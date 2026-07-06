@@ -20,11 +20,21 @@ use super::*;
 
 const CATCH_UP_RETRY_QUEUE_THRESHOLD: usize = MAX_INTERVENTIONS_PER_CHANNEL / 2;
 const CATCH_UP_RETRY_FETCH_FAILURE_LIMIT: u8 = 4;
+// #4156: a channel whose fetch keeps SUCCEEDING but whose messages keep being
+// Deferred (persistently busy / repeated ActorUnreachable) re-arms the catch-up
+// retry every scan. Without a bound that cycle is unbounded and unlogged. Cap
+// the consecutive Deferred re-arms (independently of the fetch-failure budget)
+// and emit a giving-up WARN at the cap, mirroring the fetch-failure path.
+const CATCH_UP_RETRY_DEFERRED_REARM_LIMIT: u8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services) struct CatchUpRetryState {
     checkpoint: u64,
     fetch_failures: u8,
+    // #4156: consecutive Deferred re-arms (fetch succeeded, enqueue deferred).
+    // Tracked separately from `fetch_failures` because a Deferred re-arm is not
+    // a fetch error; both budgets share the merge's most-exhausted semantics.
+    deferred_rearms: u8,
     armed_at: Instant,
 }
 
@@ -33,6 +43,7 @@ impl CatchUpRetryState {
         Self {
             checkpoint,
             fetch_failures: 0,
+            deferred_rearms: 0,
             armed_at: Instant::now(),
         }
     }
@@ -42,6 +53,22 @@ impl CatchUpRetryState {
         (fetch_failures <= CATCH_UP_RETRY_FETCH_FAILURE_LIMIT).then_some(Self {
             checkpoint: self.checkpoint,
             fetch_failures,
+            deferred_rearms: self.deferred_rearms,
+            armed_at: self.armed_at,
+        })
+    }
+
+    // #4156: advance the Deferred re-arm budget. Returns `None` once the cap is
+    // exhausted so the caller stops re-arming (the backlog then ages out or a
+    // fresh catch-up trigger restarts the cycle), matching `after_fetch_failure`.
+    fn after_deferred_rearm(self, checkpoint: u64) -> Option<Self> {
+        let deferred_rearms = self.deferred_rearms.saturating_add(1);
+        (deferred_rearms <= CATCH_UP_RETRY_DEFERRED_REARM_LIMIT).then_some(Self {
+            checkpoint,
+            fetch_failures: self.fetch_failures,
+            deferred_rearms,
+            // Preserve the original arm time so the arm-time age window
+            // (`catch_up_message_age_reference_time`) is NOT reset each cycle.
             armed_at: self.armed_at,
         })
     }
@@ -177,6 +204,8 @@ fn merge_catch_up_retry_state(
         // A merged older checkpoint inherits the most exhausted budget so the
         // same old backlog cannot gain unbounded retries through fresh arms.
         fetch_failures: existing.fetch_failures.max(retry_state.fetch_failures),
+        // #4156: same most-exhausted rule for the Deferred re-arm budget.
+        deferred_rearms: existing.deferred_rearms.max(retry_state.deferred_rearms),
         armed_at: existing.armed_at.min(retry_state.armed_at),
     }
 }
@@ -245,6 +274,49 @@ fn rearm_catch_up_retry_after_fetch_failure(
         CATCH_UP_RETRY_FETCH_FAILURE_LIMIT
     );
     Some(rearmed)
+}
+
+// #4156: re-arm the catch-up retry after a fetch-succeeded-but-enqueue-Deferred
+// scan, carrying forward the prior scan's Deferred budget + original arm time
+// (`prior`, the state consumed for THIS scan). Returns the armed checkpoint, or
+// `None` once the Deferred re-arm cap is exhausted — at which point it emits a
+// giving-up WARN and does NOT re-arm, so a persistently-busy channel can no
+// longer spin an unbounded, unlogged re-arm cycle.
+fn rearm_catch_up_retry_after_defer(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    retry_after: u64,
+    threaded_prior: Option<CatchUpRetryState>,
+) -> Option<u64> {
+    // The prior Deferred budget can live in the state consumed for THIS scan
+    // (phase-1 removes the pending entry up front, so it hands the state in via
+    // `threaded_prior`) OR still in the pending map (phase-2 does not consume,
+    // so it passes `None` and the budget is read from the map). Take the
+    // most-exhausted of the two so neither phase resets the other's budget.
+    let map_prior = shared
+        .catch_up_retry_pending
+        .get(&channel_id)
+        .map(|entry| *entry.value());
+    let prior = match (threaded_prior, map_prior) {
+        (Some(threaded), Some(mapped)) => Some(merge_catch_up_retry_state(Some(threaded), mapped)),
+        (Some(state), None) | (None, Some(state)) => Some(state),
+        (None, None) => None,
+    };
+    let base = prior.unwrap_or_else(|| CatchUpRetryState::new(retry_after));
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    let attempted_rearms = base.deferred_rearms.saturating_add(1);
+    let Some(next_retry_state) = base.after_deferred_rearm(retry_after) else {
+        tracing::warn!(
+            "  [{ts}] ⚠ catch-up: channel {} deferred {} time(s); giving up after {} re-arm(s) at checkpoint {}",
+            channel_id,
+            attempted_rearms,
+            CATCH_UP_RETRY_DEFERRED_REARM_LIMIT,
+            retry_after
+        );
+        return None;
+    };
+    let rearmed = arm_catch_up_retry_state(shared, channel_id, next_retry_state);
+    Some(rearmed.checkpoint)
 }
 
 fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after: u64) -> u64 {
@@ -1046,7 +1118,12 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                         let retry_after = max_recovered_id
                             .or(scan_checkpoint)
                             .unwrap_or_else(|| mid.saturating_sub(1));
-                        arm_catch_up_retry_pending(shared, channel_id, retry_after);
+                        rearm_catch_up_retry_after_defer(
+                            shared,
+                            channel_id,
+                            retry_after,
+                            retry_state,
+                        );
                         break;
                     }
                 }
@@ -1055,7 +1132,7 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                     let retry_after = max_recovered_id
                         .or(scan_checkpoint)
                         .unwrap_or_else(|| mid.saturating_sub(1));
-                    arm_catch_up_retry_pending(shared, channel_id, retry_after);
+                    rearm_catch_up_retry_after_defer(shared, channel_id, retry_after, retry_state);
                     break;
                 }
             }
@@ -1339,9 +1416,14 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                             phase2_checkpoint,
                             last_bot_response_id,
                         );
-                        let retry_after =
-                            arm_catch_up_retry_pending(shared, channel_id, retry_after);
-                        phase2_retry_after = Some(retry_after);
+                        phase2_retry_after = rearm_catch_up_retry_after_defer(
+                            shared,
+                            channel_id,
+                            retry_after,
+                            // phase-2 does not consume the pending entry, so the
+                            // Deferred budget is read from the map inside the helper.
+                            None,
+                        );
                         stats.deferred += 1;
                         break;
                     }
@@ -1353,8 +1435,8 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                         phase2_checkpoint,
                         last_bot_response_id,
                     );
-                    let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
-                    phase2_retry_after = Some(retry_after);
+                    phase2_retry_after =
+                        rearm_catch_up_retry_after_defer(shared, channel_id, retry_after, None);
                     stats.deferred += 1;
                     break;
                 }
@@ -1403,22 +1485,22 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
 #[cfg(test)]
 mod catch_up_recovery_tests {
     use super::{
-        CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT,
-        CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate, CatchUpClassification,
-        CatchUpDiscordApi, CatchUpFetchMode, CatchUpMessageView, CatchUpRetryScanDecision,
-        CatchUpRetryState, ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind,
-        RuntimeChannelBindingStatus, advance_phase2_checkpoint, arm_catch_up_retry_pending,
-        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
-        catch_up_last_item_dedup_is_checkpoint_safe, catch_up_message_age_reference_time,
-        catch_up_missed_messages_inner_with_api,
+        CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_RETRY_DEFERRED_REARM_LIMIT,
+        CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
+        CatchUpClassification, CatchUpDiscordApi, CatchUpFetchMode, CatchUpMessageView,
+        CatchUpRetryScanDecision, CatchUpRetryState, ChannelId, MessageId, Phase2EnqueueCommit,
+        ProviderKind, RuntimeChannelBindingStatus, advance_phase2_checkpoint,
+        arm_catch_up_retry_pending, catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan,
+        catch_up_intervention_created_at, catch_up_last_item_dedup_is_checkpoint_safe,
+        catch_up_message_age_reference_time, catch_up_missed_messages_inner_with_api,
         catch_up_missed_messages_inner_with_api_and_pending_retry_channels,
         catch_up_remaining_queue_capacity, classify_catch_up_message,
         classify_phase2_enqueue_commit, collect_catch_up_retry_pending_channels,
         consume_catch_up_retry_state_for_scan, insert_configured_catch_up_candidate,
         merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
-        prune_stale_checkpoint_files, rearm_catch_up_retry_after_fetch_failure,
-        should_fetch_older_recent_page, should_pace_before_scan,
-        take_catch_up_retry_checkpoint_after_queue_drain,
+        prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer,
+        rearm_catch_up_retry_after_fetch_failure, should_fetch_older_recent_page,
+        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::EnqueueRefusalReason;
     use poise::serenity_prelude as serenity;
@@ -1937,6 +2019,7 @@ mod catch_up_recovery_tests {
             CatchUpRetryState {
                 checkpoint: 1504812094456070200,
                 fetch_failures: 2,
+                deferred_rearms: 0,
                 armed_at: older_armed_at,
             },
         );
@@ -1946,6 +2029,7 @@ mod catch_up_recovery_tests {
             CatchUpRetryState {
                 checkpoint: 1504812094456070300,
                 fetch_failures: 1,
+                deferred_rearms: 0,
                 armed_at: newer_armed_at,
             },
         )]);
@@ -1982,6 +2066,7 @@ mod catch_up_recovery_tests {
             CatchUpRetryState {
                 checkpoint,
                 fetch_failures: 1,
+                deferred_rearms: 0,
                 armed_at: Instant::now(),
             },
         );
@@ -2231,6 +2316,7 @@ mod catch_up_recovery_tests {
         let retry_state = CatchUpRetryState {
             checkpoint: 1504812094456070130,
             fetch_failures: 1,
+            deferred_rearms: 0,
             armed_at,
         };
 
@@ -2267,6 +2353,7 @@ mod catch_up_recovery_tests {
         let retry_state = CatchUpRetryState {
             checkpoint,
             fetch_failures: 1,
+            deferred_rearms: 0,
             armed_at,
         };
         let retry_checkpoints = HashMap::from([(channel_id, retry_state)]);
@@ -2302,6 +2389,7 @@ mod catch_up_recovery_tests {
         let retry_state = CatchUpRetryState {
             checkpoint,
             fetch_failures: 1,
+            deferred_rearms: 0,
             armed_at,
         };
         let retry_checkpoints = HashMap::from([(channel_id, retry_state)]);
@@ -2358,6 +2446,7 @@ mod catch_up_recovery_tests {
         let exhausted_retry = CatchUpRetryState {
             checkpoint,
             fetch_failures: CATCH_UP_RETRY_FETCH_FAILURE_LIMIT,
+            deferred_rearms: 0,
             armed_at: Instant::now(),
         };
 
@@ -2367,6 +2456,49 @@ mod catch_up_recovery_tests {
             "retry fetch failures must not re-arm forever"
         );
         assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+    }
+
+    // #4156: a channel whose fetch keeps succeeding but whose messages keep
+    // being Deferred must not re-arm the catch-up retry forever.
+    #[test]
+    fn deferred_rearm_gives_up_after_bounded_attempts_and_preserves_arm_time() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(1479671298497183835);
+        let checkpoint = 1504812094456070130;
+        let armed_at = Instant::now();
+
+        // Already at the Deferred cap ⇒ no further re-arm, nothing left pending.
+        let exhausted = CatchUpRetryState {
+            checkpoint,
+            fetch_failures: 0,
+            deferred_rearms: CATCH_UP_RETRY_DEFERRED_REARM_LIMIT,
+            armed_at,
+        };
+        assert!(
+            rearm_catch_up_retry_after_defer(&shared, channel_id, checkpoint, Some(exhausted))
+                .is_none(),
+            "deferred re-arms must not spin forever"
+        );
+        assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+
+        // One below the cap ⇒ re-arms, carrying the incremented Deferred budget
+        // and the ORIGINAL arm time forward (the age window must not reset).
+        let almost = CatchUpRetryState {
+            checkpoint,
+            fetch_failures: 0,
+            deferred_rearms: CATCH_UP_RETRY_DEFERRED_REARM_LIMIT - 1,
+            armed_at,
+        };
+        assert_eq!(
+            rearm_catch_up_retry_after_defer(&shared, channel_id, checkpoint, Some(almost)),
+            Some(checkpoint),
+        );
+        let pending = *shared
+            .catch_up_retry_pending
+            .get(&channel_id)
+            .expect("re-arm below cap should stay pending");
+        assert_eq!(pending.deferred_rearms, CATCH_UP_RETRY_DEFERRED_REARM_LIMIT);
+        assert_eq!(pending.armed_at, armed_at);
     }
 
     #[test]
