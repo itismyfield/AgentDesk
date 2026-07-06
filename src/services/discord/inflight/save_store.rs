@@ -357,6 +357,63 @@ mod tests {
         assert_eq!(persisted.full_response, "adopted durable response");
         assert!(!persisted.terminal_delivery_committed);
     }
+
+    #[test]
+    fn matches_identity_save_skips_after_adoption_changes_only_output_path() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let old_rollout_path = temp.path().join("old-rollout.jsonl");
+        let adopted_rollout_path = temp.path().join("adopted-rollout.jsonl");
+        std::fs::write(&old_rollout_path, vec![b'o'; 256]).expect("write old rollout");
+        std::fs::write(&adopted_rollout_path, vec![b'a'; 1024]).expect("write adopted rollout");
+        let channel_id = 44_153_006;
+        let mut stale_snapshot = InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("adk-cc".to_string()),
+            123,
+            456,
+            789,
+            "continue".to_string(),
+            Some("codex-session".to_string()),
+            Some("AgentDesk-codex-output-only-adoption-44153006".to_string()),
+            Some(old_rollout_path.display().to_string()),
+            None,
+            256,
+        );
+        stale_snapshot.turn_start_offset = Some(128);
+        stale_snapshot.full_response = "stale response".to_string();
+        save_inflight_state_in_root(temp.path(), &stale_snapshot).expect("seed stale snapshot row");
+        let expected = InflightTurnIdentity::from_state(&stale_snapshot);
+        let expected_turn_start_offset = stale_snapshot.turn_start_offset;
+
+        let mut adopted = stale_snapshot.clone();
+        adopted.output_path = Some(adopted_rollout_path.display().to_string());
+        adopted.full_response = "adopted durable response".to_string();
+        save_inflight_state_in_root(temp.path(), &adopted).expect("persist adopted row");
+
+        stale_snapshot.response_sent_offset = stale_snapshot.full_response.len();
+        stale_snapshot.terminal_delivery_committed = true;
+        let outcome = save_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &stale_snapshot,
+            &expected,
+            expected_turn_start_offset,
+        );
+
+        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        let persisted_path = inflight_state_path(temp.path(), &provider, channel_id);
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
+        )
+        .expect("parse persisted inflight");
+        assert_eq!(
+            persisted.output_path,
+            Some(adopted_rollout_path.display().to_string())
+        );
+        assert_eq!(persisted.full_response, "adopted durable response");
+        assert!(!persisted.terminal_delivery_committed);
+    }
 }
 
 pub(in crate::services::discord) fn save_inflight_state_create_new(
@@ -1036,6 +1093,20 @@ pub(super) fn save_inflight_state_if_matches_identity_in_root(
         if on_disk.turn_start_offset != Some(expected_offset) {
             return GuardedSaveOutcome::IdentityMismatch;
         }
+    }
+    if on_disk.output_path != state.output_path {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            snapshot_identity = ?expected,
+            durable_identity = ?InflightTurnIdentity::from_state(&on_disk),
+            snapshot_output_path = ?state.output_path.as_deref(),
+            durable_output_path = ?on_disk.output_path.as_deref(),
+            durable_restart_mode = ?on_disk.restart_mode,
+            durable_rebind_origin = on_disk.rebind_origin,
+            "inflight identity-guarded save skipped because durable row output path changed"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
     }
     // #3089 B3: verdict observe-only here — this path already identity/offset-
     // gates above; the #3416 backward vector is the plain overwrite tails.
