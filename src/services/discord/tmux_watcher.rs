@@ -3674,13 +3674,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             deferred_monitor_ready,
         ) {
             if let Some(msg_id) = placeholder_msg_id {
-                let _ = delete_nonterminal_placeholder(
+                let inflight_before_cleanup =
+                    crate::services::discord::inflight::load_inflight_state(
+                        &watcher_provider,
+                        channel_id.get(),
+                    );
+                let _ = delete_nonterminal_placeholder_unless_delivered(
                     &http,
                     channel_id,
                     &shared,
                     &watcher_provider,
                     &tmux_session_name,
                     msg_id,
+                    inflight_before_cleanup.as_ref(),
+                    Some((
+                        turn_data_start_offset,
+                        terminal_event_consumed_offset(current_offset, &all_data),
+                    )),
+                    response_sent_offset,
+                    &last_edit_text,
                     "watcher_late_epoch_guard_cleanup",
                 )
                 .await;
@@ -3812,13 +3824,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     last_relayed_offset,
                 );
                 if let Some(msg_id) = placeholder_msg_id {
-                    let _ = delete_nonterminal_placeholder(
+                    let inflight_before_cleanup =
+                        crate::services::discord::inflight::load_inflight_state(
+                            &watcher_provider,
+                            channel_id.get(),
+                        );
+                    let _ = delete_nonterminal_placeholder_unless_delivered(
                         &http,
                         channel_id,
                         &shared,
                         &watcher_provider,
                         &tmux_session_name,
                         msg_id,
+                        inflight_before_cleanup.as_ref(),
+                        Some((
+                            turn_data_start_offset,
+                            terminal_event_consumed_offset(current_offset, &all_data),
+                        )),
+                        response_sent_offset,
+                        &last_edit_text,
                         "watcher_duplicate_relay_guard_cleanup",
                     )
                     .await;
@@ -5702,31 +5726,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             false
         } else {
             if let Some(msg_id) = placeholder_msg_id {
-                if let Some(evidence) = placeholder_real_body_exposure_evidence(
+                let _ = delete_terminal_placeholder_unless_delivered(
+                    &http,
+                    channel_id,
+                    &shared,
                     &watcher_provider,
+                    &tmux_session_name,
+                    msg_id,
+                    inflight_before_relay.as_ref(),
+                    Some((
+                        turn_data_start_offset,
+                        terminal_event_consumed_offset(current_offset, &all_data),
+                    )),
                     response_sent_offset,
                     &last_edit_text,
-                ) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        message_id = msg_id.get(),
-                        evidence = %evidence,
-                        response_sent_offset = response_sent_offset,
-                        "  [{ts}] 👁 watcher_no_response_cleanup preserved exposed placeholder for {tmux_session_name}"
-                    );
-                } else {
-                    // No response text but placeholder exists — clean up
-                    let _ = delete_terminal_placeholder(
-                        &http,
-                        channel_id,
-                        &shared,
-                        &watcher_provider,
-                        &tmux_session_name,
-                        msg_id,
-                        "watcher_no_response_cleanup",
-                    )
-                    .await;
-                }
+                    "watcher_no_response_cleanup",
+                )
+                .await;
             }
             false
         };

@@ -7,9 +7,10 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
 
 use super::super::formatting::{build_streaming_placeholder_text, truncate_str};
+use super::super::outbound::delivery_frontier_probe;
 use super::super::placeholder_cleanup::{
     PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
-    classify_delete_error,
+    classify_delete_error, committed_terminal_anchor_protects_delete,
 };
 use super::super::{SharedData, rate_limit_wait};
 use crate::services::discord;
@@ -182,18 +183,194 @@ fn strip_placeholder_indicators_for_preserve(text: &str, provider: &ProviderKind
 
 pub(super) fn placeholder_real_body_exposure_evidence(
     provider: &ProviderKind,
-    response_sent_offset: usize,
+    _response_sent_offset: usize,
     last_edit_text: &str,
 ) -> Option<&'static str> {
-    if response_sent_offset > 0 {
-        return Some("response_sent_offset");
-    }
     let stripped_body =
         discord::single_message_panel::strip_placeholder_terminal_status(last_edit_text, provider);
     if stripped_body.trim().is_empty() {
         None
     } else {
         Some("last_edit_text_body")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardedDeliveredElsewhereSignal {
+    Protected { evidence: &'static str },
+    Found { evidence: &'static str },
+    NotFound,
+    Ambiguous { evidence: &'static str },
+}
+
+impl GuardedDeliveredElsewhereSignal {
+    fn evidence(self) -> &'static str {
+        match self {
+            Self::Protected { evidence }
+            | Self::Found { evidence }
+            | Self::Ambiguous { evidence } => evidence,
+            Self::NotFound => "no_delivered_elsewhere_signal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardedCleanupTargetAuthor {
+    Watcher,
+    CrossActor,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum GuardedNonterminalDeleteDecision {
+    PreserveNoEdit {
+        evidence: &'static str,
+    },
+    PreserveWithStrip {
+        evidence: &'static str,
+        cleaned_body: String,
+    },
+    Delete {
+        evidence: &'static str,
+    },
+}
+
+fn delivered_frontier_same_coordinate_space(
+    anchor: delivery_frontier_probe::CurrentGenerationAnchor,
+    current_output_eof: Option<u64>,
+    live_committed_end: Option<u64>,
+) -> Result<(), &'static str> {
+    let Some(current_output_eof) = current_output_eof else {
+        return Err("current_generation_anchor_coordinate_unproven");
+    };
+    if anchor.range.1 > current_output_eof {
+        return Err("current_generation_anchor_exceeds_current_eof");
+    }
+    match live_committed_end {
+        Some(committed_end) if committed_end == anchor.range.1 => Ok(()),
+        _ => Err("current_generation_anchor_live_frontier_mismatch"),
+    }
+}
+
+fn guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+    channel_id: ChannelId,
+    message_id: MessageId,
+    delivered_range: (u64, u64),
+    anchor: delivery_frontier_probe::CurrentGenerationAnchor,
+    current_output_eof: Option<u64>,
+    live_committed_end: Option<u64>,
+) -> GuardedDeliveredElsewhereSignal {
+    let (range_start, range_end) = delivered_range;
+    if range_end <= range_start {
+        return GuardedDeliveredElsewhereSignal::NotFound;
+    }
+    if anchor.panel_channel_id == channel_id.get() && anchor.panel_msg_id == message_id.get() {
+        return GuardedDeliveredElsewhereSignal::Protected {
+            evidence: "current_generation_anchor_same_message",
+        };
+    }
+    if range_start >= anchor.range.0 && range_end <= anchor.range.1 {
+        return match delivered_frontier_same_coordinate_space(
+            anchor,
+            current_output_eof,
+            live_committed_end,
+        ) {
+            Ok(()) => GuardedDeliveredElsewhereSignal::Found {
+                evidence: "current_generation_anchor_different_message",
+            },
+            Err(evidence) => GuardedDeliveredElsewhereSignal::Ambiguous { evidence },
+        };
+    }
+    GuardedDeliveredElsewhereSignal::Ambiguous {
+        evidence: "current_generation_anchor_range_mismatch",
+    }
+}
+
+pub(super) fn guarded_cleanup_delivered_elsewhere_signal(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    message_id: MessageId,
+    delivered_range: Option<(u64, u64)>,
+    current_output_eof: Option<u64>,
+    live_committed_end: Option<u64>,
+) -> GuardedDeliveredElsewhereSignal {
+    let Some(delivered_range) = delivered_range else {
+        return GuardedDeliveredElsewhereSignal::NotFound;
+    };
+    let Some(anchor) = delivery_frontier_probe::current_generation_delivered_anchor(
+        provider,
+        channel_id,
+        tmux_session_name,
+    ) else {
+        return GuardedDeliveredElsewhereSignal::NotFound;
+    };
+    guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+        channel_id,
+        message_id,
+        delivered_range,
+        anchor,
+        current_output_eof,
+        live_committed_end,
+    )
+}
+
+pub(super) fn guarded_nonterminal_delete_decision(
+    provider: &ProviderKind,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+    committed_terminal_anchor: bool,
+    delivered_elsewhere: GuardedDeliveredElsewhereSignal,
+    target_author: GuardedCleanupTargetAuthor,
+) -> GuardedNonterminalDeleteDecision {
+    // Decision table (rows are evaluated in this order):
+    // terminal anchor | * | * | * => PreserveNoEdit
+    // no terminal anchor | Protected(same-message frontier) | * | * => PreserveNoEdit
+    // no terminal anchor | Found(different message + same coordinate) | * | * => Delete
+    // no terminal anchor | Ambiguous | body present | Watcher => PreserveWithStrip
+    // no terminal anchor | Ambiguous | body present | CrossActor/Unknown => PreserveNoEdit
+    // no terminal anchor | Ambiguous | body absent | * => PreserveNoEdit
+    // no terminal anchor | NotFound | body present | Watcher => PreserveWithStrip
+    // no terminal anchor | NotFound | body present | CrossActor/Unknown => PreserveNoEdit
+    // no terminal anchor | NotFound | body absent | * => Delete
+    //
+    // The Found+absent row is the disposable chrome case where a different
+    // message is positively proven to hold the delivered body. Ambiguous+absent
+    // preserves fail-safe because there is no positive proof deletion is safe.
+    if committed_terminal_anchor {
+        return GuardedNonterminalDeleteDecision::PreserveNoEdit {
+            evidence: "committed_terminal_anchor",
+        };
+    }
+    if let GuardedDeliveredElsewhereSignal::Protected { evidence } = delivered_elsewhere {
+        return GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence };
+    }
+    if let GuardedDeliveredElsewhereSignal::Found { evidence } = delivered_elsewhere {
+        return GuardedNonterminalDeleteDecision::Delete { evidence };
+    }
+    if let Some(evidence) =
+        placeholder_real_body_exposure_evidence(provider, response_sent_offset, last_edit_text)
+    {
+        return match target_author {
+            GuardedCleanupTargetAuthor::Watcher => {
+                GuardedNonterminalDeleteDecision::PreserveWithStrip {
+                    evidence,
+                    cleaned_body: strip_placeholder_indicators_for_preserve(
+                        last_edit_text,
+                        provider,
+                    ),
+                }
+            }
+            GuardedCleanupTargetAuthor::CrossActor | GuardedCleanupTargetAuthor::Unknown => {
+                GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence }
+            }
+        };
+    }
+    if let GuardedDeliveredElsewhereSignal::Ambiguous { evidence } = delivered_elsewhere {
+        return GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence };
+    }
+    GuardedNonterminalDeleteDecision::Delete {
+        evidence: delivered_elsewhere.evidence(),
     }
 }
 
@@ -484,6 +661,228 @@ pub(super) async fn delete_nonterminal_placeholder(
         source,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn delete_nonterminal_placeholder_unless_delivered(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    message_id: MessageId,
+    live_inflight: Option<&discord::inflight::InflightTurnState>,
+    delivered_range: Option<(u64, u64)>,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+    source: &'static str,
+) -> Option<PlaceholderCleanupOutcome> {
+    delete_placeholder_unless_delivered(
+        http,
+        channel_id,
+        shared,
+        provider,
+        tmux_session_name,
+        message_id,
+        live_inflight,
+        delivered_range,
+        response_sent_offset,
+        last_edit_text,
+        PlaceholderCleanupOperation::DeleteNonterminal,
+        source,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn delete_terminal_placeholder_unless_delivered(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    message_id: MessageId,
+    live_inflight: Option<&discord::inflight::InflightTurnState>,
+    delivered_range: Option<(u64, u64)>,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+    source: &'static str,
+) -> Option<PlaceholderCleanupOutcome> {
+    delete_placeholder_unless_delivered(
+        http,
+        channel_id,
+        shared,
+        provider,
+        tmux_session_name,
+        message_id,
+        live_inflight,
+        delivered_range,
+        response_sent_offset,
+        last_edit_text,
+        PlaceholderCleanupOperation::DeleteTerminal,
+        source,
+    )
+    .await
+}
+
+fn cleanup_output_eof_from_path(path: &str) -> Option<u64> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    std::fs::metadata(path).ok().map(|meta| meta.len())
+}
+
+fn cleanup_current_output_eof(
+    shared: &SharedData,
+    live_inflight: Option<&discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<u64> {
+    if let Some(eof) = live_inflight
+        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
+        .and_then(|state| state.output_path.as_deref())
+        .and_then(cleanup_output_eof_from_path)
+    {
+        return Some(eof);
+    }
+    shared
+        .tmux_watchers
+        .watcher_output_path(tmux_session_name)
+        .and_then(|path| cleanup_output_eof_from_path(&path))
+}
+
+fn guarded_cleanup_target_author(
+    live_inflight: Option<&discord::inflight::InflightTurnState>,
+    message_id: MessageId,
+) -> GuardedCleanupTargetAuthor {
+    let Some(inflight) = live_inflight else {
+        return GuardedCleanupTargetAuthor::Unknown;
+    };
+    if inflight.current_msg_id != message_id.get() {
+        return GuardedCleanupTargetAuthor::Unknown;
+    }
+    match inflight.effective_relay_owner_kind() {
+        discord::inflight::RelayOwnerKind::Watcher => GuardedCleanupTargetAuthor::Watcher,
+        discord::inflight::RelayOwnerKind::None
+        | discord::inflight::RelayOwnerKind::StandbyRelay
+        | discord::inflight::RelayOwnerKind::SessionBoundRelay
+        | discord::inflight::RelayOwnerKind::Unknown => GuardedCleanupTargetAuthor::CrossActor,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn delete_placeholder_unless_delivered(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    message_id: MessageId,
+    live_inflight: Option<&discord::inflight::InflightTurnState>,
+    delivered_range: Option<(u64, u64)>,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+    operation: PlaceholderCleanupOperation,
+    source: &'static str,
+) -> Option<PlaceholderCleanupOutcome> {
+    let committed_terminal_anchor = committed_terminal_anchor_protects_delete(
+        &shared.ui.placeholder_cleanup,
+        provider,
+        channel_id,
+        message_id,
+        live_inflight,
+    );
+    let current_output_eof = cleanup_current_output_eof(shared, live_inflight, tmux_session_name);
+    let live_committed_end =
+        crate::services::discord::tmux::committed_frontier_for_current_generation(
+            shared,
+            channel_id,
+            tmux_session_name,
+        );
+    let delivered_elsewhere = guarded_cleanup_delivered_elsewhere_signal(
+        provider,
+        channel_id,
+        tmux_session_name,
+        message_id,
+        delivered_range,
+        current_output_eof,
+        live_committed_end,
+    );
+    let target_author = guarded_cleanup_target_author(live_inflight, message_id);
+    match guarded_nonterminal_delete_decision(
+        provider,
+        response_sent_offset,
+        last_edit_text,
+        committed_terminal_anchor,
+        delivered_elsewhere,
+        target_author,
+    ) {
+        GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence } => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                message_id = message_id.get(),
+                evidence = %evidence,
+                source = source,
+                response_sent_offset = response_sent_offset,
+                "  [{ts}] 👁 preserved delivered placeholder without edit during guarded cleanup for {tmux_session_name}"
+            );
+            None
+        }
+        GuardedNonterminalDeleteDecision::PreserveWithStrip {
+            evidence,
+            cleaned_body,
+        } => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                message_id = message_id.get(),
+                evidence = %evidence,
+                source = source,
+                response_sent_offset = response_sent_offset,
+                "  [{ts}] 👁 preserved exposed placeholder with stripped streaming chrome during guarded cleanup for {tmux_session_name}"
+            );
+            let outcome = edit_preserve_placeholder(
+                http,
+                channel_id,
+                shared,
+                provider,
+                tmux_session_name,
+                message_id,
+                &cleaned_body,
+                source,
+            )
+            .await;
+            if !outcome.is_committed() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    message_id = message_id.get(),
+                    source = source,
+                    "  [{ts}] ⚠ guarded cleanup strip-preserve edit failed; keeping placeholder for {tmux_session_name}"
+                );
+            }
+            None
+        }
+        GuardedNonterminalDeleteDecision::Delete { evidence } => {
+            tracing::debug!(
+                message_id = message_id.get(),
+                evidence = %evidence,
+                source = source,
+                response_sent_offset = response_sent_offset,
+                "guarded cleanup deleting placeholder for {tmux_session_name}"
+            );
+            Some(
+                delete_placeholder_with_operation(
+                    http,
+                    channel_id,
+                    shared,
+                    provider,
+                    tmux_session_name,
+                    message_id,
+                    operation,
+                    source,
+                )
+                .await,
+            )
+        }
+    }
 }
 
 /// #3871: which streamed rollover-prefix message ids the watcher MUST delete
@@ -783,6 +1182,18 @@ mod placeholder_suppression_tests {
         state
     }
 
+    fn delivered_anchor(
+        channel_id: ChannelId,
+        message_id: MessageId,
+        range: (u64, u64),
+    ) -> delivery_frontier_probe::CurrentGenerationAnchor {
+        delivery_frontier_probe::CurrentGenerationAnchor {
+            panel_msg_id: message_id.get(),
+            panel_channel_id: channel_id.get(),
+            range,
+        }
+    }
+
     #[test]
     fn status_only_legacy_spinner_placeholder_deletes() {
         assert_eq!(
@@ -847,15 +1258,15 @@ mod placeholder_suppression_tests {
     }
 
     #[test]
-    fn response_sent_offset_counts_as_exposure_even_with_empty_text() {
+    fn response_sent_offset_alone_does_not_expose_placeholder_body() {
         assert_eq!(
             suppressed_placeholder_action(true, &ProviderKind::Claude, 1, ""),
-            SuppressedPlaceholderAction::Edit(SUPPRESSED_INTERNAL_LABEL.to_string())
+            SuppressedPlaceholderAction::Delete
         );
     }
 
     #[test]
-    fn no_response_cleanup_preserves_real_body_exposure_evidence() {
+    fn no_response_cleanup_requires_real_body_in_target_message() {
         let placeholder = body_with_footer("visible assistant body");
 
         assert_eq!(
@@ -864,7 +1275,7 @@ mod placeholder_suppression_tests {
         );
         assert_eq!(
             placeholder_real_body_exposure_evidence(&ProviderKind::Claude, 1, ""),
-            Some("response_sent_offset")
+            None
         );
     }
 
@@ -881,6 +1292,405 @@ mod placeholder_suppression_tests {
                 &placeholder,
                 &ProviderKind::Claude
             )
+        );
+    }
+
+    #[test]
+    fn same_message_frontier_is_hard_preserve_for_sink_delivered_body() {
+        let channel_id = ChannelId::new(42);
+        let msg_id = MessageId::new(88);
+        let signal = guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+            channel_id,
+            msg_id,
+            (100, 200),
+            delivered_anchor(channel_id, msg_id, (100, 200)),
+            Some(200),
+            Some(200),
+        );
+
+        assert_eq!(
+            signal,
+            GuardedDeliveredElsewhereSignal::Protected {
+                evidence: "current_generation_anchor_same_message"
+            }
+        );
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &footer_only_placeholder(),
+                false,
+                signal,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "current_generation_anchor_same_message"
+            }
+        );
+    }
+
+    #[test]
+    fn same_wrapper_truncation_downgrades_stale_different_message_frontier() {
+        let channel_id = ChannelId::new(42);
+        let candidate_msg = MessageId::new(88);
+        let delivered_msg = MessageId::new(99);
+        let signal = guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+            channel_id,
+            candidate_msg,
+            (1_200, 1_300),
+            delivered_anchor(channel_id, delivered_msg, (1_000, 2_000)),
+            Some(2_500),
+            Some(900),
+        );
+
+        assert_eq!(
+            signal,
+            GuardedDeliveredElsewhereSignal::Ambiguous {
+                evidence: "current_generation_anchor_live_frontier_mismatch"
+            }
+        );
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &footer_only_placeholder(),
+                false,
+                signal,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "current_generation_anchor_live_frontier_mismatch"
+            }
+        );
+    }
+
+    #[test]
+    fn stale_frontier_beyond_current_eof_is_ambiguous() {
+        let channel_id = ChannelId::new(42);
+        let candidate_msg = MessageId::new(88);
+        let delivered_msg = MessageId::new(99);
+
+        assert_eq!(
+            guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+                channel_id,
+                candidate_msg,
+                (200, 300),
+                delivered_anchor(channel_id, delivered_msg, (100, 1_000)),
+                Some(350),
+                Some(350),
+            ),
+            GuardedDeliveredElsewhereSignal::Ambiguous {
+                evidence: "current_generation_anchor_exceeds_current_eof"
+            }
+        );
+    }
+
+    #[test]
+    fn cross_actor_body_preserves_no_edit_instead_of_stripping_snapshot() {
+        let mut inflight = orphan_state("", 0);
+        let msg_id = MessageId::new(88);
+        inflight.current_msg_id = msg_id.get();
+        inflight.set_relay_owner_kind(discord::inflight::RelayOwnerKind::SessionBoundRelay);
+        let placeholder = body_with_footer("complete sink-authored answer");
+
+        let author = guarded_cleanup_target_author(Some(&inflight), msg_id);
+        assert_eq!(author, GuardedCleanupTargetAuthor::CrossActor);
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::Ambiguous {
+                    evidence: "current_generation_anchor_range_mismatch"
+                },
+                author,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "last_edit_text_body"
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_author_body_preserves_no_edit() {
+        let placeholder = body_with_footer("possibly cross-actor body");
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "last_edit_text_body"
+            }
+        );
+    }
+
+    #[test]
+    fn different_message_same_coordinate_frontier_still_deletes_duplicate() {
+        let channel_id = ChannelId::new(42);
+        let candidate_msg = MessageId::new(88);
+        let delivered_msg = MessageId::new(99);
+        let signal = guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+            channel_id,
+            candidate_msg,
+            (150, 250),
+            delivered_anchor(channel_id, delivered_msg, (100, 300)),
+            Some(300),
+            Some(300),
+        );
+
+        assert_eq!(
+            signal,
+            GuardedDeliveredElsewhereSignal::Found {
+                evidence: "current_generation_anchor_different_message"
+            }
+        );
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &footer_only_placeholder(),
+                false,
+                signal,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::Delete {
+                evidence: "current_generation_anchor_different_message"
+            }
+        );
+    }
+
+    #[test]
+    fn late_epoch_guard_deletes_rollover_tail_when_offset_only() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                128,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::Delete {
+                evidence: "no_delivered_elsewhere_signal"
+            }
+        );
+    }
+
+    #[test]
+    fn late_epoch_guard_preserves_ambiguous_body_with_strip() {
+        let placeholder = body_with_footer("visible assistant body");
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                128,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::Ambiguous {
+                    evidence: "current_generation_anchor_range_mismatch"
+                },
+                GuardedCleanupTargetAuthor::Watcher,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveWithStrip {
+                evidence: "last_edit_text_body",
+                cleaned_body: "visible assistant body".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn late_epoch_guard_preserves_committed_terminal_anchor_evidence() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &placeholder,
+                true,
+                GuardedDeliveredElsewhereSignal::Found {
+                    evidence: "current_generation_anchor_different_message"
+                },
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "committed_terminal_anchor"
+            }
+        );
+    }
+
+    #[test]
+    fn late_epoch_guard_deletes_placeholder_without_evidence() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::Delete {
+                evidence: "no_delivered_elsewhere_signal"
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_copy_with_delivered_elsewhere_deletes_body_placeholder() {
+        let placeholder = body_with_footer("visible assistant body");
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                128,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::Found {
+                    evidence: "current_generation_anchor_different_message"
+                },
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::Delete {
+                evidence: "current_generation_anchor_different_message"
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_relay_guard_deletes_rollover_tail_when_offset_only() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                128,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::Delete {
+                evidence: "no_delivered_elsewhere_signal"
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_relay_guard_deletes_placeholder_without_evidence() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::Delete {
+                evidence: "no_delivered_elsewhere_signal"
+            }
+        );
+    }
+
+    #[test]
+    fn sole_copy_ambiguous_body_preserves_with_strip() {
+        let placeholder = body_with_footer("possibly sole assistant body");
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                &placeholder,
+                false,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Watcher,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveWithStrip {
+                evidence: "last_edit_text_body",
+                cleaned_body: "possibly sole assistant body".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn live_inflight_anchor_preserves_no_edit_without_registry() {
+        let registry =
+            crate::services::discord::placeholder_cleanup::PlaceholderCleanupRegistry::default();
+        let mut inflight = orphan_state("", 0);
+        let msg_id = MessageId::new(77);
+        let channel_id = ChannelId::new(inflight.channel_id);
+        inflight.current_msg_id = msg_id.get();
+        inflight.terminal_delivery_committed = true;
+
+        let anchor_pass = committed_terminal_anchor_protects_delete(
+            &registry,
+            &ProviderKind::Claude,
+            channel_id,
+            msg_id,
+            Some(&inflight),
+        );
+
+        assert!(anchor_pass);
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                "",
+                anchor_pass,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "committed_terminal_anchor"
+            }
+        );
+    }
+
+    #[test]
+    fn no_response_gate_preserves_bridge_delivered_current_msg_without_body() {
+        let registry =
+            crate::services::discord::placeholder_cleanup::PlaceholderCleanupRegistry::default();
+        let mut inflight = orphan_state("", 0);
+        let msg_id = MessageId::new(88);
+        let channel_id = ChannelId::new(inflight.channel_id);
+        inflight.current_msg_id = msg_id.get();
+        inflight.terminal_delivery_committed = true;
+
+        let anchor_pass = committed_terminal_anchor_protects_delete(
+            &registry,
+            &ProviderKind::Claude,
+            channel_id,
+            msg_id,
+            Some(&inflight),
+        );
+
+        assert!(anchor_pass);
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                "",
+                anchor_pass,
+                GuardedDeliveredElsewhereSignal::NotFound,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "committed_terminal_anchor"
+            }
         );
     }
 
@@ -1024,14 +1834,14 @@ No response requested.\n\
     }
 
     #[test]
-    fn active_bridge_offset_exposed_empty_text_preserves() {
-        // response_sent_offset > 0 (already-delivered bytes) with no residual text
-        // is the bare restart-boundary signal — still preserve, never label.
+    fn active_bridge_offset_only_empty_text_deletes() {
+        // Offset alone is not proof that the target message contains body; after
+        // rollover it may describe prose frozen into an earlier message.
         let ctx = active_bridge_ctx("", 1, false);
-        assert!(matches!(
+        assert_eq!(
             decide_placeholder_suppression(&ctx),
-            PlaceholderSuppressDecision::Preserve { .. }
-        ));
+            PlaceholderSuppressDecision::Delete
+        );
     }
 
     #[test]

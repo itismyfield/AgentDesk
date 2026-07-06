@@ -662,18 +662,18 @@
 | `services::discord::subagent_notification_card` | `src/services/discord/subagent_notification_card.rs` | 363 | 264 | 99 |  |
 | `services::discord::task_supervisor` | `src/services/discord/task_supervisor.rs` | 105 | 83 | 22 |  |
 | `services::discord::terminal_ui_obligation` | `src/services/discord/terminal_ui_obligation.rs` | 570 | 507 | 63 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 2218 | 1484 | 734 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 2216 | 1482 | 734 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 70 | 60 | 10 |  |
 | `services::discord::tmux_kill_policy` | `src/services/discord/tmux_kill_policy.rs` | 521 | 521 | 0 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 190 | 190 | 0 |  |
-| `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 1118 | 733 | 385 |  |
+| `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 922 | 599 | 323 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 347 | 200 | 147 |  |
-| `services::discord::tmux_placeholder_suppression` | `src/services/discord/tmux_placeholder_suppression.rs` | 1256 | 693 | 563 |  |
+| `services::discord::tmux_placeholder_suppression` | `src/services/discord/tmux_placeholder_suppression.rs` | 2066 | 1092 | 974 | giant-file |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 781 | 676 | 105 |  |
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 82 | 82 | 0 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 602 | 479 | 123 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 7250 | 7250 | 0 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 7233 | 7233 | 0 | giant-file |
 | `services::discord::tmux_watcher::commit_decisions` | `src/services/discord/tmux_watcher/commit_decisions.rs` | 296 | 174 | 122 |  |
 | `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 250 | 250 | 0 |  |
 | `services::discord::tmux_watcher::completion_producer` | `src/services/discord/tmux_watcher/completion_producer.rs` | 54 | 54 | 0 |  |
@@ -689,15 +689,15 @@
 | `services::discord::tmux_watcher::stall_exit` | `src/services/discord/tmux_watcher/stall_exit.rs` | 280 | 95 | 185 |  |
 | `services::discord::tmux_watcher::supervisor_relay` | `src/services/discord/tmux_watcher/supervisor_relay.rs` | 619 | 619 | 0 |  |
 | `services::discord::tmux_watcher::terminal_long_chunks` | `src/services/discord/tmux_watcher/terminal_long_chunks.rs` | 298 | 298 | 0 |  |
-| `services::discord::tmux_watcher::terminal_readiness` | `src/services/discord/tmux_watcher/terminal_readiness.rs` | 273 | 273 | 0 |  |
+| `services::discord::tmux_watcher::terminal_readiness` | `src/services/discord/tmux_watcher/terminal_readiness.rs` | 257 | 257 | 0 |  |
 | `services::discord::tmux_watcher::terminal_send` | `src/services/discord/tmux_watcher/terminal_send.rs` | 632 | 578 | 54 |  |
 | `services::discord::tmux_watcher::turn_identity` | `src/services/discord/tmux_watcher/turn_identity.rs` | 484 | 484 | 0 |  |
 | `services::discord::tmux_watcher::two_message_panel` | `src/services/discord/tmux_watcher/two_message_panel.rs` | 694 | 382 | 312 |  |
 | `services::discord::tmux_watcher::utf8_chunk_decoder` | `src/services/discord/tmux_watcher/utf8_chunk_decoder.rs` | 88 | 88 | 0 |  |
-| `services::discord::tui_direct_abort_marker` | `src/services/discord/tui_direct_abort_marker/mod.rs` | 3318 | 1233 | 2085 | giant-file |
-| `services::discord::tui_direct_abort_marker::deferred_claim` | `src/services/discord/tui_direct_abort_marker/deferred_claim.rs` | 680 | 273 | 407 |  |
-| `services::discord::tui_direct_abort_marker::store` | `src/services/discord/tui_direct_abort_marker/store.rs` | 452 | 452 | 0 |  |
-| `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 3811 | 1492 | 2319 | giant-file |
+| `services::discord::tui_direct_abort_marker` | `src/services/discord/tui_direct_abort_marker/mod.rs` | 2460 | 825 | 1635 |  |
+| `services::discord::tui_direct_abort_marker::deferred_claim` | `src/services/discord/tui_direct_abort_marker/deferred_claim.rs` | 669 | 265 | 404 |  |
+| `services::discord::tui_direct_abort_marker::store` | `src/services/discord/tui_direct_abort_marker/store.rs` | 348 | 348 | 0 |  |
+| `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 3810 | 1491 | 2319 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 992 | 992 | 0 |  |
 | `services::discord::tui_prompt_relay::anchor_completion` | `src/services/discord/tui_prompt_relay/anchor_completion.rs` | 454 | 218 | 236 |  |
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
@@ -757,7 +757,7 @@
 | `services::discord::turn_completion_events` | `src/services/discord/turn_completion_events.rs` | 85 | 85 | 0 |  |
 | `services::discord::turn_end_wip_warning` | `src/services/discord/turn_end_wip_warning.rs` | 344 | 145 | 199 |  |
 | `services::discord::turn_finalizer` | `src/services/discord/turn_finalizer.rs` | 4778 | 1048 | 3730 | giant-file |
-| `services::discord::turn_finalizer::cleanup` | `src/services/discord/turn_finalizer/cleanup.rs` | 1532 | 569 | 963 |  |
+| `services::discord::turn_finalizer::cleanup` | `src/services/discord/turn_finalizer/cleanup.rs` | 1529 | 566 | 963 |  |
 | `services::discord::turn_finalizer::completion_signal` | `src/services/discord/turn_finalizer/completion_signal.rs` | 310 | 54 | 256 |  |
 | `services::discord::turn_finalizer::delivery_lease` | `src/services/discord/turn_finalizer/delivery_lease.rs` | 515 | 87 | 428 |  |
 | `services::discord::turn_finalizer::finalize` | `src/services/discord/turn_finalizer/finalize.rs` | 569 | 241 | 328 |  |
