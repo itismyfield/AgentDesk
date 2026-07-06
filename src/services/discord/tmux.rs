@@ -1933,7 +1933,7 @@ pub(super) use self::tmux_watcher::{
 mod tmux_output_stream;
 pub(in crate::services::discord) use self::tmux_output_stream::{
     WatcherToolState, build_watcher_placeholder_status_block, flush_placeholder_live_events,
-    force_next_watcher_status_update, process_watcher_lines,
+    force_next_watcher_status_update, process_watcher_lines, process_watcher_lines_for_turn,
 };
 
 #[cfg(test)]
