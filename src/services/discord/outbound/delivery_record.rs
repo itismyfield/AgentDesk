@@ -704,19 +704,61 @@ pub(in crate::services::discord) fn durable_frontier_generation_current(
     current_gen_mtime != 0 && durable_mtime == current_gen_mtime
 }
 
-/// Path-based core (pure-ish, testable): the durable `delivered_frontier` END,
-/// but ONLY when it was written by the CURRENT wrapper generation (#1270 guard,
-/// via [`durable_frontier_generation_current`]). `None` when the record is
-/// absent/malformed (I3 conservative) OR its frontier is from a PRIOR generation
-/// (stale-high → distrust). `current_gen_mtime == 0` (no/unreadable `.generation`
-/// file) → the guard distrusts everything → `None`. This is the SINGLE durable
-/// frontier reader; the env-resolved [`delivered_frontier_end_current_generation`]
-/// and the flag-gated [`effective_committed_offset`] both funnel through it so the
-/// generation-gating logic exists in exactly one place.
-fn current_generation_durable_frontier_end_at(path: &Path, current_gen_mtime: i64) -> Option<u64> {
-    read_record_at(path)
-        .and_then(|r| r.delivered_frontier)
-        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen_mtime))
+/// Path-based core (pure-ish, testable): the durable `delivered_frontier`, but
+/// ONLY when it was written by the CURRENT wrapper generation (#1270 guard, via
+/// [`durable_frontier_generation_current`]) AND its END is physically inside the
+/// current transcript byte length (#4188 EOF guard). `None` when the record is
+/// absent/malformed (I3 conservative), from a PRIOR generation (stale-high →
+/// distrust), or when the current transcript EOF is unavailable (cannot
+/// bound-check → distrust). `current_gen_mtime == 0` (no/unreadable
+/// `.generation` file) → the guard distrusts everything → `None`.
+pub(in crate::services::discord::outbound) fn current_generation_durable_frontier_at(
+    path: &Path,
+    current_gen_mtime: i64,
+    current_transcript_eof: Option<u64>,
+) -> Option<DeliveredCommit> {
+    let frontier = read_record_at(path).and_then(|r| r.delivered_frontier)?;
+    if !durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime) {
+        return None;
+    }
+
+    let Some(current_transcript_eof) = current_transcript_eof else {
+        tracing::debug!(
+            delivery_record_path = %path.display(),
+            frontier_end = frontier.range.1,
+            frontier_generation_mtime_ns = frontier.generation_mtime_ns,
+            current_gen_mtime,
+            "durable delivered_frontier current transcript EOF unavailable — distrusting unbounded frontier"
+        );
+        return None;
+    };
+
+    if frontier.range.1 > current_transcript_eof {
+        tracing::warn!(
+            delivery_record_path = %path.display(),
+            frontier_end = frontier.range.1,
+            current_transcript_eof,
+            frontier_generation_mtime_ns = frontier.generation_mtime_ns,
+            current_gen_mtime,
+            "durable delivered_frontier end exceeds current transcript EOF — distrusting stale-length frontier (compaction/rotation)"
+        );
+        return None;
+    }
+
+    Some(frontier)
+}
+
+/// Path-based core (pure-ish, testable): the durable `delivered_frontier` END.
+/// This is the SINGLE durable frontier END reader; the env-resolved
+/// [`delivered_frontier_end_current_generation`] and the flag-gated
+/// [`effective_committed_offset`] both funnel through it so the generation and
+/// EOF-bounds gating logic exists in exactly one place.
+fn current_generation_durable_frontier_end_at(
+    path: &Path,
+    current_gen_mtime: i64,
+    current_transcript_eof: Option<u64>,
+) -> Option<u64> {
+    current_generation_durable_frontier_at(path, current_gen_mtime, current_transcript_eof)
         .map(|f| f.range.1)
 }
 
@@ -737,8 +779,9 @@ pub(in crate::services::discord) fn current_generation_mtime_ns(tmux_session_nam
 }
 
 /// #3593 (flag-INDEPENDENT): the CURRENT-generation durable `delivered_frontier`
-/// END, or `0` when there is none to trust (absent/malformed record, or a stale
-/// prior-generation frontier per the #1270 guard). UNLIKE
+/// END, or `0` when there is none to trust (absent/malformed record, a stale
+/// prior-generation frontier per the #1270 guard, missing transcript EOF, or a
+/// frontier END beyond the current EOF). UNLIKE
 /// [`effective_committed_offset`], this NEVER consults
 /// `AGENTDESK_DELIVERY_RECORD_AUTHORITY` — it is the durable frontier the legacy
 /// #3520 new-message floor read, surfaced so the synthetic-resume dedup gate can
@@ -750,12 +793,14 @@ pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
 ) -> u64 {
     let Some(path) = delivery_record_path(provider, channel.get()) else {
         return 0;
     };
     let current_gen = current_generation_mtime_ns(tmux_session_name);
-    current_generation_durable_frontier_end_at(&path, current_gen).unwrap_or(0)
+    current_generation_durable_frontier_end_at(&path, current_gen, current_transcript_eof)
+        .unwrap_or(0)
 }
 
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
@@ -764,14 +809,17 @@ pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
 /// in_memory)` (I3: missing/malformed record → in-memory only, never assume
 /// delivered), but ONLY when the durable frontier is from the CURRENT wrapper
 /// generation (#1270 guard — a stale prior-generation frontier is treated as
-/// `None`). The in-memory authority is the relay coord's `confirmed_end_offset`
-/// for `channel`; the durable record is keyed by `(provider, channel)`;
-/// `tmux_session_name` resolves the current generation watermark.
+/// `None`) and physically within the current transcript EOF (#4188 guard). The
+/// in-memory authority is the relay coord's `confirmed_end_offset` for
+/// `channel`; the durable record is keyed by `(provider, channel)`;
+/// `tmux_session_name` resolves the current generation watermark, while
+/// `current_transcript_eof` bounds the durable offset space.
 pub(in crate::services::discord) fn effective_committed_offset(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
 ) -> u64 {
     let in_memory = shared.committed_relay_offset(channel);
     if !delivery_record_authority_enabled() {
@@ -781,6 +829,7 @@ pub(in crate::services::discord) fn effective_committed_offset(
         current_generation_durable_frontier_end_at(
             &path,
             current_generation_mtime_ns(tmux_session_name),
+            current_transcript_eof,
         )
     });
     fuse_committed_offset(durable_end, in_memory)
@@ -810,10 +859,21 @@ pub(in crate::services::discord) fn committed_floor_for_resend_dedup(
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
 ) -> u64 {
-    effective_committed_offset(shared, provider, channel, tmux_session_name).max(
-        delivered_frontier_end_current_generation(provider, channel, tmux_session_name),
+    effective_committed_offset(
+        shared,
+        provider,
+        channel,
+        tmux_session_name,
+        current_transcript_eof,
     )
+    .max(delivered_frontier_end_current_generation(
+        provider,
+        channel,
+        tmux_session_name,
+        current_transcript_eof,
+    ))
 }
 
 /// #3593 JSONL-space monotonic dedup predicate (pure, testable). `range_end` is the
@@ -1940,7 +2000,7 @@ mod tests {
         )
         .unwrap();
         // Current generation matches the frontier's → trust the durable END.
-        let durable_end = current_generation_durable_frontier_end_at(&path, gen_ns);
+        let durable_end = current_generation_durable_frontier_end_at(&path, gen_ns, Some(443_154));
         assert_eq!(durable_end, Some(443_154));
         // In-memory committed reset to 0 (the AUTHORITY-OFF restart hazard); the
         // fused floor rises to the durable value → the synthetic-resume range is
@@ -1971,8 +2031,9 @@ mod tests {
             },
         )
         .unwrap();
-        let fused =
-            0_u64.max(current_generation_durable_frontier_end_at(&path, gen_ns).unwrap_or(0));
+        let fused = 0_u64.max(
+            current_generation_durable_frontier_end_at(&path, gen_ns, Some(443_154)).unwrap_or(0),
+        );
         // A new answer produced AFTER the durable high watermark.
         assert!(!range_already_committed(443_200, fused));
     }
@@ -1997,13 +2058,55 @@ mod tests {
         )
         .unwrap();
         // Current generation differs → distrust → None.
-        assert_eq!(current_generation_durable_frontier_end_at(&path, 999), None);
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, 999, Some(443_154)),
+            None
+        );
         // `current_gen == 0` (no .generation file) → also distrust.
-        assert_eq!(current_generation_durable_frontier_end_at(&path, 0), None);
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, 0, Some(443_154)),
+            None
+        );
         // Fused floor stays at in-memory (here 0) → a real range above 0 is NOT
         // suppressed (the new generation's fresh output is relayed).
-        let fused = 0_u64.max(current_generation_durable_frontier_end_at(&path, 999).unwrap_or(0));
+        let fused = 0_u64.max(
+            current_generation_durable_frontier_end_at(&path, 999, Some(443_154)).unwrap_or(0),
+        );
         assert!(!range_already_committed(422_855, fused));
+    }
+
+    /// #4188: `/compact` can shrink the transcript without changing the wrapper
+    /// `.generation` file. Even with a CURRENT generation, a durable END beyond
+    /// the current EOF is physically stale and must not raise the committed floor.
+    #[test]
+    fn current_gen_durable_frontier_distrusts_end_beyond_current_eof_4188() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 4188);
+        let gen_ns = 700_000_000_i64;
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 20_536_793),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, gen_ns, Some(16_545_127)),
+            None
+        );
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, gen_ns, Some(20_536_793)),
+            Some(20_536_793)
+        );
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, gen_ns, None),
+            None
+        );
     }
 
     /// I3 conservatism: an absent or malformed record yields no durable floor
@@ -2014,7 +2117,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = delivery_record_path_in_root(dir.path(), &ProviderKind::Codex, 35932);
         assert_eq!(
-            current_generation_durable_frontier_end_at(&missing, 5),
+            current_generation_durable_frontier_end_at(&missing, 5, Some(0)),
             None
         );
 
@@ -2022,7 +2125,7 @@ mod tests {
         fs::create_dir_all(malformed.parent().unwrap()).unwrap();
         fs::write(&malformed, "{ not json").unwrap();
         assert_eq!(
-            current_generation_durable_frontier_end_at(&malformed, 5),
+            current_generation_durable_frontier_end_at(&malformed, 5, Some(0)),
             None
         );
     }
@@ -2051,7 +2154,7 @@ mod tests {
         .unwrap();
         // Matching generation + fully-populated anchor → Some.
         assert_eq!(
-            current_generation_delivered_anchor_at(&path, 700),
+            current_generation_delivered_anchor_at(&path, 700, Some(443_154)),
             Some(CurrentGenerationAnchor {
                 panel_msg_id: 555,
                 panel_channel_id: 777,
@@ -2076,9 +2179,15 @@ mod tests {
         )
         .unwrap();
         // Current generation differs → distrust → None (no repost of a stale turn).
-        assert_eq!(current_generation_delivered_anchor_at(&path, 999), None);
+        assert_eq!(
+            current_generation_delivered_anchor_at(&path, 999, Some(100)),
+            None
+        );
         // No `.generation` file (current_gen == 0) → also distrust.
-        assert_eq!(current_generation_delivered_anchor_at(&path, 0), None);
+        assert_eq!(
+            current_generation_delivered_anchor_at(&path, 0, Some(100)),
+            None
+        );
     }
 
     #[test]
@@ -2097,7 +2206,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(current_generation_delivered_anchor_at(&zero_msg, 700), None);
+        assert_eq!(
+            current_generation_delivered_anchor_at(&zero_msg, 700, Some(42)),
+            None
+        );
 
         // panel_channel_id == 0 → None.
         let zero_ch = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36104);
@@ -2112,7 +2224,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(current_generation_delivered_anchor_at(&zero_ch, 700), None);
+        assert_eq!(
+            current_generation_delivered_anchor_at(&zero_ch, 700, Some(42)),
+            None
+        );
 
         // Absent anchor pair (legacy short-replace frontier w/o anchor) → None.
         let no_anchor = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36105);
@@ -2128,7 +2243,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            current_generation_delivered_anchor_at(&no_anchor, 700),
+            current_generation_delivered_anchor_at(&no_anchor, 700, Some(42)),
             None
         );
     }
@@ -2137,12 +2252,18 @@ mod tests {
     fn current_gen_anchor_missing_or_malformed_is_none() {
         let dir = tempfile::tempdir().unwrap();
         let missing = delivery_record_path_in_root(dir.path(), &ProviderKind::Codex, 36106);
-        assert_eq!(current_generation_delivered_anchor_at(&missing, 5), None);
+        assert_eq!(
+            current_generation_delivered_anchor_at(&missing, 5, Some(0)),
+            None
+        );
 
         let malformed = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36107);
         fs::create_dir_all(malformed.parent().unwrap()).unwrap();
         fs::write(&malformed, "{ not json").unwrap();
-        assert_eq!(current_generation_delivered_anchor_at(&malformed, 5), None);
+        assert_eq!(
+            current_generation_delivered_anchor_at(&malformed, 5, Some(0)),
+            None
+        );
     }
 
     // ---- #3610 (Phase B PR-1 / PR-1b) terminal-anchor recording ----------------
@@ -2291,8 +2412,10 @@ mod tests {
         .unwrap();
 
         // Same durable frontier END read out regardless of anchor.
-        let end_with = current_generation_durable_frontier_end_at(&path_with_anchor, gen_ns);
-        let end_null = current_generation_durable_frontier_end_at(&path_null_anchor, gen_ns);
+        let end_with =
+            current_generation_durable_frontier_end_at(&path_with_anchor, gen_ns, Some(443_154));
+        let end_null =
+            current_generation_durable_frontier_end_at(&path_null_anchor, gen_ns, Some(443_154));
         assert_eq!(end_with, end_null);
         assert_eq!(end_with, Some(443_154));
 
@@ -2622,13 +2745,25 @@ mod tests {
             // authority ON → durable frontier RAISES the floor above in-memory.
             let _authority = authority_test_seam::force(true);
             assert_eq!(
-                effective_committed_offset(shared.as_ref(), &provider, channel, tmux),
+                effective_committed_offset(
+                    shared.as_ref(),
+                    &provider,
+                    channel,
+                    tmux,
+                    Some(u64::MAX)
+                ),
                 durable_end.max(in_memory),
             );
             // `committed_floor_for_resend_dedup` = effective.max(flag-independent
             // durable) → the same fused value (floor never drops below in-memory).
             assert_eq!(
-                committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux),
+                committed_floor_for_resend_dedup(
+                    shared.as_ref(),
+                    &provider,
+                    channel,
+                    tmux,
+                    Some(u64::MAX)
+                ),
                 durable_end.max(in_memory),
             );
         }
@@ -2637,7 +2772,13 @@ mod tests {
             // hidden by the flag. Pins the flag-gated branch.
             let _authority = authority_test_seam::force(false);
             assert_eq!(
-                effective_committed_offset(shared.as_ref(), &provider, channel, tmux),
+                effective_committed_offset(
+                    shared.as_ref(),
+                    &provider,
+                    channel,
+                    tmux,
+                    Some(u64::MAX)
+                ),
                 in_memory,
             );
         }
@@ -2661,7 +2802,13 @@ mod tests {
         let shared = shared_with_committed(channel, 0);
 
         let _authority = authority_test_seam::force(true);
-        let floor = committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux);
+        let floor = committed_floor_for_resend_dedup(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(u64::MAX),
+        );
         assert_eq!(
             floor, durable_end,
             "durable frontier must lift the reset in-memory floor"
@@ -2689,7 +2836,13 @@ mod tests {
         let shared = shared_with_committed(channel, 0); // watchdog fires post in-memory reset
 
         let _authority = authority_test_seam::force(true);
-        let floor = committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux);
+        let floor = committed_floor_for_resend_dedup(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(u64::MAX),
+        );
         assert_eq!(floor, durable_end);
         // Watchdog re-relay of the delivered body → suppressed (dup guard).
         assert!(range_already_committed(500_000, floor));
@@ -2727,11 +2880,17 @@ mod tests {
         let _authority = authority_test_seam::force(true);
         // Stale frontier distrusted → floor stays at the in-memory value (0).
         assert_eq!(
-            effective_committed_offset(shared.as_ref(), &provider, channel, tmux),
+            effective_committed_offset(shared.as_ref(), &provider, channel, tmux, Some(u64::MAX)),
             0,
         );
         assert_eq!(
-            committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux),
+            committed_floor_for_resend_dedup(
+                shared.as_ref(),
+                &provider,
+                channel,
+                tmux,
+                Some(u64::MAX)
+            ),
             0,
         );
         // A fresh answer above 0 is NOT over-suppressed.

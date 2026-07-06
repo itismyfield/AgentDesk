@@ -302,6 +302,7 @@ pub(super) fn guarded_cleanup_delivered_elsewhere_signal(
         provider,
         channel_id,
         tmux_session_name,
+        current_output_eof,
     ) else {
         return GuardedDeliveredElsewhereSignal::NotFound;
     };

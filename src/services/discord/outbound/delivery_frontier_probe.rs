@@ -5,8 +5,8 @@ use std::path::Path;
 use poise::serenity_prelude::ChannelId;
 
 use super::delivery_record::{
-    DeliveredCommit, current_generation_mtime_ns, delivery_record_path,
-    durable_frontier_generation_current, read_record_at,
+    DeliveredCommit, current_generation_durable_frontier_at, current_generation_mtime_ns,
+    delivery_record_path,
 };
 use crate::services::provider::ProviderKind;
 
@@ -25,16 +25,15 @@ pub(in crate::services::discord) struct CurrentGenerationAnchor {
 
 /// #3610 PR-2 (stale-anchor guard, path-based core): the durable
 /// `delivered_frontier` terminal anchor, but only when it belongs to the current
-/// wrapper generation and the anchor pair is fully populated/non-zero.
+/// wrapper generation, its END is inside the current transcript EOF, and the
+/// anchor pair is fully populated/non-zero.
 pub(in crate::services::discord) fn current_generation_delivered_anchor_at(
     path: &Path,
     current_gen_mtime: i64,
+    current_transcript_eof: Option<u64>,
 ) -> Option<CurrentGenerationAnchor> {
-    let frontier = read_record_at(path)
-        .and_then(|r| r.delivered_frontier)
-        .filter(|f| {
-            durable_frontier_generation_current(f.generation_mtime_ns, current_gen_mtime)
-        })?;
+    let frontier =
+        current_generation_durable_frontier_at(path, current_gen_mtime, current_transcript_eof)?;
     let panel_msg_id = frontier.panel_msg_id.filter(|&id| id != 0)?;
     let panel_channel_id = frontier.panel_channel_id.filter(|&id| id != 0)?;
     Some(CurrentGenerationAnchor {
@@ -50,10 +49,11 @@ pub(in crate::services::discord) fn current_generation_delivered_anchor(
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
 ) -> Option<CurrentGenerationAnchor> {
     let path = delivery_record_path(provider, channel.get())?;
     let current_gen = current_generation_mtime_ns(tmux_session_name);
-    current_generation_delivered_anchor_at(&path, current_gen)
+    current_generation_delivered_anchor_at(&path, current_gen, current_transcript_eof)
 }
 
 /// Current-generation durable delivered frontier with diagnostic details.
@@ -61,15 +61,15 @@ pub(in crate::services::discord) fn current_generation_delivered_anchor(
 /// Idle recap uses this read-only view to report the same trusted frontier the
 /// relay dedup machinery trusts, while preserving the committed range and
 /// terminal anchor ids for a deterministic operator report. Missing/malformed
-/// records and stale prior-generation frontiers return `None`.
+/// records, stale prior-generation frontiers, unbounded EOF, and frontier ENDs
+/// beyond the current transcript EOF return `None`.
 pub(in crate::services::discord) fn delivered_frontier_current_generation(
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
 ) -> Option<DeliveredCommit> {
     let path = delivery_record_path(provider, channel.get())?;
     let current_gen = current_generation_mtime_ns(tmux_session_name);
-    read_record_at(&path)
-        .and_then(|r| r.delivered_frontier)
-        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
+    current_generation_durable_frontier_at(&path, current_gen, current_transcript_eof)
 }

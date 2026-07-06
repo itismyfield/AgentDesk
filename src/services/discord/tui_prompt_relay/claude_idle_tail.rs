@@ -229,9 +229,10 @@ pub(super) fn spawn_claude_idle_response_tail_once(
     // consulting the watermark (session_relay_sink.rs): a truncated/respawned
     // transcript (EOF below the watermark) or a wrapper-generation change resets the
     // watermark to 0, so the fresh range is relayed; only a watermark that genuinely covers THIS transcript clamps (dedupe).
-    let transcript_len = std::fs::metadata(&transcript_path)
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let transcript_eof = std::fs::metadata(&transcript_path)
+        .ok()
+        .map(|meta| meta.len());
+    let transcript_len = transcript_eof.unwrap_or(0);
     super::super::tmux::reset_stale_relay_watermark_if_output_regressed(
         shared.as_ref(),
         channel_id,
@@ -251,6 +252,7 @@ pub(super) fn spawn_claude_idle_response_tail_once(
         &ProviderKind::Claude,
         channel_id,
         &tmux_session_name,
+        transcript_eof,
     );
     let start_offset = clamp_idle_tail_start_offset_to_committed(start_offset, committed_offset);
     if committed_offset > 0 {

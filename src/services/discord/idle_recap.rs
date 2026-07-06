@@ -382,6 +382,7 @@ pub(crate) fn probe_relay_integrity(
             provider,
             ChannelId::new(owner_channel_id),
             tmux_session_name,
+            Some(output_end),
         )
     else {
         return decide_relay_integrity(RelayIntegrityInput {

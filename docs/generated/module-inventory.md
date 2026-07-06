@@ -473,7 +473,7 @@
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1382 | 627 | 755 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |
-| `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2585 | 1373 | 1212 | giant-file |
+| `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2586 | 1374 | 1212 | giant-file |
 | `services::discord::idle_recap::context_display` | `src/services/discord/idle_recap/context_display.rs` | 154 | 154 | 0 |  |
 | `services::discord::idle_recap::relay_integrity` | `src/services/discord/idle_recap/relay_integrity.rs` | 213 | 160 | 53 |  |
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 301 | 287 | 14 |  |
@@ -510,7 +510,7 @@
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 248 | 248 | 0 |  |
 | `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1271 | 693 | 578 |  |
 | `services::discord::outbound::delivery_frontier_probe` | `src/services/discord/outbound/delivery_frontier_probe.rs` | 75 | 75 | 0 |  |
-| `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2740 | 1216 | 1524 | giant-file |
+| `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2887 | 1276 | 1611 | giant-file |
 | `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1176 | 580 | 596 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 426 | 426 | 0 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 124 | 124 | 0 |  |
@@ -571,11 +571,11 @@
 | `services::discord::recovery_engine::state_extractors` | `src/services/discord/recovery_engine/state_extractors.rs` | 220 | 220 | 0 |  |
 | `services::discord::recovery_engine::status_panel` | `src/services/discord/recovery_engine/status_panel.rs` | 71 | 55 | 16 |  |
 | `services::discord::recovery_engine::status_panel_completion_producer` | `src/services/discord/recovery_engine/status_panel_completion_producer.rs` | 64 | 64 | 0 |  |
-| `services::discord::recovery_engine::terminal_text_idempotency` | `src/services/discord/recovery_engine/terminal_text_idempotency.rs` | 863 | 431 | 432 |  |
+| `services::discord::recovery_engine::terminal_text_idempotency` | `src/services/discord/recovery_engine/terminal_text_idempotency.rs` | 880 | 442 | 438 |  |
 | `services::discord::recovery_engine::terminal_watcher` | `src/services/discord/recovery_engine/terminal_watcher.rs` | 306 | 168 | 138 |  |
 | `services::discord::recovery_paths` | `src/services/discord/recovery_paths/mod.rs` | 36 | 36 | 0 |  |
-| `services::discord::recovery_paths::controller_cutover` | `src/services/discord/recovery_paths/controller_cutover.rs` | 648 | 278 | 370 |  |
-| `services::discord::recovery_paths::restart` | `src/services/discord/recovery_paths/restart.rs` | 1341 | 863 | 478 |  |
+| `services::discord::recovery_paths::controller_cutover` | `src/services/discord/recovery_paths/controller_cutover.rs` | 649 | 278 | 371 |  |
+| `services::discord::recovery_paths::restart` | `src/services/discord/recovery_paths/restart.rs` | 1346 | 868 | 478 |  |
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 569 | 253 | 316 |  |
 | `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 305 | 185 | 120 |  |
 | `services::discord::relay_owner_observability` | `src/services/discord/relay_owner_observability.rs` | 458 | 343 | 115 |  |
@@ -638,9 +638,9 @@
 | `services::discord::semantic_boundaries` | `src/services/discord/semantic_boundaries.rs` | 261 | 261 | 0 |  |
 | `services::discord::session_banner` | `src/services/discord/session_banner.rs` | 68 | 68 | 0 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 214 | 141 | 73 |  |
-| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 4744 | 1677 | 3067 | giant-file |
+| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 4745 | 1678 | 3067 | giant-file |
 | `services::discord::session_relay_sink::idle_jsonl` | `src/services/discord/session_relay_sink/idle_jsonl.rs` | 410 | 387 | 23 |  |
-| `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 427 | 123 | 304 |  |
+| `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 432 | 128 | 304 |  |
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 64 | 64 | 0 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1027 | 501 | 526 |  |
 | `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 235 | 235 | 0 |  |
@@ -671,12 +671,12 @@
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 190 | 190 | 0 |  |
 | `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 1118 | 733 | 385 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 347 | 200 | 147 |  |
-| `services::discord::tmux_placeholder_suppression` | `src/services/discord/tmux_placeholder_suppression.rs` | 2066 | 1092 | 974 | giant-file |
+| `services::discord::tmux_placeholder_suppression` | `src/services/discord/tmux_placeholder_suppression.rs` | 2067 | 1093 | 974 | giant-file |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 781 | 676 | 105 |  |
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 82 | 82 | 0 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 602 | 479 | 123 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 7361 | 7361 | 0 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 7372 | 7372 | 0 | giant-file |
 | `services::discord::tmux_watcher::commit_decisions` | `src/services/discord/tmux_watcher/commit_decisions.rs` | 296 | 174 | 122 |  |
 | `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 250 | 250 | 0 |  |
 | `services::discord::tmux_watcher::completion_producer` | `src/services/discord/tmux_watcher/completion_producer.rs` | 54 | 54 | 0 |  |
@@ -709,7 +709,7 @@
 | `services::discord::tui_prompt_relay::bridge_gateway` | `src/services/discord/tui_prompt_relay/bridge_gateway.rs` | 199 | 199 | 0 |  |
 | `services::discord::tui_prompt_relay::claude_idle_bridge` | `src/services/discord/tui_prompt_relay/claude_idle_bridge.rs` | 678 | 678 | 0 |  |
 | `services::discord::tui_prompt_relay::claude_idle_runtime` | `src/services/discord/tui_prompt_relay/claude_idle_runtime.rs` | 664 | 628 | 36 |  |
-| `services::discord::tui_prompt_relay::claude_idle_tail` | `src/services/discord/tui_prompt_relay/claude_idle_tail.rs` | 478 | 478 | 0 |  |
+| `services::discord::tui_prompt_relay::claude_idle_tail` | `src/services/discord/tui_prompt_relay/claude_idle_tail.rs` | 480 | 480 | 0 |  |
 | `services::discord::tui_prompt_relay::codex_idle_rollout` | `src/services/discord/tui_prompt_relay/codex_idle_rollout.rs` | 613 | 613 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_offset_resolution` | `src/services/discord/tui_prompt_relay/idle_offset_resolution.rs` | 100 | 100 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_transcript_scan` | `src/services/discord/tui_prompt_relay/idle_transcript_scan.rs` | 495 | 347 | 148 |  |
