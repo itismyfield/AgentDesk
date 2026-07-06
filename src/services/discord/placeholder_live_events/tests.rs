@@ -6546,6 +6546,181 @@ fn stuck_background_task_slot_dropped_on_turn_boundary_reconciliation() {
     );
 }
 
+// #4177: a background subagent slot stuck past the TTL is force-aborted to a
+// terminal failed state, then normal delivered-terminal eviction can drop it.
+#[test]
+fn stuck_background_subagent_slot_force_aborted_and_evicted() {
+    use super::status_panel::force_abort_stuck_subagent_slots;
+    use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_001);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("stuck subagent".to_string()),
+            tool_use_id: Some("toolu_stuck_subagent".to_string()),
+            background: true,
+        },
+    );
+
+    let now = std::time::Instant::now();
+    let stale_at = now
+        .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
+        .expect("monotonic clock far enough past origin");
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = guard
+            .subagents
+            .iter_mut()
+            .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_stuck_subagent"))
+            .expect("stuck subagent slot");
+        slot.started_at = stale_at;
+
+        let swept = force_abort_stuck_subagent_slots(&mut guard.subagents, now);
+        assert_eq!(swept, 1, "only the stale subagent is swept");
+        assert_eq!(
+            guard
+                .subagents
+                .iter()
+                .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_stuck_subagent"))
+                .and_then(|slot| slot.finished),
+            Some(false)
+        );
+    }
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "*");
+    assert!(
+        delivered
+            .delivered_terminal_ids
+            .contains(&subagent_id("toolu_stuck_subagent")),
+        "swept subagent must become terminal and deliverable: {:?}",
+        delivered.delivered_terminal_ids
+    );
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state remains after eviction");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        guard.subagents.is_empty(),
+        "swept terminal subagent must be evicted: {:?}",
+        guard.subagents
+    );
+}
+
+// #4177: a fresh unfinished background subagent remains eligible to survive the
+// turn boundary; the TTL sweep does not change its state.
+#[test]
+fn fresh_background_subagent_slot_preserved_by_ttl_sweep() {
+    use super::status_panel::force_abort_stuck_subagent_slots;
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_002);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("fresh subagent".to_string()),
+            tool_use_id: Some("toolu_fresh_subagent".to_string()),
+            background: true,
+        },
+    );
+
+    let now = std::time::Instant::now();
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let mut guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original_started_at = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_fresh_subagent"))
+        .expect("fresh subagent slot")
+        .started_at;
+
+    let swept = force_abort_stuck_subagent_slots(&mut guard.subagents, now);
+    assert_eq!(swept, 0, "fresh subagent must not be swept");
+    let slot = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_fresh_subagent"))
+        .expect("fresh subagent slot");
+    assert_eq!(slot.finished, None);
+    assert_eq!(slot.started_at, original_started_at);
+}
+
+// #4177: already-terminal subagents are left alone even when their start instant
+// is older than the stuck-slot TTL.
+#[test]
+fn finished_background_subagent_slot_untouched_by_ttl_sweep() {
+    use super::status_panel::force_abort_stuck_subagent_slots;
+    use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_003);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("finished subagent".to_string()),
+            tool_use_id: Some("toolu_finished_subagent".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_finished_subagent".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let now = std::time::Instant::now();
+    let stale_at = now
+        .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
+        .expect("monotonic clock far enough past origin");
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let mut guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot = guard
+        .subagents
+        .iter_mut()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_finished_subagent"))
+        .expect("finished subagent slot");
+    slot.started_at = stale_at;
+    let original_finished = slot.finished;
+
+    let swept = force_abort_stuck_subagent_slots(&mut guard.subagents, now);
+    assert_eq!(swept, 0, "finished subagent must not be swept");
+    let slot = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_finished_subagent"))
+        .expect("finished subagent slot");
+    assert_eq!(slot.finished, original_finished);
+}
+
 // ===========================================================================
 // #3811: deterministic turn anchors on result/status surfaces.
 //

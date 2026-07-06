@@ -13,7 +13,7 @@ use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
 use super::subagent_summary::render_subagent_done_summary;
 use super::task_panel::{
-    TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot,
+    STUCK_BACKGROUND_TASK_TTL, TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot,
     force_abort_stuck_background_task_slots, render_task_panel_line, render_task_tool_slot,
     take_slot_ordinal, task_tool_slot_is_unfinished_background, upsert_background_task_tool_slot,
     upsert_task_tool_slot,
@@ -41,6 +41,9 @@ pub(super) struct SubagentSlot {
     /// #3391: monotonic, never-reused per-entry slot id (mirrors
     /// `TaskToolSlot::ordinal`) backing slot-identity subagent eviction.
     ordinal: u64,
+    /// #4177: monotonic creation instant. Turn-boundary reconciliation force-aborts
+    /// a stuck background subagent older than `STUCK_BACKGROUND_TASK_TTL`.
+    pub(super) started_at: std::time::Instant,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) enum DerivedStatus {
@@ -159,7 +162,9 @@ impl StatusPanelState {
         // #3473: turn-boundary reconciliation — force a TTL-expired stuck
         // background task to `aborted` BEFORE the retain filter so it is dropped
         // here instead of sitting ⏳ forever.
-        force_abort_stuck_background_task_slots(&mut self.tasks, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        force_abort_stuck_background_task_slots(&mut self.tasks, now);
+        force_abort_stuck_subagent_slots(&mut self.subagents, now);
         let tasks = self
             .tasks
             .iter()
@@ -250,6 +255,7 @@ impl StatusPanelState {
                     summary: None,
                     background,
                     ordinal,
+                    started_at: std::time::Instant::now(),
                 });
                 self.status = DerivedStatus::SubagentRunning { desc };
                 trim_subagents(&mut self.subagents);
@@ -277,8 +283,9 @@ impl StatusPanelState {
                 summary,
                 ack_only,
             } => {
-                // #3084: close the id-matching slot (pairs a long-running subagent
-                // to its own result among parallels); else first-unfinished.
+                // #3084/#4177: real subagent lifecycle records pair start->finish by
+                // exact Task `tool_use_id`; if an id-bearing completion misses, do
+                // not guess another unfinished slot.
                 let id = tool_use_id.as_deref();
                 let matched = id.and_then(|id| {
                     self.subagents.iter().rposition(|slot| {
@@ -689,6 +696,34 @@ impl SubagentSlot {
             None => SlotKey::Ordinal(self.ordinal),
         }
     }
+}
+
+/// #4177: at a turn boundary, force any background subagent slot that is still
+/// unfinished AND older than `STUCK_BACKGROUND_TASK_TTL` to terminal failed. Its
+/// terminal notification never arrived, so it would otherwise survive every
+/// residual-preserving reset as a ghost running entry. Returns the number swept.
+pub(super) fn force_abort_stuck_subagent_slots(
+    slots: &mut [SubagentSlot],
+    now: std::time::Instant,
+) -> usize {
+    let mut swept = 0usize;
+    for slot in slots.iter_mut() {
+        if slot.is_unfinished_background()
+            && now.saturating_duration_since(slot.started_at) >= STUCK_BACKGROUND_TASK_TTL
+        {
+            slot.finished = Some(false);
+            swept += 1;
+        }
+    }
+    if swept != 0 {
+        tracing::info!(
+            target: "agentdesk::discord::live_panel",
+            swept_subagents = swept,
+            ttl_secs = STUCK_BACKGROUND_TASK_TTL.as_secs(),
+            "#4177: swept stuck background subagent slots"
+        );
+    }
+    swept
 }
 
 fn sanitize_label(raw: &str) -> String {
