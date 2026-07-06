@@ -17,8 +17,8 @@
 | `src/services/codex_tui/rollout_tail.rs` | 1276 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/catch_up.rs` | 1402 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2717 | discord-relay | 2026-10-31 | #3839 |
-| `src/services/discord/idle_recap.rs` | 1373 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/outbound/delivery_record.rs` | 1216 | discord-relay | 2026-10-31 | #3405 |
+| `src/services/discord/idle_recap.rs` | 1374 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1180 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1014 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine/manual_rebind.rs` | 1084 | discord-relay | 2026-10-31 | #4157 |
@@ -26,10 +26,10 @@
 | `src/services/discord/relay_recovery.rs` | 1511 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1607 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2825 | discord-relay | 2026-10-31 | #3837 |
-| `src/services/discord/session_relay_sink.rs` | 1677 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/session_relay_sink.rs` | 1678 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1505 | discord-relay | 2026-10-31 | #3841 |
-| `src/services/discord/tmux_placeholder_suppression.rs` | 1092 | discord-relay | 2026-10-31 | #4176 |
-| `src/services/discord/tmux_watcher.rs` | 7361 | discord-relay | 2026-10-31 | #3832 |
+| `src/services/discord/tmux_placeholder_suppression.rs` | 1093 | discord-relay | 2026-10-31 | #4176 |
+| `src/services/discord/tmux_watcher.rs` | 7372 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tui_direct_abort_marker/mod.rs` | 1233 | discord-relay | 2026-10-31 | #4175 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1495 | discord-relay | 2026-08-31 | #3540 |
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1051 | discord-relay | 2026-10-31 | #4019 |

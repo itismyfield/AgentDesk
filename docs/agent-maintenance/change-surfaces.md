@@ -57,7 +57,7 @@
 - do_not_edit_without_migration_plan:
   - `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
     ordered-chunk continuation contract not yet modelled in v3).
-  - `src/services/discord/outbound/delivery_record.rs` (1216 lines; +8 from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF tests ignore developer-shell AGENTDESK_DELIVERY_RECORD_SHADOW; production paths untouched; durable
+  - `src/services/discord/outbound/delivery_record.rs` (1276 lines; +60 from #4188 EOF-bound frontier guard — thread `current_transcript_eof` through the single durable-frontier funnel (`current_generation_durable_frontier_at`) + delivered-anchor / effective-committed-offset call-sites so a stale prior-generation frontier whose end exceeds the compacted transcript EOF is distrusted (fixes the delivered_frontier message-loss after `/compact`); +8 from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF tests ignore developer-shell AGENTDESK_DELIVERY_RECORD_SHADOW; production paths untouched; durable
     delivery lease/frontier/owner-context sidecar, plus the #4081 bounded
     recent-content fingerprint guard; bugfix only until split under #3405).
   - `src/services/message_outbox.rs` is the PG-backed message outbox

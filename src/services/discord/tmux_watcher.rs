@@ -2557,6 +2557,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &watcher_provider,
                     channel_id,
                     &tmux_session_name,
+                    pinned_pre_cleanup_inflight
+                        .as_ref()
+                        .and_then(|state| state.output_path.as_deref())
+                        .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len())),
                 );
                 let fresh_idle_pending_session_bound_delivery = pinned_pre_cleanup_inflight
                     .as_ref()
@@ -4327,12 +4331,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // the idle relay path does. The unconditional pre-relay reset below
             // at `pre_relay` is for the general path; this one guards the
             // no-inflight dedup read specifically.
-            if let Ok(meta) = std::fs::metadata(&output_path) {
+            let output_eof_for_no_inflight_dedup =
+                std::fs::metadata(&output_path).ok().map(|meta| meta.len());
+            if let Some(output_eof) = output_eof_for_no_inflight_dedup {
                 reset_stale_relay_watermark_if_output_regressed(
                     &shared,
                     channel_id,
                     &tmux_session_name,
-                    meta.len(),
+                    output_eof,
                     "no_inflight_dedup",
                 );
             }
@@ -4364,6 +4370,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
+                output_eof_for_no_inflight_dedup,
             );
             if committed >= turn_consumed_offset && turn_consumed_offset > turn_data_start_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4571,11 +4578,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &tmux_session_name,
             "watcher_terminal_resend_dedup",
         );
+        let output_eof_for_resend_dedup =
+            std::fs::metadata(&output_path).ok().map(|meta| meta.len());
         let watcher_resend_committed = dr::committed_floor_for_resend_dedup(
             &shared,
             &watcher_provider,
             channel_id,
             &tmux_session_name,
+            output_eof_for_resend_dedup,
         ); // #3089 B2b + #3593 (codex HIGH): in-memory committed ∪ flag-independent durable frontier
         let watcher_resend_reconciled = session_bound_terminal_delivery_attempted
             && watcher_direct_fallback_intended
@@ -4610,6 +4620,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
+                output_eof_for_resend_dedup,
             );
             let now_ms = crate::services::discord::lease_now_ms();
             let (action, reclaim_expired_sink) = watcher_terminal_resend_action_gated(

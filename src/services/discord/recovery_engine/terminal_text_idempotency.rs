@@ -24,6 +24,12 @@ pub(in crate::services::discord) struct RecoveryDeliveryContext {
     expected_turn_start_offset: Option<u64>,
     expected_current_msg_id: u64,
     durable_range: Option<(u64, u64)>,
+    /// #4188: current transcript (output_path) byte length, snapshotted from the
+    /// inflight state at construction. Bounds the durable frontier so a stale
+    /// prior-generation/compaction frontier whose end exceeds the current
+    /// transcript EOF is distrusted. `None` when the state has no output_path or
+    /// it cannot be stat'd → fail-safe distrust.
+    current_output_eof: Option<u64>,
     attempts: u32,
     reuse_recorded_anchor: bool,
 }
@@ -99,6 +105,10 @@ impl RecoveryDeliveryContext {
             expected_turn_start_offset: state.turn_start_offset,
             expected_current_msg_id: state.current_msg_id,
             durable_range,
+            current_output_eof: state
+                .output_path
+                .as_deref()
+                .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len())),
             attempts: state.recovery_relay_attempts,
             reuse_recorded_anchor,
         }
@@ -136,6 +146,7 @@ impl RecoveryDeliveryContext {
             &self.provider,
             self.record_channel_id,
             tmux_session_name,
+            self.current_output_eof,
         )?;
         (anchor.panel_channel_id == self.channel_id.get() && anchor.range == range)
             .then_some(anchor.panel_msg_id)
@@ -581,6 +592,7 @@ mod tests {
                 &provider,
                 ChannelId::new(state.delivery_record_owner_channel_id()),
                 tmux,
+                Some(u64::MAX),
             )
             .is_none(),
             "identity-mismatched bind must not write a durable frontier"
@@ -609,6 +621,7 @@ mod tests {
                 &provider,
                 ChannelId::new(state.delivery_record_owner_channel_id()),
                 tmux,
+                Some(u64::MAX),
             )
             .is_none(),
             "non-NotFound read failure must block the durable frontier write"
@@ -633,6 +646,7 @@ mod tests {
             &provider,
             ChannelId::new(state.delivery_record_owner_channel_id()),
             tmux,
+            Some(u64::MAX),
         )
         .expect("genuine absence is safe to record as durable delivered");
         assert_eq!(anchor.panel_msg_id, 77_007);
@@ -651,6 +665,15 @@ mod tests {
         let tmux = state.tmux_session_name.as_deref().unwrap();
         write_generation_marker(tmux);
         inflight::save_inflight_state(&state).expect("save inflight");
+        // #4188: a genuinely durable-delivered anchor implies the transcript
+        // (output_path) exists and is at least as long as the recorded range end
+        // (256). Seed it so the EOF-bound guard trusts the current-generation
+        // frontier instead of fail-safe distrusting an absent transcript.
+        std::fs::write(
+            state.output_path.as_deref().expect("output_path"),
+            vec![b'x'; 512],
+        )
+        .expect("seed transcript at/above the durable frontier end");
 
         let shared = make_shared_data_for_tests();
         let ctx = RecoveryDeliveryContext::from_state(
@@ -744,6 +767,7 @@ mod tests {
             &provider,
             matched_record_channel,
             tmux,
+            Some(u64::MAX),
         )
         .expect("replacement durable anchor should overwrite the matched owner record");
         assert_eq!(matched_anchor.panel_msg_id, 88_008);
@@ -753,6 +777,7 @@ mod tests {
                 &provider,
                 ChannelId::new(state.delivery_record_owner_channel_id()),
                 tmux,
+                Some(u64::MAX),
             )
             .is_none(),
             "replacement must not be written to the stale state-derived owner record"
@@ -849,6 +874,7 @@ mod tests {
             &provider,
             ChannelId::new(state.delivery_record_owner_channel_id()),
             tmux,
+            Some(u64::MAX),
         )
         .expect("replacement durable anchor");
         assert_eq!(anchor.panel_msg_id, 88_005);

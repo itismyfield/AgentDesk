@@ -1433,6 +1433,7 @@ async fn run_idle_jsonl_relay_loop(
                     &matched.provider,
                     channel,
                     &session_name,
+                    Some(len),
                 );
                 // Classification passed above → consults ONLY the offset-authority dedup branch.
                 match idle_relay_range_action(

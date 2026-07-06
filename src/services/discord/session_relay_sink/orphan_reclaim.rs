@@ -105,7 +105,12 @@ pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
     else {
         return false;
     };
-    let committed = effective_committed_offset(&shared, provider, channel, owner_session_name);
+    let output_eof = inflight
+        .output_path
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len()));
+    let committed =
+        effective_committed_offset(&shared, provider, channel, owner_session_name, output_eof);
     let turn_floor = inflight.turn_start_offset.unwrap_or(inflight.last_offset);
     if !should_reclaim_orphaned_session_bound_relay(true, producer_gone, committed, turn_floor) {
         return false;

@@ -639,6 +639,7 @@ mod tests {
             &provider,
             ChannelId::new(state.delivery_record_owner_channel_id()),
             tmux,
+            Some(u64::MAX),
         )
         .expect("replacement durable anchor");
         assert_eq!(anchor.panel_msg_id, 88_009);

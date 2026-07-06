@@ -231,11 +231,16 @@ fn matching_recovery_anchors(
     use super::super::outbound::delivery_frontier_probe;
 
     let mut anchors = Vec::with_capacity(2);
+    let output_eof = state
+        .output_path
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len()));
     for record_channel_id in anchor_record_lookup_channel_ids(provider, state) {
         let Some(anchor) = delivery_frontier_probe::current_generation_delivered_anchor(
             provider,
             ChannelId::new(record_channel_id),
             tmux_session_name,
+            output_eof,
         ) else {
             tracing::debug!(
                 provider = %provider.as_str(),
