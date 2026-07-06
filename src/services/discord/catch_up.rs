@@ -438,6 +438,34 @@ fn collect_catch_up_channel_candidates(
     candidates
 }
 
+fn prune_stale_checkpoint_files(dir: &Path, max_checkpoint_age: std::time::Duration) -> usize {
+    let mut pruned = 0usize;
+    if let Ok(prune_entries) = fs::read_dir(dir) {
+        for entry in prune_entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("txt") {
+                continue;
+            }
+            let Ok(meta) = path.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if modified.elapsed().unwrap_or_default() <= max_checkpoint_age {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                pruned += 1;
+            }
+        }
+    }
+    pruned
+}
+
 /// #1227: page size for catch-up REST fetch. Bumped from 10 → 50 because the
 /// previous size was overrun by bursty bot output and silently dropped buried
 /// user messages.
@@ -708,20 +736,7 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
     // max_checkpoint_age were written by sessions that ended long before this
     // restart, so catch-up is pointless and the API calls are wasted.
     let max_checkpoint_age = std::time::Duration::from_secs(600); // 10 minutes
-    let mut pruned = 0usize;
-    if let Ok(prune_entries) = fs::read_dir(&dir) {
-        for entry in prune_entries.flatten() {
-            let path = entry.path();
-            if let Ok(meta) = path.metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if modified.elapsed().unwrap_or_default() > max_checkpoint_age {
-                        let _ = fs::remove_file(&path);
-                        pruned += 1;
-                    }
-                }
-            }
-        }
-    }
+    let pruned = prune_stale_checkpoint_files(&dir, max_checkpoint_age);
     if pruned > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
@@ -1399,8 +1414,9 @@ mod catch_up_recovery_tests {
         classify_phase2_enqueue_commit, collect_catch_up_retry_pending_channels,
         consume_catch_up_retry_state_for_scan, insert_configured_catch_up_candidate,
         merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
-        rearm_catch_up_retry_after_fetch_failure, should_fetch_older_recent_page,
-        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
+        prune_stale_checkpoint_files, rearm_catch_up_retry_after_fetch_failure,
+        should_fetch_older_recent_page, should_pace_before_scan,
+        take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::EnqueueRefusalReason;
     use poise::serenity_prelude as serenity;
@@ -1614,6 +1630,41 @@ mod catch_up_recovery_tests {
         assert!(
             should_pace_before_scan(true),
             "subsequent scans must wait the pacing gap"
+        );
+    }
+
+    #[test]
+    fn stale_checkpoint_prune_preserves_last_message_lock_sidecars() {
+        let root = scoped_runtime_root();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(1479671298497183835);
+        write_last_message_checkpoint(root.path(), &provider, channel_id, 1504812094456070174);
+
+        let dir = root
+            .path()
+            .join("runtime")
+            .join("last_message")
+            .join(provider.as_str());
+        let checkpoint_path = dir.join(format!("{}.txt", channel_id.get()));
+        let lock_path = dir.join(format!("{}.txt.lock", channel_id.get()));
+        std::fs::write(&lock_path, "lock").expect("write lock sidecar");
+
+        let old_mtime = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - Duration::from_secs(700),
+        );
+        filetime::set_file_mtime(&checkpoint_path, old_mtime).expect("age checkpoint");
+        filetime::set_file_mtime(&lock_path, old_mtime).expect("age lock sidecar");
+
+        let pruned = prune_stale_checkpoint_files(&dir, Duration::from_secs(600));
+
+        assert_eq!(pruned, 1, "only the stale .txt checkpoint is pruned");
+        assert!(
+            !checkpoint_path.exists(),
+            "stale checkpoint file should be pruned"
+        );
+        assert!(
+            lock_path.exists(),
+            ".txt.lock flock sidecar must not be pruned"
         );
     }
 
