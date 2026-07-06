@@ -319,14 +319,125 @@ pub(in crate::services::discord) fn advance_last_message_checkpoint(
     message_id: MessageId,
 ) -> u64 {
     let message_id = message_id.get();
-    let checkpoint = shared
+    let checkpoint = *shared
         .last_message_ids
-        .get(&channel_id)
-        .map(|current| (*current).max(message_id))
-        .unwrap_or(message_id);
-    shared.last_message_ids.insert(channel_id, checkpoint);
+        .entry(channel_id)
+        .and_modify(|current| *current = (*current).max(message_id))
+        .or_insert(message_id);
     runtime_store::save_last_message_id(provider.as_str(), channel_id.get(), checkpoint);
     checkpoint
+}
+
+#[cfg(test)]
+mod last_message_checkpoint_tests {
+    use super::*;
+
+    struct ScopedRuntimeRoot {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        temp: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedRuntimeRoot {
+        fn path(&self) -> &std::path::Path {
+            self.temp.path()
+        }
+    }
+
+    impl Drop for ScopedRuntimeRoot {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("AGENTDESK_ROOT_DIR", value),
+                    None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+                }
+            }
+        }
+    }
+
+    fn scoped_runtime_root() -> ScopedRuntimeRoot {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = tempfile::tempdir().expect("last-message runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        ScopedRuntimeRoot {
+            _lock: lock,
+            temp,
+            previous,
+        }
+    }
+
+    fn last_message_path(
+        root: &std::path::Path,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+    ) -> std::path::PathBuf {
+        root.join("runtime")
+            .join("last_message")
+            .join(provider.as_str())
+            .join(format!("{}.txt", channel_id.get()))
+    }
+
+    #[test]
+    fn advance_last_message_checkpoint_interleaved_advances_keep_max() {
+        let root = scoped_runtime_root();
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_162_000);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+        let low_shared = std::sync::Arc::clone(&shared);
+        let low_barrier = std::sync::Arc::clone(&barrier);
+        let low = std::thread::spawn(move || {
+            low_barrier.wait();
+            advance_last_message_checkpoint(
+                &low_shared,
+                &ProviderKind::Claude,
+                channel_id,
+                MessageId::new(90_001),
+            )
+        });
+
+        let high_shared = std::sync::Arc::clone(&shared);
+        let high_barrier = std::sync::Arc::clone(&barrier);
+        let high = std::thread::spawn(move || {
+            high_barrier.wait();
+            advance_last_message_checkpoint(
+                &high_shared,
+                &ProviderKind::Claude,
+                channel_id,
+                MessageId::new(90_002),
+            )
+        });
+
+        barrier.wait();
+        let _ = low.join().expect("low checkpoint thread");
+        let _ = high.join().expect("high checkpoint thread");
+
+        assert_eq!(
+            shared.last_message_ids.get(&channel_id).map(|entry| *entry),
+            Some(90_002)
+        );
+        let path = last_message_path(root.path(), &provider, channel_id);
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("checkpoint file")
+                .trim(),
+            "90002"
+        );
+
+        let mut stale_snapshot = std::collections::HashMap::new();
+        stale_snapshot.insert(channel_id.get(), 90_001);
+        runtime_store::save_all_last_message_ids(provider.as_str(), &stale_snapshot);
+        assert_eq!(
+            std::fs::read_to_string(path)
+                .expect("checkpoint file after stale full-map save")
+                .trim(),
+            "90002"
+        );
+    }
 }
 
 pub(in crate::services::discord) use queue_io::{

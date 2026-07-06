@@ -219,17 +219,73 @@ pub(super) fn last_message_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("last_message"))
 }
 
+struct LastMessageIdFileLock {
+    _file: fs::File,
+}
+
+impl Drop for LastMessageIdFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn last_message_id_lock_path(path: &Path) -> PathBuf {
+    path.with_extension("txt.lock")
+}
+
+fn lock_last_message_id_path(path: &Path) -> Result<LastMessageIdFileLock, String> {
+    let lock_path = last_message_id_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    Ok(LastMessageIdFileLock { _file: file })
+}
+
+fn read_last_message_id(path: &Path) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| contents.trim().parse::<u64>().ok())
+}
+
 /// Save the last processed message ID for a channel.
 pub(super) fn save_last_message_id(provider: &str, channel_id: u64, message_id: u64) {
     let Some(root) = last_message_root() else {
         return;
     };
     let dir = root.join(provider);
-    let _ = fs::create_dir_all(&dir);
     let path = dir.join(format!("{}.txt", channel_id));
+    let Ok(_lock) = lock_last_message_id_path(&path) else {
+        tracing::warn!(
+            provider = provider,
+            channel_id = channel_id,
+            "last-message checkpoint save skipped because the file lock could not be acquired"
+        );
+        return;
+    };
+    let checkpoint = read_last_message_id(&path)
+        .map(|existing| existing.max(message_id))
+        .unwrap_or(message_id);
     best_effort_atomic_write_logged(
         &path,
-        &message_id.to_string(),
+        &checkpoint.to_string(),
         AtomicWriteContext::new("last_message")
             .provider(provider)
             .channel_id(channel_id),

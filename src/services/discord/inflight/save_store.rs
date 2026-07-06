@@ -207,6 +207,51 @@ mod tests {
     }
 
     #[test]
+    fn id0_with_turn_start_offset_identity_refresh_save_succeeds_when_durable_matches() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            44_008,
+            Some("adk-test".to_string()),
+            343_742_347_365_974_026,
+            0,
+            77_002,
+            "recover this".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-codex-id0-offset-save".to_string()),
+            Some("/tmp/id0-offset-save.jsonl".to_string()),
+            None,
+            256,
+        );
+        assert_eq!(state.user_msg_id, 0);
+        assert_eq!(state.turn_start_offset, Some(256));
+        save_inflight_state_in_root(temp.path(), &state).expect("seed matching id-0 row");
+
+        state.full_response = "id-0 durable owner refresh".to_string();
+        state.response_sent_offset = state.full_response.len();
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged_in_root(
+                temp.path(),
+                &state,
+                "test::id0_with_turn_start_offset_identity_refresh_save_succeeds_when_durable_matches",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+
+        let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
+        )
+        .expect("parse persisted inflight");
+        assert_eq!(
+            persisted.full_response, "id-0 durable owner refresh",
+            "legitimate id-0 TUI-direct turns with a turn_start_offset still own the row"
+        );
+        assert_eq!(persisted.response_sent_offset, state.response_sent_offset);
+    }
+
+    #[test]
     fn existing_claude_transcript_adoption_rebase_save_persists_eof_coordinates_and_runtime() {
         let temp = tempfile::TempDir::new().expect("runtime root");
         let provider = ProviderKind::Claude;
