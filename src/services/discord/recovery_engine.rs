@@ -60,6 +60,8 @@ mod state_extractors;
 // point is re-exported below so external call sites stay byte-identical.
 #[path = "recovery_engine/manual_rebind.rs"]
 mod manual_rebind;
+#[path = "recovery_engine/manual_rebind_output_path.rs"]
+mod manual_rebind_output_path;
 #[path = "recovery_engine/routing_orphan.rs"] // #3869 routing-orphan finalize
 mod routing_orphan;
 #[path = "recovery_engine/terminal_text_idempotency.rs"]
@@ -122,7 +124,10 @@ use self::terminal_watcher::{
 // members (the worktree path/branch/info/git helpers, `recovery_dispatch_id`,
 // `recovery_requires_worktree_context` and `inflight_ready_for_input_without_tui_pane`)
 // stay private to the submodule.
-use self::rebind_runtime::{resolve_rebind_runtime_state, spawn_codex_tui_rebind_relay_output};
+use self::rebind_runtime::{
+    claude_rebind_transcript_path, resolve_rebind_runtime_state,
+    spawn_codex_tui_rebind_relay_output,
+};
 use self::state_extractors::{
     inflight_or_legacy_tmux_ready_for_input, interrupted_recovery_message, recovery_spawn_adk_cwd,
     recovery_tmux_session_name, restore_recovered_session_worktree,

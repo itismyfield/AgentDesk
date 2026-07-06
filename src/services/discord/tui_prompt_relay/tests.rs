@@ -2449,11 +2449,11 @@ fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _env = EnvRootGuard::set(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap();
-    let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
     let tmux = "AgentDesk-claude-bridge-no-binding";
     let channel_id = ChannelId::new(940_000_000_000_005);
     let prompt = ObservedTuiPrompt {
@@ -3038,12 +3038,12 @@ fn codex_external_input_relay_output_path_uses_rollout_not_wrapper() {
 #[cfg(unix)]
 #[test]
 fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _env = EnvRootGuard::set(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap();
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
-    let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
     let tmux_session_name = "AgentDesk-codex-marker-refresh";
     let rollout_path = temp.path().join("rollout.jsonl");
     std::fs::write(
@@ -3382,10 +3382,18 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
     );
 }
 
+// SAFETY (await_holding_lock): `tui_prompt_dedupe::TEST_LOCK` serializes this
+// test's runtime-binding registration against tests that reset the shared
+// dedupe maps. Test-only.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _env = EnvRootGuard::set(temp.path());
+    let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap();
+    crate::services::tui_prompt_dedupe::reset_state_for_tests();
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(940_000_000_004_083);
@@ -3446,6 +3454,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         !state.relay_ownership_only,
         "human typed input must remain a full synthetic external turn"
     );
+    crate::services::tui_prompt_dedupe::reset_state_for_tests();
 }
 
 #[tokio::test]

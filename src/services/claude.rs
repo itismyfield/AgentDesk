@@ -3485,6 +3485,9 @@ mod local_tmux_lifecycle_tests {
 
     #[test]
     fn claude_tui_runtime_binding_recovers_resume_transcript_when_cwd_lookup_missed() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let transcript = tempfile::NamedTempFile::new().expect("create transcript");
         let tmux_session_name = format!("AgentDesk-claude-recover-{}", uuid::Uuid::new_v4());
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -3515,6 +3518,9 @@ mod local_tmux_lifecycle_tests {
 
     #[test]
     fn claude_tui_runtime_binding_recovery_rejects_mismatched_session() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let transcript = tempfile::NamedTempFile::new().expect("create transcript");
         let tmux_session_name = format!("AgentDesk-claude-reject-{}", uuid::Uuid::new_v4());
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(

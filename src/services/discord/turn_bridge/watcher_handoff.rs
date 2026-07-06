@@ -424,7 +424,10 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
             let delivered_len = inflight_state.full_response.len();
             inflight_state.response_sent_offset = delivered_len;
             inflight_state.terminal_delivery_committed = true;
-            let _ = save_inflight_state(inflight_state);
+            let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                inflight_state,
+                "turn_bridge::watcher_handoff::proven_delivered",
+            );
             return;
         }
         emit_post_gate_handoff_pending_response_visibility(
@@ -448,7 +451,10 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
         // Persist watcher ownership so a later recovery rehydrates with the
         // correct relay owner (mirrors the watcher-unpause sites).
         inflight_state.set_relay_owner_kind(RelayOwnerKind::Watcher);
-        let _ = save_inflight_state(inflight_state);
+        let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+            inflight_state,
+            "turn_bridge::watcher_handoff::watcher_ownership",
+        );
         // Register the turn as watcher-owned in the single-authority ledger
         // BEFORE unpausing (the modern replacement for the legacy
         // `mailbox_finalize_owed` publish, phase-5b2): (a) makes the delegated

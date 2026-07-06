@@ -440,6 +440,11 @@ pub(super) fn resolved_claude_idle_relay_transcript_path(
             &transcript_path,
             resolved_session_id,
         );
+    } else if transcript_recent_enough_for_binding_refresh(&transcript_path) {
+        crate::services::tui_prompt_dedupe::refresh_tmux_runtime_binding_activity(
+            tmux_session_name,
+            &binding.output_path,
+        );
     }
     Some(transcript_path)
 }
@@ -489,6 +494,59 @@ pub(super) fn resolve_idle_relay_transcript(
     }
 
     Some(transcript_path)
+}
+
+#[cfg(unix)]
+fn transcript_recent_enough_for_binding_refresh(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    age.as_secs()
+        < u64::try_from(crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS)
+            .unwrap_or(0)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_binding_refresh_requires_recent_activity() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let transcript_path = tmp.path().join("claude.jsonl");
+        std::fs::write(&transcript_path, b"old transcript\n").expect("write transcript");
+        filetime::set_file_mtime(
+            &transcript_path,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now()
+                    - std::time::Duration::from_secs(
+                        crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS as u64
+                            + 1,
+                    ),
+            ),
+        )
+        .expect("set stale transcript mtime");
+
+        assert!(
+            !transcript_recent_enough_for_binding_refresh(&transcript_path),
+            "a dead-but-existing Claude transcript must not refresh binding TTL"
+        );
+
+        filetime::set_file_mtime(
+            &transcript_path,
+            filetime::FileTime::from_system_time(std::time::SystemTime::now()),
+        )
+        .expect("set fresh transcript mtime");
+        assert!(transcript_recent_enough_for_binding_refresh(
+            &transcript_path
+        ));
+    }
 }
 
 #[cfg(unix)]

@@ -146,6 +146,84 @@ pub(super) fn recovery_watcher_start_offset_for_state(
     recovery_watcher_start_offset(output_path, state.last_offset, state.turn_start_offset)
 }
 
+pub(super) fn restart_report_watcher_start(
+    tmux_session_name: &str,
+    state: &crate::services::discord::inflight::InflightTurnState,
+) -> Option<(String, u64, u64, bool)> {
+    let output_path = state
+        .output_path
+        .clone()
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| {
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl")
+        });
+    if std::fs::metadata(&output_path).is_err() {
+        return None;
+    }
+    let (initial_offset, current_len, truncated) =
+        recovery_watcher_start_offset_for_state(&output_path, state);
+    Some((output_path, initial_offset, current_len, truncated))
+}
+
+#[cfg(test)]
+mod restart_report_tests {
+    use super::{recovery_watcher_start_offset_for_state, restart_report_watcher_start};
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn restart_report_alive_watcher_uses_rebased_output_path_and_offset() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let transcript_path = temp.path().join("transcript.jsonl");
+        std::fs::write(&transcript_path, vec![b't'; 512_000]).expect("write transcript");
+        let transcript_eof = std::fs::metadata(&transcript_path)
+            .expect("transcript metadata")
+            .len();
+        let tmux_session_name = "AgentDesk-claude-adk-restart-report-rebased-transcript-44153003";
+        let wrapper_path =
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
+        std::fs::create_dir_all(
+            std::path::Path::new(&wrapper_path)
+                .parent()
+                .expect("wrapper parent"),
+        )
+        .expect("create wrapper parent");
+        std::fs::write(&wrapper_path, vec![b'w'; 128]).expect("write stale wrapper");
+
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            44_153_003,
+            Some("adk-cc".to_string()),
+            123,
+            456,
+            789,
+            "continue".to_string(),
+            Some("88fdb7f3-0000-4000-8000-000000000000".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some(transcript_path.display().to_string()),
+            None,
+            transcript_eof,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.turn_start_offset = Some(transcript_eof);
+        state.last_watcher_relayed_offset = None;
+
+        let stale_wrapper_start = recovery_watcher_start_offset_for_state(&wrapper_path, &state);
+        assert_eq!(stale_wrapper_start, (0, 128, true));
+
+        let (output_path, initial_offset, current_len, truncated) =
+            restart_report_watcher_start(tmux_session_name, &state).expect("watcher start");
+
+        assert_eq!(output_path, transcript_path.display().to_string());
+        assert_ne!(output_path, wrapper_path);
+        assert_eq!(initial_offset, transcript_eof);
+        assert_eq!(current_len, transcript_eof);
+        assert!(!truncated);
+
+        let _ = std::fs::remove_file(wrapper_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::recovery_watcher_start_offset;
@@ -191,5 +269,38 @@ mod tests {
         assert_eq!(offset, 0);
         assert_eq!(current_len, 900);
         assert!(truncated);
+    }
+
+    #[test]
+    fn recovery_start_offset_for_adopted_transcript_uses_persisted_eof_after_restart() {
+        let wrapper_last_offset = 128;
+        let transcript_eof = 512_000;
+        let file = temp_file_with_len(transcript_eof);
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            44_153_002,
+            Some("adk-cc".to_string()),
+            123,
+            456,
+            789,
+            "continue".to_string(),
+            Some("88fdb7f3-0000-4000-8000-000000000000".to_string()),
+            Some("AgentDesk-claude-recovery-start-offset-adopted-transcript-44153002".to_string()),
+            Some(file.path().display().to_string()),
+            None,
+            wrapper_last_offset,
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.last_offset = transcript_eof as u64;
+        state.turn_start_offset = Some(transcript_eof as u64);
+        state.last_watcher_relayed_offset = None;
+
+        let (offset, current_len, truncated) =
+            super::recovery_watcher_start_offset_for_state(file.path().to_str().unwrap(), &state);
+
+        assert_eq!(offset, transcript_eof as u64);
+        assert_ne!(offset, wrapper_last_offset);
+        assert_eq!(current_len, transcript_eof as u64);
+        assert!(!truncated);
     }
 }

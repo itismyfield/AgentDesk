@@ -994,7 +994,10 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1824 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1849 lines; +2 from #4091 r6 mandatory env-first lock-order comment at TEST_LOCK; +23 from #4091 r3
+    refresh_runtime_binding_activity so live transcript activity extends the
+    24h binding-mapping TTL even when the relay offset never advances (the
+    exact relay-dead state the anchor protects); shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +60 from #3956: add the
     `touch_prompt_anchor_on_activity` refresh primitive — an ANCHOR-ONLY single-map
@@ -1082,6 +1085,15 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
+  - `src/services/discord/recovery_engine/manual_rebind.rs` (1084 lines; crossed
+    the giant threshold in #4091 r3/r4 when manual rebind gained ClaudeTui
+    transcript adoption — candidate probing, EOF-forced start offsets for
+    adopted transcripts (never reuse wrapper-jsonl coordinates on a different
+    file), and runtime-binding re-registration; +27 from r5 driving the durable
+    guarded CAS save (persisted last_offset/turn_start_offset := EOF +
+    runtime_kind/session_id in the same locked save) so a restart cannot
+    resurrect wrapper coordinates against the adopted transcript. Registered in
+    scripts/giant_file_registry.toml; decompose_issue #4157.)
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
@@ -1740,8 +1752,18 @@
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
   - `src/db/postgres.rs` (1280 lines; #3651: the `FOREGROUND_RESERVE` process-global, the `background_should_yield` backpressure predicate + pure `should_yield_for_counters` helper, the `clamp_foreground_reserve` helper that keeps the background budget >= 1 for small `pool_max` configs, reserve install+clamp in `connect`, and the predicate + clamp unit tests; #3690: preferred_intake_node_labels upsert/sync + COALESCE preserve; #3692: `agent_roster_sync_enabled` leader-ownership gate on the roster sync; #3722 adds the bounded startup advisory lock wrapper plus concurrency coverage for migration/config-audit/reseed startup sections).
-  - `src/db/dispatched_sessions.rs` (1627 lines; dispatched session
-    persistence helpers. #3306: +48 for the narrow `load_session_channel_id_pg`
+  - `src/db/dispatched_sessions.rs` (1734 lines; dispatched session
+    persistence helpers. #4091 r4: +63 keying the watermark to its raw session id
+    with mismatch reset, the sticky raw_provider_transcript_growth_proven flag
+    (non-destructive growth evidence), compare/flag-only observation for the kill
+    path, and watermark+flag clears in the session-id clear APIs (migration 0078);
+    #4091 r3: +38 for claude_session_id_recorded_at (upsert
+    bumps it only when the cached id value changes, so heartbeats stop extending
+    the flip-back window) and the monotonic raw_provider_transcript_len_watermark
+    accessors backing restart-surviving growth evidence (migration 0077);
+    #4091 r2: +6 exposing cache-entry age on provider-session
+    rows so the selector flip-back window can prefer a recently written cached id;
+    #3306: +48 for the narrow `load_session_channel_id_pg`
     durable-truth accessor the idle-relay drift self-heal reads; #3693: +2 to
     include `cwd` in provider resume selector lookup; #3718 makes runtime
     activity heartbeat refresh monotonic via `GREATEST`; -1 from #3795 using
@@ -1773,7 +1795,9 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/auto_queue/cancel_run.rs` (1031) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2937),
-  `src/services/dispatched_sessions.rs` (1546), and
+  `src/services/dispatched_sessions.rs` (1650; #4091 r2 adds the two-sample
+  growth-evidence selector cross-check wiring, claude_tui transcript-mtime
+  runtime-activity anchors, and the flip-back window guard), and
   `src/services/settings.rs` (1114) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
@@ -1861,7 +1885,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   the AUTHORITATIVE transcript turn-state in `claude_tui_followup_stranded_prompt_
   draft_state`, not by the pane.)
 - `src/services/memory/memento.rs` (1893).
-- `src/services/dispatched_sessions.rs` (1546) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1633; +87 from #4091 server-selected session id — freshness cross-check picks the growing raw transcript over a stale cached claude_session_id) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-

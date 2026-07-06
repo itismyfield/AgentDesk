@@ -352,8 +352,9 @@ pub(super) async fn emit_context_compacted_lifecycle_for_inflight(
 }
 
 /// Fetch the stored executable provider session selector from DB for a given session_key.
-/// Prefer the legacy `claude_session_id` field and fall back to `session_id`
-/// only for older rows that never populated the dedicated selector slot.
+/// Prefer the server-resolved `session_id` field: it may distrust a stale
+/// legacy `claude_session_id` when the raw provider selector points at the
+/// growing transcript. Legacy fields remain fallbacks for older endpoints.
 pub(super) async fn fetch_provider_session_id(
     session_key: &str,
     provider: &ProviderKind,
@@ -411,14 +412,14 @@ async fn fetch_provider_session_id_once(
     // #107: Filter empty strings — a stale clear path may have stored ""
     // instead of NULL; treat it as no session ID.
     // Also try session_id field as fallback for provider-agnostic lookup.
-    // #3052: GET /claude-session-id also returns raw_provider_session_id (the
-    // native provider selector). Use it as a third durable fallback so a
-    // tmux-only idle cleanup that left only the raw selector can still
-    // provider-native resume.
+    // #4091: GET /claude-session-id resolves `session_id` after freshness
+    // checking `claude_session_id` against `raw_provider_session_id`. Trust that
+    // selected field first so a frozen transient Claude transcript cannot shadow
+    // the still-growing raw provider session.
     let selector = json
-        .get("claude_session_id")
+        .get("session_id")
         .and_then(|v| v.as_str())
-        .or_else(|| json.get("session_id").and_then(|v| v.as_str()))
+        .or_else(|| json.get("claude_session_id").and_then(|v| v.as_str()))
         .or_else(|| json.get("raw_provider_session_id").and_then(|v| v.as_str()))
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());

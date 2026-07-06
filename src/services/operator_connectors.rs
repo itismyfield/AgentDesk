@@ -297,15 +297,13 @@ mod tests {
         OptionalConnectorState, OptionalConnectorSummary, optional_connector_status_by_id,
         optional_connector_statuses,
     };
-    use std::sync::Mutex;
-
-    static CONNECTOR_ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn with_connector_env<F>(f: F)
     where
         F: FnOnce(),
     {
-        let _guard = CONNECTOR_ENV_LOCK.lock().unwrap();
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let saved_home = std::env::var_os("HOME");
         let saved_userprofile = std::env::var_os("USERPROFILE");
         let saved_obsidian_root = std::env::var_os("OBSIDIAN_VAULT_ROOT");

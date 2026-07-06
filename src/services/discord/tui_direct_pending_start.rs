@@ -893,7 +893,6 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
     let Some(state) = super::inflight::load_inflight_state(&provider, record.channel_id) else {
         return false;
     };
-    let relay_frontier = shared.committed_relay_offset(channel);
     let capture_offset = output_capture_offset(&state);
     if committed_foreign_inflight_is_finalize_clearable(&state, record) {
         let mailbox_active_user_msg_id = super::mailbox_snapshot(shared, channel)
@@ -901,10 +900,12 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
             .active_user_message_id
             .map(|id| id.get());
         let probe = super::destructive_cancel_gate::DestructiveCancelProbeSnapshot::from_state(
+            shared.as_ref(),
             &state,
             mailbox_active_user_msg_id,
-            Some(relay_frontier),
+            channel,
         );
+        let relay_frontier = probe.relay_frontier;
         if !super::destructive_cancel_gate::terminal_envelope_present(&provider, &probe) {
             tracing::warn!(
                 provider = %record.provider,
@@ -914,7 +915,7 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
                 committed_user_msg_id = state.user_msg_id,
                 committed_started_at = %state.started_at,
                 committed_updated_at = %state.updated_at,
-                relay_frontier,
+                relay_frontier = ?relay_frontier,
                 capture_offset = ?capture_offset,
                 "tui_direct_pending_start: skipped committed FOREIGN finalize-clear; terminal envelope evidence missing"
             );
@@ -931,7 +932,7 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
                 committed_user_msg_id = state.user_msg_id,
                 committed_started_at = %state.started_at,
                 committed_updated_at = %state.updated_at,
-                relay_frontier,
+                relay_frontier = ?relay_frontier,
                 capture_offset = ?capture_offset,
                 "tui_direct_pending_start: cleared committed FOREIGN inflight with terminal envelope via finalizer Complete; re-evaluating before claiming (#4035)"
             );
@@ -946,10 +947,12 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
         .active_user_message_id
         .map(|id| id.get());
     let probe = super::destructive_cancel_gate::DestructiveCancelProbeSnapshot::from_state(
+        shared.as_ref(),
         &state,
         mailbox_active_user_msg_id,
-        Some(relay_frontier),
+        channel,
     );
+    let relay_frontier = probe.relay_frontier;
     let gate =
         super::destructive_cancel_gate::evaluate(shared, &provider, channel, channel, &probe).await;
     if !gate.is_allowed() {
@@ -961,7 +964,7 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
             stale_user_msg_id = state.user_msg_id,
             stale_started_at = %state.started_at,
             stale_updated_at = %state.updated_at,
-            relay_frontier,
+            relay_frontier = ?relay_frontier,
             capture_offset = ?capture_offset,
             denied_reason = gate.denied_reason().unwrap_or("unknown"),
             "tui_direct_pending_start: skipped destructive stale FOREIGN demotion; death/identity gate did not pass (#4030)"
@@ -979,7 +982,7 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
             stale_user_msg_id = state.user_msg_id,
             stale_started_at = %state.started_at,
             stale_updated_at = %state.updated_at,
-            relay_frontier,
+            relay_frontier = ?relay_frontier,
             capture_offset = ?capture_offset,
             death_evidence = gate.allowed_reason().unwrap_or("unknown"),
             min_stale_age_secs = STALE_FOREIGN_INFLIGHT_MIN_AGE_SECS,
@@ -2569,9 +2572,10 @@ mod tests {
 
             let stale_probe =
                 crate::services::discord::destructive_cancel_gate::DestructiveCancelProbeSnapshot::from_state(
+                    &shared,
                     &stale_state,
                     Some(4_030_211),
-                    Some(shared.committed_relay_offset(channel)),
+                    channel,
                 );
             assert!(
                 !submit_stale_foreign_inflight_cancel(&shared, &provider, channel, &stale_probe).await,
@@ -3519,10 +3523,10 @@ mod tests {
         // (`record_lease` → `external_input_relay_lease`); hold `TEST_LOCK` so a
         // concurrent dedupe-state test cannot wipe the lease mid-claim and turn
         // the watcher-owned marker into a no-op (cross-lock race, #3540).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3596,10 +3600,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3644,10 +3648,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3707,10 +3711,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3741,10 +3745,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();

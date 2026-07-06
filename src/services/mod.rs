@@ -97,6 +97,7 @@ pub mod review_decision;
 pub mod routines;
 pub mod service_error;
 pub mod session_activity;
+pub(crate) mod session_selector_validity;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during session_backend dead-code cleanup.
 #[allow(dead_code)]
