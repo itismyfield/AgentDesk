@@ -2669,16 +2669,16 @@ fn load_persisted_replace_continuation_rollback(key: (u64, u64)) -> Option<Vec<u
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
-            // Fail open for corrupt/unreadable sidecars: runtime_store::atomic_write
-            // uses a temp file, fsync, and same-dir rename, so torn files cannot be
-            // self-produced. Treating an unparseable file as debt would reintroduce
-            // the r4 permanent send-block without a bounded probe.
+            // Fail open WITHOUT removing the file: a read error (EIO, fd
+            // exhaustion, EACCES) is transient-environment evidence, not
+            // corruption evidence — removing here would permanently destroy
+            // valid debt that a later claim could still read. Only the parse
+            // arm below (unparseable content = a genuinely bad file) removes.
             tracing::warn!(
                 path = %path.display(),
                 error = %error,
-                "failed to read continuation rollback sidecar; removing corrupt sidecar and treating as no debt"
+                "failed to read continuation rollback sidecar; leaving file in place and treating as no debt for this claim"
             );
-            let _ = fs::remove_file(&path);
             return None;
         }
     };
