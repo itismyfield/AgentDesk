@@ -153,8 +153,9 @@ fn contains_status_code_token(message: &str, code: &str) -> bool {
 }
 
 /// Pure string classifier for flattened send errors. Serenity often drops the
-/// HTTP status from Display, so match the durable Discord error text first and
-/// keep known network/timeout/server strings retryable.
+/// HTTP status from Display, so match the durable Discord error text first.
+/// Unknown flattened strings stay retry-safe: they are ambiguous transport
+/// evidence, not proof that Discord rejected the delivery permanently.
 pub(in crate::services::discord) fn classify_watcher_send_failure_message(
     message: &str,
 ) -> WatcherSendFailureClass {
@@ -228,7 +229,7 @@ pub(in crate::services::discord) fn classify_watcher_send_failure_message(
     {
         return WatcherSendFailureClass::Permanent;
     }
-    WatcherSendFailureClass::Permanent
+    WatcherSendFailureClass::Transient
 }
 
 /// Classify a boxed send error: prefer typed serenity HTTP status when the
@@ -494,6 +495,7 @@ mod a0_replace_outcome_policy_tests {
             "503 Service Unavailable",
             "[Serenity] Could not decode json when receiving error response from discord:",
             "You are being rate limited.",
+            "fake replace failure",
             "",
         ] {
             assert_eq!(

@@ -2668,6 +2668,18 @@ fn load_persisted_replace_continuation_rollback(key: (u64, u64)) -> Option<Vec<u
     let content = match fs::read_to_string(&path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            // Non-UTF8 means the sidecar content is corrupt, just like a JSON
+            // parse failure below. Remove it so a bad-content file cannot warn
+            // forever on every future claim attempt.
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to decode continuation rollback sidecar; removing corrupt sidecar and treating as no debt"
+            );
+            let _ = fs::remove_file(&path);
+            return None;
+        }
         Err(error) => {
             // Fail open WITHOUT removing the file: a read error (EIO, fd
             // exhaustion, EACCES) is transient-environment evidence, not
@@ -3155,6 +3167,29 @@ mod replace_long_message_tests {
         assert!(
             !rollback_path.exists(),
             "corrupt rollback sidecar should be removed after fail-open"
+        );
+    }
+
+    #[test]
+    fn continuation_rollback_non_utf8_sidecar_warns_open_and_removes_4154() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = RuntimeRootEnvGuard::new(tempdir.path());
+        let key = super::replace_continuation_rollback_key(ChannelId::new(40), MessageId::new(46));
+        let rollback_path = super::replace_continuation_rollback_path(key).expect("rollback path");
+        std::fs::create_dir_all(rollback_path.parent().expect("rollback parent"))
+            .expect("create rollback parent");
+        std::fs::write(&rollback_path, [0xff, 0xfe, 0xfd]).expect("write non-UTF8 sidecar");
+
+        assert_eq!(
+            super::claim_replace_continuation_rollback(key),
+            super::ReplaceContinuationRollbackClaim::None
+        );
+        assert!(
+            !rollback_path.exists(),
+            "non-UTF8 rollback sidecar should be removed after fail-open"
         );
     }
 
