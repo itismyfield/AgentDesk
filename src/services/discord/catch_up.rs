@@ -289,9 +289,9 @@ fn rearm_catch_up_retry_after_defer(
     threaded_prior: Option<CatchUpRetryState>,
 ) -> Option<u64> {
     // The prior Deferred budget can live in the state consumed for THIS scan
-    // (phase-1 removes the pending entry up front, so it hands the state in via
-    // `threaded_prior`) OR still in the pending map (phase-2 does not consume,
-    // so it passes `None` and the budget is read from the map). Take the
+    // (both phases thread it in via `threaded_prior`: phase-1 from the entry it
+    // just removed, phase-2 from `consumed_retry_states_this_cycle`) AND/OR still
+    // in the pending map (e.g. phase-1 re-armed before phase-2 ran). Take the
     // most-exhausted of the two so neither phase resets the other's budget.
     let map_prior = shared
         .catch_up_retry_pending
