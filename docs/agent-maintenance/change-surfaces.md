@@ -1205,7 +1205,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6160 lines; production LoC; ±0
+  - `src/services/discord/turn_bridge/mod.rs` (6178 lines; production LoC; +18
+    from the #4171/#4167/#4172 inflight single-authority surgery (7 post-release
+    saves + twin converted to `save_inflight_state_if_identity_unchanged` guarded
+    call-sites + one `GuardedSaveOutcome` match), reconciled here per #4183 CI-red
+    recovery; prior ±0
     from #4139 — `recovery_text` module visibility widened to
     pub(in crate::services::discord) so the intake put-back path reaches the
     KV-only restore helper directly (no re-export line, no logic change); -2
@@ -1464,7 +1468,7 @@
     with persisted queue-marker state for notification-only 📬/⏳/✅/⚠/🛑 updates,
     queue cancel cleanup, and requeue coalescing; bugfix-only until a follow-up
     can split persistence/tests from the runtime reconciler).
-  - `src/services/discord/formatting.rs` (2807 lines; -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
+  - `src/services/discord/formatting.rs` (2821 lines; +14 reconciled to the current module-inventory production surface per #4183 CI-red recovery (post-surgery inventory drift); -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
     raw long-send created message ids and fallback replacement anchors for
     recovery anchor persistence while the existing `send_long_message_raw_with_reference`
     surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving
