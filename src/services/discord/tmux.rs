@@ -121,6 +121,8 @@ pub(in crate::services::discord) async fn sniff_background_agent_pending_for_com
 pub(super) struct WatcherLineOutcome {
     pub found_result: bool,
     pub terminal_kind: Option<WatcherTerminalKind>,
+    pub terminal_evidence_offset: Option<u64>,
+    pub pre_turn_bytes_skipped: usize,
     pub soft_terminal_candidate: bool,
     pub is_prompt_too_long: bool,
     pub is_auth_error: bool,

@@ -148,10 +148,7 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1503 lines; +21 from #4115 r4 threading the
-    same-turn rewind-seed origin into the idle-direct-prompt stale-seed discard
-    predicate so a rewind retry keeps its placeholder target while restart-restored
-    stale seeds still discard; -7 from #4048 S3 removing the
+  - `src/services/discord/tmux.rs` (1484 lines; +2 from #4159 r3 carrying the terminal_evidence_offset field on WatcherLineOutcome so pre-turn terminal evidence can be gated by output-stream provenance; -7 from #4048 S3 removing the
     restored-watcher direct queue-kickoff path in favor of the finalizer
     completion-event drain trigger; -12 from #4047 S2-b deleting
     the GateTimeout submit path and adding the shared bounded
@@ -884,6 +881,15 @@
     regression tests, which pushed the production surface over the 1000-line
     giant-file threshold, so this file is now a registered giant. Bugfix /
     queue-safety only; split before adding new pending-start behavior).
+  - `src/services/discord/tui_direct_abort_marker/mod.rs` (1233 production lines;
+    DeferredClaim marker record / cover gate / sweep-hold / tombstone-drain for
+    synthetic TUI-direct turns. #4159 r3 added output-stream provenance gating
+    (terminal_evidence_offset >= turn_start_offset, same-second id-0 discriminator
+    via committed_turn_start_offset, and sweep-hold alignment with the cover gate)
+    which pushed the production surface over the 1000-line giant threshold, so this
+    file is now a registered giant (decompose_issue #4175). Bugfix / cover-gate
+    correctness only; extract the sweep/tombstone/drain sections before adding new
+    behavior).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
@@ -1435,7 +1441,7 @@
     with persisted queue-marker state for notification-only 📬/⏳/✅/⚠/🛑 updates,
     queue cancel cleanup, and requeue coalescing; bugfix-only until a follow-up
     can split persistence/tests from the runtime reconciler).
-  - `src/services/discord/formatting.rs` (2807 lines; +74 from #4115 r6 serializing all rollback-sidecar writes/removes/empty-marker GC under REPLACE_CONTINUATION_ROLLBACKS (record/claim race fix) + corrupt-sidecar WARN/remove/documented-fail-open + clear-success map-entry removal; +42 from #4115 r5 durable-safe rollback clear (clear failure atomically writes an empty `message_ids: []` marker; restart-side claim treats it as no debt) + regression test; +40 from #4115 r4 classifying typed serenity errors at the send seams before flattening (structured class markers carried to the watcher failure arms); -203 net from #4115 r2+r3 — the rollback-aware long-message senders (send_long_message_raw_with_rollback / _with_reference_rollback, added so a mid-chunk send failure cleans up already-posted prefix chunks before the watcher rewind retries) moved verbatim with the pre-existing rollback helpers into the non-giant formatting/long_send_rollback.rs child; -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
+  - `src/services/discord/formatting.rs` (2854 lines; -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
     raw long-send created message ids and fallback replacement anchors for
     recovery anchor persistence while the existing `send_long_message_raw_with_reference`
     surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving

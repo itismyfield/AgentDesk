@@ -155,6 +155,7 @@ pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) injected_prompt_message_id: Option<u64>,
     pub(in crate::services::discord) tmux_session_name: Option<String>,
     pub(in crate::services::discord) started_at: String,
+    pub(in crate::services::discord) turn_start_offset: Option<u64>,
     pub(in crate::services::discord) relay_ownership_only: bool,
     pub(in crate::services::discord) relay_owner_kind: RelayOwnerKind,
 }
@@ -171,6 +172,7 @@ impl SyntheticClaimSnapshot {
             injected_prompt_message_id: row.injected_prompt_message_id,
             tmux_session_name: row.tmux_session_name.clone(),
             started_at: row.started_at.clone(),
+            turn_start_offset: row.turn_start_offset,
             relay_ownership_only: row.relay_ownership_only,
             relay_owner_kind: row.effective_relay_owner_kind(),
         }
@@ -278,6 +280,7 @@ pub(super) fn ensure_synthetic_claim_marker_before_clear(
         key.user_msg_id,
         tmux,
         &snapshot.started_at,
+        snapshot.turn_start_offset,
     );
 }
 

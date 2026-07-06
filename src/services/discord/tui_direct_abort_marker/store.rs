@@ -166,6 +166,20 @@ pub(in crate::services::discord) struct CommitTombstone {
     /// same positive correlation the drain cover uses (codex r1).
     pub committed_user_msg_id: u64,
     pub committed_started_at: String,
+    /// JSONL byte offset at which the committed turn began. Present for new
+    /// inflight-backed commits; absent on legacy tombstones, which makes id-0
+    /// same-timestamp DeferredClaim cover checks fail closed.
+    #[serde(default)]
+    pub committed_turn_start_offset: Option<u64>,
+    /// JSONL byte offset where the terminal evidence line was observed. New
+    /// writers set `committed_terminal_evidence_offset_recorded=true`; if that
+    /// new-format record lacks this offset, DeferredClaim cover checks fail
+    /// closed. Legacy tombstones leave the recorded flag false and keep prior
+    /// behavior.
+    #[serde(default)]
+    pub committed_terminal_evidence_offset: Option<u64>,
+    #[serde(default)]
+    pub committed_terminal_evidence_offset_recorded: bool,
     /// Wall-clock ms of the commit (the chokepoint's clock). Also the GC key.
     pub committed_at_ms: u64,
 }
@@ -183,13 +197,56 @@ pub(in crate::services::discord) fn record_commit_tombstone(
     committed_user_msg_id: u64,
     committed_started_at: &str,
 ) {
-    record_commit_tombstone_at(
+    record_commit_tombstone_with_offset(
+        provider,
+        tmux_session_name,
+        channel_id,
+        committed_user_msg_id,
+        committed_started_at,
+        None,
+    );
+}
+
+pub(in crate::services::discord) fn record_commit_tombstone_with_offset(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+) {
+    record_commit_tombstone_at_with_offsets(
         super::now_ms(),
         provider,
         tmux_session_name,
         channel_id,
         committed_user_msg_id,
         committed_started_at,
+        committed_turn_start_offset,
+        false,
+        None,
+    );
+}
+
+pub(in crate::services::discord) fn record_commit_tombstone_with_offsets(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    committed_terminal_evidence_offset: Option<u64>,
+) {
+    record_commit_tombstone_at_with_offsets(
+        super::now_ms(),
+        provider,
+        tmux_session_name,
+        channel_id,
+        committed_user_msg_id,
+        committed_started_at,
+        committed_turn_start_offset,
+        true,
+        committed_terminal_evidence_offset,
     );
 }
 
@@ -201,6 +258,50 @@ pub(in crate::services::discord) fn record_commit_tombstone_at(
     committed_user_msg_id: u64,
     committed_started_at: &str,
 ) {
+    record_commit_tombstone_at_with_offset(
+        now_ms,
+        provider,
+        tmux_session_name,
+        channel_id,
+        committed_user_msg_id,
+        committed_started_at,
+        None,
+    );
+}
+
+pub(in crate::services::discord) fn record_commit_tombstone_at_with_offset(
+    now_ms: u64,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+) {
+    record_commit_tombstone_at_with_offsets(
+        now_ms,
+        provider,
+        tmux_session_name,
+        channel_id,
+        committed_user_msg_id,
+        committed_started_at,
+        committed_turn_start_offset,
+        false,
+        None,
+    )
+}
+
+pub(in crate::services::discord) fn record_commit_tombstone_at_with_offsets(
+    now_ms: u64,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    committed_terminal_evidence_offset_recorded: bool,
+    committed_terminal_evidence_offset: Option<u64>,
+) {
     let Some(root) = tombstone_root() else {
         return; // tests / unconfigured root — nothing durable to write
     };
@@ -210,6 +311,9 @@ pub(in crate::services::discord) fn record_commit_tombstone_at(
         tmux_session_name: tmux_session_name.to_string(),
         committed_user_msg_id,
         committed_started_at: committed_started_at.to_string(),
+        committed_turn_start_offset,
+        committed_terminal_evidence_offset,
+        committed_terminal_evidence_offset_recorded,
         committed_at_ms: now_ms,
     };
     static STEM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

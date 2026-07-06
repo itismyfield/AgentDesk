@@ -1053,11 +1053,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // Process any complete lines we already have
         let initial_buffer_len = all_data.len();
         observe_qwen_user_prompts_in_buffer(&all_data, &watcher_provider, &tmux_session_name);
-        let initial_outcome = process_watcher_lines(
+        let turn_terminal_start_offset = turn_identity_for_panel
+            .as_ref()
+            .and_then(|identity| identity.turn_start_offset)
+            .unwrap_or(turn_data_start_offset);
+        let initial_outcome = process_watcher_lines_for_turn(
             &mut all_data,
             &mut state,
             &mut full_response,
             &mut tool_state,
+            Some(turn_data_start_offset),
+            Some(turn_terminal_start_offset),
+        );
+        let initial_forward_text = watcher_forward_text_after_pre_turn_skip(
+            &decoded_data.text,
+            initial_buffer_len.saturating_sub(decoded_data.text.len()),
+            initial_outcome.pre_turn_bytes_skipped,
         );
         // #3041 P1-3 (Part a, B1): DEFERRED forward of the outer-read chunk. We now
         // know — from `initial_outcome.found_result` — whether THIS chunk is the
@@ -1085,7 +1096,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // a separate non-terminal frame (no black-hole, no shared-ACK reuse).
             Some(fence) => forward_terminal_chunk_with_trailing_to_supervisor_relay(
                 &tmux_session_name,
-                &decoded_data.text,
+                initial_forward_text,
                 all_data.len(),
                 &producer_registry,
                 &mut cached_relay_producer,
@@ -1093,7 +1104,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             ),
             None => forward_chunk_to_supervisor_relay_for_turn(
                 &tmux_session_name,
-                &decoded_data.text,
+                initial_forward_text,
                 &producer_registry,
                 &mut cached_relay_producer,
                 turn_identity_for_panel.as_ref(),
@@ -1118,6 +1129,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
         let mut found_result = initial_outcome.found_result;
         let mut terminal_kind = initial_outcome.terminal_kind;
+        let mut terminal_evidence_offset = initial_outcome.terminal_evidence_offset;
         let mut soft_terminal_seen_at = if initial_outcome.soft_terminal_candidate {
             Some(tokio::time::Instant::now())
         } else {
@@ -1328,11 +1340,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &watcher_provider,
                             &tmux_session_name,
                         );
-                        let outcome = process_watcher_lines(
+                        let turn_terminal_start_offset = turn_identity_for_panel
+                            .as_ref()
+                            .and_then(|identity| identity.turn_start_offset)
+                            .unwrap_or(chunk_buffer_start_offset);
+                        let outcome = process_watcher_lines_for_turn(
                             &mut all_data,
                             &mut state,
                             &mut full_response,
                             &mut tool_state,
+                            Some(chunk_buffer_start_offset),
+                            Some(turn_terminal_start_offset),
+                        );
+                        let chunk_forward_text = watcher_forward_text_after_pre_turn_skip(
+                            &decoded_chunk.text,
+                            chunk_buffer_len.saturating_sub(decoded_chunk.text.len()),
+                            outcome.pre_turn_bytes_skipped,
                         );
                         // #3041 P1-3 (Part a, B1): deferred forward of THIS streaming
                         // chunk. `outcome.found_result` now tells us whether this is
@@ -1355,7 +1378,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             Some(fence) => {
                                 forward_terminal_chunk_with_trailing_to_supervisor_relay(
                                     &tmux_session_name,
-                                    &decoded_chunk.text,
+                                    chunk_forward_text,
                                     all_data.len(),
                                     &producer_registry,
                                     &mut cached_relay_producer,
@@ -1364,7 +1387,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             }
                             None => forward_chunk_to_supervisor_relay_for_turn(
                                 &tmux_session_name,
-                                &decoded_chunk.text,
+                                chunk_forward_text,
                                 &producer_registry,
                                 &mut cached_relay_producer,
                                 turn_identity_for_panel.as_ref(),
@@ -1397,6 +1420,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         found_result = found_result || outcome.found_result;
                         if outcome.found_result {
                             terminal_kind = outcome.terminal_kind.or(terminal_kind);
+                            terminal_evidence_offset = outcome
+                                .terminal_evidence_offset
+                                .or(terminal_evidence_offset);
                         }
                         if outcome.soft_terminal_candidate && soft_terminal_seen_at.is_none() {
                             soft_terminal_seen_at = Some(tokio::time::Instant::now());
@@ -1404,6 +1430,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .terminal_kind
                                 .or(terminal_kind)
                                 .or(Some(WatcherTerminalKind::SoftStopHookSummary));
+                            terminal_evidence_offset = outcome
+                                .terminal_evidence_offset
+                                .or(terminal_evidence_offset);
                         }
                         is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
                         is_auth_error = is_auth_error || outcome.is_auth_error;
@@ -6608,21 +6637,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 && (tui_direct_anchor_terminal_body_visible
                     || committed_row_requires_marker_tombstone(committed))
             {
-                crate::services::discord::tui_direct_abort_marker::record_commit_tombstone(
+                crate::services::discord::tui_direct_abort_marker::record_commit_tombstone_with_offsets(
                     watcher_provider.as_str(),
                     &tmux_session_name,
                     channel_id.get(),
                     committed.user_msg_id,
                     &committed.started_at,
+                    committed.turn_start_offset,
+                    terminal_evidence_offset,
                 );
                 let _ =
-                    crate::services::discord::tui_direct_abort_marker::drain_on_terminal_commit(
+                    crate::services::discord::tui_direct_abort_marker::drain_on_terminal_commit_with_offsets(
                         &shared,
                         watcher_provider.as_str(),
                         &tmux_session_name,
                         channel_id.get(),
                         committed.user_msg_id,
                         &committed.started_at,
+                        committed.turn_start_offset,
+                        terminal_evidence_offset,
                     )
                     .await;
             }

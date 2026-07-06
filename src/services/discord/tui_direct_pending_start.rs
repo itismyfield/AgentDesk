@@ -1378,6 +1378,7 @@ pub(in crate::services::discord) fn record_claim_marker_if_watcher_owned(
         anchor_message_id,
         tmux_session_name.to_string(),
         (anchor_message_id, row.started_at),
+        row.turn_start_offset,
     ) {
         Ok(marker) => tracing::info!(
             provider = %provider,
