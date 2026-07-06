@@ -5016,12 +5016,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     )),
                     response_sent_offset,
                     &last_edit_text,
-                    // #4158: this arm runs AFTER a proven terminal commit, so the
-                    // live placeholder MIGHT be the sink's PlaceholderEdit target.
-                    // Require positive delivered-elsewhere (`Found`) proof before
-                    // deleting — never fall through to the disposable-chrome default,
-                    // which would delete a sink-delivered body when the durable
-                    // delivered anchor is absent (shadow-write disabled).
+                    // #4158: post-commit arm — the placeholder may be the sink's
+                    // PlaceholderEdit target, so require positive `Found` proof to
+                    // delete (see apply_terminal_committed_delete_proof_gate).
                     true,
                     "watcher_skip_already_committed_cleanup",
                 )
@@ -5722,8 +5719,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     )),
                     response_sent_offset,
                     &last_edit_text,
-                    // No terminal commit happened on this arm, so the placeholder is
-                    // disposable chrome — keep the base decision table (no proof gate).
+                    // No commit on this arm → disposable chrome; keep the base table.
                     false,
                     "watcher_no_response_cleanup",
                 )
