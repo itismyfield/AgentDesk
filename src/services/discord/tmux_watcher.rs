@@ -6625,6 +6625,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // watcher-owned synthetic rows (suppressed task-notification
             // completions) — their `⏳ → ✅` block fires regardless, and skipping
             // here left their own-pin marker to a false TTL `⚠`.
+            let pinned_committed_clear_identity = if !completion_is_stale_for_newer_turn {
+                inflight_state
+                    .as_ref()
+                    .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
+            } else {
+                None
+            };
+
             if !completion_is_stale_for_newer_turn
                 && let Some(committed) = inflight_state.as_ref()
                 && (tui_direct_anchor_terminal_body_visible
@@ -6653,53 +6661,73 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     .await;
             }
             if !completion_is_stale_for_newer_turn {
-                crate::services::discord::inflight::clear_inflight_state(
-                    &provider_kind,
-                    channel_id.get(),
-                );
-                let watcher_turn_id = inflight_state
-                    .as_ref()
-                    .filter(|s| s.user_msg_id != 0)
-                    .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
-                let watcher_session_key_owned =
-                    inflight_state.as_ref().and_then(|s| s.session_key.clone());
-                let watcher_dispatch_id_owned = resolved_did
-                    .clone()
-                    .or_else(|| inflight_state.as_ref().and_then(|s| s.dispatch_id.clone()));
-                crate::services::observability::emit_inflight_lifecycle_event(
-                    provider_kind.as_str(),
-                    channel_id.get(),
-                    watcher_dispatch_id_owned.as_deref(),
-                    watcher_session_key_owned.as_deref(),
-                    watcher_turn_id.as_deref(),
-                    "cleared_by_watcher",
-                    serde_json::json!({
-                        "dispatch_ok": dispatch_ok,
-                        "has_assistant_response": has_assistant_response,
-                        "full_response_len": full_response.len(),
-                    }),
-                );
-                // #3646 OBSERVATION-ONLY (event 3/3 — inflight_clear + invariant
-                // signal): the committed-output, non-stale watcher clear — the exact
-                // #3607 chokepoint. The clear ABOVE has already run; this only
-                // RECORDS the live lifecycle signals and fires a NON-FATAL
-                // ERROR-level invariant signal if a committed terminal was cleared
-                // with neither a visible UI completion nor a persisted obligation
-                // (#3607). Never gates cleanup. `terminal_ui_obligation_persisted` is
-                // `false` on the watcher path. S2-b removed completion-gate
-                // suppression, so a busy pane observation no longer suppresses this
-                // clear. Orchestration + the non-fatal invariant live in
-                // relay_owner_observability (non-hot file).
-                crate::services::discord::relay_owner_observability::emit_inflight_clear_with_invariant(
-                    provider_kind.as_str(),
-                    channel_id.get(),
-                    watcher_dispatch_id_owned.as_deref(),
-                    watcher_session_key_owned.as_deref(),
-                    watcher_turn_id.as_deref(),
-                    terminal_delivery_committed,
-                    terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion(),
-                    false,
-                );
+                if let Some(pinned_clear_identity) = pinned_committed_clear_identity.as_ref() {
+                    let clear_outcome =
+                        crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+                            &provider_kind,
+                            channel_id.get(),
+                            pinned_clear_identity,
+                        );
+                    match clear_outcome {
+                        crate::services::discord::inflight::GuardedClearOutcome::Cleared => {
+                            let watcher_turn_id = inflight_state
+                                .as_ref()
+                                .filter(|s| s.user_msg_id != 0)
+                                .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
+                            let watcher_session_key_owned =
+                                inflight_state.as_ref().and_then(|s| s.session_key.clone());
+                            let watcher_dispatch_id_owned = resolved_did.clone().or_else(|| {
+                                inflight_state.as_ref().and_then(|s| s.dispatch_id.clone())
+                            });
+                            crate::services::observability::emit_inflight_lifecycle_event(
+                                provider_kind.as_str(),
+                                channel_id.get(),
+                                watcher_dispatch_id_owned.as_deref(),
+                                watcher_session_key_owned.as_deref(),
+                                watcher_turn_id.as_deref(),
+                                "cleared_by_watcher",
+                                serde_json::json!({
+                                    "dispatch_ok": dispatch_ok,
+                                    "has_assistant_response": has_assistant_response,
+                                    "full_response_len": full_response.len(),
+                                }),
+                            );
+                            // #3646 OBSERVATION-ONLY (event 3/3 — inflight_clear + invariant
+                            // signal): the committed-output, non-stale watcher clear — the exact
+                            // #3607 chokepoint. The clear ABOVE has already run; this only
+                            // RECORDS the live lifecycle signals and fires a NON-FATAL
+                            // ERROR-level invariant signal if a committed terminal was cleared
+                            // with neither a visible UI completion nor a persisted obligation
+                            // (#3607). Never gates cleanup. `terminal_ui_obligation_persisted` is
+                            // `false` on the watcher path. S2-b removed completion-gate
+                            // suppression, so a busy pane observation no longer suppresses this
+                            // clear. Orchestration + the non-fatal invariant live in
+                            // relay_owner_observability (non-hot file).
+                            crate::services::discord::relay_owner_observability::emit_inflight_clear_with_invariant(
+                                provider_kind.as_str(),
+                                channel_id.get(),
+                                watcher_dispatch_id_owned.as_deref(),
+                                watcher_session_key_owned.as_deref(),
+                                watcher_turn_id.as_deref(),
+                                terminal_delivery_committed,
+                                terminal_output_committed
+                                    && watcher_tui_gate_outcome.should_emit_completion(),
+                                false,
+                            );
+                        }
+                        other => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 👁 watcher committed-output clear for {tmux_session_name}: atomic identity-matched clear was a no-op (outcome={other:?}) at offset {current_offset} — on-disk inflight is no longer the pinned committed turn"
+                            );
+                        }
+                    }
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 👁 watcher committed-output clear for {tmux_session_name}: no pinned committed-turn identity at offset {current_offset}; skipping the on-disk clear"
+                    );
+                }
             }
             // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token
             // release) MUST run on every relay-completed terminal even when

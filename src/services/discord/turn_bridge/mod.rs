@@ -4418,7 +4418,7 @@ pub(super) fn spawn_turn_bridge(
         // inflight row for an already-delivered turn (recovery sees it as
         // delivered and returns without clearing → permanent stale leak). The
         // epilogue's save is therefore made IDENTITY-GUARDED on a Skip
-        // (`save_inflight_state_if_matches_identity`): it only rewrites if the
+        // (`save_inflight_state_if_identity_unchanged`): it only rewrites if the
         // on-disk row STILL matches this turn's identity, so a watcher-clear
         // (file gone) or a newer turn (identity mismatch) no-ops instead of
         // resurrecting. When the holder FAILS (does not clear), the row is still
@@ -4497,7 +4497,10 @@ pub(super) fn spawn_turn_bridge(
             .await;
             if pending_long_running_open_after_state_save.take().is_some() {
                 inflight_state.long_running_placeholder_active = false;
-                let _ = save_inflight_state(&inflight_state);
+                let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                    &inflight_state,
+                    "turn_bridge::cancel_longrun_open_after_state_save@4500",
+                );
             }
             // #1255: cancelled turn → drive any active long-running placeholder
             // into Aborted before the rest of the cleanup machinery runs. The
@@ -4521,7 +4524,10 @@ pub(super) fn spawn_turn_bridge(
                     let _ = pending_long_running_retarget_after_state_save.take();
                     shared_owned.ui.placeholder_controller.detach(&key);
                     inflight_state.long_running_placeholder_active = false;
-                    let _ = save_inflight_state(&inflight_state);
+                    let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                        &inflight_state,
+                        "turn_bridge::cancel_longrun_retarget_detach@4524",
+                    );
                 } else {
                     let outcome = shared_owned
                         .ui.placeholder_controller
@@ -4534,7 +4540,10 @@ pub(super) fn spawn_turn_bridge(
                     use super::placeholder_controller::PlaceholderControllerOutcome::*;
                     if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
                         inflight_state.long_running_placeholder_active = false;
-                        let _ = save_inflight_state(&inflight_state);
+                        let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                            &inflight_state,
+                            "turn_bridge::cancel_longrun_placeholder_abort_committed@4537",
+                        );
                     } else {
                         // EditFailed (or any non-committed outcome): leave the
                         // persisted flag set AND preserve the inflight file for
@@ -4546,7 +4555,10 @@ pub(super) fn spawn_turn_bridge(
                         // the inflight to be preserved so the next sweeper
                         // pass can finish the teardown.
                         let _ = (key, snapshot, close_trigger, ack_consumed);
-                        let _ = save_inflight_state(&inflight_state);
+                        let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                            &inflight_state,
+                            "turn_bridge::cancel_longrun_placeholder_abort_edit_failed@4549",
+                        );
                         preserve_inflight_for_cleanup_retry = true;
                     }
                 }
@@ -5533,13 +5545,20 @@ pub(super) fn spawn_turn_bridge(
                 inflight_state.response_sent_offset = response_sent_offset;
                 inflight_state.terminal_delivery_committed = true;
                 inflight_state.full_response = full_response.clone();
-                if let Err(error) = save_inflight_state(&inflight_state) {
-                    tracing::warn!(
-                        provider = %provider.as_str(),
-                        channel = channel_id.get(),
-                        error = %error,
-                        "turn bridge failed to mirror committed terminal delivery before cleanup"
-                    );
+                match crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                    &inflight_state,
+                    "turn_bridge::terminal_delivery_committed_mirror@5536",
+                ) {
+                    crate::services::discord::inflight::GuardedSaveOutcome::IoError => {
+                        tracing::warn!(
+                            provider = %provider.as_str(),
+                            channel = channel_id.get(),
+                            "turn bridge failed to mirror committed terminal delivery before cleanup"
+                        );
+                    }
+                    crate::services::discord::inflight::GuardedSaveOutcome::Saved
+                    | crate::services::discord::inflight::GuardedSaveOutcome::Missing
+                    | crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch => {}
                 }
                 for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
                     // #5413/#3607: current_msg_id is the terminal answer and is
@@ -6327,7 +6346,10 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if cancelled && cancel_token.restart_mode().is_some() {
-            let _ = save_inflight_state(&inflight_state);
+            let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                &inflight_state,
+                "turn_bridge::restart_mode_preserve@6330",
+            );
             inflight_guard.provider.take();
         } else if preserve_inflight_for_cleanup_retry || bridge_output_owner.is_some() {
             // #3041 P1-2 (codex P1-2 R3): on a delivery-lease `Skip` the live
@@ -6341,22 +6363,15 @@ pub(super) fn spawn_turn_bridge(
             // matches this turn — a holder-cleared row (Missing) or a newer turn
             // (IdentityMismatch) no-ops. When the holder FAILED (did not clear),
             // the row is still present + matching, so the refresh lands and retry
-            // survives. Every other preserve site (bridge-owned cleanup retry) and
-            // the delegated-owner path keep the blind save: there is no competing
-            // holder, so the bridge's save is authoritative.
+            // survives. The delegated-owner path uses the same guard so a watcher
+            // clear cannot race with a bridge re-save and resurrect a delivered row.
             let identity_guarded_skip_save =
                 bridge_epilogue_skip_save_is_identity_guarded(bridge_skip_holder_owns_inflight);
             if identity_guarded_skip_save {
-                let expected_identity =
-                    crate::services::discord::inflight::InflightTurnIdentity::from_state(
-                        &inflight_state,
-                    );
-                let guarded_outcome =
-                    crate::services::discord::inflight::save_inflight_state_if_matches_identity(
-                        &inflight_state,
-                        &expected_identity,
-                        inflight_state.turn_start_offset,
-                    );
+                let guarded_outcome = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                    &inflight_state,
+                    "turn_bridge::skip_holder_preserve@6355",
+                );
                 crate::services::observability::emit_inflight_lifecycle_event(
                     provider.as_str(),
                     channel_id.get(),
@@ -6371,7 +6386,10 @@ pub(super) fn spawn_turn_bridge(
                     }),
                 );
             } else {
-                let _ = save_inflight_state(&inflight_state);
+                let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                    &inflight_state,
+                    "turn_bridge::delegated_owner_preserve@6374",
+                );
             }
             inflight_guard.provider.take();
             if let Some(owner) = bridge_output_owner {

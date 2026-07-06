@@ -547,12 +547,11 @@ pub(super) fn bridge_epilogue_clears_inflight(
 ///
 /// This predicate gates the epilogue's `~9168` preserve-save: when the preserve
 /// is due to a Skip (`bridge_skip_holder_owns_inflight`), the save MUST be
-/// identity-guarded (`save_inflight_state_if_matches_identity`) so a
-/// holder-cleared / newer-turn row no-ops instead of resurrecting. Every other
-/// preserve site (bridge-owned cleanup retry: EditFailed, PG-cancel-fail,
-/// replace-not-committed, send/enqueue failure, TUI quiescence timeout) and the
-/// delegated-owner path have NO competing holder, so the blind save stays
-/// authoritative (this returns `false` → blind save). Pure so the
+/// identity-guarded (`save_inflight_state_if_identity_unchanged`) so a
+/// holder-cleared / newer-turn row no-ops instead of resurrecting. Bridge-owned
+/// cleanup-retry preserve sites bypass this predicate; delegated-owner preserve
+/// is guarded separately in the epilogue because it can race the watcher clear.
+/// Pure so the
 /// "a Skip never resurrects a holder-cleared inflight" contract is unit-testable
 /// without driving the whole turn loop.
 pub(super) fn bridge_epilogue_skip_save_is_identity_guarded(
