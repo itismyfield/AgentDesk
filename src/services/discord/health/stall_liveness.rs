@@ -97,6 +97,28 @@ struct OffsetObservationResult {
 static OFFSET_OBSERVATIONS: LazyLock<dashmap::DashMap<StallLivenessKey, OffsetObservation>> =
     LazyLock::new(dashmap::DashMap::new);
 
+/// #4178: per-channel tmux capture-offset liveness tracked across stall-watchdog
+/// ticks. A relay can be stalled (relay offset frozen) while the underlying tmux
+/// turn is still alive and producing bytes (capture offset advancing). This map
+/// lets the watchdog distinguish "relay stalled but turn alive" (do NOT
+/// force-clean) from a genuinely dead turn (capture also frozen).
+#[derive(Clone, Debug)]
+struct CaptureOffsetWatchdogState {
+    last_seen_capture_offset: Option<u64>,
+    /// #4178: set once this channel's capture offset has been observed to
+    /// ADVANCE at least once (proven-alive baseline). Only a proven-alive turn
+    /// earns the short grace debounce before a force-clean; a turn we have never
+    /// seen advance (dead-on-arrival, or no capture data) keeps the pre-#4178
+    /// force-clean timing so genuine hangs are still cleaned promptly.
+    observed_advancing_before: bool,
+    consecutive_non_advancing_ticks: u8,
+    last_updated_unix_secs: i64,
+}
+
+static CAPTURE_OFFSET_WATCHDOG_STATE: LazyLock<
+    dashmap::DashMap<StallLivenessKey, CaptureOffsetWatchdogState>,
+> = LazyLock::new(dashmap::DashMap::new);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum StallWatchdogLivenessAction {
     ProceedNoEvidence,
@@ -291,6 +313,70 @@ pub(super) fn evaluate_stall_watchdog_liveness(
     }
 }
 
+/// #4178: returns `true` while the tmux capture offset for this channel shows
+/// the underlying turn is still alive, so the stall-watchdog must NOT force-clean
+/// inflight. A turn is protected only once its capture offset has been observed
+/// to ADVANCE at least once (proven-alive), and then only for a short grace of
+/// up to TWO consecutive non-advancing ticks after it last advanced — so a live
+/// turn whose relay lane wedged (capture still growing) is never wrongly cleaned
+/// (#4178 incident 2026-07-06), while a turn we have never seen advance (dead on
+/// arrival, or no capture data) keeps the pre-#4178 prompt force-clean timing.
+pub(super) fn stall_watchdog_capture_offset_advancing(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &WatcherStateSnapshot,
+    now_unix_secs: i64,
+) -> bool {
+    let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
+    capture_offset_advancing(&key, snapshot.last_capture_offset, now_unix_secs)
+}
+
+fn capture_offset_advancing(
+    key: &StallLivenessKey,
+    current_capture_offset: Option<u64>,
+    now_unix_secs: i64,
+) -> bool {
+    let previous = CAPTURE_OFFSET_WATCHDOG_STATE
+        .get(key)
+        .map(|entry| entry.clone());
+    let previous_capture_offset = previous
+        .as_ref()
+        .and_then(|state| state.last_seen_capture_offset);
+    let observed_advancing = matches!(
+        (previous_capture_offset, current_capture_offset),
+        (Some(previous), Some(current)) if current > previous
+    );
+    let observed_advancing_before = observed_advancing
+        || previous
+            .as_ref()
+            .map(|state| state.observed_advancing_before)
+            .unwrap_or(false);
+    let consecutive_non_advancing_ticks = if observed_advancing {
+        0
+    } else {
+        previous
+            .as_ref()
+            .map(|state| state.consecutive_non_advancing_ticks)
+            .unwrap_or(0)
+            .saturating_add(1)
+    };
+    CAPTURE_OFFSET_WATCHDOG_STATE.insert(
+        key.clone(),
+        CaptureOffsetWatchdogState {
+            last_seen_capture_offset: current_capture_offset,
+            observed_advancing_before,
+            consecutive_non_advancing_ticks,
+            last_updated_unix_secs: now_unix_secs,
+        },
+    );
+    // Protect only a proven-alive turn, and only within the grace window after
+    // its capture last advanced: the advancing tick plus up to TWO consecutive
+    // non-advancing ticks (ticks 1 and 2), losing protection on the third
+    // consecutive non-advancing tick. Never-advanced turns fall through to the
+    // watchdog's other force-clean signals (pre-#4178 behavior).
+    observed_advancing || (observed_advancing_before && consecutive_non_advancing_ticks < 3)
+}
+
 pub(super) fn clear_stall_watchdog_liveness_state(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -298,6 +384,7 @@ pub(super) fn clear_stall_watchdog_liveness_state(
 ) {
     let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
     OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
+    CAPTURE_OFFSET_WATCHDOG_STATE.retain(|key, _| !key.matches_session(&probe));
 }
 
 pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
@@ -332,6 +419,8 @@ pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
     });
+    CAPTURE_OFFSET_WATCHDOG_STATE
+        .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
 }
 
 fn stall_watchdog_liveness_state_is_healthy(snapshot: &WatcherStateSnapshot) -> bool {
@@ -969,6 +1058,42 @@ mod tests {
 
     fn liveness_state_present(key: &StallLivenessKey) -> bool {
         OFFSET_OBSERVATIONS.contains_key(key)
+    }
+
+    /// #4178: the capture-offset liveness gate must (1) NOT protect a turn we
+    /// have never seen advance (dead-on-arrival keeps pre-#4178 prompt clean),
+    /// (2) protect the instant the capture offset grows (proven alive), and
+    /// (3) after a proven-alive turn stops, grant only a short grace of up to
+    /// TWO consecutive non-advancing ticks before allowing force-clean again.
+    #[test]
+    fn capture_offset_advancing_protects_only_proven_alive_turns() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4178);
+        let tmux_session = "AgentDesk-codex-4178-capture-debounce";
+        let key = liveness_key(&provider, channel, tmux_session);
+        CAPTURE_OFFSET_WATCHDOG_STATE.remove(&key);
+        let now = chrono::Utc::now().timestamp();
+
+        // First observation, never seen advance ⇒ not proven-alive ⇒ do NOT
+        // block force-clean (preserves the pre-#4178 dead-turn cleanup timing).
+        assert!(!capture_offset_advancing(&key, Some(100), now));
+        // Still frozen at the same offset ⇒ still never proven alive ⇒ no block.
+        assert!(!capture_offset_advancing(&key, Some(100), now + 30));
+        // Capture grew ⇒ proven alive ⇒ protect, and reset the grace counter.
+        assert!(capture_offset_advancing(&key, Some(200), now + 60));
+        // Frozen for the first tick after proving alive ⇒ within grace ⇒ protect.
+        assert!(capture_offset_advancing(&key, Some(200), now + 90));
+        // Frozen for a second consecutive tick ⇒ still within the two-tick grace.
+        assert!(capture_offset_advancing(&key, Some(200), now + 120));
+        // Frozen for a third consecutive tick ⇒ grace exhausted ⇒ allow clean.
+        assert!(!capture_offset_advancing(&key, Some(200), now + 150));
+        // A single fresh advance re-arms the full grace window.
+        assert!(capture_offset_advancing(&key, Some(201), now + 180));
+        assert!(capture_offset_advancing(&key, Some(201), now + 210));
+        assert!(capture_offset_advancing(&key, Some(201), now + 240));
+        assert!(!capture_offset_advancing(&key, Some(201), now + 270));
+
+        CAPTURE_OFFSET_WATCHDOG_STATE.remove(&key);
     }
 
     #[test]

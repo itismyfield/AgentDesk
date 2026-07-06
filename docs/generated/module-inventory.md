@@ -460,16 +460,16 @@
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 369 | 369 | 0 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 111 | 111 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
-| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5489 | 2717 | 2772 | giant-file |
+| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5556 | 2724 | 2832 | giant-file |
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
-| `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 289 | 289 | 0 |  |
+| `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
 | `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 533 | 290 | 243 |  |
-| `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 267 | 100 | 167 |  |
+| `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 268 | 101 | 167 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 226 | 226 | 0 |  |
 | `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1071 | 893 | 178 |  |
-| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 1872 | 768 | 1104 |  |
+| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 1997 | 857 | 1140 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1382 | 627 | 755 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |
@@ -510,7 +510,7 @@
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 248 | 248 | 0 |  |
 | `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1271 | 693 | 578 |  |
 | `services::discord::outbound::delivery_frontier_probe` | `src/services/discord/outbound/delivery_frontier_probe.rs` | 75 | 75 | 0 |  |
-| `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2887 | 1276 | 1611 | giant-file |
+| `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2899 | 1276 | 1623 | giant-file |
 | `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1176 | 580 | 596 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 426 | 426 | 0 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 124 | 124 | 0 |  |
@@ -571,7 +571,7 @@
 | `services::discord::recovery_engine::state_extractors` | `src/services/discord/recovery_engine/state_extractors.rs` | 220 | 220 | 0 |  |
 | `services::discord::recovery_engine::status_panel` | `src/services/discord/recovery_engine/status_panel.rs` | 71 | 55 | 16 |  |
 | `services::discord::recovery_engine::status_panel_completion_producer` | `src/services/discord/recovery_engine/status_panel_completion_producer.rs` | 64 | 64 | 0 |  |
-| `services::discord::recovery_engine::terminal_text_idempotency` | `src/services/discord/recovery_engine/terminal_text_idempotency.rs` | 880 | 442 | 438 |  |
+| `services::discord::recovery_engine::terminal_text_idempotency` | `src/services/discord/recovery_engine/terminal_text_idempotency.rs` | 889 | 442 | 447 |  |
 | `services::discord::recovery_engine::terminal_watcher` | `src/services/discord/recovery_engine/terminal_watcher.rs` | 306 | 168 | 138 |  |
 | `services::discord::recovery_paths` | `src/services/discord/recovery_paths/mod.rs` | 36 | 36 | 0 |  |
 | `services::discord::recovery_paths::controller_cutover` | `src/services/discord/recovery_paths/controller_cutover.rs` | 649 | 278 | 371 |  |

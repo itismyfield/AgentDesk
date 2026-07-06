@@ -76,6 +76,7 @@ pub(crate) fn force_clean_should_preserve_resume_selector(
 pub(crate) fn stall_watchdog_should_force_clean(
     attached: bool,
     desynced: bool,
+    capture_advancing: bool,
     inflight_terminal_delivery_committed: bool,
     inflight_started_at: Option<&str>,
     now_unix_secs: i64,
@@ -83,6 +84,12 @@ pub(crate) fn stall_watchdog_should_force_clean(
     boot_unix_secs: i64,
 ) -> bool {
     if !attached || !desynced {
+        return false;
+    }
+    // #4178: a relay can be stalled while the underlying tmux turn is still
+    // alive. Advancing capture offset is the discriminator; never force-clean
+    // inflight while capture bytes are still moving across watchdog ticks.
+    if capture_advancing {
         return false;
     }
     // #3126: a normally-completed turn that is now idle (wakeup/loop
