@@ -164,23 +164,66 @@ pub(in crate::services::discord) fn process_watcher_lines(
     full_response: &mut String,
     tool_state: &mut WatcherToolState,
 ) -> WatcherLineOutcome {
+    process_watcher_lines_for_turn(buffer, state, full_response, tool_state, None, None)
+}
+
+pub(in crate::services::discord) fn process_watcher_lines_for_turn(
+    buffer: &mut String,
+    state: &mut StreamLineState,
+    full_response: &mut String,
+    tool_state: &mut WatcherToolState,
+    buffer_start_offset: Option<u64>,
+    turn_start_offset: Option<u64>,
+) -> WatcherLineOutcome {
     let mut outcome = WatcherLineOutcome::default();
+    let mut next_line_offset = buffer_start_offset;
 
     while let Some(pos) = buffer.find('\n') {
+        let line_start_offset = next_line_offset;
+        let line_len = pos + 1;
+        if let Some(offset) = next_line_offset.as_mut() {
+            *offset = offset.saturating_add(line_len as u64);
+        }
         let line: String = buffer.drain(..=pos).collect();
         let trimmed = line.trim();
+        let pre_turn_line = should_skip_pre_turn_line(turn_start_offset, line_start_offset);
         if trimmed.is_empty() {
+            if pre_turn_line {
+                outcome.pre_turn_bytes_skipped =
+                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+            }
             continue;
         }
 
         // Parse the JSON line
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
             let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if let Some(skip) = pre_turn_line_skip(
+                turn_start_offset,
+                line_start_offset,
+                terminal_kind_for_json_evidence(&val),
+            ) {
+                tracing::warn!(
+                    terminal_kind = skip.terminal_kind.as_str(),
+                    evidence_offset = skip.evidence_offset,
+                    turn_start_offset = skip.turn_start_offset,
+                    "tmux watcher skipped terminal evidence before this turn's start offset"
+                );
+                outcome.pre_turn_bytes_skipped =
+                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
+            if pre_turn_line {
+                outcome.pre_turn_bytes_skipped =
+                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
             if event_type == "user" && watcher_user_event_is_prompt_boundary(&val) {
                 if outcome.soft_terminal_candidate || !full_response.trim().is_empty() {
                     if !outcome.soft_terminal_candidate {
                         outcome.soft_terminal_candidate = true;
                         outcome.terminal_kind = Some(WatcherTerminalKind::SoftUserBoundary);
+                        outcome.terminal_evidence_offset = line_start_offset;
                     }
                     buffer.insert_str(0, &line);
                     break;
@@ -437,6 +480,7 @@ pub(in crate::services::discord) fn process_watcher_lines(
                     strip_leading_tui_response_chrome_in_place(full_response, &mut outcome);
                     outcome.found_result = true;
                     outcome.terminal_kind = Some(WatcherTerminalKind::HardResult);
+                    outcome.terminal_evidence_offset = line_start_offset;
                     // #1216: stop after the first turn-terminating event so a
                     // buffer containing multiple completed turns (post-deploy
                     // backlog, paused watcher resume) does not merge their
@@ -496,14 +540,36 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             strip_leading_tui_response_chrome_in_place(full_response, &mut outcome);
                             outcome.soft_terminal_candidate = true;
                             outcome.terminal_kind = Some(WatcherTerminalKind::SoftStopHookSummary);
+                            outcome.terminal_evidence_offset = line_start_offset;
                         }
                     }
                 }
                 _ => {}
             }
         } else if is_auth_error_message(trimmed) {
+            if let Some(skip) = pre_turn_line_skip(
+                turn_start_offset,
+                line_start_offset,
+                Some(WatcherTerminalKind::AuthError),
+            ) {
+                tracing::warn!(
+                    terminal_kind = skip.terminal_kind.as_str(),
+                    evidence_offset = skip.evidence_offset,
+                    turn_start_offset = skip.turn_start_offset,
+                    "tmux watcher skipped terminal evidence before this turn's start offset"
+                );
+                outcome.pre_turn_bytes_skipped =
+                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
+            if pre_turn_line {
+                outcome.pre_turn_bytes_skipped =
+                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
             outcome.found_result = true;
             outcome.terminal_kind = Some(WatcherTerminalKind::AuthError);
+            outcome.terminal_evidence_offset = line_start_offset;
             outcome.is_auth_error = true;
             outcome
                 .auth_error_message
@@ -523,8 +589,29 @@ pub(in crate::services::discord) fn process_watcher_lines(
             // #1216: see `result` arm — stop after a turn-terminating event.
             break;
         } else if let Some(message) = detect_provider_overload_message(trimmed) {
+            if let Some(skip) = pre_turn_line_skip(
+                turn_start_offset,
+                line_start_offset,
+                Some(WatcherTerminalKind::ProviderOverload),
+            ) {
+                tracing::warn!(
+                    terminal_kind = skip.terminal_kind.as_str(),
+                    evidence_offset = skip.evidence_offset,
+                    turn_start_offset = skip.turn_start_offset,
+                    "tmux watcher skipped terminal evidence before this turn's start offset"
+                );
+                outcome.pre_turn_bytes_skipped =
+                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
+            if pre_turn_line {
+                outcome.pre_turn_bytes_skipped =
+                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
             outcome.found_result = true;
             outcome.terminal_kind = Some(WatcherTerminalKind::ProviderOverload);
+            outcome.terminal_evidence_offset = line_start_offset;
             outcome.is_provider_overloaded = true;
             outcome.provider_overload_message.get_or_insert(message);
             push_transcript_event(
@@ -541,10 +628,57 @@ pub(in crate::services::discord) fn process_watcher_lines(
             state.final_result = Some(String::new());
             // #1216: see `result` arm — stop after a turn-terminating event.
             break;
+        } else if pre_turn_line {
+            outcome.pre_turn_bytes_skipped =
+                outcome.pre_turn_bytes_skipped.saturating_add(line_len);
         }
     }
 
     outcome
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreTurnTerminalSkip {
+    evidence_offset: u64,
+    turn_start_offset: u64,
+    terminal_kind: WatcherTerminalKind,
+}
+
+fn pre_turn_line_skip(
+    turn_start_offset: Option<u64>,
+    line_start_offset: Option<u64>,
+    terminal_kind: Option<WatcherTerminalKind>,
+) -> Option<PreTurnTerminalSkip> {
+    let terminal_kind = terminal_kind?;
+    let evidence_offset = line_start_offset?;
+    let turn_start_offset = turn_start_offset?;
+    (evidence_offset < turn_start_offset).then_some(PreTurnTerminalSkip {
+        evidence_offset,
+        turn_start_offset,
+        terminal_kind,
+    })
+}
+
+fn should_skip_pre_turn_line(
+    turn_start_offset: Option<u64>,
+    line_start_offset: Option<u64>,
+) -> bool {
+    matches!(
+        (line_start_offset, turn_start_offset),
+        (Some(line), Some(turn_start)) if line < turn_start
+    )
+}
+
+fn terminal_kind_for_json_evidence(value: &serde_json::Value) -> Option<WatcherTerminalKind> {
+    match value.get("type").and_then(|t| t.as_str()) {
+        Some("result") => Some(WatcherTerminalKind::HardResult),
+        Some("system")
+            if value.get("subtype").and_then(|s| s.as_str()) == Some("stop_hook_summary") =>
+        {
+            Some(WatcherTerminalKind::SoftStopHookSummary)
+        }
+        _ => None,
+    }
 }
 
 fn watcher_user_event_is_prompt_boundary(value: &serde_json::Value) -> bool {
@@ -650,6 +784,68 @@ mod tests {
         assert_eq!(full_response, "tui reply late tail");
         assert_eq!(state.last_session_id.as_deref(), Some("sess-tui"));
         assert!(buffer.trim().is_empty());
+    }
+
+    #[test]
+    fn process_watcher_lines_for_turn_skips_pre_start_terminal_evidence() {
+        let prior_assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old reply\"}]}}\n";
+        let prior_stop =
+            "{\"type\":\"system\",\"subtype\":\"stop_hook_summary\",\"sessionId\":\"old\"}\n";
+        let turn_start_offset = (prior_assistant.len() + prior_stop.len()) as u64;
+        let mut buffer = format!("{prior_assistant}{prior_stop}");
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome = process_watcher_lines_for_turn(
+            &mut buffer,
+            &mut state,
+            &mut full_response,
+            &mut tool_state,
+            Some(0),
+            Some(turn_start_offset),
+        );
+
+        assert!(!outcome.found_result);
+        assert!(!outcome.soft_terminal_candidate);
+        assert_eq!(outcome.terminal_evidence_offset, None);
+        assert_eq!(outcome.pre_turn_bytes_skipped, turn_start_offset as usize);
+        assert!(full_response.is_empty());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn process_watcher_lines_for_turn_keeps_valid_post_start_terminal_evidence() {
+        let prior_assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old reply\"}]}}\n";
+        let prior_stop =
+            "{\"type\":\"system\",\"subtype\":\"stop_hook_summary\",\"sessionId\":\"old\"}\n";
+        let current_assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"new reply\"}]}}\n";
+        let current_result = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"new reply\",\"session_id\":\"new\"}\n";
+        let turn_start_offset = (prior_assistant.len() + prior_stop.len()) as u64;
+        let mut buffer =
+            format!("{prior_assistant}{prior_stop}{current_assistant}{current_result}");
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome = process_watcher_lines_for_turn(
+            &mut buffer,
+            &mut state,
+            &mut full_response,
+            &mut tool_state,
+            Some(0),
+            Some(turn_start_offset),
+        );
+
+        assert!(outcome.found_result);
+        assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::HardResult));
+        assert_eq!(
+            outcome.terminal_evidence_offset,
+            Some(turn_start_offset + current_assistant.len() as u64)
+        );
+        assert_eq!(outcome.pre_turn_bytes_skipped, turn_start_offset as usize);
+        assert_eq!(full_response, "new reply");
+        assert!(buffer.is_empty());
     }
 
     #[test]

@@ -148,7 +148,7 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1482 lines; -7 from #4048 S3 removing the
+  - `src/services/discord/tmux.rs` (1484 lines; +2 from #4159 r3 carrying the terminal_evidence_offset field on WatcherLineOutcome so pre-turn terminal evidence can be gated by output-stream provenance; -7 from #4048 S3 removing the
     restored-watcher direct queue-kickoff path in favor of the finalizer
     completion-event drain trigger; -12 from #4047 S2-b deleting
     the GateTimeout submit path and adding the shared bounded
@@ -881,6 +881,15 @@
     regression tests, which pushed the production surface over the 1000-line
     giant-file threshold, so this file is now a registered giant. Bugfix /
     queue-safety only; split before adding new pending-start behavior).
+  - `src/services/discord/tui_direct_abort_marker/mod.rs` (1233 production lines;
+    DeferredClaim marker record / cover gate / sweep-hold / tombstone-drain for
+    synthetic TUI-direct turns. #4159 r3 added output-stream provenance gating
+    (terminal_evidence_offset >= turn_start_offset, same-second id-0 discriminator
+    via committed_turn_start_offset, and sweep-hold alignment with the cover gate)
+    which pushed the production surface over the 1000-line giant threshold, so this
+    file is now a registered giant (decompose_issue #4175). Bugfix / cover-gate
+    correctness only; extract the sweep/tombstone/drain sections before adding new
+    behavior).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO

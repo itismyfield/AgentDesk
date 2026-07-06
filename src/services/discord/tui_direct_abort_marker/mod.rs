@@ -141,6 +141,12 @@ pub(super) struct AbortedAnchorMarker {
     pub foreign_user_msg_id: Option<u64>,
     #[serde(default)]
     pub foreign_started_at: Option<String>,
+    /// JSONL byte offset at which the recorded turn began. This disambiguates
+    /// `user_msg_id == 0` turns whose `started_at` collides at one-second
+    /// resolution. Legacy markers lack it and therefore fail closed on id-0
+    /// same-timestamp DeferredClaim cover checks.
+    #[serde(default)]
+    pub foreign_turn_start_offset: Option<u64>,
     /// See [`MarkerOrigin`] (#3303). Legacy JSON defaults to `Abort`.
     #[serde(default)]
     pub origin: MarkerOrigin,
@@ -184,6 +190,7 @@ impl AbortedAnchorMarker {
             covered_at_ms: None,
             foreign_user_msg_id,
             foreign_started_at,
+            foreign_turn_start_offset: None,
             origin: MarkerOrigin::Abort,
         }
     }
@@ -213,11 +220,14 @@ pub(in crate::services::discord) use deferred_claim::{
 use store::reload;
 #[cfg(test)]
 pub(in crate::services::discord) use store::{
-    COMMIT_TOMBSTONE_RETENTION_MS, record_commit_tombstone_at, set_test_root_override,
+    COMMIT_TOMBSTONE_RETENTION_MS, record_commit_tombstone_at,
+    record_commit_tombstone_at_with_offset, record_commit_tombstone_at_with_offsets,
+    set_test_root_override,
 };
 pub(in crate::services::discord) use store::{
     CommitTombstone, delete, gc_expired_commit_tombstones, load_all, load_commit_tombstones,
-    load_for_channel, record, record_commit_tombstone, try_claim_marker,
+    load_for_channel, record, record_commit_tombstone, record_commit_tombstone_with_offset,
+    record_commit_tombstone_with_offsets, try_claim_marker,
 };
 #[cfg(test)]
 use store::{root, tombstone_root};
@@ -229,7 +239,33 @@ use store::{root, tombstone_root};
 /// plus a turn start at-or-after the recorded own-start boundary (#4159).
 fn commit_tombstone_matches_marker(marker: &AbortedAnchorMarker, t: &CommitTombstone) -> bool {
     t.tmux_session_name == marker.tmux_session_name
-        && commit_identity_covers_marker(marker, t.committed_user_msg_id, &t.committed_started_at)
+        && commit_identity_covers_marker(
+            marker,
+            t.committed_user_msg_id,
+            &t.committed_started_at,
+            t.committed_turn_start_offset,
+            t.terminal_evidence_offset_proof(),
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalEvidenceOffsetProof {
+    /// Legacy direct drain / tombstone evidence predates the field. Keep the
+    /// pre-r3 cover behavior for those records only.
+    Legacy,
+    /// New-format evidence explicitly recorded the field. `None` is therefore a
+    /// fail-closed malformed-new-record value, not legacy.
+    Recorded(Option<u64>),
+}
+
+impl CommitTombstone {
+    fn terminal_evidence_offset_proof(&self) -> TerminalEvidenceOffsetProof {
+        if self.committed_terminal_evidence_offset_recorded {
+            TerminalEvidenceOffsetProof::Recorded(self.committed_terminal_evidence_offset)
+        } else {
+            TerminalEvidenceOffsetProof::Legacy
+        }
+    }
 }
 
 fn local_started_at(value: &str) -> Option<chrono::NaiveDateTime> {
@@ -242,29 +278,45 @@ fn rfc3339_started_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffse
 
 /// Fail-closed start-boundary proof for DeferredClaim commit evidence (#4159).
 /// Inflight `started_at` is persisted as a lexicographically sortable local
-/// timestamp today, while some frame tests use RFC3339. Compare only when both
-/// sides parse under the same representation; mixed/unknown formats are not
-/// proof that the commit belongs to a turn started at-or-after the boundary.
-fn committed_started_at_on_or_after_boundary(committed_started_at: &str, boundary: &str) -> bool {
+/// timestamp today, while some frame tests use RFC3339. Unknown formats are
+/// not proof that the commit belongs to a turn started at-or-after the boundary.
+fn committed_started_at_cmp(
+    committed_started_at: &str,
+    boundary: &str,
+) -> Option<std::cmp::Ordering> {
     if let (Some(committed), Some(boundary)) = (
         local_started_at(committed_started_at),
         local_started_at(boundary),
     ) {
-        return committed >= boundary;
+        return Some(committed.cmp(&boundary));
     }
     if let (Some(committed), Some(boundary)) = (
         rfc3339_started_at(committed_started_at),
         rfc3339_started_at(boundary),
     ) {
-        return committed >= boundary;
+        return Some(committed.cmp(&boundary));
     }
-    false
+    if let (Some(committed), Some(boundary)) = (
+        rfc3339_started_at(committed_started_at),
+        local_started_at(boundary),
+    ) {
+        return Some(committed.naive_local().cmp(&boundary));
+    }
+    if let (Some(committed), Some(boundary)) = (
+        local_started_at(committed_started_at),
+        rfc3339_started_at(boundary),
+    ) {
+        return Some(committed.cmp(&boundary.naive_local()));
+    }
+    None
 }
 
 fn commit_identity_covers_marker(
     marker: &AbortedAnchorMarker,
     committed_user_msg_id: u64,
     committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    terminal_evidence_offset: TerminalEvidenceOffsetProof,
 ) -> bool {
     match marker.origin {
         MarkerOrigin::Abort => {
@@ -272,12 +324,174 @@ fn commit_identity_covers_marker(
         }
         MarkerOrigin::DeferredClaim => {
             let Some(boundary) = marker.foreign_started_at.as_deref() else {
+                warn_deferred_claim_commit_rejected(
+                    marker,
+                    committed_user_msg_id,
+                    committed_started_at,
+                    committed_turn_start_offset,
+                    terminal_evidence_offset,
+                    "missing_marker_started_at_boundary",
+                );
                 return false;
             };
-            marker.foreign_user_msg_id == Some(committed_user_msg_id)
-                && committed_started_at_on_or_after_boundary(committed_started_at, boundary)
+            if marker.foreign_user_msg_id != Some(committed_user_msg_id) {
+                warn_deferred_claim_commit_rejected(
+                    marker,
+                    committed_user_msg_id,
+                    committed_started_at,
+                    committed_turn_start_offset,
+                    terminal_evidence_offset,
+                    "user_msg_id_mismatch",
+                );
+                return false;
+            }
+            let identity_matches = match committed_started_at_cmp(committed_started_at, boundary) {
+                Some(std::cmp::Ordering::Greater) => true,
+                Some(std::cmp::Ordering::Less) => {
+                    warn_deferred_claim_commit_rejected(
+                        marker,
+                        committed_user_msg_id,
+                        committed_started_at,
+                        committed_turn_start_offset,
+                        terminal_evidence_offset,
+                        "committed_started_at_before_marker_boundary",
+                    );
+                    false
+                }
+                None => {
+                    warn_deferred_claim_commit_rejected(
+                        marker,
+                        committed_user_msg_id,
+                        committed_started_at,
+                        committed_turn_start_offset,
+                        terminal_evidence_offset,
+                        "started_at_parse_failed",
+                    );
+                    false
+                }
+                Some(std::cmp::Ordering::Equal) => {
+                    // `user_msg_id == 0` is not unique at `started_at`'s
+                    // one-second resolution. Same-timestamp id-0 covers must
+                    // prove the committed turn did not start before this
+                    // marker's own turn; legacy evidence without offsets
+                    // fails closed. Non-zero user ids retain the existing
+                    // same-id + timestamp >= boundary rule.
+                    if committed_user_msg_id == 0 || marker.foreign_user_msg_id == Some(0) {
+                        let covered = matches!(
+                            (committed_turn_start_offset, marker.foreign_turn_start_offset),
+                            (Some(committed), Some(boundary)) if committed >= boundary
+                        );
+                        if !covered {
+                            warn_deferred_claim_commit_rejected(
+                                marker,
+                                committed_user_msg_id,
+                                committed_started_at,
+                                committed_turn_start_offset,
+                                terminal_evidence_offset,
+                                "id0_same_timestamp_turn_start_offset_not_at_or_after_boundary",
+                            );
+                        }
+                        covered
+                    } else {
+                        true
+                    }
+                }
+            };
+            identity_matches
+                && terminal_evidence_offset_covers_deferred_claim(
+                    marker,
+                    committed_user_msg_id,
+                    committed_started_at,
+                    committed_turn_start_offset,
+                    terminal_evidence_offset,
+                )
         }
     }
+}
+
+fn terminal_evidence_offset_covers_deferred_claim(
+    marker: &AbortedAnchorMarker,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    terminal_evidence_offset: TerminalEvidenceOffsetProof,
+) -> bool {
+    let Some(boundary) = marker.foreign_turn_start_offset else {
+        return true; // legacy marker without an own-start offset keeps r2 behavior.
+    };
+    match terminal_evidence_offset {
+        TerminalEvidenceOffsetProof::Legacy => true,
+        TerminalEvidenceOffsetProof::Recorded(Some(evidence_offset))
+            if evidence_offset >= boundary =>
+        {
+            true
+        }
+        TerminalEvidenceOffsetProof::Recorded(Some(_)) => {
+            warn_deferred_claim_commit_rejected(
+                marker,
+                committed_user_msg_id,
+                committed_started_at,
+                committed_turn_start_offset,
+                terminal_evidence_offset,
+                "terminal_evidence_offset_before_marker_turn_start_offset",
+            );
+            false
+        }
+        TerminalEvidenceOffsetProof::Recorded(None) => {
+            warn_deferred_claim_commit_rejected(
+                marker,
+                committed_user_msg_id,
+                committed_started_at,
+                committed_turn_start_offset,
+                terminal_evidence_offset,
+                "terminal_evidence_offset_missing_on_new_record",
+            );
+            false
+        }
+    }
+}
+
+fn warn_deferred_claim_commit_rejected(
+    marker: &AbortedAnchorMarker,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    terminal_evidence_offset: TerminalEvidenceOffsetProof,
+    reason: &'static str,
+) {
+    tracing::warn!(
+        provider = %marker.provider,
+        channel_id = marker.channel_id,
+        tmux_session_name = %marker.tmux_session_name,
+        anchor_message_id = marker.anchor_message_id,
+        marker_pin_user_msg_id = marker.foreign_user_msg_id.unwrap_or(0),
+        marker_pin_started_at = marker.foreign_started_at.as_deref().unwrap_or("<missing>"),
+        marker_pin_turn_start_offset = ?marker.foreign_turn_start_offset,
+        committed_user_msg_id,
+        committed_started_at,
+        committed_turn_start_offset = ?committed_turn_start_offset,
+        terminal_evidence_offset = ?terminal_evidence_offset,
+        reason,
+        "tui_direct_abort_marker: DeferredClaim terminal commit evidence rejected fail-closed"
+    );
+}
+
+fn deferred_claim_live_inflight_is_pinned(
+    marker: &AbortedAnchorMarker,
+    inflight_tmux_session_name: Option<&str>,
+    inflight_user_msg_id: u64,
+    inflight_started_at: &str,
+    inflight_turn_start_offset: Option<u64>,
+) -> bool {
+    marker.origin == MarkerOrigin::DeferredClaim
+        && inflight_tmux_session_name == Some(marker.tmux_session_name.as_str())
+        && commit_identity_covers_marker(
+            marker,
+            inflight_user_msg_id,
+            inflight_started_at,
+            inflight_turn_start_offset,
+            TerminalEvidenceOffsetProof::Legacy,
+        )
 }
 
 /// Record-instant 대조 (codex r2 — replaces the unfounded "pre-covered"
@@ -415,9 +629,49 @@ pub(super) fn terminal_commit_covers_marker(
     committed_user_msg_id: u64,
     committed_started_at: &str,
 ) -> bool {
+    terminal_commit_covers_marker_with_offset(
+        now_ms,
+        marker,
+        committed_user_msg_id,
+        committed_started_at,
+        None,
+    )
+}
+
+fn terminal_commit_covers_marker_with_offset(
+    now_ms: u64,
+    marker: &AbortedAnchorMarker,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+) -> bool {
+    terminal_commit_covers_marker_with_offsets(
+        now_ms,
+        marker,
+        committed_user_msg_id,
+        committed_started_at,
+        committed_turn_start_offset,
+        TerminalEvidenceOffsetProof::Legacy,
+    )
+}
+
+fn terminal_commit_covers_marker_with_offsets(
+    now_ms: u64,
+    marker: &AbortedAnchorMarker,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    terminal_evidence_offset: TerminalEvidenceOffsetProof,
+) -> bool {
     marker.anchor_message_id != 0
         && now_ms >= marker.aborted_at_ms
-        && commit_identity_covers_marker(marker, committed_user_msg_id, committed_started_at)
+        && commit_identity_covers_marker(
+            marker,
+            committed_user_msg_id,
+            committed_started_at,
+            committed_turn_start_offset,
+            terminal_evidence_offset,
+        )
 }
 
 /// Does a live same-channel inflight defer the sweep's `⚠` fallback for this
@@ -571,14 +825,61 @@ pub(super) async fn drain_on_terminal_commit(
     committed_user_msg_id: u64,
     committed_started_at: &str,
 ) -> usize {
+    drain_on_terminal_commit_with_offset(
+        shared,
+        provider,
+        tmux_session_name,
+        channel_id,
+        committed_user_msg_id,
+        committed_started_at,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn drain_on_terminal_commit_with_offset(
+    shared: &Arc<SharedData>,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+) -> usize {
     let applier = shared_reaction_applier(shared.clone());
-    drain_on_terminal_commit_with_applier(
+    drain_on_terminal_commit_with_applier_and_offset(
         provider,
         tmux_session_name,
         channel_id,
         now_ms(),
         committed_user_msg_id,
         committed_started_at,
+        committed_turn_start_offset,
+        &applier,
+    )
+    .await
+}
+
+pub(super) async fn drain_on_terminal_commit_with_offsets(
+    shared: &Arc<SharedData>,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    committed_terminal_evidence_offset: Option<u64>,
+) -> usize {
+    let applier = shared_reaction_applier(shared.clone());
+    drain_on_terminal_commit_with_applier_and_offsets(
+        provider,
+        tmux_session_name,
+        channel_id,
+        now_ms(),
+        committed_user_msg_id,
+        committed_started_at,
+        committed_turn_start_offset,
+        TerminalEvidenceOffsetProof::Recorded(committed_terminal_evidence_offset),
         &applier,
     )
     .await
@@ -591,6 +892,54 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
     now_ms: u64,
     committed_user_msg_id: u64,
     committed_started_at: &str,
+    applier: &ReactionApplierFn,
+) -> usize {
+    drain_on_terminal_commit_with_applier_and_offset(
+        provider,
+        tmux_session_name,
+        channel_id,
+        now_ms,
+        committed_user_msg_id,
+        committed_started_at,
+        None,
+        applier,
+    )
+    .await
+}
+
+pub(super) async fn drain_on_terminal_commit_with_applier_and_offset(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    now_ms: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    applier: &ReactionApplierFn,
+) -> usize {
+    drain_on_terminal_commit_with_applier_and_offsets(
+        provider,
+        tmux_session_name,
+        channel_id,
+        now_ms,
+        committed_user_msg_id,
+        committed_started_at,
+        committed_turn_start_offset,
+        TerminalEvidenceOffsetProof::Legacy,
+        applier,
+    )
+    .await
+}
+
+async fn drain_on_terminal_commit_with_applier_and_offsets(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    now_ms: u64,
+    committed_user_msg_id: u64,
+    committed_started_at: &str,
+    committed_turn_start_offset: Option<u64>,
+    terminal_evidence_offset: TerminalEvidenceOffsetProof,
     applier: &ReactionApplierFn,
 ) -> usize {
     let mut drained = 0usize;
@@ -606,11 +955,13 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
         let Some(mut marker) = reload(&marker) else {
             continue; // resolved while unclaimed
         };
-        if !terminal_commit_covers_marker(
+        if !terminal_commit_covers_marker_with_offsets(
             now_ms,
             &marker,
             committed_user_msg_id,
             committed_started_at,
+            committed_turn_start_offset,
+            terminal_evidence_offset,
         ) {
             continue;
         }
@@ -689,12 +1040,13 @@ pub(super) fn resolve_own_claim_markers_for_visibly_completed_anchor(
         let Some(own_started_at) = marker.foreign_started_at.clone() else {
             continue; // identity-absent marker — the sweep bound alone resolves it
         };
-        record_commit_tombstone(
+        record_commit_tombstone_with_offset(
             provider,
             tmux_session_name,
             channel_id,
             anchor_message_id,
             &own_started_at,
+            marker.foreign_turn_start_offset,
         );
         let Some(_claim) = try_claim_marker(&marker) else {
             continue; // a reconciler owns it; the durable tombstone keeps its verdict ✅
@@ -741,10 +1093,13 @@ pub(super) async fn sweep_expired(
                     state.user_msg_id,
                     &state.started_at,
                 ),
-                is_pinned_turn: marker
-                    .matches_foreign_identity(state.user_msg_id, &state.started_at)
-                    && state.tmux_session_name.as_deref()
-                        == Some(marker.tmux_session_name.as_str()),
+                is_pinned_turn: deferred_claim_live_inflight_is_pinned(
+                    marker,
+                    state.tmux_session_name.as_deref(),
+                    state.user_msg_id,
+                    &state.started_at,
+                    state.turn_start_offset,
+                ),
             },
         }
     };
@@ -939,6 +1294,7 @@ mod tests {
             // default (the ABORT path pins one whenever the prior row is live).
             foreign_user_msg_id: Some(anchor + 500_000),
             foreign_started_at: Some(FOREIGN_STARTED_AT.to_string()),
+            foreign_turn_start_offset: None,
             origin: MarkerOrigin::Abort,
         }
     }
@@ -2120,6 +2476,7 @@ mod tests {
             format!("tmux-{channel}"),
             claimed_at_ms,
             (anchor, OWN_STARTED_AT.to_string()),
+            None,
         )
     }
 
@@ -2170,6 +2527,7 @@ mod tests {
             "tmux-100".into(),
             10_000,
             (0, OWN_STARTED_AT.into()),
+            None,
         );
         record(&marker).unwrap();
         let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
@@ -2220,6 +2578,307 @@ mod tests {
         assert!(load_for_channel("claude", 100).is_empty());
     }
 
+    #[test]
+    fn deferred_claim_boundary_equality_accepts_nonzero_and_rejects_id0_without_offset() {
+        let nonzero = deferred_marker("claude", 100, 712, 10_000);
+        assert!(
+            terminal_commit_covers_marker(10_500, &nonzero, 712, OWN_STARTED_AT),
+            "non-zero ids keep the existing same-id + started_at >= boundary rule"
+        );
+
+        let id0_without_offset = AbortedAnchorMarker::for_deferred_claim(
+            "claude".into(),
+            100,
+            713,
+            "tmux-100".into(),
+            10_000,
+            (0, OWN_STARTED_AT.into()),
+            None,
+        );
+        assert!(
+            !terminal_commit_covers_marker(10_500, &id0_without_offset, 0, OWN_STARTED_AT),
+            "id-0 same-second equality without offset evidence must fail closed"
+        );
+        assert!(
+            terminal_commit_covers_marker(10_500, &id0_without_offset, 0, "2026-06-10 13:00:01"),
+            "a strictly later id-0 committed started_at remains valid cover evidence"
+        );
+    }
+
+    #[test]
+    fn deferred_claim_boundary_rejects_garbage_and_compares_mixed_timestamp_formats() {
+        let local_boundary = deferred_marker("claude", 100, 714, 10_000);
+        assert!(
+            !terminal_commit_covers_marker(10_500, &local_boundary, 714, "not a timestamp"),
+            "invalid committed timestamps are not cover proof"
+        );
+        assert!(
+            terminal_commit_covers_marker(
+                10_500,
+                &local_boundary,
+                714,
+                "2026-06-10T13:00:01+09:00"
+            ),
+            "RFC3339 committed timestamps compare against local boundary timestamps"
+        );
+
+        let rfc3339_boundary = AbortedAnchorMarker::for_deferred_claim(
+            "claude".into(),
+            100,
+            715,
+            "tmux-100".into(),
+            10_000,
+            (715, "2026-06-10T13:00:00+09:00".into()),
+            None,
+        );
+        assert!(
+            terminal_commit_covers_marker(10_500, &rfc3339_boundary, 715, "2026-06-10 13:00:01"),
+            "local committed timestamps compare against RFC3339 boundary timestamps"
+        );
+    }
+
+    #[test]
+    fn deferred_claim_marker_drain_same_second_id0_requires_turn_start_offset() {
+        let _root = test_root();
+        let marker = AbortedAnchorMarker::for_deferred_claim(
+            "claude".into(),
+            100,
+            716,
+            "tmux-100".into(),
+            10_000,
+            (0, OWN_STARTED_AT.into()),
+            Some(200),
+        );
+        record(&marker).unwrap();
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let rt = test_rt();
+
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier(
+            "claude",
+            "tmux-100",
+            100,
+            10_500,
+            0,
+            OWN_STARTED_AT,
+            &applier,
+        ));
+        assert_eq!(drained, 0, "legacy no-offset drain evidence fails closed");
+
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier_and_offset(
+            "claude",
+            "tmux-100",
+            100,
+            10_501,
+            0,
+            OWN_STARTED_AT,
+            Some(199),
+            &applier,
+        ));
+        assert_eq!(
+            drained, 0,
+            "lower same-second committed offset is a prior id-0 turn"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(
+            terminal_commit_covers_marker_with_offset(
+                10_502,
+                &marker,
+                0,
+                OWN_STARTED_AT,
+                Some(201)
+            ),
+            "higher same-second committed offset is accepted"
+        );
+
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier_and_offset(
+            "claude",
+            "tmux-100",
+            100,
+            10_503,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            &applier,
+        ));
+        assert_eq!(drained, 1, "equal same-second committed offset is accepted");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(716, ReactionOp::Complete)]
+        );
+    }
+
+    #[test]
+    fn deferred_claim_marker_drain_rejects_pre_start_terminal_evidence_offset() {
+        let _root = test_root();
+        let marker = AbortedAnchorMarker::for_deferred_claim(
+            "claude".into(),
+            100,
+            718,
+            "tmux-100".into(),
+            10_000,
+            (0, OWN_STARTED_AT.into()),
+            Some(200),
+        );
+        record(&marker).unwrap();
+        let (applier, calls) = recording_applier(ReactionDelivery::Delivered);
+        let rt = test_rt();
+
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier_and_offsets(
+            "claude",
+            "tmux-100",
+            100,
+            10_504,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            TerminalEvidenceOffsetProof::Recorded(Some(199)),
+            &applier,
+        ));
+        assert_eq!(
+            drained, 0,
+            "same-row identity is not enough when terminal evidence came before the claim's own start offset"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(
+            load_for_channel("claude", 100),
+            vec![marker.clone()],
+            "the marker stays pending for the real terminal evidence"
+        );
+
+        let drained = rt.block_on(drain_on_terminal_commit_with_applier_and_offsets(
+            "claude",
+            "tmux-100",
+            100,
+            10_505,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            TerminalEvidenceOffsetProof::Recorded(Some(200)),
+            &applier,
+        ));
+        assert_eq!(drained, 1, "evidence at the own start offset covers");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(718, ReactionOp::Complete)]
+        );
+    }
+
+    #[test]
+    fn deferred_claim_tombstone_same_second_id0_requires_turn_start_offset() {
+        let _root = test_root();
+        let marker = AbortedAnchorMarker::for_deferred_claim(
+            "claude".into(),
+            100,
+            717,
+            "tmux-100".into(),
+            10_000,
+            (0, OWN_STARTED_AT.into()),
+            Some(200),
+        );
+
+        record_commit_tombstone_at(20_000, "claude", "tmux-100", 100, 0, OWN_STARTED_AT);
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            None,
+            "legacy no-offset tombstone evidence fails closed on id-0 equality"
+        );
+
+        record_commit_tombstone_at_with_offset(
+            20_001,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(199),
+        );
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            None,
+            "lower same-second tombstone offset is rejected"
+        );
+
+        record_commit_tombstone_at_with_offset(
+            20_002,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+        );
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            Some(20_002),
+            "equal same-second tombstone offset is accepted"
+        );
+    }
+
+    #[test]
+    fn deferred_claim_tombstone_requires_recorded_terminal_evidence_at_or_after_start() {
+        let _root = test_root();
+        let marker = AbortedAnchorMarker::for_deferred_claim(
+            "claude".into(),
+            100,
+            719,
+            "tmux-100".into(),
+            10_000,
+            (0, OWN_STARTED_AT.into()),
+            Some(200),
+        );
+
+        record_commit_tombstone_at_with_offsets(
+            20_010,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            true,
+            Some(199),
+        );
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            None,
+            "same-row tombstone is rejected when terminal evidence is before the claim start"
+        );
+
+        record_commit_tombstone_at_with_offsets(
+            20_011,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            true,
+            None,
+        );
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            None,
+            "new-format tombstone missing terminal evidence offset fails closed"
+        );
+
+        record_commit_tombstone_at_with_offsets(
+            20_012,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            true,
+            Some(201),
+        );
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            Some(20_012),
+            "terminal evidence after the claim start covers"
+        );
+    }
+
     /// #4159: the same start-boundary gate must apply to durable tombstone
     /// evidence, otherwise a direct drain blocked for being pre-boundary could
     /// still become a false sweep `✅` on the next pass.
@@ -2233,6 +2892,7 @@ mod tests {
             "tmux-100".into(),
             10_000,
             (0, OWN_STARTED_AT.into()),
+            None,
         );
         record(&marker).unwrap();
 
@@ -2248,6 +2908,53 @@ mod tests {
             post_abort_commit_tombstone(&marker),
             Some(20_001),
             "a post-boundary terminal commit tombstone remains valid cover evidence"
+        );
+    }
+
+    #[test]
+    fn deferred_claim_sweep_hold_uses_same_boundary_semantics_as_cover_gate() {
+        let marker = AbortedAnchorMarker::for_deferred_claim(
+            "claude".into(),
+            100,
+            720,
+            "tmux-100".into(),
+            10_000,
+            (720, OWN_STARTED_AT.into()),
+            Some(200),
+        );
+        assert!(
+            terminal_commit_covers_marker_with_offset(
+                10_500,
+                &marker,
+                720,
+                "2026-06-10 13:00:01",
+                Some(250)
+            ),
+            "the cover gate accepts a same-id commit whose start is after the marker boundary"
+        );
+        assert!(
+            deferred_claim_live_inflight_is_pinned(
+                &marker,
+                Some("tmux-100"),
+                720,
+                "2026-06-10 13:00:01",
+                Some(250),
+            ),
+            "the sweep hold must match the same widened boundary semantics"
+        );
+        assert_eq!(
+            deferred_claim::decide_deferred_claim_marker_disposition(
+                10_000 + TTL_MS,
+                &marker,
+                deferred_claim::LiveInflightProbe {
+                    defers: true,
+                    is_pinned_turn: true,
+                },
+                ABORT_MARKER_TTL,
+                true,
+            ),
+            MarkerDisposition::KeepWaiting,
+            "a live row the cover gate would accept cannot be preempted by the TTL warning sweep"
         );
     }
 
@@ -2270,6 +2977,7 @@ mod tests {
             701,
             "tmux-100".into(),
             (701, OWN_STARTED_AT.into()),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2423,6 +3131,7 @@ mod tests {
             705,
             "tmux-100".into(),
             (705, OWN_STARTED_AT.into()),
+            None,
         )
         .unwrap();
         let loaded = load_for_channel("claude", 100);

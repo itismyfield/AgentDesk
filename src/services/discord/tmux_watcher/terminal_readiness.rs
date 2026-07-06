@@ -158,6 +158,22 @@ pub(super) fn watcher_terminal_token_update_status(
     }
 }
 
+pub(super) fn watcher_forward_text_after_pre_turn_skip<'a>(
+    decoded_text: &'a str,
+    existing_buffer_len: usize,
+    pre_turn_bytes_skipped: usize,
+) -> &'a str {
+    let mut skip_from_decoded = pre_turn_bytes_skipped
+        .saturating_sub(existing_buffer_len)
+        .min(decoded_text.len());
+    while skip_from_decoded < decoded_text.len()
+        && !decoded_text.is_char_boundary(skip_from_decoded)
+    {
+        skip_from_decoded += 1;
+    }
+    &decoded_text[skip_from_decoded..]
+}
+
 /// #2442 (H3) — fast-path check for the wrapper's `ready_for_input` JSONL
 /// sentinel in the tail of the session jsonl. Reads only the last ~4 KiB
 /// so it stays O(1) regardless of jsonl size. False negatives just fall

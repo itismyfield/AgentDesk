@@ -71,8 +71,10 @@ impl AbortedAnchorMarker {
     /// `own_identity` is the synthetic turn's `(user_msg_id, started_at)` —
     /// `user_msg_id == anchor_message_id` by the synthetic-turn convention,
     /// and `started_at` is re-read from the freshly-claimed inflight row at
-    /// the record instant. Always uncovered at build time; coverage needs the
-    /// drain or a commit-tombstone 대조, exactly like the Abort kind.
+    /// the record instant. `own_turn_start_offset` is the durable id-0
+    /// discriminator from the same row. Always uncovered at build time;
+    /// coverage needs the drain or a commit-tombstone 대조, exactly like the
+    /// Abort kind.
     pub(super) fn for_deferred_claim(
         provider: String,
         channel_id: u64,
@@ -80,6 +82,7 @@ impl AbortedAnchorMarker {
         tmux_session_name: String,
         claimed_at_ms: u64,
         own_identity: (u64, String),
+        own_turn_start_offset: Option<u64>,
     ) -> Self {
         Self {
             provider,
@@ -90,6 +93,7 @@ impl AbortedAnchorMarker {
             covered_at_ms: None,
             foreign_user_msg_id: Some(own_identity.0),
             foreign_started_at: Some(own_identity.1),
+            foreign_turn_start_offset: own_turn_start_offset,
             origin: MarkerOrigin::DeferredClaim,
         }
     }
@@ -111,6 +115,7 @@ pub(in crate::services::discord) fn record_for_deferred_claim(
     anchor_message_id: u64,
     tmux_session_name: String,
     own_identity: (u64, String),
+    own_turn_start_offset: Option<u64>,
 ) -> Result<AbortedAnchorMarker, String> {
     let mut marker = AbortedAnchorMarker::for_deferred_claim(
         provider,
@@ -119,6 +124,7 @@ pub(in crate::services::discord) fn record_for_deferred_claim(
         tmux_session_name,
         super::now_ms(),
         own_identity,
+        own_turn_start_offset,
     );
     super::cover_from_commit_tombstone(&mut marker);
     super::record(&marker)?;
@@ -209,6 +215,7 @@ pub(in crate::services::discord) fn ensure_marker_for_own_synthetic_turn(
     anchor_message_id: u64,
     tmux_session_name: &str,
     own_started_at: &str,
+    own_turn_start_offset: Option<u64>,
 ) -> EnsureClaimMarkerOutcome {
     if anchor_message_id == 0 {
         return EnsureClaimMarkerOutcome::SkippedZeroAnchor; // I5
@@ -235,6 +242,7 @@ pub(in crate::services::discord) fn ensure_marker_for_own_synthetic_turn(
         anchor_message_id,
         tmux_session_name.to_string(),
         (anchor_message_id, own_started_at.to_string()),
+        own_turn_start_offset,
     ) {
         Ok(marker) => {
             tracing::info!(
@@ -279,6 +287,7 @@ mod tests {
             "tmux-1".into(),
             claimed_at_ms,
             (10, OWN_STARTED_AT.into()),
+            None,
         )
     }
 
@@ -468,7 +477,7 @@ mod tests {
     fn ensure_records_uncovered_own_pin_when_absent() {
         let _root = test_root();
         let outcome =
-            ensure_marker_for_own_synthetic_turn("claude", 1, 900, "tmux-1", OWN_STARTED_AT);
+            ensure_marker_for_own_synthetic_turn("claude", 1, 900, "tmux-1", OWN_STARTED_AT, None);
         assert_eq!(
             outcome,
             EnsureClaimMarkerOutcome::Recorded { covered: false }
@@ -499,6 +508,7 @@ mod tests {
             10,
             "tmux-1",
             "2026-06-11 09:00:00", // a DIFFERENT started_at must not re-pin
+            None,
         );
         assert_eq!(outcome, EnsureClaimMarkerOutcome::AlreadyPresent);
         assert_eq!(
@@ -522,6 +532,7 @@ mod tests {
             10,
             "tmux-1",
             "2026-06-11 09:00:00", // a DIFFERENT started_at must not re-pin
+            None,
         );
         assert_eq!(outcome, EnsureClaimMarkerOutcome::AlreadyPresent);
         assert_eq!(
@@ -549,7 +560,7 @@ mod tests {
         )
         .unwrap();
         let outcome =
-            ensure_marker_for_own_synthetic_turn("claude", 1, 10, "tmux-1", OWN_STARTED_AT);
+            ensure_marker_for_own_synthetic_turn("claude", 1, 10, "tmux-1", OWN_STARTED_AT, None);
         assert_eq!(
             outcome,
             EnsureClaimMarkerOutcome::Recorded { covered: false },
@@ -585,7 +596,7 @@ mod tests {
         covered_abort.covered_at_ms = Some(2_000);
         super::super::record(&covered_abort).unwrap();
         assert_eq!(
-            ensure_marker_for_own_synthetic_turn("claude", 1, 10, "tmux-1", OWN_STARTED_AT),
+            ensure_marker_for_own_synthetic_turn("claude", 1, 10, "tmux-1", OWN_STARTED_AT, None),
             EnsureClaimMarkerOutcome::AlreadyPresent
         );
         assert_eq!(
@@ -603,7 +614,7 @@ mod tests {
         let _root = test_root();
         super::super::record_commit_tombstone_at(5_000, "claude", "tmux-1", 1, 901, OWN_STARTED_AT);
         let outcome =
-            ensure_marker_for_own_synthetic_turn("claude", 1, 901, "tmux-1", OWN_STARTED_AT);
+            ensure_marker_for_own_synthetic_turn("claude", 1, 901, "tmux-1", OWN_STARTED_AT, None);
         assert_eq!(
             outcome,
             EnsureClaimMarkerOutcome::Recorded { covered: true }
@@ -641,7 +652,7 @@ mod tests {
     fn ensure_skips_zero_anchor() {
         let _root = test_root();
         assert_eq!(
-            ensure_marker_for_own_synthetic_turn("claude", 1, 0, "tmux-1", OWN_STARTED_AT),
+            ensure_marker_for_own_synthetic_turn("claude", 1, 0, "tmux-1", OWN_STARTED_AT, None),
             EnsureClaimMarkerOutcome::SkippedZeroAnchor
         );
         assert!(super::super::load_for_channel("claude", 1).is_empty());
