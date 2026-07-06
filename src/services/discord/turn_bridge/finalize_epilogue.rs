@@ -241,6 +241,7 @@ mod tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: "queued dispatch failure".to_string(),
             mode: InterventionMode::Soft,
             created_at: std::time::Instant::now(),

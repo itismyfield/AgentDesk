@@ -322,6 +322,7 @@ pub(super) fn build_race_requeued_intervention(
         queued_generation: crate::services::discord::runtime_store::load_generation(),
         source_message_ids: vec![user_msg_id],
         source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
         text: user_text.to_string(),
         mode: super::super::InterventionMode::Soft,
         created_at: std::time::Instant::now(),

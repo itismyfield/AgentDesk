@@ -583,6 +583,7 @@ mod tests {
                 SourceMessageQueuedGeneration::new(source_a, 71),
                 SourceMessageQueuedGeneration::new(source_b, 72),
             ],
+            source_text_segments: Vec::new(),
             text: "merged cross-generation".to_string(),
             mode: crate::services::turn_orchestrator::InterventionMode::Soft,
             created_at: std::time::Instant::now(),

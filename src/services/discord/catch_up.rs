@@ -981,6 +981,7 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                     queued_generation: crate::services::discord::runtime_store::load_generation(),
                     source_message_ids: vec![msg.id],
                     source_message_queued_generations: Vec::new(),
+                    source_text_segments: Vec::new(),
                     text: text.clone(),
                     mode: InterventionMode::Soft,
                     created_at: catch_up_intervention_created_at(
@@ -1276,6 +1277,7 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                     queued_generation: crate::services::discord::runtime_store::load_generation(),
                     source_message_ids: vec![msg.id],
                     source_message_queued_generations: Vec::new(),
+                    source_text_segments: Vec::new(),
                     text: text.to_string(),
                     mode: InterventionMode::Soft,
                     created_at: catch_up_intervention_created_at(

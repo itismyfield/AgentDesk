@@ -168,6 +168,7 @@ fn build_steer_intervention(request: &SteeringRequest) -> Intervention {
         queued_generation: crate::services::discord::runtime_store::load_generation(),
         source_message_ids: vec![request.source_id],
         source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
         text: request.instruction.clone(),
         mode: InterventionMode::Soft,
         created_at: Instant::now(),

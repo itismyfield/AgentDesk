@@ -2,7 +2,7 @@ use poise::serenity_prelude::MessageId;
 
 use super::{
     Intervention, QueueExitEvent, QueueExitKind, SourceMessageQueuedGeneration,
-    ensure_source_message_ids,
+    ensure_source_message_ids, join_source_text_segments,
 };
 
 pub(super) fn intervention_sources_all_match_active(
@@ -43,10 +43,19 @@ fn queue_exit_event_for_source(
     message_id: MessageId,
 ) -> QueueExitEvent {
     let mut removed = intervention.clone();
+    let source_text_segment = intervention
+        .source_text_segments()
+        .into_iter()
+        .find(|segment| segment.message_id == message_id);
     removed.message_id = message_id;
     removed.source_message_ids = vec![message_id];
     removed.source_message_queued_generations =
         vec![source_generation_for(intervention, message_id)];
+    removed.text = source_text_segment
+        .as_ref()
+        .map(|segment| segment.text.clone())
+        .unwrap_or_default();
+    removed.source_text_segments = source_text_segment.into_iter().collect();
     QueueExitEvent {
         intervention: removed,
         kind: QueueExitKind::Superseded,
@@ -57,12 +66,17 @@ pub(super) fn strip_source_message_id_from_intervention(
     intervention: &mut Intervention,
     message_id: MessageId,
 ) {
+    ensure_source_message_ids(intervention);
+    let mut source_text_segments = intervention.source_text_segments();
     intervention
         .source_message_ids
         .retain(|source_id| *source_id != message_id);
     intervention
         .source_message_queued_generations
         .retain(|source| source.message_id != message_id);
+    source_text_segments.retain(|segment| segment.message_id != message_id);
+    intervention.source_text_segments = source_text_segments;
+    intervention.text = join_source_text_segments(&intervention.source_text_segments);
 
     if intervention.message_id == message_id
         && let Some(replacement) = intervention.source_message_ids.last().copied()

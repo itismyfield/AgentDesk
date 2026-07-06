@@ -5,7 +5,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-use super::{Intervention, InterventionMode, SourceMessageQueuedGeneration};
+use super::{
+    Intervention, InterventionMode, SourceMessageQueuedGeneration, SourceMessageTextSegment,
+};
 use crate::services::provider::ProviderKind;
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
@@ -24,6 +26,9 @@ pub(crate) struct PendingQueueItem {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) source_message_queued_generations: Vec<PendingQueueSourceGeneration>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_text_segments: Vec<PendingQueueSourceTextSegment>,
     pub(crate) text: String,
     #[serde(default)]
     pub(crate) reply_context: Option<String>,
@@ -57,6 +62,12 @@ pub(crate) struct PendingQueueItem {
 pub(crate) struct PendingQueueSourceGeneration {
     pub(crate) message_id: u64,
     pub(crate) queued_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingQueueSourceTextSegment {
+    pub(crate) message_id: u64,
+    pub(crate) text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -272,6 +283,19 @@ fn pending_queue_item_from_intervention(
             queued_generation: owner.queued_generation,
         })
         .collect();
+    let source_text_segments: Vec<PendingQueueSourceTextSegment> = intervention
+        .source_text_segments()
+        .into_iter()
+        .map(|segment| PendingQueueSourceTextSegment {
+            message_id: segment.message_id.get(),
+            text: segment.text,
+        })
+        .collect();
+    let source_text_segments = if source_text_segments.len() > 1 {
+        source_text_segments
+    } else {
+        Vec::new()
+    };
     PendingQueueItem {
         author_id: intervention.author_id.get(),
         author_is_bot: intervention.author_is_bot,
@@ -287,6 +311,7 @@ fn pending_queue_item_from_intervention(
                 .collect()
         },
         source_message_queued_generations,
+        source_text_segments,
         text: intervention.text.clone(),
         reply_context: intervention.reply_context.clone(),
         has_reply_boundary: intervention.has_reply_boundary,
@@ -485,6 +510,14 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
             }
         }
     }
+    let source_text_segments: Vec<SourceMessageTextSegment> = item
+        .source_text_segments
+        .into_iter()
+        .filter(|segment| segment.message_id != 0)
+        .map(|segment| {
+            SourceMessageTextSegment::new(MessageId::new(segment.message_id), segment.text)
+        })
+        .collect();
     Intervention {
         author_id: UserId::new(item.author_id),
         author_is_bot: item.author_is_bot,
@@ -492,6 +525,7 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
         queued_generation,
         source_message_ids,
         source_message_queued_generations,
+        source_text_segments,
         text: item.text,
         mode: InterventionMode::Soft,
         created_at: now,

@@ -74,6 +74,21 @@ impl SourceMessageQueuedGeneration {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct SourceMessageTextSegment {
+    pub(crate) message_id: MessageId,
+    pub(crate) text: String,
+}
+
+impl SourceMessageTextSegment {
+    pub(crate) fn new(message_id: MessageId, text: impl Into<String>) -> Self {
+        Self {
+            message_id,
+            text: text.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct Intervention {
     pub(crate) author_id: UserId,
     pub(crate) author_is_bot: bool,
@@ -81,6 +96,7 @@ pub(crate) struct Intervention {
     pub(crate) queued_generation: u64,
     pub(crate) source_message_ids: Vec<MessageId>,
     pub(crate) source_message_queued_generations: Vec<SourceMessageQueuedGeneration>,
+    pub(crate) source_text_segments: Vec<SourceMessageTextSegment>,
     pub(crate) text: String,
     pub(crate) mode: InterventionMode,
     pub(crate) created_at: Instant,
@@ -125,6 +141,31 @@ impl Intervention {
             }
         }
         owners
+    }
+
+    pub(crate) fn source_text_segments(&self) -> Vec<SourceMessageTextSegment> {
+        let source_message_ids = if self.source_message_ids.is_empty() {
+            vec![self.message_id]
+        } else {
+            self.source_message_ids.clone()
+        };
+        if self.source_text_segments.is_empty() {
+            return split_text_segments_for_sources(&source_message_ids, &self.text);
+        }
+
+        let mut segments = Vec::new();
+        for message_id in source_message_ids {
+            if let Some(segment) = self
+                .source_text_segments
+                .iter()
+                .find(|segment| segment.message_id == message_id)
+            {
+                segments.push(segment.clone());
+            } else {
+                segments.push(SourceMessageTextSegment::new(message_id, String::new()));
+            }
+        }
+        segments
     }
 }
 
@@ -181,6 +222,56 @@ fn intervention_age_since(last: &Intervention, current: &Intervention) -> Durati
         .unwrap_or_default()
 }
 
+fn split_text_segments_for_sources(
+    source_message_ids: &[MessageId],
+    text: &str,
+) -> Vec<SourceMessageTextSegment> {
+    if source_message_ids.is_empty() {
+        return Vec::new();
+    }
+    if source_message_ids.len() == 1 {
+        return vec![SourceMessageTextSegment::new(source_message_ids[0], text)];
+    }
+
+    if text.matches('\n').count() + 1 != source_message_ids.len() {
+        return source_message_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, message_id)| {
+                SourceMessageTextSegment::new(message_id, if index == 0 { text } else { "" })
+            })
+            .collect();
+    }
+
+    let mut pieces = text.splitn(source_message_ids.len(), '\n');
+    source_message_ids
+        .iter()
+        .copied()
+        .map(|message_id| {
+            SourceMessageTextSegment::new(message_id, pieces.next().unwrap_or_default())
+        })
+        .collect()
+}
+
+fn join_source_text_segments(segments: &[SourceMessageTextSegment]) -> String {
+    let mut text = String::new();
+    for segment in segments {
+        if segment.text.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&segment.text);
+    }
+    text
+}
+
+fn ensure_source_text_segments(intervention: &mut Intervention) {
+    intervention.source_text_segments = intervention.source_text_segments();
+}
+
 fn ensure_source_message_ids(intervention: &mut Intervention) {
     if intervention.source_message_ids.is_empty() {
         intervention
@@ -209,6 +300,7 @@ fn ensure_source_message_ids(intervention: &mut Intervention) {
             }
         }
     }
+    ensure_source_text_segments(intervention);
 }
 
 fn push_unique_message_ids(
@@ -230,6 +322,20 @@ fn push_unique_source_message_queued_generations(
         if !existing
             .iter()
             .any(|owner| owner.message_id == incoming.message_id)
+        {
+            existing.push(incoming);
+        }
+    }
+}
+
+fn push_unique_source_text_segments(
+    existing: &mut Vec<SourceMessageTextSegment>,
+    incoming: impl IntoIterator<Item = SourceMessageTextSegment>,
+) {
+    for incoming in incoming {
+        if !existing
+            .iter()
+            .any(|segment| segment.message_id == incoming.message_id)
         {
             existing.push(incoming);
         }
@@ -299,11 +405,9 @@ pub(crate) fn enqueue_intervention(
     }
 
     if let Some(last) = queue.last_mut() {
+        ensure_source_message_ids(last);
         if should_merge_intervention(last, &intervention) {
-            if !last.text.is_empty() && !intervention.text.is_empty() {
-                last.text.push('\n');
-            }
-            last.text.push_str(&intervention.text);
+            let incoming_text_segments = intervention.source_text_segments();
             last.message_id = intervention.message_id;
             last.queued_generation = intervention.queued_generation;
             push_unique_message_ids(
@@ -314,6 +418,11 @@ pub(crate) fn enqueue_intervention(
                 &mut last.source_message_queued_generations,
                 intervention.source_message_queued_generations.into_iter(),
             );
+            push_unique_source_text_segments(
+                &mut last.source_text_segments,
+                incoming_text_segments,
+            );
+            last.text = join_source_text_segments(&last.source_text_segments);
             last.created_at = intervention.created_at;
             // #2266: on merge, the incoming voice announcement (if any)
             // matches the new HEAD `message_id`; the dispatch path reinserts
@@ -3305,6 +3414,7 @@ mod actor_hydrate_regression_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at,
@@ -3325,6 +3435,7 @@ mod actor_hydrate_regression_tests {
         Intervention {
             source_message_ids: source_ids.iter().copied().map(MessageId::new).collect(),
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             ..make_intervention(message_id, text, created_at)
         }
     }
@@ -3457,11 +3568,53 @@ mod actor_hydrate_regression_tests {
                 "merged tail must remain queued without the active source id"
             );
             assert_eq!(snapshot.intervention_queue[0].message_id, tail_id);
+            assert_eq!(
+                snapshot.intervention_queue[0].text, "tail copy",
+                "merged tail text must not retain the active source body"
+            );
+            assert!(
+                !snapshot.intervention_queue[0].text.contains("active copy"),
+                "active source body must be stripped from the queued tail text"
+            );
 
             let (persisted, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
             assert_eq!(persisted.len(), 1);
             assert_eq!(persisted[0].source_message_ids, vec![tail_id]);
+            assert_eq!(persisted[0].text, "tail copy");
         });
+    }
+
+    #[test]
+    fn legacy_multiline_merged_row_strip_keeps_body_lines_in_head_segment() {
+        let head_id = MessageId::new(4_107_214);
+        let tail_id = MessageId::new(4_107_215);
+        let legacy_text = "l1\nl2\nb";
+        let mut intervention = make_intervention_with_sources(
+            tail_id.get(),
+            &[head_id.get(), tail_id.get()],
+            legacy_text,
+            Instant::now(),
+        );
+
+        let segments = intervention.source_text_segments();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].message_id, head_id);
+        assert_eq!(segments[0].text.as_str(), legacy_text);
+        assert_eq!(segments[1].message_id, tail_id);
+        assert_eq!(segments[1].text.as_str(), "");
+
+        strip_source_message_id_from_intervention(&mut intervention, tail_id);
+
+        assert_eq!(intervention.source_message_ids, vec![head_id]);
+        assert_eq!(intervention.text, legacy_text);
+        assert!(
+            intervention.text.contains("l2"),
+            "legacy fallback must not drop a body line when stripping a tail source"
+        );
+        assert!(
+            intervention.text.contains("b"),
+            "ambiguous legacy text stays lossless by remaining on the head source"
+        );
     }
 
     #[test]
@@ -3708,6 +3861,68 @@ mod actor_hydrate_regression_tests {
             let queue = handle.snapshot().await.intervention_queue;
             assert_eq!(queue.len(), 1, "no duplicate must be inserted");
             assert_eq!(queue[0].message_id.get(), 300);
+        });
+    }
+
+    #[test]
+    fn merge_restored_items_strips_known_source_from_partial_overlap() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "merge-restored-partial-dedup";
+            let channel_id = ChannelId::new(3864005);
+            let source_a = MessageId::new(3864006);
+            let source_b = MessageId::new(3864007);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+
+            handle
+                .replace_queue(
+                    vec![make_intervention(
+                        source_a.get(),
+                        "standalone-a",
+                        Instant::now(),
+                    )],
+                    persistence.clone(),
+                )
+                .await;
+
+            let result = handle
+                .merge_restored_queue_items(
+                    vec![make_intervention_with_sources(
+                        source_b.get(),
+                        &[source_a.get(), source_b.get()],
+                        "restored-a\nrestored-b",
+                        Instant::now(),
+                    )],
+                    persistence.clone(),
+                )
+                .await;
+
+            assert_eq!(result.absorbed, 1);
+            assert_eq!(result.queue_len_after, 2);
+            let queue = handle.snapshot().await.intervention_queue;
+            assert_eq!(queue.len(), 2);
+            assert_eq!(queue[0].source_message_ids, vec![source_b]);
+            assert_eq!(queue[0].message_id, source_b);
+            assert_eq!(queue[0].text, "restored-b");
+            assert!(
+                !queue[0].text.contains("restored-a"),
+                "known source A must be stripped from the restored merged item"
+            );
+            assert_eq!(queue[1].source_message_ids, vec![source_a]);
+            assert_eq!(queue[1].text, "standalone-a");
+
+            let (disk, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
+            assert_eq!(disk.len(), 2);
+            assert_eq!(disk[0].source_message_ids, vec![source_b]);
+            assert_eq!(disk[0].text, "restored-b");
+            assert_eq!(disk[1].source_message_ids, vec![source_a]);
         });
     }
 
@@ -4326,6 +4541,7 @@ mod active_turn_kind_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: format!("msg-{message_id}"),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -4862,6 +5078,7 @@ mod enqueue_refusal_reason_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at,
@@ -4882,6 +5099,7 @@ mod enqueue_refusal_reason_tests {
         Intervention {
             source_message_ids: source_ids.iter().copied().map(MessageId::new).collect(),
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             ..intervention(message_id, text, created_at)
         }
     }
@@ -5029,6 +5247,7 @@ mod no_ttl_evict_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: format!("msg-{message_id}"),
             mode: InterventionMode::Soft,
             created_at,
@@ -5188,6 +5407,7 @@ mod persistence_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -6201,6 +6421,7 @@ mod persistence_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![message_id],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: "DISPATCH: restore me".to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -6547,6 +6768,7 @@ mod purge_queue_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at,
@@ -6719,6 +6941,7 @@ mod finish_cancelled_turn_tests {
             queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
