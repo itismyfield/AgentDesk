@@ -873,6 +873,16 @@
     a self-contained helper) and the sibling `idle_transcript_scan.rs` is itself
     giant-capped, so the ratchet baseline was RAISED 4301 -> 4310 (a deliberate,
     reviewable admission per the baseline header) rather than split.
+  - `src/services/discord/tui_direct_abort_marker/mod.rs` (1233 production lines;
+    the abort/deferred-claim marker reconcilers + Abort disposition. #4159 r3 added
+    the output-stream offset-provenance gate on `DeferredClaim` markers — the
+    watcher only flips `⏳ → ✅` when the marker's evidence offset postdates the
+    turn-start offset (`evidence_offset >= turn_start_offset`), so a synthetic
+    turn-start whose marker reads a prior-turn terminal remnant no longer completes
+    prematurely — which pushed the reconciler surface over the 1000-line giant
+    threshold, so this file is now a registered giant (decompose_issue #4175).
+    Bugfix / anchor-completion correctness only; split the reconcilers from the
+    Abort/DeferredClaim disposition helpers before adding new marker behavior).
   - `src/services/discord/tui_direct_pending_start.rs` (1125 production lines;
     the deferred TUI-direct synthetic turn-start path — the pending-start claim
     queue, the no-evict promote of a stalled inflight, and the deferred-claim

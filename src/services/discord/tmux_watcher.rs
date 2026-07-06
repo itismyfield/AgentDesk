@@ -7,6 +7,10 @@ use crate::services::discord::replace_outcome_policy::{
     watcher_rewind_attempt_disposition, watcher_send_failure_retry_plan,
 };
 
+#[path = "tmux_watcher/entry.rs"]
+mod entry;
+pub(in crate::services::discord) use self::entry::tmux_output_watcher;
+
 #[path = "tmux_watcher/liveness.rs"]
 mod liveness;
 
@@ -117,6 +121,9 @@ mod terminal_readiness;
 #[path = "tmux_watcher/utf8_chunk_decoder.rs"]
 mod utf8_chunk_decoder;
 
+#[path = "tmux_watcher/jsonl_rotation.rs"]
+mod jsonl_rotation;
+
 #[path = "tmux_watcher/stall_exit.rs"]
 mod stall_exit;
 
@@ -124,6 +131,7 @@ pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
 use self::completion_producer::*;
+use self::jsonl_rotation::*;
 use self::placeholder_reclaim::*;
 use self::session_bound_ack::*;
 use self::single_message_footer::*;
@@ -131,38 +139,6 @@ use self::stall_exit::*;
 use self::supervisor_relay::*;
 use self::terminal_readiness::*;
 use self::utf8_chunk_decoder::*;
-
-pub(in crate::services::discord) async fn tmux_output_watcher(
-    channel_id: ChannelId,
-    http: Arc<serenity::Http>,
-    shared: Arc<SharedData>,
-    output_path: String,
-    tmux_session_name: String,
-    initial_offset: u64,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
-    paused: Arc<std::sync::atomic::AtomicBool>,
-    resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
-    pause_epoch: Arc<std::sync::atomic::AtomicU64>,
-    turn_delivered: Arc<std::sync::atomic::AtomicBool>,
-    last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
-) {
-    tmux_output_watcher_with_restore(
-        channel_id,
-        http,
-        shared,
-        output_path,
-        tmux_session_name,
-        initial_offset,
-        cancel,
-        paused,
-        resume_offset,
-        pause_epoch,
-        turn_delivered,
-        last_heartbeat_ts_ms,
-        None,
-    )
-    .await;
-}
 
 /// Background watcher variant used by restart recovery to continue editing an
 /// existing streaming placeholder instead of creating a new one.
@@ -324,12 +300,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             "watcher_start",
         );
     }
-    // Rolling-size-cap rotation state. The watcher loop spins predictably
-    // (~250ms sleeps) so a mod-N gate on an iteration counter gives a
-    // regular-ish cadence for the size check without hitting the fs every
-    // spin. See issue #892.
     let mut rotation_tick: u32 = 0;
-    const ROTATION_CHECK_EVERY: u32 = 120; // ~30s at 250ms base cadence
 
     // #2441 (H1) — spawn a single `notify`-crate-backed JsonlWatcher
     // keyed on the session output path. Its `Notify` is awaited alongside
@@ -457,64 +428,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
 
-        // Periodic size-cap rotation for the session jsonl. Running this off
-        // the watcher loop keeps the wrapper child process simple while
-        // still enforcing a 20 MB soft cap (see issue #892).
         rotation_tick = rotation_tick.wrapping_add(1);
-
-        if rotation_tick % ROTATION_CHECK_EVERY == 0 {
-            let path = output_path.clone();
-            let session = tmux_session_name.clone();
-            let prev_offset = current_offset;
-            let rotation = tokio::task::spawn_blocking(move || {
-                crate::services::tmux_common::truncate_jsonl_head_safe(
-                    &path,
-                    crate::services::tmux_common::JSONL_SIZE_CAP_BYTES,
-                    crate::services::tmux_common::JSONL_TARGET_KEEP_BYTES,
-                )
-                .map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("join error: {e}")));
-            match rotation {
-                Ok(Some(new_size)) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ✂ rotated jsonl for {} — new size {} bytes (was beyond cap)",
-                        session,
-                        new_size
-                    );
-                    // File was rewritten from the head: reset reader offset
-                    // so the watcher doesn't seek past the new EOF. Also
-                    // reset the duplicate-relay guard.
-                    if prev_offset > new_size {
-                        current_offset = new_size;
-                        last_relayed_offset = Some(new_size);
-                        // #1270 codex P2: snapshot the current `.generation`
-                        // mtime alongside the local offset so a later regression
-                        // check has a real baseline. Without this, the local
-                        // mtime would still be `None` after a normal relay path
-                        // and any subsequent regression would misclassify
-                        // same-wrapper rotation as fresh-respawn and clear the
-                        // local offset to None — re-relaying surviving content.
-                        last_observed_generation_mtime_ns =
-                            Some(read_generation_file_mtime_ns(&tmux_session_name));
-                        reset_stale_relay_watermark_if_output_regressed(
-                            &shared,
-                            channel_id,
-                            &tmux_session_name,
-                            new_size,
-                            "jsonl_rotation",
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!("  [{ts}] ⚠ jsonl rotation failed for {}: {}", session, e);
-                }
-            }
-        }
+        (
+            current_offset,
+            last_relayed_offset,
+            last_observed_generation_mtime_ns,
+        ) = rotate_watcher_jsonl_if_due(
+            rotation_tick,
+            &output_path,
+            &tmux_session_name,
+            current_offset,
+            last_relayed_offset,
+            last_observed_generation_mtime_ns,
+            &shared,
+            channel_id,
+        )
+        .await;
 
         // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
         let epoch_snapshot = pause_epoch.load(Ordering::Relaxed);

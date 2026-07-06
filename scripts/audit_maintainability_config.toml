@@ -6,6 +6,12 @@
 [namespace_size_caps]
 "src/services/discord/commands/inspect/**" = 700
 "src/db/prompt_manifests/**" = 700
+# 2026-07-06 #4091 admission: +3 for the crate-wide env-lock test-isolation sweep —
+# race_loss.rs's `#[cfg(test)]` module gained `shared_test_env_lock()` acquisition +
+# `#[allow(clippy::await_holding_lock)]` to serialize AGENTDESK_ROOT_DIR mutation.
+# Test-harness lines only; production logic unchanged. More specific than the `**`
+# glob below, so it must precede it for fnmatch first-match precedence.
+"src/services/discord/router/message_handler/intake_turn/race_loss.rs" = 703
 # #3837: child modules carved out of the intake_turn.rs giant via behavior-
 # preserving decomposition (voice_intake / race_loss / turn_watchdog). Cap holds
 # the new surface under the 700-line namespace ceiling.
