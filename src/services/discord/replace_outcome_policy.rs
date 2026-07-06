@@ -152,6 +152,10 @@ fn contains_status_code_token(message: &str, code: &str) -> bool {
     })
 }
 
+fn contains_4xx_status_code_token(message: &str) -> bool {
+    (400..=499).any(|status| contains_status_code_token(message, &status.to_string()))
+}
+
 /// Pure string classifier for flattened send errors. Serenity often drops the
 /// HTTP status from Display, so match the durable Discord error text first.
 /// Unknown flattened strings stay retry-safe: they are ambiguous transport
@@ -206,7 +210,6 @@ pub(in crate::services::discord) fn classify_watcher_send_failure_message(
     {
         return WatcherSendFailureClass::Transient;
     }
-    const PERMANENT_STATUS_CODES: &[&str] = &["400", "401", "403", "404", "405", "410", "422"];
     const PERMANENT_PATTERNS: &[&str] = &[
         "unknown channel",
         "unknown message",
@@ -223,9 +226,7 @@ pub(in crate::services::discord) fn classify_watcher_send_failure_message(
     if PERMANENT_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
-        || PERMANENT_STATUS_CODES
-            .iter()
-            .any(|code| contains_status_code_token(&lower, code))
+        || contains_4xx_status_code_token(&lower)
     {
         return WatcherSendFailureClass::Permanent;
     }
@@ -508,6 +509,24 @@ mod a0_replace_outcome_policy_tests {
             classify_watcher_send_failure_message("previous chunk cleanup incomplete"),
             WatcherSendFailureClass::RollbackIncomplete
         );
+    }
+
+    #[test]
+    fn watcher_send_failure_message_classifies_flattened_4xx_status_tokens_permanent_4115() {
+        for message in ["413 Payload Too Large", "409 Conflict"] {
+            assert_eq!(
+                classify_watcher_send_failure_message(message),
+                WatcherSendFailureClass::Permanent,
+                "{message:?} should not rewind"
+            );
+        }
+        for message in ["429", "503", "unclassified flattened watcher send error"] {
+            assert_eq!(
+                classify_watcher_send_failure_message(message),
+                WatcherSendFailureClass::Transient,
+                "{message:?} should rewind"
+            );
+        }
     }
 
     #[test]
