@@ -370,9 +370,11 @@ fn capture_offset_advancing(
         },
     );
     // Protect only a proven-alive turn, and only within the grace window after
-    // its capture last advanced. Never-advanced turns fall through to the
+    // its capture last advanced: the advancing tick plus up to TWO consecutive
+    // non-advancing ticks (ticks 1 and 2), losing protection on the third
+    // consecutive non-advancing tick. Never-advanced turns fall through to the
     // watchdog's other force-clean signals (pre-#4178 behavior).
-    observed_advancing || (observed_advancing_before && consecutive_non_advancing_ticks < 2)
+    observed_advancing || (observed_advancing_before && consecutive_non_advancing_ticks < 3)
 }
 
 pub(super) fn clear_stall_watchdog_liveness_state(
@@ -1079,14 +1081,17 @@ mod tests {
         assert!(!capture_offset_advancing(&key, Some(100), now + 30));
         // Capture grew ⇒ proven alive ⇒ protect, and reset the grace counter.
         assert!(capture_offset_advancing(&key, Some(200), now + 60));
-        // Frozen for one tick after proving alive ⇒ still within grace ⇒ protect.
+        // Frozen for the first tick after proving alive ⇒ within grace ⇒ protect.
         assert!(capture_offset_advancing(&key, Some(200), now + 90));
-        // Frozen for a second consecutive tick ⇒ grace exhausted ⇒ allow clean.
-        assert!(!capture_offset_advancing(&key, Some(200), now + 120));
+        // Frozen for a second consecutive tick ⇒ still within the two-tick grace.
+        assert!(capture_offset_advancing(&key, Some(200), now + 120));
+        // Frozen for a third consecutive tick ⇒ grace exhausted ⇒ allow clean.
+        assert!(!capture_offset_advancing(&key, Some(200), now + 150));
         // A single fresh advance re-arms the full grace window.
-        assert!(capture_offset_advancing(&key, Some(201), now + 150));
         assert!(capture_offset_advancing(&key, Some(201), now + 180));
-        assert!(!capture_offset_advancing(&key, Some(201), now + 210));
+        assert!(capture_offset_advancing(&key, Some(201), now + 210));
+        assert!(capture_offset_advancing(&key, Some(201), now + 240));
+        assert!(!capture_offset_advancing(&key, Some(201), now + 270));
 
         CAPTURE_OFFSET_WATCHDOG_STATE.remove(&key);
     }
