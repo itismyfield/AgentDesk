@@ -265,11 +265,15 @@ impl VoicePcmHarness {
 }
 
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_pcm_harness_unattended_e2e() {
     let _guard = observability::test_runtime_lock();
     observability::reset_for_tests();
     observability::init_observability(None);
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let transcripts = [
         "오늘 일정 알려줘",
@@ -1222,11 +1226,15 @@ fn assert_no_play_context(harness: &VoicePcmHarness, context: &str) {
 // P1: an utterance that resolves to a real Target emits the deterministic
 // Phase-1 intake chime BEFORE start_voice_turn runs.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_fires_before_turn_start() {
     let _guard = observability::test_runtime_lock();
     observability::reset_for_tests();
     observability::init_observability(None);
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["오늘 일정 알려줘"]).await;
     harness.clear_play_requests();
@@ -1254,11 +1262,15 @@ async fn voice_intake_chime_fires_before_turn_start() {
 // intake chime is still recorded because it fires upstream of every
 // VoiceTurnStartFailed exit and the DuplicateSuppressed drop.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_fires_even_when_turn_start_fails() {
     let _guard = observability::test_runtime_lock();
     observability::reset_for_tests();
     observability::init_observability(None);
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["로그 확인해줘"]).await;
     harness.clear_play_requests();
@@ -1289,11 +1301,15 @@ async fn voice_intake_chime_fires_even_when_turn_start_fails() {
 // P1 negative: an empty / whitespace-only transcript is dropped before the
 // Target resolution, so NO intake chime is emitted.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_absent_on_empty_transcript() {
     let _guard = observability::test_runtime_lock();
     observability::reset_for_tests();
     observability::init_observability(None);
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["   "]).await;
     harness.clear_play_requests();
@@ -1312,11 +1328,15 @@ async fn voice_intake_chime_absent_on_empty_transcript() {
 // P1 negative: a barge-in routed to handle_processing_transcript returns before
 // the Target resolution, so NO intake chime is emitted.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_absent_on_active_turn_barge_in() {
     let _guard = observability::test_runtime_lock();
     observability::reset_for_tests();
     observability::init_observability(None);
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["멈춰"]).await;
     harness.clear_play_requests();
@@ -1359,11 +1379,15 @@ async fn voice_intake_chime_absent_on_active_turn_barge_in() {
 // Regression: the foreground announcement path no longer emits its own chime, so
 // a normal successful turn yields exactly ONE intake chime (not two).
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_foreground_path_does_not_double_chime() {
     let _guard = observability::test_runtime_lock();
     observability::reset_for_tests();
     observability::init_observability(None);
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["오늘 일정 알려줘"]).await;
     harness.clear_play_requests();
@@ -1402,8 +1426,12 @@ async fn voice_foreground_path_does_not_double_chime() {
 // P4: the turn-DONE branch plays the distinct descending done chime, not the
 // rising processing chime.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_turn_done_plays_distinct_done_chime() {
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let harness = VoicePcmHarness::new(&[]).await;
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     harness
@@ -1434,12 +1462,16 @@ async fn voice_turn_done_plays_distinct_done_chime() {
 // P4: done_chime_path resolves to a non-empty WAV at a file name distinct from
 // the processing chime.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn done_chime_path_is_a_distinct_nonempty_wav() {
     assert_ne!(
         DONE_CHIME_FILE_NAME, PROCESSING_CHIME_FILE_NAME,
         "done and processing chimes must use distinct asset file names"
     );
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&[]).await;
     let done_path = harness

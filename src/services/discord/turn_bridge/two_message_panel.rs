@@ -202,12 +202,17 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
             updated.current_msg_id = new_answer_msg_id.get();
             let next_generation = updated.status_panel_generation.saturating_add(1);
             updated.status_panel_generation = next_generation;
-            if let Err(error) = crate::services::discord::inflight::save_inflight_state(&updated) {
+            let save_outcome =
+                crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                    &updated,
+                    "turn_bridge::two_message_panel::reanchor",
+                );
+            if save_outcome != crate::services::discord::inflight::GuardedSaveOutcome::Saved {
                 tracing::warn!(
-                    "[turn_bridge] #3805 P2 failed to persist re-anchored two-message status panel {} in channel {}: {}",
+                    "[turn_bridge] #3805 P2 skipped/failed to persist re-anchored two-message status panel {} in channel {}: {:?}",
                     new_panel_id,
                     channel_id,
-                    error
+                    save_outcome
                 );
                 if gateway
                     .delete_message(channel_id, new_panel_id)
@@ -620,6 +625,10 @@ mod tests {
         let mut status_panel_msg_id: Option<MessageId> = Some(MessageId::new(old_panel));
         let mut generation = inflight.status_panel_generation;
         let mut last_status_panel_text = "stale old panel text".to_string();
+        // #4091 r6: the reanchor persist is identity-guarded (reload-and-match);
+        // the durable row must exist or the guarded save skips as Missing.
+        crate::services::discord::inflight::save_inflight_state(&inflight)
+            .expect("persist inflight row for guarded reanchor save");
 
         let reanchored = reanchor_bridge_two_message_status_panel_below_answer(
             &gateway,

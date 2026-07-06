@@ -487,7 +487,7 @@
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 821 | 307 | 514 |  |
 | `services::discord::inflight::ownership_ops` | `src/services/discord/inflight/ownership_ops.rs` | 329 | 329 | 0 |  |
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 796 | 796 | 0 |  |
-| `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 794 | 627 | 167 |  |
+| `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 961 | 730 | 231 |  |
 | `services::discord::inflight::store` | `src/services/discord/inflight/store.rs` | 350 | 350 | 0 |  |
 | `services::discord::inflight::watcher_state` | `src/services/discord/inflight/watcher_state.rs` | 365 | 365 | 0 |  |
 | `services::discord::inflight_heartbeat_sweeper` | `src/services/discord/inflight_heartbeat_sweeper.rs` | 299 | 264 | 35 |  |
@@ -562,14 +562,14 @@
 | `services::discord::recovery_engine::output_path_detect` | `src/services/discord/recovery_engine/output_path_detect.rs` | 177 | 177 | 0 |  |
 | `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 210 | 138 | 72 |  |
 | `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 2091 | 972 | 1119 |  |
-| `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2335 | 2335 | 0 | giant-file |
+| `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2334 | 2334 | 0 | giant-file |
 | `services::discord::recovery_engine::routing_orphan` | `src/services/discord/recovery_engine/routing_orphan.rs` | 218 | 146 | 72 |  |
 | `services::discord::recovery_engine::runtime` | `src/services/discord/recovery_engine/runtime.rs` | 341 | 137 | 204 |  |
 | `services::discord::recovery_engine::state_extractors` | `src/services/discord/recovery_engine/state_extractors.rs` | 220 | 220 | 0 |  |
 | `services::discord::recovery_engine::status_panel` | `src/services/discord/recovery_engine/status_panel.rs` | 71 | 55 | 16 |  |
 | `services::discord::recovery_engine::status_panel_completion_producer` | `src/services/discord/recovery_engine/status_panel_completion_producer.rs` | 64 | 64 | 0 |  |
 | `services::discord::recovery_engine::terminal_text_idempotency` | `src/services/discord/recovery_engine/terminal_text_idempotency.rs` | 863 | 431 | 432 |  |
-| `services::discord::recovery_engine::terminal_watcher` | `src/services/discord/recovery_engine/terminal_watcher.rs` | 228 | 148 | 80 |  |
+| `services::discord::recovery_engine::terminal_watcher` | `src/services/discord/recovery_engine/terminal_watcher.rs` | 306 | 168 | 138 |  |
 | `services::discord::recovery_paths` | `src/services/discord/recovery_paths/mod.rs` | 36 | 36 | 0 |  |
 | `services::discord::recovery_paths::controller_cutover` | `src/services/discord/recovery_paths/controller_cutover.rs` | 648 | 278 | 370 |  |
 | `services::discord::recovery_paths::restart` | `src/services/discord/recovery_paths/restart.rs` | 1341 | 863 | 478 |  |
@@ -735,7 +735,7 @@
 | `services::discord::turn_bridge::recall_feedback` | `src/services/discord/turn_bridge/recall_feedback.rs` | 493 | 475 | 18 |  |
 | `services::discord::turn_bridge::recovery_text` | `src/services/discord/turn_bridge/recovery_text.rs` | 654 | 511 | 143 |  |
 | `services::discord::turn_bridge::response_delivery` | `src/services/discord/turn_bridge/response_delivery.rs` | 139 | 75 | 64 |  |
-| `services::discord::turn_bridge::retry_state` | `src/services/discord/turn_bridge/retry_state.rs` | 746 | 381 | 365 |  |
+| `services::discord::turn_bridge::retry_state` | `src/services/discord/turn_bridge/retry_state.rs` | 756 | 384 | 372 |  |
 | `services::discord::turn_bridge::single_message_footer` | `src/services/discord/turn_bridge/single_message_footer.rs` | 825 | 511 | 314 |  |
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 80 | 80 | 0 |  |
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 301 | 144 | 157 |  |
@@ -750,9 +750,9 @@
 | `services::discord::turn_bridge::tmux_runtime::process_backend_cancel` | `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs` | 156 | 156 | 0 |  |
 | `services::discord::turn_bridge::tmux_runtime::process_table` | `src/services/discord/turn_bridge/tmux_runtime/process_table.rs` | 370 | 370 | 0 |  |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 419 | 348 | 71 |  |
-| `services::discord::turn_bridge::two_message_panel` | `src/services/discord/turn_bridge/two_message_panel.rs` | 791 | 265 | 526 |  |
+| `services::discord::turn_bridge::two_message_panel` | `src/services/discord/turn_bridge/two_message_panel.rs` | 800 | 270 | 530 |  |
 | `services::discord::turn_bridge::voice_completion` | `src/services/discord/turn_bridge/voice_completion.rs` | 385 | 385 | 0 |  |
-| `services::discord::turn_bridge::watcher_handoff` | `src/services/discord/turn_bridge/watcher_handoff.rs` | 729 | 526 | 203 |  |
+| `services::discord::turn_bridge::watcher_handoff` | `src/services/discord/turn_bridge/watcher_handoff.rs` | 735 | 532 | 203 |  |
 | `services::discord::turn_bridge::watcher_orphan_cleanup` | `src/services/discord/turn_bridge/watcher_orphan_cleanup.rs` | 475 | 233 | 242 |  |
 | `services::discord::turn_completion_events` | `src/services/discord/turn_completion_events.rs` | 85 | 85 | 0 |  |
 | `services::discord::turn_end_wip_warning` | `src/services/discord/turn_end_wip_warning.rs` | 344 | 145 | 199 |  |
@@ -929,7 +929,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 258 | 247 | 11 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 769 | 726 | 43 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 100 | 100 | 0 |  |
-| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4190 | 1847 | 2343 | giant-file |
+| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4192 | 1849 | 2343 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2031 | 646 | 1385 |  |
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |

@@ -60,6 +60,8 @@ const RELAYED_ENTRY_ID_RING_CAP: usize = 512;
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
     LazyLock::new(|| Mutex::new(TuiPromptDedupeState::default()));
 #[cfg(test)]
+// Tests that also mutate process env must acquire `shared_test_env_lock()` before
+// this lock. Keep that env -> dedupe order globally to avoid AB/BA deadlocks.
 pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
     LazyLock::new(|| broadcast::channel(OBSERVED_PROMPT_BUFFER).0);

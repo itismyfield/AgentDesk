@@ -1063,8 +1063,12 @@ mod presleep_tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn backstop_rearms_after_cleanup_retry_gate_then_next_fire_starts_queue() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
@@ -1229,8 +1233,12 @@ mod presleep_tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn backstop_no_rearm_when_fire_observes_real_foreground_turn() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
@@ -1354,8 +1362,12 @@ mod presleep_tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn race_loss_requeue_does_not_rekick_until_holding_turn_completes_4078() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
@@ -1501,8 +1513,12 @@ mod presleep_tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn hosted_tui_followup_busy_retry_release_then_enqueue_redelivers_active_message_4107() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
@@ -1595,8 +1611,12 @@ mod presleep_tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn race_loss_requeue_idle_recheck_kicks_after_missed_completion_4078() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };

@@ -7,6 +7,7 @@
 //! stable. Moved verbatim except for module-local path qualification required by
 //! the new child-module boundary.
 
+use super::terminal_watcher::restart_report_watcher_start;
 use super::*;
 
 /// Retry-aware tmux session check for recovery after dcserver restart.
@@ -735,11 +736,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
                 // — the session could die in the ~50s gap and lose the response.
                 if let Some(ref tmux_session_name) = tmux_name {
-                    let output_path =
-                        crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
-                    if std::fs::metadata(&output_path).is_ok() {
-                        let (initial_offset, current_len, truncated) =
-                            recovery_watcher_start_offset_for_state(&output_path, &state);
+                    if let Some((output_path, initial_offset, current_len, truncated)) =
+                        restart_report_watcher_start(tmux_session_name, &state)
+                    {
                         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));

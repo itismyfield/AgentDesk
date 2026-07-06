@@ -3522,10 +3522,10 @@ mod tests {
         // (`record_lease` → `external_input_relay_lease`); hold `TEST_LOCK` so a
         // concurrent dedupe-state test cannot wipe the lease mid-claim and turn
         // the watcher-owned marker into a no-op (cross-lock race, #3540).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3599,10 +3599,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3647,10 +3647,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3710,10 +3710,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();
@@ -3744,10 +3744,10 @@ mod tests {
         let _guard = worker_test_lock();
         // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
         // process-global relay lease (#3540 cross-lock race guard).
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _env_lock = crate::config::shared_test_env_lock()
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let _rig = DeferredClaimMarkerRig::new();

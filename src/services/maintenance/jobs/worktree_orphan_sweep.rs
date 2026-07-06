@@ -1610,12 +1610,9 @@ mod managed_root_recursion_tests {
     use crate::services::git::GitCommand;
     use std::collections::HashSet;
     use std::path::Path;
-    use std::sync::Mutex;
-
-    /// `cleanup_managed_worktree` resolves the managed root via the PROCESS-GLOBAL
-    /// `AGENTDESK_ROOT_DIR` env var (`managed_worktrees_root`), so the tests that
-    /// drive it must serialize their env-var setup to avoid cross-test races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // `cleanup_managed_worktree` resolves the managed root via the PROCESS-GLOBAL
+    // `AGENTDESK_ROOT_DIR` env var (`managed_worktrees_root`), so the tests that
+    // drive it must serialize against every env-mutating test in the crate.
 
     /// Run `git <args>` in `repo` via the centralised `GitCommand` helper (the
     /// audit gate forbids raw `Command::new("git")` outside `src/services/git`).
@@ -1686,7 +1683,9 @@ mod managed_root_recursion_tests {
     /// `is_managed_worktree_path` recognizes the worktree) under the env lock,
     /// then run `body` with the lock still held.
     fn with_managed_root_env<R>(body: impl FnOnce(&Path, &Path, &Path, &Path) -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         // managed_worktrees_root(repo) = $AGENTDESK_ROOT_DIR/worktrees/<repo_name>.
         // Point the runtime root at tmp so it equals our on-disk managed root.

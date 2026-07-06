@@ -1656,8 +1656,12 @@ mod tests {
             );
         }
 
+        #[allow(clippy::await_holding_lock)]
         #[tokio::test(flavor = "current_thread")]
         async fn bridge_long_chunks_controller_delivered_deletes_anchor_and_advances() {
+            let _env_lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let _root = runtime_root_guard();
             let gw = long_gateway(true, true);
             let mut locals = Locals::default();
@@ -1686,8 +1690,12 @@ mod tests {
             );
         }
 
+        #[allow(clippy::await_holding_lock)]
         #[tokio::test(flavor = "current_thread")]
         async fn bridge_long_chunks_delete_failure_still_commits() {
+            let _env_lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let _root = runtime_root_guard();
             let gw = long_gateway(true, false);
             let mut locals = Locals::default();

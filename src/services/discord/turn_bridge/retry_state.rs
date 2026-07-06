@@ -325,7 +325,10 @@ pub(super) async fn reset_session_for_auto_retry(
     reason: &str,
 ) {
     clear_local_session_state(new_session_id, new_raw_provider_session_id, inflight_state);
-    let _ = save_inflight_state(inflight_state);
+    let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+        inflight_state,
+        "turn_bridge::retry_state::reset_session_for_auto_retry",
+    );
 
     let stale_sid = {
         let mut data = shared.core.lock().await;
@@ -394,6 +397,10 @@ mod tests {
         }
     }
 
+    // #4091 r6: env-var mutation only. Every caller ALREADY holds
+    // `shared_test_env_lock()` (bound as `_env_lock`) before calling this, so
+    // acquiring the lock here would self-deadlock the non-reentrant
+    // std::sync::Mutex. Serialization is the caller's `_env_lock` guard.
     fn set_runtime_root(path: &std::path::Path) -> EnvReset {
         let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
