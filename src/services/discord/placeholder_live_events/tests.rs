@@ -6546,8 +6546,83 @@ fn stuck_background_task_slot_dropped_on_turn_boundary_reconciliation() {
     );
 }
 
+// #4177: the turn-boundary reconciliation (the production call site) drops the
+// stuck background subagent slot after the TTL sweep marks it terminal, while a
+// fresh background subagent survives as a residual.
+#[test]
+fn stuck_background_subagent_slot_dropped_on_turn_boundary_reconciliation() {
+    use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_004);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("stuck subagent".to_string()),
+            tool_use_id: Some("toolu_stuck_subagent_boundary".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("fresh subagent".to_string()),
+            tool_use_id: Some("toolu_fresh_subagent_boundary".to_string()),
+            background: true,
+        },
+    );
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stale_at = std::time::Instant::now()
+            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
+            .expect("monotonic clock far enough past origin");
+        guard
+            .subagents
+            .iter_mut()
+            .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_stuck_subagent_boundary"))
+            .expect("stuck subagent slot")
+            .started_at = stale_at;
+    }
+
+    // Turn boundary: the production reconciliation site.
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("residual state survives because the fresh subagent is preserved");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        guard
+            .subagents
+            .iter()
+            .all(|slot| slot.tool_use_id.as_deref() != Some("toolu_stuck_subagent_boundary")),
+        "stuck subagent slot must be dropped at the turn boundary: {:?}",
+        guard.subagents
+    );
+    assert!(
+        guard
+            .subagents
+            .iter()
+            .any(|slot| slot.tool_use_id.as_deref() == Some("toolu_fresh_subagent_boundary")),
+        "fresh background subagent slot must survive as a residual: {:?}",
+        guard.subagents
+    );
+}
+
 // #4177: a background subagent slot stuck past the TTL is force-aborted to a
-// terminal failed state, then normal delivered-terminal eviction can drop it.
+// terminal failed state, then the reset retain filter drops it before footer
+// delivery.
 #[test]
 fn stuck_background_subagent_slot_force_aborted_and_evicted() {
     use super::status_panel::force_abort_stuck_subagent_slots;
@@ -6594,30 +6669,18 @@ fn stuck_background_subagent_slot_force_aborted_and_evicted() {
                 .and_then(|slot| slot.finished),
             Some(false)
         );
+
+        let has_residuals = guard.reset_turn_content_preserving_unfinished_footer_residuals();
+        assert!(
+            !has_residuals,
+            "terminal stuck subagent must not count as a residual"
+        );
+        assert!(
+            guard.subagents.is_empty(),
+            "swept terminal subagent must be dropped by the reset retain filter: {:?}",
+            guard.subagents
+        );
     }
-
-    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "*");
-    assert!(
-        delivered
-            .delivered_terminal_ids
-            .contains(&subagent_id("toolu_stuck_subagent")),
-        "swept subagent must become terminal and deliverable: {:?}",
-        delivered.delivered_terminal_ids
-    );
-    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
-
-    let entry = events
-        .status_by_channel
-        .get(&channel_id)
-        .expect("status panel state remains after eviction");
-    let guard = entry
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert!(
-        guard.subagents.is_empty(),
-        "swept terminal subagent must be evicted: {:?}",
-        guard.subagents
-    );
 }
 
 // #4177: a fresh unfinished background subagent remains eligible to survive the
