@@ -881,6 +881,16 @@
     regression tests, which pushed the production surface over the 1000-line
     giant-file threshold, so this file is now a registered giant. Bugfix /
     queue-safety only; split before adding new pending-start behavior).
+  - `src/services/discord/tmux_placeholder_suppression.rs` (1092 production lines;
+    the placeholder edit/delete suppression decision surface. #4150 r4 added the
+    two-signal anchor check (registry tombstone fused with the live inflight row),
+    the delivered-elsewhere current-generation frontier probe with
+    same-coordinate-space proof (durable frontier mirrored by the live in-memory
+    frontier + anchor end <= output EOF), and watcher-vs-cross-actor author
+    detection producing a 9-row decision table, which pushed the production surface
+    over the 1000-line giant threshold, so this file is now a registered giant
+    (decompose_issue #4176). Bugfix / delete-gate correctness only; split the
+    decision logic from the evidence/edit helpers before adding new behavior).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
