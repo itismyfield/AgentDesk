@@ -833,6 +833,15 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
         return;
     }
 
+    // #4156: phase-1 CONSUMES (removes) each channel's pending retry entry
+    // before scanning, so by the time phase-2 runs later in the same cycle the
+    // Deferred budget no longer lives in the pending map. Stash the consumed
+    // state per channel here so phase-2's re-arm can recover the accumulated
+    // budget instead of resetting it to 1 (which would leave phase-2-origin
+    // defers in an unbounded, unlogged re-arm cycle).
+    let mut consumed_retry_states_this_cycle: HashMap<ChannelId, CatchUpRetryState> =
+        HashMap::new();
+
     // Pace successive per-channel REST scans so a many-channel sweep doesn't
     // fire as one tight burst (see `catch_up_scan_pace`). The first eligible
     // channel runs immediately; subsequent scans wait the configured gap.
@@ -863,6 +872,12 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
             CatchUpRetryScanDecision::Proceed(retry_state) => retry_state,
             CatchUpRetryScanDecision::SkipConsumed => continue,
         };
+        // #4156: remember the budget this scan consumed so phase-2 can carry it
+        // forward even when phase-1 does not itself re-arm (which would leave the
+        // pending map empty by phase-2 time).
+        if let Some(state) = retry_state {
+            consumed_retry_states_this_cycle.insert(channel_id, state);
+        }
         paced_scan = true;
         let retry_checkpoint = retry_state.map(|state| state.checkpoint);
         let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|entry| *entry);
@@ -1420,9 +1435,10 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                             shared,
                             channel_id,
                             retry_after,
-                            // phase-2 does not consume the pending entry, so the
-                            // Deferred budget is read from the map inside the helper.
-                            None,
+                            // #4156: recover the budget phase-1 consumed this cycle
+                            // (the pending map entry is gone by now); the helper
+                            // merges it with any surviving map entry (most-exhausted).
+                            consumed_retry_states_this_cycle.get(&channel_id).copied(),
                         );
                         stats.deferred += 1;
                         break;
@@ -1435,8 +1451,12 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                         phase2_checkpoint,
                         last_bot_response_id,
                     );
-                    phase2_retry_after =
-                        rearm_catch_up_retry_after_defer(shared, channel_id, retry_after, None);
+                    phase2_retry_after = rearm_catch_up_retry_after_defer(
+                        shared,
+                        channel_id,
+                        retry_after,
+                        consumed_retry_states_this_cycle.get(&channel_id).copied(),
+                    );
                     stats.deferred += 1;
                     break;
                 }
@@ -2499,6 +2519,53 @@ mod catch_up_recovery_tests {
             .expect("re-arm below cap should stay pending");
         assert_eq!(pending.deferred_rearms, CATCH_UP_RETRY_DEFERRED_REARM_LIMIT);
         assert_eq!(pending.armed_at, armed_at);
+    }
+
+    // #4156 (opus review): phase-1 CONSUMES the pending entry before phase-2
+    // runs, so phase-2 must recover the Deferred budget from the state phase-1
+    // consumed this cycle (`threaded_prior`) even when the pending map is empty
+    // — otherwise a phase-2-origin defer would reset the budget to 1 forever and
+    // the cap would never bind. This asserts the budget still climbs to the cap
+    // through the threaded path with NO surviving map entry.
+    #[test]
+    fn deferred_rearm_accumulates_via_threaded_prior_when_map_entry_absent() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_156_222);
+        let checkpoint = 1504812094456070130;
+        let armed_at = Instant::now();
+
+        // Simulate phase-2 re-arming with the budget phase-1 consumed this cycle
+        // while the pending map is empty (phase-1 removed it and did not re-arm).
+        let mut budget = 2u8;
+        loop {
+            let consumed = CatchUpRetryState {
+                checkpoint,
+                fetch_failures: 0,
+                deferred_rearms: budget,
+                armed_at,
+            };
+            // The pending map is empty each iteration (phase-1 consumed it).
+            shared.catch_up_retry_pending.remove(&channel_id);
+            let result =
+                rearm_catch_up_retry_after_defer(&shared, channel_id, checkpoint, Some(consumed));
+            if budget >= CATCH_UP_RETRY_DEFERRED_REARM_LIMIT {
+                assert!(
+                    result.is_none(),
+                    "at/over the cap the threaded path must give up, not reset to 1"
+                );
+                assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+                break;
+            }
+            assert_eq!(result, Some(checkpoint));
+            let pending = *shared
+                .catch_up_retry_pending
+                .get(&channel_id)
+                .expect("below cap should re-arm");
+            // Budget climbs by exactly one — never resets to 1.
+            assert_eq!(pending.deferred_rearms, budget + 1);
+            budget += 1;
+        }
+        assert_eq!(budget, CATCH_UP_RETRY_DEFERRED_REARM_LIMIT);
     }
 
     #[test]
