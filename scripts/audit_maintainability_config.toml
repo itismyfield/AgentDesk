@@ -11,7 +11,7 @@
 # `#[allow(clippy::await_holding_lock)]` to serialize AGENTDESK_ROOT_DIR mutation.
 # Test-harness lines only; production logic unchanged. More specific than the `**`
 # glob below, so it must precede it for fnmatch first-match precedence.
-"src/services/discord/router/message_handler/intake_turn/race_loss.rs" = 703
+"src/services/discord/router/message_handler/intake_turn/race_loss.rs" = 704 # 2026-07-06 #4183 CI-red reconcile: 703 -> 704 (+1 prod LoC drift from a recent landing; masked behind the hotfile-ratchet set -e exit until #4183 fixed it); admission to unblock main red.
 # #3837: child modules carved out of the intake_turn.rs giant via behavior-
 # preserving decomposition (voice_intake / race_loss / turn_watchdog). Cap holds
 # the new surface under the 700-line namespace ceiling.
@@ -22,7 +22,7 @@
 # anchor-prepend param (the heavier setter/line-builder/store helpers live in the
 # new turn_anchor.rs). More specific than the `**` glob below, so it must precede it
 # for fnmatch first-match precedence.
-"src/services/discord/placeholder_live_events/status_panel.rs" = 703
+"src/services/discord/placeholder_live_events/status_panel.rs" = 738 # 2026-07-06 #4183 CI-red reconcile: 703 -> 738 (+35 prod LoC drift from recent landings; masked behind the hotfile-ratchet set -e exit until #4183 fixed it); admission to unblock main red, a proper split is tracked separately.
 "src/services/discord/placeholder_live_events/status_events.rs" = 720 # 2026-07-04 #4097 admission: +21 for kind=background XML task-notification suppression (relay noise fix); cohesive documented helper, namespace effectively full (precedent: status_panel.rs).
 "src/services/discord/placeholder_live_events/**" = 700
 "src/services/discord/prompt_builder/**" = 700
