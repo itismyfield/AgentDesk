@@ -375,6 +375,46 @@ pub(super) fn guarded_nonterminal_delete_decision(
     }
 }
 
+/// #4158 hardening — the terminal-committed cleanup gate.
+///
+/// The SkipAlreadyCommitted arm runs only AFTER the offset authority proved a
+/// terminal delivery committed this range, so a LIVE placeholder there MIGHT be
+/// the very message the session-bound sink delivered into (the sink's
+/// `PlaceholderEdit(current_msg_id)` route, `session_relay_sink.rs`). The base
+/// decision table's final `NotFound + body-absent → Delete` fallthrough is
+/// correct for the no-response arm (nothing was delivered, so the placeholder is
+/// disposable chrome), but in the terminal-committed arm that same row would
+/// delete a sink-delivered body whenever no positive delivered-elsewhere anchor
+/// exists — e.g. the durable delivered-frontier shadow is disabled
+/// (`AGENTDESK_DELIVERY_RECORD_SHADOW` default OFF), so
+/// `current_generation_delivered_anchor` returns `None` → `NotFound`, and the
+/// sink's delivery marks `session_bound_delivered`, NOT the
+/// `terminal_delivery_committed` that `committed_terminal_anchor_protects_delete`
+/// keys on. So neither guard fires and the body-bearing placeholder is deleted.
+///
+/// Callers that pass `require_delivered_elsewhere_proof = true` therefore delete
+/// ONLY on POSITIVE `Found` proof (a DIFFERENT message demonstrably holds the
+/// committed range); every non-`Found` `Delete` is downgraded to a fail-safe
+/// preserve. `Protected`/`Ambiguous`/body-exposure preserve paths are unchanged.
+/// With the shadow anchor ENABLED (production) a real #4158 residue still yields
+/// `Found` → delete, so the fix is unchanged there; this only closes the
+/// shadow-disabled message-loss window.
+fn apply_terminal_committed_delete_proof_gate(
+    decision: GuardedNonterminalDeleteDecision,
+    has_positive_delivered_elsewhere: bool,
+    require_delivered_elsewhere_proof: bool,
+) -> GuardedNonterminalDeleteDecision {
+    if require_delivered_elsewhere_proof
+        && !has_positive_delivered_elsewhere
+        && matches!(decision, GuardedNonterminalDeleteDecision::Delete { .. })
+    {
+        return GuardedNonterminalDeleteDecision::PreserveNoEdit {
+            evidence: "terminal_committed_requires_delivered_elsewhere_proof",
+        };
+    }
+    decision
+}
+
 pub(super) fn decide_placeholder_suppression(
     ctx: &PlaceholderSuppressContext<'_>,
 ) -> PlaceholderSuppressDecision {
@@ -689,6 +729,9 @@ pub(super) async fn delete_nonterminal_placeholder_unless_delivered(
         delivered_range,
         response_sent_offset,
         last_edit_text,
+        // Nonterminal cleanup never runs behind a proven terminal commit, so it
+        // keeps the base decision table (no positive-proof requirement).
+        false,
         PlaceholderCleanupOperation::DeleteNonterminal,
         source,
     )
@@ -707,6 +750,7 @@ pub(super) async fn delete_terminal_placeholder_unless_delivered(
     delivered_range: Option<(u64, u64)>,
     response_sent_offset: usize,
     last_edit_text: &str,
+    require_delivered_elsewhere_proof: bool,
     source: &'static str,
 ) -> Option<PlaceholderCleanupOutcome> {
     delete_placeholder_unless_delivered(
@@ -720,6 +764,7 @@ pub(super) async fn delete_terminal_placeholder_unless_delivered(
         delivered_range,
         response_sent_offset,
         last_edit_text,
+        require_delivered_elsewhere_proof,
         PlaceholderCleanupOperation::DeleteTerminal,
         source,
     )
@@ -782,6 +827,7 @@ async fn delete_placeholder_unless_delivered(
     delivered_range: Option<(u64, u64)>,
     response_sent_offset: usize,
     last_edit_text: &str,
+    require_delivered_elsewhere_proof: bool,
     operation: PlaceholderCleanupOperation,
     source: &'static str,
 ) -> Option<PlaceholderCleanupOutcome> {
@@ -809,14 +855,26 @@ async fn delete_placeholder_unless_delivered(
         live_committed_end,
     );
     let target_author = guarded_cleanup_target_author(live_inflight, message_id);
-    match guarded_nonterminal_delete_decision(
-        provider,
-        response_sent_offset,
-        last_edit_text,
-        committed_terminal_anchor,
+    // #4158 hardening: capture the positive-proof signal BEFORE the decision
+    // consumes `delivered_elsewhere`, so the terminal-committed proof gate can
+    // reason about it without a clone.
+    let has_positive_delivered_elsewhere = matches!(
         delivered_elsewhere,
-        target_author,
-    ) {
+        GuardedDeliveredElsewhereSignal::Found { .. }
+    );
+    let decision = apply_terminal_committed_delete_proof_gate(
+        guarded_nonterminal_delete_decision(
+            provider,
+            response_sent_offset,
+            last_edit_text,
+            committed_terminal_anchor,
+            delivered_elsewhere,
+            target_author,
+        ),
+        has_positive_delivered_elsewhere,
+        require_delivered_elsewhere_proof,
+    );
+    match decision {
         GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence } => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -1624,6 +1682,61 @@ mod placeholder_suppression_tests {
                 evidence: "last_edit_text_body",
                 cleaned_body: "possibly sole assistant body".to_string()
             }
+        );
+    }
+
+    // #4158 hardening: the terminal-committed arm (SkipAlreadyCommitted) must
+    // NOT delete on the disposable-chrome default. When the durable delivered
+    // anchor is absent (shadow-write disabled → `NotFound`) the base table would
+    // `Delete` a body-less placeholder, but on the terminal-committed arm that
+    // placeholder might be the sink's `PlaceholderEdit` delivery target, so the
+    // proof gate downgrades every non-`Found` delete to a fail-safe preserve.
+    #[test]
+    fn proof_gate_downgrades_notfound_default_delete_to_preserve() {
+        let delete = GuardedNonterminalDeleteDecision::Delete {
+            evidence: "no_delivered_elsewhere_signal",
+        };
+        assert_eq!(
+            apply_terminal_committed_delete_proof_gate(delete, false, true),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "terminal_committed_requires_delivered_elsewhere_proof",
+            },
+            "terminal-committed arm must preserve when there is no positive Found proof"
+        );
+    }
+
+    #[test]
+    fn proof_gate_keeps_found_delete_and_leaves_other_arms_untouched() {
+        // Positive `Found` proof (a DIFFERENT message holds the range) still
+        // deletes — the real #4158 residue path (shadow anchor enabled).
+        let found_delete = GuardedNonterminalDeleteDecision::Delete {
+            evidence: "current_generation_anchor_different_message",
+        };
+        assert_eq!(
+            apply_terminal_committed_delete_proof_gate(found_delete.clone(), true, true),
+            found_delete,
+            "a Found-backed delete must survive the proof gate"
+        );
+
+        // The no-response arm (`require = false`) keeps the base decision table:
+        // a disposable-chrome default delete is NOT downgraded.
+        let default_delete = GuardedNonterminalDeleteDecision::Delete {
+            evidence: "no_delivered_elsewhere_signal",
+        };
+        assert_eq!(
+            apply_terminal_committed_delete_proof_gate(default_delete.clone(), false, false),
+            default_delete,
+            "with require=false the base table is unchanged (no-response arm parity)"
+        );
+
+        // Preserve decisions are never altered by the gate.
+        let preserve = GuardedNonterminalDeleteDecision::PreserveNoEdit {
+            evidence: "committed_terminal_anchor",
+        };
+        assert_eq!(
+            apply_terminal_committed_delete_proof_gate(preserve.clone(), false, true),
+            preserve,
+            "a preserve decision is untouched by the proof gate"
         );
     }
 
