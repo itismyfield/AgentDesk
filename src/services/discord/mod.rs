@@ -2390,6 +2390,20 @@ impl SharedData {
             .load(Ordering::Acquire)
     }
 
+    /// #4181: `true` while some watcher is actively emitting a relay for this
+    /// channel — the `relay_slot` holds the in-progress emission's
+    /// `data_start_offset` (non-zero). A single relay POST can be in-flight for
+    /// longer than the stall grace under extreme rate-limiting, freezing the
+    /// committed offset without the turn being stalled. Redrive consults this so
+    /// it does not re-drive an already-in-flight emission (a duplicate, not a
+    /// loss).
+    pub(super) fn relay_emission_in_flight(&self, channel_id: ChannelId) -> bool {
+        self.tmux_relay_coord(channel_id)
+            .relay_slot
+            .load(Ordering::Acquire)
+            != 0
+    }
+
     /// Record a recovery/reattach watcher spawn and purge the channel footer so the
     /// dead prior generation's task/subagent slots don't linger as zombies (#3436, #964).
     pub(super) fn record_tmux_watcher_reconnect(&self, channel_id: ChannelId) {

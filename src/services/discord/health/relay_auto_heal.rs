@@ -114,14 +114,14 @@ async fn redrive_undelivered_backlog(
     if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, now_unix_secs) {
         return Ok(false);
     }
-    if live_relay_frontier_advanced_since_snapshot(&shared, channel_id, &snapshot) {
+    if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
         return Ok(false);
     }
 
     if nudge_existing_watcher_for_backlog(&shared, provider, &snapshot, channel_id, now_unix_secs) {
         return Ok(true);
     }
-    if live_relay_frontier_advanced_since_snapshot(&shared, channel_id, &snapshot) {
+    if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
         return Ok(false);
     }
 
@@ -165,6 +165,23 @@ fn live_relay_frontier_advanced_since_snapshot(
     snapshot: &WatcherStateSnapshot,
 ) -> bool {
     shared.committed_relay_offset(channel_id) > snapshot.last_relay_offset
+}
+
+/// #4181 item-1: redrive must yield to a live relay either because the committed
+/// frontier already advanced past the snapshot (delivery landed) OR because a
+/// relay emission is still in-flight (`relay_slot` non-zero). The committed-only
+/// check has a TOCTOU: a single relay POST held >stall-grace under extreme
+/// rate-limiting freezes the committed offset without the emission having
+/// finished, so the offset-only stall test can pass while a POST is mid-flight;
+/// redriving then double-sends the range that POST is about to commit (a
+/// duplicate, not a loss). Consulting the in-flight slot closes that window.
+fn redrive_should_yield_to_live_relay(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    snapshot: &WatcherStateSnapshot,
+) -> bool {
+    live_relay_frontier_advanced_since_snapshot(shared, channel_id, snapshot)
+        || shared.relay_emission_in_flight(channel_id)
 }
 
 fn nudge_existing_watcher_for_backlog(
@@ -223,7 +240,7 @@ fn nudge_watcher_handle_for_backlog(
     let Ok(mut resume_offset) = watcher.resume_offset.lock() else {
         return false;
     };
-    if live_relay_frontier_advanced_since_snapshot(shared, channel_id, snapshot) {
+    if redrive_should_yield_to_live_relay(shared, channel_id, snapshot) {
         return false;
     }
     *resume_offset = Some(snapshot.last_relay_offset);
@@ -523,6 +540,82 @@ mod tests {
         ));
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
+
+        stall_liveness::clear_stall_watchdog_liveness_state(
+            &provider,
+            channel_id,
+            Some(tmux_session),
+        );
+    }
+
+    // #4181 item-1: a relay emission still in-flight (`relay_slot` non-zero)
+    // freezes the committed offset without the turn being stalled; redrive must
+    // yield to it and NOT rewind the watcher over the in-flight range (which
+    // would double-send the bytes that POST is about to commit).
+    #[test]
+    fn redrive_nudge_yields_while_relay_emission_in_flight() {
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_181_777);
+        let tmux_session = "AgentDesk-codex-4181-inflight-slot";
+        let output_path = "/tmp/agentdesk-4181-inflight-slot.jsonl";
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let resume_offset = Arc::new(Mutex::new(None));
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        let watcher = watcher_handle(
+            tmux_session,
+            output_path,
+            resume_offset.clone(),
+            turn_delivered.clone(),
+        );
+        shared.tmux_watchers.insert(channel_id, watcher);
+        stall_liveness::clear_stall_watchdog_liveness_state(
+            &provider,
+            channel_id,
+            Some(tmux_session),
+        );
+
+        let capture_offset = 301_613;
+        let now = 1_800_000_000;
+        let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
+        // Prime the stall observation, then mark a relay emission in-flight
+        // (non-zero `relay_slot`) while the committed frontier stays frozen.
+        assert!(!nudge_existing_watcher_for_backlog(
+            &shared, &provider, &snapshot, channel_id, now,
+        ));
+        shared
+            .tmux_relay_coord(channel_id)
+            .relay_slot
+            .store(128, Ordering::Release);
+        assert!(shared.relay_emission_in_flight(channel_id));
+
+        // Even past the no-progress grace, the in-flight slot must veto redrive.
+        assert!(!nudge_existing_watcher_for_backlog(
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+        ));
+        assert_eq!(*resume_offset.lock().unwrap(), None);
+        assert!(turn_delivered.load(Ordering::Acquire));
+
+        // Once the emission completes (slot cleared) and no frontier advanced,
+        // the nudge is allowed again (rewinds to the last relayed offset).
+        shared
+            .tmux_relay_coord(channel_id)
+            .relay_slot
+            .store(0, Ordering::Release);
+        assert!(nudge_existing_watcher_for_backlog(
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+        ));
+        assert_eq!(
+            *resume_offset.lock().unwrap(),
+            Some(snapshot.last_relay_offset)
+        );
 
         stall_liveness::clear_stall_watchdog_liveness_state(
             &provider,
