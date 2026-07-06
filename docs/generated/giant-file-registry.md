@@ -29,7 +29,7 @@
 | `src/services/discord/session_relay_sink.rs` | 1678 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1505 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_placeholder_suppression.rs` | 1093 | discord-relay | 2026-10-31 | #4176 |
-| `src/services/discord/tmux_watcher.rs` | 7372 | discord-relay | 2026-10-31 | #3832 |
+| `src/services/discord/tmux_watcher.rs` | 7409 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tui_direct_abort_marker/mod.rs` | 1233 | discord-relay | 2026-10-31 | #4175 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1495 | discord-relay | 2026-08-31 | #3540 |
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1051 | discord-relay | 2026-10-31 | #4019 |
@@ -94,7 +94,7 @@
 | `src/services/discord/commands/text_commands.rs` | 1476 |
 | `src/services/discord/formatting.rs` | 2821 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4124 |
+| `src/services/discord/mod.rs` | 4138 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1337 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1815 |

@@ -257,6 +257,28 @@ pub(super) fn classify_cleanup_failure(detail: &str) -> PlaceholderCleanupFailur
 mod permanent_failure_tests {
     use super::PlaceholderCleanupOutcome;
 
+    // #4158: the watcher's skip-already-committed arm clears its live
+    // placeholder ONLY when the guarded cleanup reports a committed outcome
+    // (`is_committed()`), i.e. the residue was actually deleted (or was already
+    // gone). A preserve decision returns `None` from the helper (not covered
+    // here — it never reaches an outcome), and a transient `Failed` must NOT be
+    // treated as committed, so the placeholder id is kept for the next pass /
+    // durable orphan record. This pins the exact gate the arm relies on.
+    #[test]
+    fn only_succeeded_or_already_gone_counts_as_committed_cleanup() {
+        assert!(PlaceholderCleanupOutcome::Succeeded.is_committed());
+        assert!(PlaceholderCleanupOutcome::AlreadyGone.is_committed());
+        assert!(
+            !PlaceholderCleanupOutcome::failed("HTTP 500 Internal Server Error").is_committed(),
+            "a transient delete failure must not clear the placeholder (kept for retry)"
+        );
+        assert!(
+            !PlaceholderCleanupOutcome::failed("HTTP 403 Forbidden: Missing Permissions")
+                .is_committed(),
+            "even a permanent-failure delete is not a committed cleanup"
+        );
+    }
+
     #[test]
     fn permanent_failure_matches_http_status_phrases_not_digit_substrings() {
         // #3003 codex P2 r21: real permanent statuses are permanent.

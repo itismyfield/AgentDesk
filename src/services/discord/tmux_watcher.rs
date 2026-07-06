@@ -4979,15 +4979,52 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // Part (a) advanced the authority on the sink's confirmed POST). This is
             // the failure-mode-① case: re-sending would DUPLICATE. Treat it as a
             // completed delegated delivery (mirror the delegation-success arm): do NOT
-            // delete the placeholder and do NOT re-send. `relay_ok = true` so the
-            // lifecycle finalizes exactly as a delivered turn (the response IS on the
-            // channel, posted by the sink); the offset is already at `end`, so the
-            // inline advance below is an idempotent no-op.
+            // re-send. `relay_ok = true` so the lifecycle finalizes exactly as a
+            // delivered turn (the response IS on the channel, posted by the sink); the
+            // offset is already at `end`, so the inline advance below is an idempotent
+            // no-op.
             if has_current_response {
                 tui_direct_anchor_terminal_body_visible = true;
                 last_relayed_offset = Some(turn_data_start_offset);
                 last_observed_generation_mtime_ns =
                     Some(read_generation_file_mtime_ns(&tmux_session_name));
+            }
+            // #4158: a LIVE `placeholder_msg_id` here is NOT necessarily the message
+            // that holds the delivered body. When inflight vanished mid-turn the
+            // streaming loop POSTed a FRESH placeholder while the sink delivered the
+            // real answer through a DIFFERENT message and advanced the offset
+            // authority — that fresh placeholder is stale residue and, unless
+            // reconciled, is orphaned (never edited/deleted/finalized). Route it
+            // through the same guarded-cleanup helper the no-response arm uses: it
+            // PRESERVES the placeholder when the delivered anchor IS this message
+            // (#3593 sink-delivered-body case → `Protected`) and DELETES it only when
+            // the delivered anchor is a DIFFERENT message covering the same committed
+            // coordinate space (#4158 residue → `Found`); a body-bearing placeholder
+            // with no positive delivered-elsewhere proof is preserved fail-safe.
+            if let Some(msg_id) = placeholder_msg_id {
+                let outcome = delete_terminal_placeholder_unless_delivered(
+                    &http,
+                    channel_id,
+                    &shared,
+                    &watcher_provider,
+                    &tmux_session_name,
+                    msg_id,
+                    inflight_before_relay.as_ref(),
+                    Some((
+                        turn_data_start_offset,
+                        terminal_event_consumed_offset(current_offset, &all_data),
+                    )),
+                    response_sent_offset,
+                    &last_edit_text,
+                    "watcher_skip_already_committed_cleanup",
+                )
+                .await;
+                if outcome.is_some_and(|outcome| outcome.is_committed()) {
+                    drop_placeholder_orphan_record(&watcher_provider, &shared, channel_id, msg_id);
+                    placeholder_msg_id = None;
+                    placeholder_from_restored_inflight = false;
+                    last_edit_text.clear();
+                }
             }
             clear_provider_overload_retry_state(channel_id);
             true
