@@ -4980,7 +4980,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // `DELIVERY_LEASE_DEADLINE_MS` the sink commits+releases (→ committed>=end →
             // SkipAlreadyCommitted) or dies (→ deadline lapses → reclaim + SendFull).
             // The sole arm closing the slow-sink-in-flight duplicate (#3151).
-            let plan = watcher_partial_continuation_retry_plan();
+            let plan =
+                crate::services::discord::replace_outcome_policy::watcher_partial_continuation_retry_plan();
             retry_terminal_delivery_from_offset = plan.retry_offset;
             plan.relay_ok
         } else if watcher_lease_b2_skip {

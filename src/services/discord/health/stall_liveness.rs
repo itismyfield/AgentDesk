@@ -1849,6 +1849,7 @@ mod tests {
             OffsetObservation {
                 offset: 20,
                 advanced_at_unix_secs: Some(expired_at),
+                unchanged_since_unix_secs: expired_at,
                 last_updated_unix_secs: expired_at,
             },
         );
@@ -1857,6 +1858,7 @@ mod tests {
             OffsetObservation {
                 offset: 30,
                 advanced_at_unix_secs: Some(fresh_at),
+                unchanged_since_unix_secs: fresh_at,
                 last_updated_unix_secs: fresh_at,
             },
         );
