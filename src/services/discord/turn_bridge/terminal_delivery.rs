@@ -387,14 +387,10 @@ pub(super) fn advance_tmux_relay_confirmed_end(
         }
     }
 
-    // #964: observability timestamp — updated whenever the watermark advances
-    // (including the CAS-loser path, since that still proves a peer completed
-    // a relay) so `GET /api/channels/:id/watcher-state` can surface the most
-    // recent relay activity without blocking on disk state.
-    relay_coord.last_relay_ts_ms.store(
-        chrono::Utc::now().timestamp_millis(),
-        std::sync::atomic::Ordering::Release,
-    );
+    // #964: observability timestamp — updated through the same relay-progress
+    // heartbeat used by confirmed chunk sends, so `last_relay_ts_ms` has one
+    // writer authority on the per-channel coord.
+    relay_coord.note_relay_progress_heartbeat(chrono::Utc::now().timestamp_millis());
 
     // Pair the pre-CAS mtime with the offset only when we actually won
     // the advance. Losers and no-ops leave the mtime baseline alone so

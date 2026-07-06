@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude::ChannelId;
 
 use super::HealthRegistry;
+use super::snapshot::WatcherStateSnapshot;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::RelayStallState;
 use crate::services::discord::relay_recovery::{
@@ -41,19 +42,50 @@ pub(super) async fn run_orphan_token_auto_heal_pass(
 ) -> usize {
     let mut applied = 0usize;
     for shared in runtimes {
+        let mut redrive_channels = std::collections::HashSet::new();
         let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
         for (channel_id, mailbox) in mailbox_snapshots {
-            if mailbox.cancel_token.is_none() {
+            redrive_channels.insert(channel_id);
+            if mailbox.cancel_token.is_some() {
+                match apply_orphan_pending_token_cleanup(
+                    registry,
+                    provider,
+                    shared.clone(),
+                    channel_id,
+                    RelayRecoveryApplySource::ProbeAutoHeal,
+                )
+                .await
+                {
+                    Ok(true) => applied += 1,
+                    Ok(false) => {}
+                    Err(RelayRecoveryError::SnapshotNotFound { .. }) => {}
+                    Err(error) => trace_orphan_auto_heal_error(provider, channel_id, &error),
+                }
+            }
+
+            match redrive_undelivered_backlog(registry, provider, shared.clone(), channel_id).await
+            {
+                Ok(true) => applied += 1,
+                Ok(false) => {}
+                Err(RelayRecoveryError::SnapshotNotFound { .. }) => {}
+                Err(error) => trace_orphan_auto_heal_error(provider, channel_id, &error),
+            }
+        }
+
+        let watcher_owner_channels: Vec<ChannelId> = shared
+            .tmux_watchers
+            .iter()
+            .filter_map(|entry| {
+                shared
+                    .tmux_watchers
+                    .owner_channel_for_tmux_session(entry.key())
+            })
+            .collect();
+        for channel_id in watcher_owner_channels {
+            if !redrive_channels.insert(channel_id) {
                 continue;
             }
-            match apply_orphan_pending_token_cleanup(
-                registry,
-                provider,
-                shared.clone(),
-                channel_id,
-                RelayRecoveryApplySource::ProbeAutoHeal,
-            )
-            .await
+            match redrive_undelivered_backlog(registry, provider, shared.clone(), channel_id).await
             {
                 Ok(true) => applied += 1,
                 Ok(false) => {}
@@ -63,6 +95,42 @@ pub(super) async fn run_orphan_token_auto_heal_pass(
         }
     }
     applied
+}
+
+async fn redrive_undelivered_backlog(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    shared: Arc<SharedData>,
+    channel_id: ChannelId,
+) -> Result<bool, RelayRecoveryError> {
+    let Some(snapshot) = registry
+        .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
+        .await
+    else {
+        return Ok(false);
+    };
+
+    if !has_live_undelivered_backlog(&snapshot) {
+        return Ok(false);
+    }
+
+    let response = relay_recovery::auto_apply_relay_recovery_for_shared(
+        registry,
+        shared,
+        provider,
+        channel_id.get(),
+        RelayRecoveryActionKind::ReattachWatcher,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+    )
+    .await?;
+
+    Ok(response.applied)
+}
+
+fn has_live_undelivered_backlog(snapshot: &WatcherStateSnapshot) -> bool {
+    snapshot.unread_bytes.is_some_and(|bytes| bytes > 0)
+        && snapshot.tmux_session_alive == Some(true)
+        && !snapshot.inflight_terminal_delivery_committed
 }
 
 async fn apply_orphan_pending_token_cleanup(
