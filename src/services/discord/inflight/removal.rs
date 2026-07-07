@@ -19,7 +19,7 @@ fn user_msg_id_for_inflight_remove_log(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-pub(super) fn log_inflight_remove(
+pub(crate) fn log_inflight_remove(
     provider: &ProviderKind,
     channel_id: u64,
     user_msg_id: u64,
@@ -37,7 +37,7 @@ pub(super) fn log_inflight_remove(
     );
 }
 
-pub(super) fn log_inflight_remove_for_path(
+pub(crate) fn log_inflight_remove_for_path(
     provider: &ProviderKind,
     channel_id: u64,
     reason: &'static str,
@@ -314,7 +314,7 @@ pub(super) fn load_inflight_states_from_root(
     };
     let mut states = Vec::new();
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
-    let current_generation = super::runtime_store::load_generation();
+    let current_generation = crate::services::discord::runtime_store::load_generation();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
