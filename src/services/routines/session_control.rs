@@ -9,6 +9,7 @@ use crate::services::discord::health::{HealthRegistry, clear_provider_channel_ru
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
+use super::agent_executor::routine_agent_session_name;
 use super::store::RoutineRecord;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,7 +455,7 @@ impl RoutineSessionController {
         routine: &RoutineRecord,
         result_json: Option<&Value>,
     ) -> Result<RoutineSessionTarget> {
-        let agent_id = routine_agent_id(routine, "fresh routine session teardown")?;
+        let agent_id = fresh_teardown_agent_id(routine, result_json)?;
 
         let bindings = crate::db::agents::load_agent_channel_bindings_pg(&self.pool, &agent_id)
             .await
@@ -465,15 +466,6 @@ impl RoutineSessionController {
         let provider = bindings
             .resolved_primary_provider_kind()
             .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
-        let primary_channel_id =
-            crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
-                .or_else(|| primary_channel.parse::<u64>().ok())
-                .ok_or_else(|| {
-                    anyhow!("agent {agent_id} primary channel is invalid: {primary_channel}")
-                })?;
         let routine_thread_channel_id =
             fresh_teardown_thread_channel_id(routine, result_json).ok_or_else(|| {
                 anyhow!(
@@ -492,11 +484,7 @@ impl RoutineSessionController {
             .and_then(tmux_name_from_session_key)
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| {
-                provider.build_tmux_session_name(&fallback_tmux_channel_name(
-                    &primary_channel,
-                    primary_channel_id,
-                    routine_thread_channel_id,
-                ))
+                fresh_teardown_fallback_tmux_session_name(routine, &agent_id, &provider)
             });
 
         Ok(RoutineSessionTarget {
@@ -805,6 +793,14 @@ fn routine_agent_id(routine: &RoutineRecord, context: &str) -> Result<String> {
         })
 }
 
+fn fresh_teardown_agent_id(routine: &RoutineRecord, result_json: Option<&Value>) -> Result<String> {
+    if let Some(agent_id) = string_field(result_json, "agent_id") {
+        return Ok(agent_id.to_string());
+    }
+
+    routine_agent_id(routine, "fresh routine session teardown")
+}
+
 fn string_field<'a>(value: Option<&'a Value>, key: &str) -> Option<&'a str> {
     value?
         .get(key)
@@ -881,6 +877,14 @@ fn fallback_tmux_channel_name(
     } else {
         format!("{primary_channel}-t{target_channel_id}")
     }
+}
+
+fn fresh_teardown_fallback_tmux_session_name(
+    routine: &RoutineRecord,
+    agent_id: &str,
+    provider: &ProviderKind,
+) -> String {
+    provider.build_tmux_session_name(&routine_agent_session_name(&routine.name, agent_id))
 }
 
 pub fn provider_clear_behavior(provider: &ProviderKind) -> &'static str {
@@ -986,6 +990,28 @@ mod tests {
             fallback_tmux_channel_name("agent-cdx", 100, 200),
             "agent-cdx-t200"
         );
+    }
+
+    #[test]
+    fn fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label() {
+        let provider = ProviderKind::Claude;
+        let mut routine = routine_with_thread("fresh", Some("1485506232256168011"));
+        routine.name = "Token Daily Report".to_string();
+        routine.agent_id = Some("claude".to_string());
+
+        let result_json = json!({ "agent_id": "claude" });
+        let agent_id = fresh_teardown_agent_id(&routine, Some(&result_json)).expect("agent id");
+        let spawn_time =
+            provider.build_tmux_session_name(&routine_agent_session_name(&routine.name, &agent_id));
+        let teardown_time =
+            fresh_teardown_fallback_tmux_session_name(&routine, &agent_id, &provider);
+
+        assert_eq!(teardown_time, spawn_time);
+
+        let old_channel_thread_fallback = provider.build_tmux_session_name(
+            &fallback_tmux_channel_name("1481478222", 1_481_478_222, 1_485_506_232_256_168_011),
+        );
+        assert_ne!(teardown_time, old_channel_thread_fallback);
     }
 
     #[test]
