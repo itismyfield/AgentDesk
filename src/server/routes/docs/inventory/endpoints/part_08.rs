@@ -541,6 +541,57 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Policy hook timeout and execution counters.",
         ),
         ep(
+            "POST",
+            "/api/hook/reset-status",
+            "ops",
+            "Reset agents currently marked working back to idle and report rows updated.",
+        ),
+        ep(
+            "POST",
+            "/api/hook/skill-usage",
+            "skills",
+            "Record one skill usage event with optional agent, role, and session context.",
+        )
+        .with_params([
+            ("skill_id", body_param("string", true, "Skill identifier to record")),
+            ("agent_id", body_param("string", false, "Optional agent id")),
+            (
+                "role_id",
+                body_param(
+                    "string",
+                    false,
+                    "Optional role id used to resolve an agent when agent_id is absent",
+                ),
+            ),
+            (
+                "session_key",
+                body_param("string", false, "Optional session key associated with the usage event"),
+            ),
+        ]),
+        ep(
+            "DELETE",
+            "/api/hook/session/{sessionKey}",
+            "sessions",
+            "Mark the matching session disconnected by session key.",
+        )
+        .with_params([(
+            "sessionKey",
+            path_param("Session key to mark disconnected"),
+        )]),
+        ep(
+            "POST",
+            "/api/internal/escalation/emit",
+            "internal",
+            "Emit a manual-decision escalation for a card through the configured user-thread or PM Discord route.",
+        )
+        .with_params([
+            ("card_id", body_param("string", true, "Kanban card id to escalate")),
+            (
+                "reasons",
+                body_param("array<string>", true, "Non-empty escalation reasons"),
+            ),
+        ]),
+        ep(
             "GET",
             "/api/github/pr-summary",
             "github",
