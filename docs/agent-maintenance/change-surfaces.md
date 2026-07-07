@@ -1489,7 +1489,7 @@
     with persisted queue-marker state for notification-only 📬/⏳/✅/⚠/🛑 updates,
     queue cancel cleanup, and requeue coalescing; bugfix-only until a follow-up
     can split persistence/tests from the runtime reconciler).
-  - `src/services/discord/formatting.rs` (2821 lines; +14 reconciled to the current module-inventory production surface per #4183 CI-red recovery (post-surgery inventory drift); -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
+  - `src/services/discord/formatting.rs` (2862 lines; +41 from #4214 converting every Discord-limit length judgment in the send/chunk paths from UTF-8 byte length to unicode code-point count (Korean answers no longer split ~3x early at ~666 chars) with a safe char-budget→byte-index boundary mapper; code-fence preservation and the #1043 empty-chunk guard unchanged; +14 reconciled to the current module-inventory production surface per #4183 CI-red recovery (post-surgery inventory drift); -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
     raw long-send created message ids and fallback replacement anchors for
     recovery anchor persistence while the existing `send_long_message_raw_with_reference`
     surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving
