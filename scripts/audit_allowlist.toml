@@ -50,7 +50,9 @@ direct_discord_sends = [
   # the stream/status tick block moved verbatim to turn_bridge/stream_tick.rs.
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:40a1288799a3f040",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:03ea2acdb96e58a5",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:f31f0c69052ee4c5",
+  # #4230 S5: existing recovery-notice direct gateway edit moved verbatim from
+  # turn_bridge/mod.rs to turn_bridge/terminal_outcome_delivery.rs.
+  "src/services/discord/turn_bridge/terminal_outcome_delivery.rs#direct_discord_sends:17077162223368f0",
   "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:7aef9562406e0468",
   "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:3749de8c4b7edb9e",
   "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:029e6a0f4f88558e",
