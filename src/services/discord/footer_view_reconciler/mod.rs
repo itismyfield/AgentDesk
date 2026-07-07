@@ -482,6 +482,7 @@ mod tests {
             StatusEvent::SubagentStart {
                 subagent_type: Some("bgworker".to_string()),
                 desc: Some("Review".to_string()),
+                agent_id: None,
                 tool_use_id: Some(format!("toolu_agent_{}", channel_id.get())),
                 background: true,
             },

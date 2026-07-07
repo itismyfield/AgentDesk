@@ -47,11 +47,7 @@ pub(super) fn summary_from_tool_use_result(
         return None;
     }
 
-    let agent_id = result
-        .get("agentId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|id| !id.trim().is_empty());
+    let agent_id = agent_id_from_tool_use_result(value);
 
     let has_accounting_field = result.contains_key("totalToolUseCount")
         || result.contains_key("totalTokens")
@@ -79,6 +75,29 @@ pub(super) fn summary_from_tool_use_result(
         return None;
     }
     Some((summary, agent_id))
+}
+
+/// Extracts the async/completion agent id from `toolUseResult`.
+pub(super) fn agent_id_from_tool_use_result(value: &Value) -> Option<String> {
+    value
+        .get("toolUseResult")?
+        .as_object()?
+        .get("agentId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) fn description_from_tool_use_result(value: &Value) -> Option<String> {
+    value
+        .get("toolUseResult")?
+        .as_object()?
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|desc| !desc.is_empty())
+        .map(str::to_string)
 }
 
 /// #3920: `true` when a parent-transcript `tool_result`/`user` record (or a
@@ -121,9 +140,9 @@ pub(super) fn async_launch_promote_events(
     if is_error {
         return None;
     }
-    let is_async_launch = tool_use_result_is_async_launch(block)
-        || (tool_use_result_is_async_launch(value)
-            && Some(idx) == first_idful_tool_result_idx(blocks));
+    let record_owns_launch =
+        tool_use_result_is_async_launch(value) && Some(idx) == first_idful_tool_result_idx(blocks);
+    let is_async_launch = tool_use_result_is_async_launch(block) || record_owns_launch;
     if !is_async_launch {
         return None;
     }
@@ -133,11 +152,28 @@ pub(super) fn async_launch_promote_events(
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_string);
+    let agent_id = agent_id_from_tool_use_result(block).or_else(|| {
+        record_owns_launch
+            .then(|| agent_id_from_tool_use_result(value))
+            .flatten()
+    });
+    let desc = tool_use_id
+        .as_ref()
+        .is_none()
+        .then(|| {
+            description_from_tool_use_result(block).or_else(|| {
+                record_owns_launch
+                    .then(|| description_from_tool_use_result(value))
+                    .flatten()
+            })
+        })
+        .flatten();
     Some(vec![
         StatusEvent::ToolEnd { success: true },
         StatusEvent::SubagentStart {
             subagent_type: None,
-            desc: None,
+            desc,
+            agent_id,
             tool_use_id,
             background: true,
         },

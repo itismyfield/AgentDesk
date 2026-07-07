@@ -292,6 +292,7 @@ pub enum StatusEvent {
     SubagentStart {
         subagent_type: Option<String>,
         desc: Option<String>,
+        agent_id: Option<String>,
         /// Originating Task tool-use id, used to pair the eventual
         /// `SubagentEnd` to the exact slot rather than the first unfinished
         /// one (which mis-attributes across parallel subagents). `None` when
@@ -323,6 +324,8 @@ pub enum StatusEvent {
     },
     SubagentEnd {
         success: bool,
+        agent_id: Option<String>,
+        desc: Option<String>,
         /// Tool-use id of the Task whose result closed this subagent. Matched
         /// against [`StatusEvent::SubagentStart::tool_use_id`]; `None` falls
         /// back to closing the first unfinished slot.

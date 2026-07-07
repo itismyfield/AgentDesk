@@ -32,6 +32,7 @@ pub(super) struct SubagentSlot {
     /// #3084: Task tool-use id that opened this slot, so `SubagentEnd` closes the
     /// exact slot among parallels instead of the first unfinished one.
     pub(super) tool_use_id: Option<String>,
+    agent_id: Option<String>,
     /// #3086: TUI-parity accounting from the finishing `SubagentEnd`; drives the
     /// `Done (N tools · M tokens · Xs)` summary on the render line.
     summary: Option<SubagentSummary>,
@@ -209,6 +210,7 @@ impl StatusPanelState {
             StatusEvent::SubagentStart {
                 subagent_type,
                 desc,
+                agent_id,
                 tool_use_id,
                 background,
             } => {
@@ -218,6 +220,7 @@ impl StatusPanelState {
                 // description with the `subagent`/`Task` placeholders.
                 let provided_desc = desc.filter(|value| !value.trim().is_empty());
                 let provided_type = subagent_type.filter(|value| !value.trim().is_empty());
+                let provided_agent_id = agent_id.filter(|value| !value.trim().is_empty());
                 // A background `SubagentStart` re-affirms (and #3920: PROMOTES) the
                 // still-running slot for this tool-use id. Matching ANY unfinished
                 // slot — not only an already-background one — lets an async/
@@ -239,6 +242,9 @@ impl StatusPanelState {
                     if let Some(desc) = provided_desc {
                         slot.desc = desc;
                     }
+                    if let Some(agent_id) = provided_agent_id {
+                        slot.agent_id = Some(agent_id);
+                    }
                     let running_desc = slot.desc.clone();
                     self.status = DerivedStatus::SubagentRunning { desc: running_desc };
                     return;
@@ -253,6 +259,7 @@ impl StatusPanelState {
                     finished: None,
                     tool_use_id,
                     summary: None,
+                    agent_id: provided_agent_id,
                     background,
                     ordinal,
                     started_at: std::time::Instant::now(),
@@ -279,6 +286,8 @@ impl StatusPanelState {
             } => self.set_subagent_activity(tool_use_id, summary),
             StatusEvent::SubagentEnd {
                 success,
+                agent_id,
+                desc,
                 tool_use_id,
                 summary,
                 ack_only,
@@ -292,17 +301,25 @@ impl StatusPanelState {
                         slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
                     })
                 });
-                // #3086 P1 / #3359: a summary/id-bearing ack-only end is safe only
-                // on an exact id match; id-less legacy acks close only id-less slots.
-                let has_summary = summary.as_ref().is_some_and(|s| !s.is_empty());
+                // #3086 P1 / #3359: ack-only id-bearing ends are safe only
+                // on an exact id match; genuine id-bearing completions may use
+                // a unique agent-id/description fallback (#4177).
+                let fallback = (!ack_only && id.is_some())
+                    .then(|| {
+                        match_subagent_end_fallback(
+                            &self.subagents,
+                            agent_id.as_deref(),
+                            desc.as_deref(),
+                        )
+                    })
+                    .flatten();
                 let target = match matched {
                     Some(index) => Some(index),
-                    None if id.is_some() => None,
+                    None if id.is_some() => fallback,
                     None if ack_only => self
                         .subagents
                         .iter()
                         .rposition(|slot| slot.finished.is_none() && slot.tool_use_id.is_none()),
-                    None if has_summary && id.is_some() => None,
                     None => self
                         .subagents
                         .iter()
@@ -726,13 +743,52 @@ pub(super) fn force_abort_stuck_subagent_slots(
     swept
 }
 
+fn match_subagent_end_fallback(
+    slots: &[SubagentSlot],
+    agent_id: Option<&str>,
+    desc: Option<&str>,
+) -> Option<usize> {
+    if let Some(agent_id) = clean_match_key(agent_id) {
+        match unique_unfinished_subagent(slots, |slot| slot.agent_id.as_deref() == Some(agent_id)) {
+            Ok(Some(index)) => return Some(index),
+            Err(()) => return None,
+            Ok(None) => {}
+        }
+    }
+    let desc = clean_match_key(desc)?;
+    unique_unfinished_subagent(slots, |slot| slot.desc == desc).ok()?
+}
+
+fn unique_unfinished_subagent(
+    slots: &[SubagentSlot],
+    mut matches: impl FnMut(&SubagentSlot) -> bool,
+) -> Result<Option<usize>, ()> {
+    let mut found = None;
+    for (index, slot) in slots.iter().enumerate().rev() {
+        if slot.finished.is_none() && matches(slot) {
+            if found.is_some() {
+                return Err(());
+            }
+            found = Some(index);
+        }
+    }
+    Ok(found)
+}
+
+fn clean_match_key(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|value| !value.is_empty())
+}
+
 fn sanitize_label(raw: &str) -> String {
     sanitized_tool_name(raw).unwrap_or_else(|| "Task".to_string())
 }
 
 fn trim_subagents(slots: &mut Vec<SubagentSlot>) {
-    if slots.len() > STATUS_PANEL_SUBAGENT_LIMIT {
-        let excess = slots.len() - STATUS_PANEL_SUBAGENT_LIMIT;
-        slots.drain(0..excess);
+    while slots.len() > STATUS_PANEL_SUBAGENT_LIMIT {
+        let remove_index = slots
+            .iter()
+            .position(|slot| slot.finished.is_some())
+            .unwrap_or(0);
+        slots.remove(remove_index);
     }
 }

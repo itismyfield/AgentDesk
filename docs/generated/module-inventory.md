@@ -308,7 +308,7 @@
 | `server::worker_registry` | `src/server/worker_registry.rs` | 1515 | 1278 | 237 | giant-file |
 | `server::ws` | `src/server/ws.rs` | 140 | 140 | 0 |  |
 | `services` | `src/services/mod.rs` | 131 | 131 | 0 |  |
-| `services::agent_protocol` | `src/services/agent_protocol.rs` | 593 | 593 | 0 |  |
+| `services::agent_protocol` | `src/services/agent_protocol.rs` | 596 | 596 | 0 |  |
 | `services::agent_quality` | `src/services/agent_quality/mod.rs` | 24 | 24 | 0 |  |
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 523 | 463 | 60 |  |
 | `services::agents` | `src/services/agents/mod.rs` | 3 | 3 | 0 |  |
@@ -450,7 +450,7 @@
 | `services::discord::destructive_cancel_gate` | `src/services/discord/destructive_cancel_gate.rs` | 688 | 337 | 351 |  |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 507 | 507 | 0 |  |
 | `services::discord::dispatch_policy` | `src/services/discord/dispatch_policy.rs` | 351 | 218 | 133 |  |
-| `services::discord::footer_view_reconciler` | `src/services/discord/footer_view_reconciler/mod.rs` | 660 | 473 | 187 |  |
+| `services::discord::footer_view_reconciler` | `src/services/discord/footer_view_reconciler/mod.rs` | 661 | 473 | 188 |  |
 | `services::discord::footer_view_reconciler::registry` | `src/services/discord/footer_view_reconciler/registry.rs` | 624 | 624 | 0 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 4100 | 2862 | 1238 | giant-file |
 | `services::discord::formatting::long_send_rollback` | `src/services/discord/formatting/long_send_rollback.rs` | 314 | 314 | 0 |  |
@@ -537,9 +537,9 @@
 | `services::discord::placeholder_live_events::recent_events` | `src/services/discord/placeholder_live_events/recent_events.rs` | 321 | 321 | 0 |  |
 | `services::discord::placeholder_live_events::session_panel` | `src/services/discord/placeholder_live_events/session_panel.rs` | 262 | 262 | 0 |  |
 | `services::discord::placeholder_live_events::slot_rehydration` | `src/services/discord/placeholder_live_events/slot_rehydration.rs` | 525 | 447 | 78 |  |
-| `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 716 | 716 | 0 |  |
-| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 738 | 738 | 0 |  |
-| `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 445 | 270 | 175 |  |
+| `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 779 | 779 | 0 |  |
+| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 794 | 794 | 0 |  |
+| `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 481 | 306 | 175 |  |
 | `services::discord::placeholder_live_events::subagent_summary` | `src/services/discord/placeholder_live_events/subagent_summary.rs` | 69 | 69 | 0 |  |
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 348 | 348 | 0 |  |
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
@@ -660,7 +660,7 @@
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 81 | 81 | 0 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 749 | 678 | 71 |  |
 | `services::discord::sidecar_interaction` | `src/services/discord/sidecar_interaction.rs` | 390 | 390 | 0 |  |
-| `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2826 | 861 | 1965 |  |
+| `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2830 | 861 | 1969 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 113 | 113 | 0 |  |
 | `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1637 | 904 | 733 |  |
 | `services::discord::startup_reclaim` | `src/services/discord/startup_reclaim.rs` | 541 | 324 | 217 |  |
