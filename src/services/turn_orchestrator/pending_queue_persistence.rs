@@ -313,7 +313,18 @@ fn created_at_instant_from_wall_time_ms(
         Ok(age) => reference_instant
             .checked_sub(age)
             .unwrap_or(reference_instant),
-        Err(_) => reference_instant,
+        // #4180 review: a persisted wall time in OUR future means the wall
+        // clock stepped backward across the restart, so the item's true age is
+        // unknowable (no cross-restart monotonic source). Clamping to "fresh"
+        // (`reference_instant`) would re-open the LastItemDedup false-reject
+        // this module exists to close, so restore the item as already OUTSIDE
+        // the dedup window — preferring a possible duplicate dispatch over a
+        // silently dropped re-send, consistent with the relay's
+        // duplicate-over-loss stance. (A backward step small enough to keep
+        // `duration_since` in `Ok` remains undetectable; documented residual.)
+        Err(_) => reference_instant
+            .checked_sub(super::INTERVENTION_DEDUP_WINDOW + Duration::from_secs(1))
+            .unwrap_or(reference_instant),
     }
 }
 
@@ -793,9 +804,7 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::turn_orchestrator::test_support::{
-        lock_test_env, AGENTDESK_ROOT_DIR_ENV,
-    };
+    use crate::services::turn_orchestrator::test_support::{AGENTDESK_ROOT_DIR_ENV, lock_test_env};
 
     /// #3293: `pending_queue_item_to_intervention` resolves the runtime store
     /// root (via `runtime_store::load_generation`), so these tests must pin
@@ -886,5 +895,36 @@ mod tests {
             pending_queue_item_to_intervention(item, reference_wall_time, reference_instant);
 
         assert_eq!(restored.created_at, reference_instant);
+    }
+
+    #[test]
+    fn backward_clock_restore_lands_outside_dedup_window() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        // Persisted wall time is AHEAD of the reload reference wall time: the
+        // wall clock stepped backward across the restart. The restored age
+        // must land outside `INTERVENTION_DEDUP_WINDOW` so a distinct re-send
+        // is never falsely rejected as `LastItemDedup` (duplicate-over-loss).
+        const RELOAD_WALL_TIME_MS: u64 = 1_700_000_000_000;
+        let json = format!(
+            r#"{{"author_id":1,"message_id":10,"text":"skewed","created_at_wall_time_ms":{}}}"#,
+            RELOAD_WALL_TIME_MS + 30_000
+        );
+        let item = serde_json::from_str::<PendingQueueItem>(&json).unwrap();
+
+        let reference_instant = Instant::now();
+        let reference_wall_time =
+            SystemTime::UNIX_EPOCH + Duration::from_millis(RELOAD_WALL_TIME_MS);
+        let restored =
+            pending_queue_item_to_intervention(item, reference_wall_time, reference_instant);
+
+        assert!(
+            reference_instant.duration_since(restored.created_at)
+                > crate::services::turn_orchestrator::INTERVENTION_DEDUP_WINDOW,
+            "a backward-clock restore must not look fresh enough to suppress a re-send"
+        );
     }
 }
