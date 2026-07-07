@@ -2481,6 +2481,7 @@ fn completion_footer_terminal_subagent_evicts_after_delivery_inflight_unaffected
         StatusEvent::SubagentStart {
             subagent_type: Some("reviewer".to_string()),
             desc: Some("Audit the diff".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_done_sub".to_string()),
             background: false,
         },
@@ -2490,6 +2491,7 @@ fn completion_footer_terminal_subagent_evicts_after_delivery_inflight_unaffected
         StatusEvent::SubagentStart {
             subagent_type: Some("reviewer".to_string()),
             desc: Some("Still inspecting".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_running_sub".to_string()),
             background: false,
         },
@@ -2498,6 +2500,8 @@ fn completion_footer_terminal_subagent_evicts_after_delivery_inflight_unaffected
         channel_id,
         StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_done_sub".to_string()),
             summary: None,
             ack_only: false,
@@ -2594,6 +2598,7 @@ fn completion_footer_long_subagent_line_ends_with_check_mark() {
         StatusEvent::SubagentStart {
             subagent_type: Some("reviewer".to_string()),
             desc: Some(long_desc),
+            agent_id: None,
             tool_use_id: Some("toolu_3391_long_sub".to_string()),
             background: false,
         },
@@ -2602,6 +2607,8 @@ fn completion_footer_long_subagent_line_ends_with_check_mark() {
         channel_id,
         StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_3391_long_sub".to_string()),
             summary: None,
             ack_only: false,
@@ -2674,6 +2681,7 @@ fn completion_footer_evicted_subagent_does_not_survive_migration_carry_over() {
         StatusEvent::SubagentStart {
             subagent_type: Some("bgworker".to_string()),
             desc: Some("Finished bg agent".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_bg_done".to_string()),
             background: true,
         },
@@ -2683,6 +2691,7 @@ fn completion_footer_evicted_subagent_does_not_survive_migration_carry_over() {
         StatusEvent::SubagentStart {
             subagent_type: Some("bgworker".to_string()),
             desc: Some("Running bg agent".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_bg_run".to_string()),
             background: true,
         },
@@ -2691,6 +2700,8 @@ fn completion_footer_evicted_subagent_does_not_survive_migration_carry_over() {
         channel_id,
         StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_bg_done".to_string()),
             summary: None,
             ack_only: false,
@@ -4149,6 +4160,8 @@ fn status_panel_background_ack_only_unmatched_id_waits_for_matching_completion()
         channel_id,
         vec![StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_other".to_string()),
             summary: None,
             ack_only: true,
@@ -4170,6 +4183,8 @@ fn status_panel_background_ack_only_unmatched_id_waits_for_matching_completion()
         channel_id,
         vec![StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_bg_real".to_string()),
             summary: Some(crate::services::agent_protocol::SubagentSummary {
                 tool_count: Some(3),
@@ -4229,6 +4244,8 @@ fn status_panel_ack_only_unmatched_id_does_not_fallback_to_any_slot() {
         channel_id,
         vec![StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_wrong".to_string()),
             summary: None,
             ack_only: true,
@@ -4266,6 +4283,8 @@ fn status_panel_foreground_subagent_summary_completion_still_marks_done() {
         channel_id,
         vec![StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_fg_summary".to_string()),
             summary: Some(crate::services::agent_protocol::SubagentSummary {
                 tool_count: Some(2),
@@ -4485,6 +4504,8 @@ fn status_panel_unmatched_summary_end_is_dropped_not_misrouted() {
         channel_id,
         vec![StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_ghost".to_string()),
             summary: Some(crate::services::agent_protocol::SubagentSummary {
                 tool_count: Some(99),
@@ -4507,6 +4528,287 @@ fn status_panel_unmatched_summary_end_is_dropped_not_misrouted() {
     assert!(
         !worker_line.contains('✓') && !worker_line.contains('✗'),
         "unmatched summary-bearing end must not close the slot, got: {worker_line}"
+    );
+}
+
+#[test]
+fn status_panel_unmatched_completion_fallback_pairs_by_agent_id_or_description() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_010);
+
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("Agent-id carried slot".to_string()),
+            agent_id: Some("agent-alpha-4177".to_string()),
+            tool_use_id: None,
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            agent_id: Some("agent-alpha-4177".to_string()),
+            desc: None,
+            tool_use_id: Some("toolu_mismatched_alpha".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("Description carried slot".to_string()),
+            agent_id: None,
+            tool_use_id: None,
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            agent_id: None,
+            desc: Some("Description carried slot".to_string()),
+            tool_use_id: Some("toolu_mismatched_desc".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    for expected in [
+        "agent Agent-id carried slot",
+        "agent Description carried slot",
+    ] {
+        let line = rendered
+            .lines()
+            .find(|line| line.contains(expected))
+            .unwrap_or_else(|| panic!("subagent slot missing in: {rendered}"));
+        assert!(
+            line.contains('✓'),
+            "unique fallback completion must finalize {expected}, got: {line}"
+        );
+    }
+}
+
+#[test]
+fn status_panel_async_completion_agent_id_e2e_pairs_launch_ack_and_task_notification_xml() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_013);
+    let launch_tool_use_id = "toolu_agent_4177_launch";
+    let mismatched_tool_use_id = "toolu_agent_4177_mismatched";
+    let agent_id = "a09e45d12a68015a5";
+    let launch_desc = "Async #4177 primary slot";
+    let xml_desc = "Different #4177 terminal caption";
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Agent",
+            &json!({
+                "subagent_type": "general-purpose",
+                "description": launch_desc
+            })
+            .to_string(),
+            Some(launch_tool_use_id),
+        ),
+    );
+
+    let launch_ack = json!({
+        "type": "user",
+        "message": {
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": launch_tool_use_id,
+                "is_error": false
+            }]
+        },
+        "toolUseResult": {
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": agent_id,
+            "description": launch_desc,
+            "prompt": "...",
+            "outputFile": "/private/tmp/claude-4177/sess/tasks/a09e45d12a68015a5.output",
+            "canReadOutputFile": true
+        }
+    });
+    let launch_blocks = launch_ack["message"]["content"]
+        .as_array()
+        .expect("launch ack content blocks");
+    let promotion_events =
+        super::subagent_rollout::async_launch_promote_events(&launch_ack, launch_blocks, 0, false)
+            .expect("async launch ack should promote the slot");
+    assert!(
+        promotion_events.iter().any(|event| matches!(
+            event,
+            StatusEvent::SubagentStart {
+                agent_id: Some(extracted_agent_id),
+                tool_use_id: Some(extracted_tool_use_id),
+                background: true,
+                ..
+            } if extracted_agent_id.as_str() == agent_id
+                && extracted_tool_use_id.as_str() == launch_tool_use_id
+        )),
+        "launch ack promotion must carry toolUseResult.agentId: {promotion_events:?}"
+    );
+    events.push_status_events(channel_id, promotion_events);
+
+    let raw = format!(
+        "<task-notification>\n\
+        <task-id>{agent_id}</task-id>\n\
+        <tool-use-id>{mismatched_tool_use_id}</tool-use-id>\n\
+        <output-file>/private/tmp/claude-4177/sess/tasks/{agent_id}.output</output-file>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"{xml_desc}\" completed</summary>\n\
+        <result>Done.</result>\n\
+        </task-notification>"
+    );
+    let completion_events = status_events_from_task_notification_xml_for_footer_mode(&raw, true);
+    assert!(
+        completion_events.iter().any(|event| matches!(
+            event,
+            StatusEvent::SubagentEnd {
+                success: true,
+                agent_id: Some(extracted_agent_id),
+                desc: Some(extracted_desc),
+                tool_use_id: Some(extracted_tool_use_id),
+                ack_only: false,
+                ..
+            } if extracted_agent_id.as_str() == agent_id
+                && extracted_tool_use_id.as_str() == mismatched_tool_use_id
+                && extracted_desc.as_str() == xml_desc
+        )),
+        "task-notification XML must extract task-id as SubagentEnd agent_id: {completion_events:?}"
+    );
+    events.push_status_events(channel_id, completion_events);
+
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some(launch_tool_use_id))
+        .unwrap_or_else(|| panic!("launched subagent slot missing: {:?}", guard.subagents));
+    assert_eq!(slot.desc.as_str(), launch_desc);
+    assert_eq!(
+        slot.finished,
+        Some(true),
+        "mismatched tool-use-id and mismatched desc must finalize only via the aligned agent_id fallback"
+    );
+}
+
+#[test]
+fn status_panel_unmatched_completion_ambiguous_auxiliary_match_is_noop() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_011);
+
+    for desc in ["First duplicate", "Second duplicate"] {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::SubagentStart {
+                subagent_type: Some("agent".to_string()),
+                desc: Some(desc.to_string()),
+                agent_id: Some("agent-ambiguous-4177".to_string()),
+                tool_use_id: None,
+                background: true,
+            },
+        );
+    }
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            agent_id: Some("agent-ambiguous-4177".to_string()),
+            desc: Some("First duplicate".to_string()),
+            tool_use_id: Some("toolu_mismatched_ambiguous".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    for expected in ["agent First duplicate", "agent Second duplicate"] {
+        let line = rendered
+            .lines()
+            .find(|line| line.contains(expected))
+            .unwrap_or_else(|| panic!("subagent slot missing in: {rendered}"));
+        assert!(
+            !line.contains('✓') && !line.contains('✗'),
+            "ambiguous fallback must leave {expected} unfinished, got: {line}"
+        );
+    }
+}
+
+#[test]
+fn status_panel_trim_subagents_evicts_finished_before_unfinished() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_012);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "agent", "description": "unfinished 0"}).to_string(),
+            Some("toolu_unfinished_0"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"subagent_type": "agent", "description": "finished middle"}).to_string(),
+            Some("toolu_finished_middle"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_finished_middle")),
+    );
+    for idx in 1..STATUS_PANEL_SUBAGENT_LIMIT {
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use_with_id(
+                "Task",
+                &json!({"subagent_type": "agent", "description": format!("unfinished {idx}")})
+                    .to_string(),
+                Some(&format!("toolu_unfinished_{idx}")),
+            ),
+        );
+    }
+
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    assert_eq!(guard.subagents.len(), STATUS_PANEL_SUBAGENT_LIMIT);
+    assert!(
+        guard
+            .subagents
+            .iter()
+            .any(|slot| slot.desc == "unfinished 0"),
+        "oldest unfinished slot must survive finished-first trim"
+    );
+    assert!(
+        guard
+            .subagents
+            .iter()
+            .all(|slot| slot.desc != "finished middle"),
+        "finished slot should be evicted before unfinished slots"
     );
 }
 
@@ -5107,6 +5409,8 @@ fn status_tool_result_closes_subagent_only_for_task_tools() {
             StatusEvent::ToolEnd { success: false },
             StatusEvent::SubagentEnd {
                 success: false,
+                agent_id: None,
+                desc: None,
                 tool_use_id: None,
                 summary: None,
                 ack_only: false
@@ -5121,6 +5425,8 @@ fn status_tool_result_closes_subagent_only_for_task_tools() {
             StatusEvent::ToolEnd { success: true },
             StatusEvent::SubagentEnd {
                 success: true,
+                agent_id: None,
+                desc: None,
                 tool_use_id: None,
                 summary: None,
                 ack_only: true
@@ -5914,6 +6220,7 @@ fn clear_channel_purges_unfinished_background_zombie_slots_3436() {
         StatusEvent::SubagentStart {
             subagent_type: Some("reviewer".to_string()),
             desc: Some("never finishes".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_sub_zombie".to_string()),
             background: true,
         },
@@ -6181,6 +6488,7 @@ fn live_panel_compaction_keeps_subagents_section_and_running_entry() {
             StatusEvent::SubagentStart {
                 subagent_type: Some("reviewer".to_string()),
                 desc: Some(format!("Audit chunk {i:02}")),
+                agent_id: None,
                 tool_use_id: Some(id.clone()),
                 background: false,
             },
@@ -6189,6 +6497,8 @@ fn live_panel_compaction_keeps_subagents_section_and_running_entry() {
             channel_id,
             StatusEvent::SubagentEnd {
                 success: true,
+                agent_id: None,
+                desc: None,
                 tool_use_id: Some(id),
                 summary: None,
                 ack_only: false,
@@ -6200,6 +6510,7 @@ fn live_panel_compaction_keeps_subagents_section_and_running_entry() {
         StatusEvent::SubagentStart {
             subagent_type: Some("reviewer".to_string()),
             desc: Some("Live inspection".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_3404_sub_live".to_string()),
             background: false,
         },
@@ -6560,6 +6871,7 @@ fn stuck_background_subagent_slot_dropped_on_turn_boundary_reconciliation() {
         StatusEvent::SubagentStart {
             subagent_type: Some("bgworker".to_string()),
             desc: Some("stuck subagent".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_stuck_subagent_boundary".to_string()),
             background: true,
         },
@@ -6569,6 +6881,7 @@ fn stuck_background_subagent_slot_dropped_on_turn_boundary_reconciliation() {
         StatusEvent::SubagentStart {
             subagent_type: Some("bgworker".to_string()),
             desc: Some("fresh subagent".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_fresh_subagent_boundary".to_string()),
             background: true,
         },
@@ -6635,6 +6948,7 @@ fn stuck_background_subagent_slot_force_aborted_and_evicted() {
         StatusEvent::SubagentStart {
             subagent_type: Some("bgworker".to_string()),
             desc: Some("stuck subagent".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_stuck_subagent".to_string()),
             background: true,
         },
@@ -6696,6 +7010,7 @@ fn fresh_background_subagent_slot_preserved_by_ttl_sweep() {
         StatusEvent::SubagentStart {
             subagent_type: Some("bgworker".to_string()),
             desc: Some("fresh subagent".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_fresh_subagent".to_string()),
             background: true,
         },
@@ -6741,6 +7056,7 @@ fn finished_background_subagent_slot_untouched_by_ttl_sweep() {
         StatusEvent::SubagentStart {
             subagent_type: Some("bgworker".to_string()),
             desc: Some("finished subagent".to_string()),
+            agent_id: None,
             tool_use_id: Some("toolu_finished_subagent".to_string()),
             background: true,
         },
@@ -6749,6 +7065,8 @@ fn finished_background_subagent_slot_untouched_by_ttl_sweep() {
         channel_id,
         StatusEvent::SubagentEnd {
             success: true,
+            agent_id: None,
+            desc: None,
             tool_use_id: Some("toolu_finished_subagent".to_string()),
             summary: None,
             ack_only: false,

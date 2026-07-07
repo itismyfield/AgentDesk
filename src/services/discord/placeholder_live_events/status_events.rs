@@ -98,6 +98,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id_for_foot
                 .map(str::to_string)
                 .or_else(|| Some(name.to_string())),
             desc: subagent_description(&value).or(args_summary.clone()),
+            agent_id: subagent_agent_id(&value),
             tool_use_id: tool_use_id.map(str::to_string),
             background,
         });
@@ -143,6 +144,8 @@ pub(in crate::services::discord) fn status_events_from_tool_result_with_id(
     if tool_name.is_some_and(tool_result_completes_subagent) {
         events.push(StatusEvent::SubagentEnd {
             success: !is_error,
+            agent_id: None,
+            desc: None,
             tool_use_id: tool_use_id.map(str::to_string),
             summary: None,
             // A SUCCESSFUL `run_in_background` launch is ack-only: dispatch
@@ -169,11 +172,22 @@ pub(in crate::services::discord) fn status_events_from_task_notification_with_to
     summary: &str,
     tool_use_id: Option<&str>,
 ) -> Vec<StatusEvent> {
+    status_events_from_task_notification_with_metadata(kind, status, summary, tool_use_id, None)
+}
+
+fn status_events_from_task_notification_with_metadata(
+    kind: &str,
+    status: &str,
+    summary: &str,
+    tool_use_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> Vec<StatusEvent> {
     let mut events = Vec::new();
     match kind {
         "monitor_auto_turn" => events.push(StatusEvent::MonitorWait),
         "subagent" => {
             let summary = first_content_line(summary);
+            let desc = subagent_desc_from_notification_summary(&summary);
             if !summary.is_empty() {
                 events.push(match tool_use_id {
                     Some(tool_use_id) => StatusEvent::SubagentActivity {
@@ -186,6 +200,8 @@ pub(in crate::services::discord) fn status_events_from_task_notification_with_to
             if notification_is_terminal(status) {
                 events.push(StatusEvent::SubagentEnd {
                     success: !notification_is_error(status),
+                    agent_id: clean_status_key(agent_id),
+                    desc,
                     tool_use_id: tool_use_id.map(str::to_string),
                     summary: None,
                     // A terminal task_notification is the subagent's REAL
@@ -244,11 +260,15 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
         return Vec::new();
     }
     let kind = parsed.kind();
-    let events = status_events_from_task_notification_with_tool_use_id(
+    let agent_id = (kind == "subagent")
+        .then(|| parsed.task_id.as_deref())
+        .flatten();
+    let events = status_events_from_task_notification_with_metadata(
         kind,
         status,
         parsed.summary.as_deref().unwrap_or(""),
         parsed.tool_use_id.as_deref(),
+        agent_id,
     );
     // #3393 finding 1 (XML-scoped): drop an id-less terminal `SubagentEnd` — it
     // would fall back in the panel to "the last unfinished slot" and flip/evict
@@ -387,6 +407,29 @@ fn subagent_description(value: &Value) -> Option<String> {
     .find_map(|key| value.get(key).and_then(Value::as_str))
     .map(normalize_summary)
     .filter(|summary| !summary.is_empty())
+}
+
+fn subagent_agent_id(value: &Value) -> Option<String> {
+    ["agentId", "agent_id", "agent-id"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .and_then(|value| clean_status_key(Some(value)))
+}
+
+fn subagent_desc_from_notification_summary(summary: &str) -> Option<String> {
+    ["Agent \"", "Background agent \""]
+        .into_iter()
+        .find_map(|prefix| {
+            let rest = summary.trim_start().strip_prefix(prefix)?;
+            let (desc, _) = rest.split_once('"')?;
+            Some(normalize_summary(desc)).filter(|value| !value.is_empty())
+        })
+}
+
+fn clean_status_key(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn todo_items_from_input(value: &Value) -> Option<Vec<StatusTodoItem>> {
@@ -532,7 +575,7 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
     let record_summary = if any_block_aggregate {
         None
     } else {
-        subagent_summary_from_record(value)
+        subagent_completion_from_record(value)
     };
     let record_summary_owner_idx = record_summary.as_ref().and_then(|_| {
         blocks.iter().position(|block| {
@@ -566,8 +609,8 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
             // This block's OWN aggregate (batched case), keyed by THIS block's
             // tool_use_id; else the legacy record-level aggregate on the first
             // id-bearing block.
-            let block_summary = subagent_summary_from_record(block);
-            let summary = block_summary.or_else(|| {
+            let block_completion = subagent_completion_from_record(block);
+            let completion = block_completion.or_else(|| {
                 if Some(idx) == record_summary_owner_idx {
                     record_summary.clone()
                 } else {
@@ -575,7 +618,7 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                 }
             });
 
-            if let Some(summary) = summary {
+            if let Some((summary, agent_id, desc)) = completion {
                 // Pair by this block's own tool_use_id; the panel refuses the
                 // summary unless the id matches a real tracked slot.
                 let tool_use_id = block
@@ -586,6 +629,8 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                     StatusEvent::ToolEnd { success: !is_error },
                     StatusEvent::SubagentEnd {
                         success: !is_error,
+                        agent_id,
+                        desc,
                         tool_use_id,
                         summary: Some(summary),
                         // A summary-bearing end carries real accounting — a
@@ -605,11 +650,16 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
 /// block (batched) or the whole `user` record (legacy single). `None` for
 /// ordinary results. #3086 P1: live hot path — in-stream aggregate only (no disk
 /// IO); the prior synchronous rollout `read_to_string` was removed.
-fn subagent_summary_from_record(
+fn subagent_completion_from_record(
     value: &Value,
-) -> Option<crate::services::agent_protocol::SubagentSummary> {
-    let (summary, _agent_id) = super::subagent_rollout::summary_from_tool_use_result(value)?;
-    Some(summary)
+) -> Option<(
+    crate::services::agent_protocol::SubagentSummary,
+    Option<String>,
+    Option<String>,
+)> {
+    let (summary, agent_id) = super::subagent_rollout::summary_from_tool_use_result(value)?;
+    let desc = super::subagent_rollout::description_from_tool_use_result(value);
+    Some((summary, agent_id, desc))
 }
 
 fn system_status_events(value: &Value) -> Vec<StatusEvent> {
@@ -628,12 +678,28 @@ fn system_status_events(value: &Value) -> Vec<StatusEvent> {
     let status = value.get("status").and_then(Value::as_str).unwrap_or("");
     let summary = value.get("summary").and_then(Value::as_str).unwrap_or("");
     let tool_use_id = tool_use_id_from_notification(value);
-    status_events_from_task_notification_with_tool_use_id(
+    let agent_id = task_notification_agent_id(value, kind);
+    status_events_from_task_notification_with_metadata(
         kind,
         status,
         summary,
         tool_use_id.as_deref(),
+        agent_id.as_deref(),
     )
+}
+
+/// Returns the cleaned agent/task id from a subagent task notification,
+/// accepting `agentId`/`agent_id`/`agent-id` and
+/// `task_id`/`task-id`/`taskId`. `None` for non-subagent notifications.
+fn task_notification_agent_id(value: &Value, kind: &str) -> Option<String> {
+    (kind == "subagent").then(|| {
+        [
+            "agentId", "agent_id", "agent-id", "task_id", "task-id", "taskId",
+        ]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .and_then(|value| clean_status_key(Some(value)))
+    })?
 }
 
 /// Returns the launching Task's tool-use id from a nested subagent record's

@@ -885,6 +885,7 @@ mod tests {
             StatusEvent::SubagentStart {
                 subagent_type: Some("reviewer".to_string()),
                 desc: Some("Long background job".to_string()),
+                agent_id: None,
                 tool_use_id: Some(format!("tool-{}", channel_id.get())),
                 background: true,
             },
@@ -1557,6 +1558,7 @@ mod tests {
             StatusEvent::SubagentStart {
                 subagent_type: Some("bgworker".to_string()),
                 desc: Some("Carried agent".to_string()),
+                agent_id: None,
                 tool_use_id: Some("toolu_latest_agent".to_string()),
                 background: true,
             },
@@ -1612,6 +1614,8 @@ mod tests {
             channel_id,
             StatusEvent::SubagentEnd {
                 success: true,
+                agent_id: None,
+                desc: None,
                 tool_use_id: Some("toolu_latest_agent".to_string()),
                 summary: None,
                 ack_only: false,
