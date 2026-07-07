@@ -5,7 +5,7 @@
 
 - Production Rust modules: `931`
 - Giant-file threshold: `>= 1000` production lines
-- Giant files: `96`
+- Giant files: `98`
 
 > `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
 > giant-file flag tracks `Prod` so inline test fixtures do not freeze a
@@ -156,7 +156,7 @@
 | `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1640 | 1212 | 428 | giant-file |
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 364 | 364 | 0 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 376 | 376 | 0 |  |
-| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 598 | 421 | 177 |  |
+| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 616 | 439 | 177 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 243 | 149 | 94 |  |
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 1540 | 942 | 598 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 202 | 202 | 0 |  |
@@ -196,7 +196,7 @@
 | `manual_intervention` | `src/manual_intervention.rs` | 35 | 35 | 0 |  |
 | `pipeline` | `src/pipeline.rs` | 1517 | 1383 | 134 | giant-file |
 | `receipt` | `src/receipt.rs` | 1842 | 1842 | 0 | giant-file |
-| `reconcile` | `src/reconcile.rs` | 2906 | 1863 | 1043 | giant-file |
+| `reconcile` | `src/reconcile.rs` | 2945 | 1902 | 1043 | giant-file |
 | `runtime_layout` | `src/runtime_layout/mod.rs` | 773 | 715 | 58 |  |
 | `runtime_layout::config_merge` | `src/runtime_layout/config_merge.rs` | 602 | 602 | 0 |  |
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 | 396 | 0 |  |
@@ -479,15 +479,15 @@
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 301 | 287 | 14 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 545 | 494 | 51 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6387 | 936 | 5451 |  |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6489 | 1038 | 5451 | giant-file |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 550 | 189 | 361 |  |
 | `services::discord::inflight::budget` | `src/services/discord/inflight/budget.rs` | 340 | 109 | 231 |  |
-| `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store.rs` | 989 | 989 | 0 |  |
+| `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store.rs` | 1060 | 1060 | 0 | giant-file |
 | `services::discord::inflight::finalizer_identity` | `src/services/discord/inflight/finalizer_identity.rs` | 56 | 56 | 0 |  |
 | `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1174 | 858 | 316 |  |
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 821 | 307 | 514 |  |
 | `services::discord::inflight::ownership_ops` | `src/services/discord/inflight/ownership_ops.rs` | 329 | 329 | 0 |  |
-| `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 796 | 796 | 0 |  |
+| `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 810 | 810 | 0 |  |
 | `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 1366 | 954 | 412 |  |
 | `services::discord::inflight::store` | `src/services/discord/inflight/store.rs` | 350 | 350 | 0 |  |
 | `services::discord::inflight::watcher_state` | `src/services/discord/inflight/watcher_state.rs` | 365 | 365 | 0 |  |
@@ -634,7 +634,7 @@
 | `services::discord::runtime_bootstrap::spawns` | `src/services/discord/runtime_bootstrap/spawns.rs` | 268 | 268 | 0 |  |
 | `services::discord::runtime_bootstrap::startup_doctor` | `src/services/discord/runtime_bootstrap/startup_doctor.rs` | 156 | 156 | 0 |  |
 | `services::discord::runtime_bootstrap::voice` | `src/services/discord/runtime_bootstrap/voice.rs` | 140 | 140 | 0 |  |
-| `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 448 | 420 | 28 |  |
+| `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 497 | 469 | 28 |  |
 | `services::discord::semantic_boundaries` | `src/services/discord/semantic_boundaries.rs` | 261 | 261 | 0 |  |
 | `services::discord::session_banner` | `src/services/discord/session_banner.rs` | 68 | 68 | 0 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 214 | 141 | 73 |  |

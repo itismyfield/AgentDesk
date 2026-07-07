@@ -596,3 +596,23 @@ file = "src/services/discord/tui_direct_abort_marker/mod.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4175"
+
+[[entry]]
+# Re-crossed 1000-prod-LoC (1038) at #4104: standardized inflight-row-removal
+# instrumentation across the enumeration prunes + removal helpers. Was
+# decomposed in #3835 (store clusters -> inflight/{save_store,clear_store,...});
+# re-expanded prod-giants cannot be grandfathered, so registered here.
+file = "src/services/discord/inflight.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4201"
+
+[[entry]]
+# Crossed 1000-prod-LoC (1060) at #4104: was already 989 prod (a product of the
+# #3835 inflight decomposition) and the standardized removal instrumentation
+# across the 11 clear_inflight_state* / abandon-request identity-guarded clear
+# paths tipped it over.
+file = "src/services/discord/inflight/clear_store.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4201"

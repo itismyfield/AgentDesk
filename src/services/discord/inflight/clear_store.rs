@@ -21,6 +21,7 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return false;
     };
+    log_inflight_remove_for_path(provider, channel_id, "clear_inflight_state", &path);
     fs::remove_file(path).is_ok()
 }
 
@@ -254,6 +255,13 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_in_root(
             return GuardedClearOutcome::UserMsgMismatch;
         }
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "clear_inflight_state_if_matches",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -324,6 +332,13 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_zero_owned_i
     if state.user_msg_id != 0 {
         return GuardedClearOutcome::UserMsgMismatch;
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "clear_inflight_state_if_matches_zero_owned",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -492,6 +507,13 @@ pub(super) fn request_inflight_abandon_if_matches_in_root(
     if !enqueue_abandon_request_for_row(provider, channel_id, token_hash, &state) {
         return GuardedClearOutcome::IoError;
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "request_inflight_abandon_if_matches",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -553,6 +575,13 @@ pub(super) fn request_inflight_abandon_if_matches_zero_owned_in_root(
     if !enqueue_abandon_request_for_row(provider, channel_id, token_hash, &state) {
         return GuardedClearOutcome::IoError;
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "request_inflight_abandon_if_matches_zero_owned",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -593,6 +622,13 @@ pub(super) fn clear_inflight_state_if_matches_identity_in_root(
     if !expected.matches_state(&state) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "clear_inflight_state_if_matches_identity",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -642,6 +678,13 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
     {
         return GuardedClearOutcome::UserMsgMismatch;
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "clear_inflight_state_if_matches_identity_generation",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -684,6 +727,13 @@ pub(super) fn clear_rebind_origin_inflight_state_if_matches_identity_in_root(
     if !expected.matches_state(&state) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "clear_rebind_origin_inflight_state_if_matches_identity",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -730,6 +780,13 @@ pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evi
     if state.save_generation != expected_save_generation {
         return GuardedClearOutcome::UserMsgMismatch;
     }
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -818,6 +875,13 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
         }
     };
 
+    log_inflight_remove(
+        provider,
+        channel_id,
+        delivered_state.user_msg_id,
+        "clear_inflight_state_if_matches_identity_after_delivery",
+        &path,
+    );
     let outcome = match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
@@ -874,6 +938,13 @@ pub(super) fn clear_inflight_state_if_matches_tmux_response_in_root(
         return GuardedClearOutcome::UserMsgMismatch;
     }
 
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "clear_inflight_state_if_matches_tmux_response",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,

@@ -320,6 +320,54 @@ fn classify_io_error(prefix: &str, error: std::io::Error) -> String {
     }
 }
 
+fn discord_inflight_atomic_replace_channel_id(path: &Path) -> u64 {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn discord_inflight_atomic_replace_user_msg_id(path: &Path) -> u64 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .and_then(|value| value.get("user_msg_id").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0)
+}
+
+fn log_discord_inflight_atomic_replace(path: &Path) {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        return;
+    }
+    let Some(provider_dir) = path.parent() else {
+        return;
+    };
+    if provider_dir
+        .parent()
+        .and_then(|root| root.file_name())
+        .and_then(|name| name.to_str())
+        != Some("discord_inflight")
+    {
+        return;
+    }
+    if !path.exists() {
+        return;
+    }
+    let provider = provider_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    tracing::info!(
+        target: "agentdesk::inflight_remove",
+        provider = %provider,
+        channel_id = discord_inflight_atomic_replace_channel_id(path),
+        user_msg_id = discord_inflight_atomic_replace_user_msg_id(path),
+        reason = "runtime_store_atomic_write_replace",
+        path = %path.display(),
+        "discord inflight state row removal"
+    );
+}
+
 pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| classify_io_error("create_dir_all", e))?;
@@ -332,6 +380,7 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
         .map_err(|e| classify_io_error("write_all", e))?;
     file.sync_all()
         .map_err(|e| classify_io_error("sync_all", e))?;
+    log_discord_inflight_atomic_replace(path);
     fs::rename(&tmp, path).map_err(|e| classify_io_error("rename", e))
 }
 
