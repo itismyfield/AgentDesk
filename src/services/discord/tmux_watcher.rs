@@ -5657,8 +5657,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else if relay_decision.suppressed {
             let monitor_event_count = tool_state.transcript_events.len();
             // #1009: Snapshot the channel's MonitoringStore entry keys ONCE so
-            // both the lifecycle notify-outbox row and the suppressed-placeholder
-            // edit body share an identical summary (DRY enforcement).
+            // the lifecycle notify-outbox row uses a stable monitor summary for
+            // this suppressed terminal task-notification.
             let monitor_entry_keys: Vec<String> = if matches!(
                 task_notification_kind,
                 Some(TaskNotificationKind::MonitorAutoTurn)
@@ -5706,24 +5706,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 task_notification_kind,
                 reattach_offset_match: false,
             };
-            let mut decision = decide_placeholder_suppression(&ctx);
-            // #1009: Monitor auto-turn gets a richer suppressed-placeholder body
-            // (event count + current MonitoringStore entry keys) in place of the
-            // generic internal-suppression label.
-            if matches!(
-                task_notification_kind,
-                Some(TaskNotificationKind::MonitorAutoTurn)
-            ) {
-                if let PlaceholderSuppressDecision::Edit(_) = &decision {
-                    let body = format_monitor_suppressed_body(
-                        &last_edit_text,
-                        &watcher_provider,
-                        monitor_event_count,
-                        &monitor_entry_keys,
-                    );
-                    decision = PlaceholderSuppressDecision::Edit(body);
-                }
-            }
+            let decision = decide_placeholder_suppression(&ctx);
             apply_placeholder_suppression(
                 &http,
                 channel_id,
