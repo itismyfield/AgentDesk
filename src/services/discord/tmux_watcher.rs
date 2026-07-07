@@ -127,6 +127,9 @@ mod jsonl_rotation;
 #[path = "tmux_watcher/stall_exit.rs"]
 mod stall_exit;
 
+#[path = "tmux_watcher/terminal_abort_exits.rs"]
+mod terminal_abort_exits;
+
 pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
@@ -137,6 +140,7 @@ use self::session_bound_ack::*;
 use self::single_message_footer::*;
 use self::stall_exit::*;
 use self::supervisor_relay::*;
+use self::terminal_abort_exits::*;
 use self::terminal_readiness::*;
 use self::utf8_chunk_decoder::*;
 
@@ -3212,476 +3216,56 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
 
-        // Discard partial data if paused while reading (even if now unpaused), or if the epoch
-        // changed (a Discord turn claimed this data even when paused is now false).
-        let paused_now = paused.load(Ordering::Relaxed);
-        let epoch_changed_now = pause_epoch.load(Ordering::Relaxed) != epoch_snapshot;
-        let deferred_monitor_ready =
-            monitor_auto_turn_claimed && monitor_auto_turn_deferred && !paused_now;
-        if (was_paused || paused_now || epoch_changed_now) && !deferred_monitor_ready {
-            if let Some(msg_id) = placeholder_msg_id {
-                if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
-                {
-                    let inflight_before_cleanup =
-                        crate::services::discord::inflight::load_inflight_state(
-                            &watcher_provider,
-                            channel_id.get(),
-                        );
-                    let _ = delete_nonterminal_placeholder_unless_delivered(
-                        &http,
-                        channel_id,
-                        &shared,
-                        &watcher_provider,
-                        &tmux_session_name,
-                        msg_id,
-                        inflight_before_cleanup.as_ref(),
-                        Some((
-                            turn_data_start_offset,
-                            terminal_event_consumed_offset(current_offset, &all_data),
-                        )),
-                        response_sent_offset,
-                        &last_edit_text,
-                        "watcher_pause_epoch_placeholder_cleanup",
-                    )
-                    .await;
-                } else {
-                    placeholder_from_restored_inflight = false;
-                    last_edit_text.clear();
-                }
-            }
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
+        let abort_exit_outcome = {
+            let abort_exit_context = TerminalAbortExitContext {
+                http: &http,
+                shared: &shared,
                 channel_id,
-                &mut monitor_auto_turn_claimed,
-                &mut monitor_auto_turn_finished,
-                &mut monitor_auto_turn_synthetic_msg_id,
-                &mut monitor_auto_turn_ledger_generation,
-            )
-            .await;
-            all_data.clear();
-            all_data_start_offset = current_offset;
-            all_data_fully_mirrored_to_session_relay = true;
-            all_data_session_bound_relay_ack = None;
-            all_data_first_forwarded_relay_sequence = None;
-            continue;
-        }
-
-        // Handle prompt-too-long: kill session so next message creates a fresh one
-        if is_prompt_too_long {
-            clear_provider_overload_retry_state(channel_id);
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
-            );
-            prompt_too_long_killed = true;
-
-            let sess = tmux_session_name.clone();
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                tokio::task::spawn_blocking(move || {
-                    crate::services::termination_audit::record_termination_for_tmux(
-                        &sess,
-                        None,
-                        "tmux_watcher",
-                        "prompt_too_long",
-                        Some("watcher cleanup: prompt too long"),
-                        None,
-                    );
-                    record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                    crate::services::platform::tmux::kill_session(
-                        &sess,
-                        "watcher cleanup: prompt too long",
-                    );
-                }),
-            )
-            .await;
-
-            let notice = "⚠️ 컨텍스트 한도 초과로 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 처리됩니다.";
-            match placeholder_msg_id {
-                Some(msg_id) => {
-                    rate_limit_wait(&shared, channel_id).await;
-                    let _ = crate::services::discord::http::edit_channel_message(
-                        &http, channel_id, msg_id, notice,
-                    )
-                    .await;
-                }
-                None => {
-                    let _ = crate::services::discord::http::send_channel_message(
-                        &http, channel_id, notice,
-                    )
-                    .await;
-                }
-            }
-            // Don't break — let the watcher exit naturally when session-alive check fails
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut monitor_auto_turn_claimed,
-                &mut monitor_auto_turn_finished,
-                &mut monitor_auto_turn_synthetic_msg_id,
-                &mut monitor_auto_turn_ledger_generation,
-            )
-            .await;
-            continue;
-        }
-
-        // Handle auth error: kill session and notify user to re-authenticate
-        if is_auth_error {
-            clear_provider_overload_retry_state(channel_id);
-            let inflight_state = crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            );
-            let fallback_session_id = inflight_state
-                .as_ref()
-                .and_then(|state| state.session_id.as_deref());
-            let dispatch_id =
-                resolve_watcher_dispatch_id(&shared, channel_id, inflight_state.as_ref()).await;
-            let auth_detail = auth_error_message
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("authentication expired");
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 👁 Auth error detected in watcher for {tmux_session_name}: {}",
-                truncate_str(auth_detail, 300)
-            );
-            prompt_too_long_killed = true; // reuse flag to suppress duplicate "session ended" message
-
-            clear_provider_session_for_retry(
-                &shared,
-                channel_id,
-                &tmux_session_name,
-                fallback_session_id,
-            )
-            .await;
-
-            let sess = tmux_session_name.clone();
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                tokio::task::spawn_blocking(move || {
-                    crate::services::termination_audit::record_termination_for_tmux(
-                        &sess,
-                        None,
-                        "tmux_watcher",
-                        "auth_error",
-                        Some("watcher cleanup: authentication failed"),
-                        None,
-                    );
-                    record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
-                    crate::services::platform::tmux::kill_session(
-                        &sess,
-                        "watcher cleanup: authentication failed",
-                    );
-                }),
-            )
-            .await;
-
-            let notice = format!(
-                "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: {}",
-                truncate_str(auth_detail, 300)
-            );
-            let notice_ok = match placeholder_msg_id {
-                Some(msg_id) => {
-                    rate_limit_wait(&shared, channel_id).await;
-                    crate::services::discord::http::edit_channel_message(
-                        &http, channel_id, msg_id, &notice,
-                    )
-                    .await
-                    .is_ok()
-                }
-                None => {
-                    crate::services::discord::http::send_channel_message(&http, channel_id, &notice)
-                        .await
-                        .is_ok()
-                }
+                watcher_provider: &watcher_provider,
+                tmux_session_name: &tmux_session_name,
+                paused: &paused,
+                pause_epoch: &pause_epoch,
             };
-            if !notice_ok {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ watcher: auth error notice failed before dispatch failure — preserving inflight for retry"
-                );
-                finish_monitor_auto_turn_if_claimed(
-                    &shared,
-                    &watcher_provider,
-                    channel_id,
-                    &mut monitor_auto_turn_claimed,
-                    &mut monitor_auto_turn_finished,
-                    &mut monitor_auto_turn_synthetic_msg_id,
-                    &mut monitor_auto_turn_ledger_generation,
-                )
-                .await;
-                continue;
-            }
-            // #897 round-3 Medium: skip reaction work for `rebind_origin`
-            // inflights — their `user_msg_id=0` identifies no real Discord
-            // message so issuing reactions against it just produces API
-            // errors. The synthetic state was created by
-            // `/api/inflight/rebind` to adopt a live tmux session. The same
-            // holds for any user_msg_id == 0 (e.g. a TUI-direct turn) — there
-            // is no message to react against and `MessageId::new(0)` panics.
-            if let Some(state) = inflight_state
-                .as_ref()
-                .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
-            {
-                let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
-                    &shared,
-                    &http,
-                    channel_id,
-                    user_msg_id,
-                    state.born_generation,
-                    "tmux_watcher_auth_expired",
-                )
-                .await;
-            }
-            finalize_pinned_watcher_exit(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                inflight_state.as_ref(),
-                "watcher_auth_error_exit",
-            )
-            .await;
-            let failure_text = format!(
-                "authentication expired; re-authentication required: {}",
-                truncate_str(auth_detail, 300)
-            );
-            crate::services::discord::turn_bridge::fail_dispatch_auth_expired(
-                shared.api_port,
-                dispatch_id.as_deref(),
-                &failure_text,
-            )
-            .await;
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut monitor_auto_turn_claimed,
-                &mut monitor_auto_turn_finished,
-                &mut monitor_auto_turn_synthetic_msg_id,
-                &mut monitor_auto_turn_ledger_generation,
-            )
-            .await;
-            continue;
-        }
-
-        if is_provider_overloaded {
-            let overload_message = provider_overload_message
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("provider overload detected");
-            let inflight_state = crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            );
-            let retry_text = inflight_state
-                .as_ref()
-                .map(|state| state.user_text.clone())
-                .filter(|text| !text.trim().is_empty());
-            let fallback_session_id = inflight_state
-                .as_ref()
-                .and_then(|state| state.session_id.as_deref());
-            let dispatch_id =
-                resolve_watcher_dispatch_id(&shared, channel_id, inflight_state.as_ref()).await;
-
-            let decision = retry_text
-                .as_deref()
-                .map(|text| record_provider_overload_retry(channel_id, text))
-                .unwrap_or(ProviderOverloadDecision::Exhausted);
-            let retry_notice = match &decision {
-                ProviderOverloadDecision::Retry { attempt, delay, .. } => format!(
-                    "⚠️ 모델 capacity 상태를 감지해 세션을 정리했습니다. {}분 후 자동 재시도합니다. ({}/{})",
-                    delay.as_secs() / 60,
-                    attempt,
-                    PROVIDER_OVERLOAD_MAX_RETRIES
-                ),
-                ProviderOverloadDecision::Exhausted => format!(
-                    "⚠️ 모델 capacity 상태가 계속되어 자동 재시도를 중단했습니다. 잠시 후 다시 시도해 주세요.\n\n사유: {}",
-                    truncate_str(overload_message, 300)
-                ),
+            let abort_exit_locals = TerminalAbortExitLocals {
+                was_paused,
+                epoch_snapshot,
+                monitor_auto_turn_deferred,
+                placeholder_msg_id,
+                turn_data_start_offset,
+                current_offset,
+                response_sent_offset,
+                is_prompt_too_long,
+                is_auth_error,
+                auth_error_message: &auth_error_message,
+                is_provider_overloaded,
+                provider_overload_message: &provider_overload_message,
             };
-
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 👁 Provider overload detected in watcher for {}: {}",
-                tmux_session_name,
-                overload_message
-            );
-            prompt_too_long_killed = true;
-
-            clear_provider_session_for_retry(
-                &shared,
-                channel_id,
-                &tmux_session_name,
-                fallback_session_id,
-            )
-            .await;
-
-            let sess = tmux_session_name.clone();
-            let termination_reason = match &decision {
-                ProviderOverloadDecision::Retry { .. } => "provider_overload_retry",
-                ProviderOverloadDecision::Exhausted => "provider_overload_exhausted",
+            let mut abort_exit_state = TerminalAbortExitState {
+                placeholder_from_restored_inflight: &mut placeholder_from_restored_inflight,
+                last_edit_text: &mut last_edit_text,
+                monitor_auto_turn_claimed: &mut monitor_auto_turn_claimed,
+                monitor_auto_turn_finished: &mut monitor_auto_turn_finished,
+                monitor_auto_turn_synthetic_msg_id: &mut monitor_auto_turn_synthetic_msg_id,
+                monitor_auto_turn_ledger_generation: &mut monitor_auto_turn_ledger_generation,
+                all_data: &mut all_data,
+                all_data_start_offset: &mut all_data_start_offset,
+                all_data_fully_mirrored_to_session_relay:
+                    &mut all_data_fully_mirrored_to_session_relay,
+                all_data_session_bound_relay_ack: &mut all_data_session_bound_relay_ack,
+                all_data_first_forwarded_relay_sequence:
+                    &mut all_data_first_forwarded_relay_sequence,
+                prompt_too_long_killed: &mut prompt_too_long_killed,
             };
-            let termination_detail = format!("watcher cleanup: {overload_message}");
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                tokio::task::spawn_blocking(move || {
-                    crate::services::termination_audit::record_termination_for_tmux(
-                        &sess,
-                        None,
-                        "tmux_watcher",
-                        termination_reason,
-                        Some(&termination_detail),
-                        None,
-                    );
-                    record_tmux_exit_reason(&sess, &termination_detail);
-                    crate::services::platform::tmux::kill_session(&sess, &termination_detail);
-                }),
+            handle_terminal_abort_exits(
+                &abort_exit_context,
+                abort_exit_locals,
+                &mut abort_exit_state,
             )
-            .await;
-
-            let notice_ok = match placeholder_msg_id {
-                Some(msg_id) => {
-                    rate_limit_wait(&shared, channel_id).await;
-                    crate::services::discord::http::edit_channel_message(
-                        &http,
-                        channel_id,
-                        msg_id,
-                        &retry_notice,
-                    )
-                    .await
-                    .is_ok()
-                }
-                None => crate::services::discord::http::send_channel_message(
-                    &http,
-                    channel_id,
-                    &retry_notice,
-                )
-                .await
-                .is_ok(),
-            };
-            if !notice_ok {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ watcher: provider overload notice failed before retry/failure handling — preserving inflight for retry"
-                );
-                finish_monitor_auto_turn_if_claimed(
-                    &shared,
-                    &watcher_provider,
-                    channel_id,
-                    &mut monitor_auto_turn_claimed,
-                    &mut monitor_auto_turn_finished,
-                    &mut monitor_auto_turn_synthetic_msg_id,
-                    &mut monitor_auto_turn_ledger_generation,
-                )
-                .await;
-                continue;
-            }
-
-            // #897 round-3 Medium: skip reaction + retry scheduling for
-            // `rebind_origin` inflights — they have no real user message
-            // to react against and no real user text to re-prompt. The same
-            // holds for user_msg_id == 0 (e.g. a TUI-direct turn): no message
-            // to react against, and `MessageId::new(0)` would panic.
-            if let Some(state) = inflight_state
-                .as_ref()
-                .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
-            {
-                let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                if matches!(&decision, ProviderOverloadDecision::Exhausted) {
-                    crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
-                        &shared,
-                        &http,
-                        channel_id,
-                        user_msg_id,
-                        state.born_generation,
-                        "tmux_watcher_overload_exhausted",
-                    )
-                    .await;
-                } else {
-                    crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
-                        &shared,
-                        &http,
-                        channel_id,
-                        user_msg_id,
-                        state.born_generation,
-                        "tmux_watcher_overload_retry",
-                    )
-                    .await;
-                }
-            }
-            finalize_pinned_watcher_exit(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                inflight_state.as_ref(),
-                "watcher_provider_overload_exit",
-            )
-            .await;
-
-            match decision {
-                ProviderOverloadDecision::Retry {
-                    attempt,
-                    delay,
-                    fingerprint,
-                } => {
-                    if let Some(retry_text) = retry_text {
-                        // A turn with no anchored user message (rebind_origin or
-                        // user_msg_id == 0, e.g. a TUI-direct turn) has no
-                        // message to re-prompt against; clear retry state
-                        // instead of building `MessageId::new(0)` (panics).
-                        if let Some(state) = inflight_state
-                            .as_ref()
-                            .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
-                        {
-                            schedule_provider_overload_retry(
-                                shared.clone(),
-                                http.clone(),
-                                watcher_provider.clone(),
-                                channel_id,
-                                serenity::MessageId::new(state.user_msg_id),
-                                retry_text,
-                                attempt,
-                                delay,
-                                fingerprint,
-                            );
-                        } else {
-                            clear_provider_overload_retry_state(channel_id);
-                        }
-                    } else {
-                        clear_provider_overload_retry_state(channel_id);
-                    }
-                }
-                ProviderOverloadDecision::Exhausted => {
-                    let failure_text = format!(
-                        "provider overloaded after {} auto-retries: {}",
-                        PROVIDER_OVERLOAD_MAX_RETRIES,
-                        truncate_str(overload_message, 300)
-                    );
-                    crate::services::discord::turn_bridge::fail_dispatch_with_retry(
-                        shared.api_port,
-                        dispatch_id.as_deref(),
-                        &failure_text,
-                    )
-                    .await;
-                }
-            }
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut monitor_auto_turn_claimed,
-                &mut monitor_auto_turn_finished,
-                &mut monitor_auto_turn_synthetic_msg_id,
-                &mut monitor_auto_turn_ledger_generation,
-            )
-            .await;
-            continue;
+            .await
+        };
+        match abort_exit_outcome {
+            AbortExitOutcome::ContinueWatcherLoop => continue,
+            AbortExitOutcome::Fallthrough => {}
         }
 
         // Final guard: re-check epoch and turn_delivered right before relay.
