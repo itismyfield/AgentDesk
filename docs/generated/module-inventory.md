@@ -736,7 +736,7 @@
 | `services::discord::tui_prompt_relay::synthetic_start::stale_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs` | 225 | 225 | 0 |  |
 | `services::discord::tui_prompt_relay::synthetic_start_wiring` | `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs` | 137 | 137 | 0 |  |
 | `services::discord::tui_task_card` | `src/services/discord/tui_task_card.rs` | 1861 | 1065 | 796 | giant-file |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 2952 | 2492 | 460 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 1690 | 1230 | 460 | giant-file |
 | `services::discord::turn_bridge::bridge_latency_spans` | `src/services/discord/turn_bridge/bridge_latency_spans.rs` | 236 | 142 | 94 |  |
 | `services::discord::turn_bridge::cancel_finalize_policy` | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` | 581 | 131 | 450 |  |
 | `services::discord::turn_bridge::chunk_compose` | `src/services/discord/turn_bridge/chunk_compose.rs` | 68 | 68 | 0 |  |
@@ -763,6 +763,7 @@
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 80 | 80 | 0 |  |
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 301 | 144 | 157 |  |
 | `services::discord::turn_bridge::status_panel` | `src/services/discord/turn_bridge/status_panel.rs` | 684 | 684 | 0 |  |
+| `services::discord::turn_bridge::stream_loop` | `src/services/discord/turn_bridge/stream_loop.rs` | 1638 | 1638 | 0 | giant-file |
 | `services::discord::turn_bridge::stream_tick` | `src/services/discord/turn_bridge/stream_tick.rs` | 680 | 680 | 0 |  |
 | `services::discord::turn_bridge::streaming_edit_text` | `src/services/discord/turn_bridge/streaming_edit_text.rs` | 619 | 219 | 400 |  |
 | `services::discord::turn_bridge::task_notification_lifecycle` | `src/services/discord/turn_bridge/task_notification_lifecycle.rs` | 221 | 104 | 117 |  |

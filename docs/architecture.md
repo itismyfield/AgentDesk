@@ -87,6 +87,10 @@ Turn bridge decomposition anchors:
   candidate, review dispatch guard, bridge output owner classification,
   `TURN_ACTIVE` publish, finalizing counters, early TUI gate, busy-watcher
   handoff, and single-authority finalizer submission.
+- `turn_bridge/stream_loop.rs` — main stream receive/drain loop, cancel gates,
+  remaining stream event arms, long-running placeholder open/retarget state,
+  runtime handoff delegation, stream/status ticks, and bridge latency span
+  emission.
 - `turn_bridge/terminal_outcome_delivery.rs` — cancel, prompt-too-long,
   recovery retry, empty response, terminal delivery lease commits,
   terminal-controller cutover, voice completion, TUI completion gate, dispatch
