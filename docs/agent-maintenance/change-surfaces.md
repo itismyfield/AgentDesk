@@ -1986,15 +1986,16 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `shared_state::RestartLifecycle`, leaving a single `restart: RestartLifecycle`
   group field on `SharedData` with the type re-exported for surface freeze),
   `src/services/discord_config_audit.rs` (1288; +15 from #3692 leader-ownership gate on the config-audit agent sync path).
-- `src/services/discord/inflight/save_store.rs` (1069; crossed the 1000
+- `src/services/discord/inflight/save_store.rs` (1083; crossed the 1000
   threshold in #4185 — added the restart-only locked `full_response` patch
   helper `patch_restart_full_response_if_identity_unchanged` (identity +
   restart_mode/generation equality + rebind/output_path invariance + id-0
-  offsetless refusal + response_sent_offset boundary check) plus its regression
-  tests, so the API_FRICTION-cleaned response reaches restart-preserved rows
-  that the broad guarded save intentionally refuses) — guarded inflight
-  save/patch authority. Keep growth bugfix-only; decomposition tracked in
-  #4280 (move inline tests to a child module, extract identity-gate
+  offsetless refusal + response_sent_offset boundary check; +14 from the r2
+  already-relayed raw/cleaned prefix-equality guard before replacing durable
+  text) plus its regression tests, so the API_FRICTION-cleaned response reaches
+  restart-preserved rows that the broad guarded save intentionally refuses) —
+  guarded inflight save/patch authority. Keep growth bugfix-only; decomposition
+  tracked in #4280 (move inline tests to a child module, extract identity-gate
   predicates).
 - `src/services/discord/catch_up.rs` (1077; +70 from #4118 bugfix — retry-mode
   REST fetch failure re-arms `catch_up_retry_pending` with a bounded attempt

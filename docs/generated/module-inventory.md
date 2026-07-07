@@ -5,7 +5,7 @@
 
 - Production Rust modules: `940`
 - Giant-file threshold: `>= 1000` production lines
-- Giant files: `93`
+- Giant files: `94`
 
 > `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
 > giant-file flag tracks `Prod` so inline test fixtures do not freeze a
@@ -247,7 +247,7 @@
 | `server::routes::docs::inventory::endpoints::part_05` | `src/server/routes/docs/inventory/endpoints/part_05.rs` | 655 | 655 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_06` | `src/server/routes/docs/inventory/endpoints/part_06.rs` | 666 | 666 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_07` | `src/server/routes/docs/inventory/endpoints/part_07.rs` | 659 | 659 | 0 |  |
-| `server::routes::docs::inventory::endpoints::part_08` | `src/server/routes/docs/inventory/endpoints/part_08.rs` | 656 | 656 | 0 |  |
+| `server::routes::docs::inventory::endpoints::part_08` | `src/server/routes/docs/inventory/endpoints/part_08.rs` | 707 | 707 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_09` | `src/server/routes/docs/inventory/endpoints/part_09.rs` | 113 | 113 | 0 |  |
 | `server::routes::docs::taxonomy` | `src/server/routes/docs/taxonomy.rs` | 256 | 256 | 0 |  |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 | 8 | 0 |  |
@@ -479,7 +479,7 @@
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 301 | 287 | 14 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 545 | 494 | 51 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6039 | 588 | 5451 |  |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6040 | 589 | 5451 |  |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 550 | 189 | 361 |  |
 | `services::discord::inflight::budget` | `src/services/discord/inflight/budget.rs` | 340 | 109 | 231 |  |
 | `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store/mod.rs` | 873 | 873 | 0 |  |
@@ -490,7 +490,7 @@
 | `services::discord::inflight::ownership_ops` | `src/services/discord/inflight/ownership_ops.rs` | 329 | 329 | 0 |  |
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 810 | 810 | 0 |  |
 | `services::discord::inflight::removal` | `src/services/discord/inflight/removal.rs` | 465 | 465 | 0 |  |
-| `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 1366 | 954 | 412 |  |
+| `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 1730 | 1083 | 647 | giant-file |
 | `services::discord::inflight::store` | `src/services/discord/inflight/store.rs` | 350 | 350 | 0 |  |
 | `services::discord::inflight::watcher_state` | `src/services/discord/inflight/watcher_state.rs` | 365 | 365 | 0 |  |
 | `services::discord::inflight_heartbeat_sweeper` | `src/services/discord/inflight_heartbeat_sweeper.rs` | 299 | 264 | 35 |  |
@@ -731,7 +731,7 @@
 | `services::discord::tui_prompt_relay::synthetic_start::stale_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs` | 225 | 225 | 0 |  |
 | `services::discord::tui_prompt_relay::synthetic_start_wiring` | `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs` | 137 | 137 | 0 |  |
 | `services::discord::tui_task_card` | `src/services/discord/tui_task_card.rs` | 1861 | 1065 | 796 | giant-file |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 6642 | 6182 | 460 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 6653 | 6193 | 460 | giant-file |
 | `services::discord::turn_bridge::bridge_latency_spans` | `src/services/discord/turn_bridge/bridge_latency_spans.rs` | 236 | 142 | 94 |  |
 | `services::discord::turn_bridge::cancel_finalize_policy` | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` | 581 | 131 | 450 |  |
 | `services::discord::turn_bridge::chunk_compose` | `src/services/discord/turn_bridge/chunk_compose.rs` | 68 | 68 | 0 |  |

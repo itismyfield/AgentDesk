@@ -156,6 +156,25 @@ mod tests {
         (raw, extracted.cleaned_response)
     }
 
+    fn api_friction_response_with_leading_blanks_pair() -> (String, String) {
+        let raw = concat!(
+            "\n",
+            "\n",
+            "Visible answer before marker.\n",
+            "API_FRICTION: {\"endpoint\":\"GET /api/docs\",",
+            "\"friction_type\":\"missing_docs\",",
+            "\"summary\":\"docs endpoint omitted the category\"}\n",
+            "Visible answer after marker."
+        )
+        .to_string();
+        let extracted = crate::services::api_friction::extract_api_friction_reports(&raw);
+        assert_eq!(extracted.reports.len(), 1);
+        assert!(extracted.parse_errors.is_empty());
+        assert!(!extracted.cleaned_response.contains("API_FRICTION:"));
+        assert!(!extracted.cleaned_response.starts_with('\n'));
+        (raw, extracted.cleaned_response)
+    }
+
     fn state_with_full_response(
         channel_id: u64,
         full_response: &str,
@@ -225,6 +244,94 @@ mod tests {
         );
         assert_eq!(persisted.current_msg_id, state.current_msg_id);
         assert_eq!(persisted.response_sent_offset, state.response_sent_offset);
+    }
+
+    #[test]
+    fn restart_full_response_patch_declines_when_cleaning_changes_relayed_prefix() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let (raw, cleaned) = api_friction_response_with_leading_blanks_pair();
+        let response_sent_offset = raw.find("Visible answer").expect("visible prefix");
+        assert!(response_sent_offset > 0);
+        assert_ne!(
+            &raw.as_bytes()[..response_sent_offset],
+            &cleaned.as_bytes()[..response_sent_offset]
+        );
+
+        let mut state =
+            state_with_full_response(44_087, &raw, "AgentDesk-codex-restart-prefix-decline-4185");
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        state.response_sent_offset = response_sent_offset;
+        save_inflight_state(&state).expect("seed raw restart-preserved row");
+
+        let mut cleaned_snapshot = state.clone();
+        cleaned_snapshot.full_response = cleaned;
+        assert_eq!(
+            patch_restart_full_response_if_identity_unchanged(
+                &cleaned_snapshot,
+                "test::restart_cleaned_patch_prefix_declines",
+            ),
+            GuardedSaveOutcome::IdentityMismatch
+        );
+
+        let persisted = super::super::load_inflight_state(&ProviderKind::Codex, state.channel_id)
+            .expect("persisted restart row");
+        assert_eq!(persisted.full_response, raw);
+        assert_eq!(persisted.response_sent_offset, response_sent_offset);
+        assert_eq!(
+            persisted.restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
+    }
+
+    #[test]
+    fn restart_full_response_patch_saves_when_cleaning_keeps_relayed_prefix() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let (raw, cleaned) = api_friction_response_pair();
+        let response_sent_offset = raw.find("API_FRICTION:").expect("marker offset");
+        assert!(response_sent_offset > 0);
+        assert_eq!(
+            &raw.as_bytes()[..response_sent_offset],
+            &cleaned.as_bytes()[..response_sent_offset]
+        );
+
+        let mut state =
+            state_with_full_response(44_088, &raw, "AgentDesk-codex-restart-prefix-save-4185");
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        state.response_sent_offset = response_sent_offset;
+        save_inflight_state(&state).expect("seed raw restart-preserved row");
+
+        let mut cleaned_snapshot = state.clone();
+        cleaned_snapshot.full_response = cleaned.clone();
+        assert_eq!(
+            patch_restart_full_response_if_identity_unchanged(
+                &cleaned_snapshot,
+                "test::restart_cleaned_patch_prefix_saves",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+
+        let persisted = super::super::load_inflight_state(&ProviderKind::Codex, state.channel_id)
+            .expect("persisted restart row");
+        assert_eq!(persisted.full_response, cleaned);
+        assert_eq!(persisted.response_sent_offset, response_sent_offset);
+        assert_eq!(
+            persisted.restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
     }
 
     #[test]
@@ -938,23 +1045,37 @@ pub(super) fn patch_restart_full_response_if_identity_unchanged_in_root(
         return GuardedSaveOutcome::IdentityMismatch;
     }
 
-    on_disk.full_response = state.full_response.clone();
-    if on_disk.response_sent_offset > on_disk.full_response.len()
-        || !on_disk
-            .full_response
-            .is_char_boundary(on_disk.response_sent_offset)
+    let response_sent_offset = on_disk.response_sent_offset;
+    if response_sent_offset > state.full_response.len()
+        || !state.full_response.is_char_boundary(response_sent_offset)
     {
         tracing::info!(
             provider = %provider.as_str(),
             channel = state.channel_id,
             caller = caller,
-            response_sent_offset = on_disk.response_sent_offset,
-            full_response_len = on_disk.full_response.len(),
+            response_sent_offset = response_sent_offset,
+            full_response_len = state.full_response.len(),
             "restart-preserved full_response patch skipped because the existing response offset would become invalid"
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
+    if response_sent_offset > 0
+        && on_disk.full_response.as_bytes().get(..response_sent_offset)
+            != Some(&state.full_response.as_bytes()[..response_sent_offset])
+    {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            caller = caller,
+            response_sent_offset = response_sent_offset,
+            raw_full_response_len = on_disk.full_response.len(),
+            cleaned_full_response_len = state.full_response.len(),
+            "already-relayed prefix diverges after API_FRICTION cleaning; keeping raw text to preserve resume-offset semantics"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
 
+    on_disk.full_response = state.full_response.clone();
     match persist_under_lock(
         root,
         &path,
