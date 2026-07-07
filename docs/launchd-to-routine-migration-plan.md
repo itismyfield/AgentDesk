@@ -1,6 +1,6 @@
 # launchd → AgentDesk Routine Migration Plan (#2202 §2/§3)
 
-This document tracks the migration of 12 launchd cron jobs to AgentDesk
+This document tracks the remaining launchd cron jobs migrated to AgentDesk
 routines. **The launchd plists are intentionally left in place during the
 24h+ verification window**; routines and launchd both fire, the operator
 de-duplicates by removing the launchd plist once parity is confirmed.
@@ -15,11 +15,10 @@ were copied from the original `~/.local/bin/*.sh` launchd targets and are
 deployed by `adk-release`, so leadership can move between eligible nodes
 without a manual script rsync.
 
-## The 12 jobs
+## Migrated jobs
 
 | # | launchd label | routine script_ref | cron (KST) | agent_id | status |
 |---|---|---|---|---|---|
-| 1 | `com.itismyfield.agent-feedback-briefing` | `migrated-launchd/agent-feedback-briefing.js` | `5 19 * * *` | `ch-pmd` | cutover (stage-paused) |
 | 2 | `com.itismyfield.ai-integrated-briefing` | `migrated-launchd/ai-integrated-briefing.js` | `10 9,21 * * *` | `project-newsbot` | cutover (stage-paused) |
 | 3 | `com.itismyfield.banchan-day-reminder.prep` | `migrated-launchd/banchan-day-reminder-prep.js` | `0 8 * * *` | `family-routine` | cutover (stage-paused) |
 | 4 | `com.itismyfield.banchan-day-reminder.cook` | `migrated-launchd/banchan-day-reminder-cook.js` | `0 18 * * *` | `family-routine` | cutover (stage-paused) |
@@ -85,7 +84,7 @@ curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
 }'
 ```
 
-### Group B — stage-paused attach without schedule (cutover jobs: 1, 2, 3, 4, 5, 6, 7, 11)
+### Group B — stage-paused attach without schedule (cutover jobs: 2, 3, 4, 5, 6, 7, 11)
 
 Jobs 3/4 (banchan reminders) are also in this group because the
 verification window can land on 반찬데이, where the skill's calendar
@@ -101,16 +100,6 @@ cutover time.
 
 ```bash
 # Capture the routine id from each POST response (jq .routine.id).
-
-# Job 1 — agent-feedback-briefing (cutover schedule: 5 19 * * *)
-ID1=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/agent-feedback-briefing.js",
-  "name": "agent-feedback-briefing",
-  "agent_id": "ch-pmd",
-  "execution_strategy": "fresh",
-  "timeout_secs": 1800
-}' | jq -r '.routine.id')
-curl -sf "$API/api/routines/$ID1/pause" -X POST
 
 # Job 2 — ai-integrated-briefing (cutover schedule: 10 9,21 * * *)
 ID2=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
@@ -182,8 +171,8 @@ ID11=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' 
 }' | jq -r '.routine.id')
 curl -sf "$API/api/routines/$ID11/pause" -X POST
 
-# Verify all eight are paused:
-for ID in "$ID1" "$ID2" "$ID3" "$ID4" "$ID5" "$ID6" "$ID7" "$ID11"; do
+# Verify all seven are paused:
+for ID in "$ID2" "$ID3" "$ID4" "$ID5" "$ID6" "$ID7" "$ID11"; do
   curl -sf "$API/api/routines/$ID" | jq -r '.routine | "\(.id) \(.status)"'
 done
 # Expected: every row reports "paused".
@@ -231,7 +220,7 @@ curl -sf "$API/api/routines/$ID10/pause" -X POST
 
 ## Cross-leader prerequisite — script availability
 
-Jobs 1–11 now invoke scripts staged by `adk-release` at
+Migrated shell jobs now invoke scripts staged by `adk-release` at
 `${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}/scripts/launchd-migrated/*.sh`; the
 helper `run-claude-message-job.sh` is staged in the same directory and
 called via the script's own directory. Cross-leader failover therefore
@@ -320,12 +309,12 @@ legacy paths. Environment prefixes like `$OBSIDIAN_VAULT_ROOT/foo` and
 
 ## Verification window (≥24 hours)
 
-Because jobs 1, 2, 5, 6, 7, 11 send Discord messages, the operator
+Because jobs 2, 5, 6, 7, 11 send Discord messages, the operator
 **must avoid true parallel-running** for those — the recipient would see
 two copies of every briefing. Use the **stage-paused → cutover**
 protocol instead:
 
-### Stage-paused → cutover protocol (jobs with Discord side effects: 1, 2, 5, 6, 7, 11)
+### Stage-paused → cutover protocol (jobs with Discord side effects: 2, 5, 6, 7, 11)
 
 `POST /api/routines` inserts migrated launchd rows as `status='paused'`.
 Older releases inserted every row as `status='enabled'`, which created a
