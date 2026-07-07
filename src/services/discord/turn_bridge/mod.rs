@@ -618,6 +618,36 @@ mod streaming_edit_text_tests {
 }
 
 #[cfg(test)]
+mod headless_completion_footer_tests {
+    fn compact_ws(input: &str) -> String {
+        input.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// #4103: headless-dispatched turns (API / cron / routine, and E2E
+    /// E-1/E-22/E-23) never emitted single-message completion chrome because the
+    /// `enqueue_headless_delivery` SUCCESS arm set `terminal_delivery_committed`
+    /// / `terminal_body_visible` but NOT `completion_footer_terminal_text`, so
+    /// `note_turn_completed_footer` was never reached. Assert the guarded footer
+    /// write sits immediately after that arm's `terminal_body_visible = true;`
+    /// commit — a sequence unique to this arm (sibling branches register the
+    /// footer in different contexts) and absent from this test's own source, so
+    /// it does not self-match the `include_str!` include.
+    #[test]
+    fn headless_enqueue_success_registers_completion_footer_text() {
+        let source = compact_ws(include_str!("mod.rs"));
+        let expected = "terminal_body_visible = true; \
+             if single_message_panel_footer_mode { \
+             completion_footer_terminal_text = Some(delivery_response.clone()); }";
+
+        assert!(
+            source.contains(expected),
+            "headless enqueue success arm must set completion_footer_terminal_text \
+             right after committing terminal_body_visible (#4103 completion chrome)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod bridge_busy_turn_handoff_tests {
     use super::*;
     use output_lifecycle::{BridgeOutputOwner, classify_bridge_output_owner};
@@ -5525,6 +5555,9 @@ pub(super) fn spawn_turn_bridge(
                             .await;
                             terminal_delivery_committed = true;
                             terminal_body_visible = true;
+                            if single_message_panel_footer_mode {
+                                completion_footer_terminal_text = Some(delivery_response.clone());
+                            }
                         }
                         Err(error) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");

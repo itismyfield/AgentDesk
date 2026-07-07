@@ -1219,7 +1219,12 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6178 lines; production LoC; +18
+  - `src/services/discord/turn_bridge/mod.rs` (6182 lines; production LoC; +4
+    from #4103 setting `completion_footer_terminal_text = Some(delivery_response)`
+    in the `enqueue_headless_delivery` success arm so headless (API/cron/routine)
+    turns render single-message completion chrome via `note_turn_completed_footer`
+    (the arm previously set only `terminal_delivery_committed`/`terminal_body_visible`,
+    leaving `terminal_text: None` → footer reconciler never called); +18
     from the #4171/#4167/#4172 inflight single-authority surgery (7 post-release
     saves + twin converted to `save_inflight_state_if_identity_unchanged` guarded
     call-sites + one `GuardedSaveOutcome` match), reconciled here per #4183 CI-red
