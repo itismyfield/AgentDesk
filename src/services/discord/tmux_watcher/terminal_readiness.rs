@@ -127,6 +127,7 @@ pub(super) fn watcher_terminal_rewind_seed(
             task_notification_kind: input.task_notification_kind,
             finish_mailbox_on_completion: input.finish_mailbox_on_completion,
             injected_prompt_message_id: input.injected_prompt_message_id,
+            turn_identity: None,
             streaming_rollover_frozen_msg_ids: input.streaming_rollover_frozen_msg_ids.to_vec(),
             same_turn_rewind: true,
         })

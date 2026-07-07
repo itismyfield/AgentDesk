@@ -828,18 +828,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .map(|body| body.trim().chars().count())
             .unwrap_or(0);
         let restored_seed_has_body = restored_seed_undelivered_body_len > 0;
-        let prompt_anchor_present_for_seed_discard =
+        let prompt_anchor_for_seed_discard =
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id.get(),
-            )
-            .is_some();
+            );
+        let prompt_anchor_present_for_seed_discard = prompt_anchor_for_seed_discard.is_some();
+        let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(
+            restored_turn_seed.as_ref(),
+            watcher_turn_identity.as_ref(),
+            prompt_anchor_for_seed_discard.map(|anchor| anchor.message_id),
+        );
         let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
             restored_turn_seed.is_some(),
             prompt_anchor_present_for_seed_discard,
             restored_seed_has_body,
             seed_from_rewind,
+            seed_reassigned_to_different_turn,
         );
         if !discard_restored_seed
             && prompt_anchor_present_for_seed_discard
@@ -855,9 +861,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if discard_restored_seed {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] 👁 watcher: discarding restored stream seed for idle SSH-direct prompt on channel {} (tmux={})",
+                "  [{ts}] 👁 watcher: discarding restored stream seed for idle SSH-direct prompt on channel {} (tmux={}, cross_turn={})",
                 channel_id.get(),
-                tmux_session_name
+                tmux_session_name,
+                seed_reassigned_to_different_turn
             );
         }
         let stream_seed = watcher_stream_seed(if discard_restored_seed {

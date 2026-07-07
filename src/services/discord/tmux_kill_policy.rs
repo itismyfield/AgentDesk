@@ -2,6 +2,7 @@ use super::*;
 
 const RECENT_TURN_STOP_CAPACITY: usize = 128;
 const RECENT_TURN_STOP_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const RECENT_TURN_STOP_OFFSET_MATCH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 pub(in crate::services::discord) const RECENT_TURN_STOP_METADATA_FALLBACK_TTL: std::time::Duration =
     std::time::Duration::from_secs(60);
 /// Slack between the cancel boundary recorded at stop time and the wrapper's
@@ -166,9 +167,17 @@ pub(in crate::services::discord) async fn record_recent_turn_stop(
     tmux_session_name: Option<&str>,
     reason: &str,
 ) {
-    let stop_output_offset =
-        tmux_session_name.and_then(|name| tmux_output_offset_for_stop(channel_id, name));
     let stop_generation_mtime_ns = tmux_generation_mtime_for_stop(tmux_session_name);
+    if tmux_session_name.is_some() && stop_generation_mtime_ns.is_none() {
+        tracing::warn!(
+            "[cancel-tombstone] generation mtime unavailable for channel {} session {:?}; range suppression will fail closed",
+            channel_id.get(),
+            tmux_session_name
+        );
+    }
+    let stop_output_offset = tmux_session_name
+        .filter(|_| stop_generation_mtime_ns.is_some())
+        .and_then(|name| tmux_output_offset_for_stop(channel_id, name));
     // #2549: the in-memory entry is still published immediately so a live
     // watcher can classify the cancel race, but async consumers wait for the
     // PG insert tied to the same UUID before deleting/consuming the row. That
@@ -499,16 +508,35 @@ fn recent_turn_stop_matches_watcher_range(
     if let (Some(entry_tmux), Some(stop_offset)) =
         (entry.tmux_session_name.as_deref(), entry.stop_output_offset)
     {
-        if let Some(stop_generation_mtime_ns) = entry.stop_generation_mtime_ns {
-            let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
-            if current_generation_mtime_ns != stop_generation_mtime_ns {
-                return false;
-            }
+        if now.saturating_duration_since(entry.recorded_at) > RECENT_TURN_STOP_OFFSET_MATCH_TTL {
+            return false;
+        }
+        let Some(stop_generation_mtime_ns) =
+            entry.stop_generation_mtime_ns.filter(|mtime| *mtime > 0)
+        else {
+            return false;
+        };
+        let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+        if current_generation_mtime_ns != stop_generation_mtime_ns {
+            return false;
         }
         // Exact EOF equality means the next watcher range starts after a clean
         // cancel boundary. Only ranges that began before the stop EOF belong to
         // the canceled turn.
         return entry_tmux == tmux_session_name && data_start_offset < stop_offset;
+    }
+
+    if entry.tmux_session_name.is_some() && entry.stop_generation_mtime_ns.is_none() {
+        return false;
+    }
+    if let (Some(_entry_tmux), Some(stop_generation_mtime_ns)) = (
+        entry.tmux_session_name.as_deref(),
+        entry.stop_generation_mtime_ns.filter(|mtime| *mtime > 0),
+    ) {
+        let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+        if current_generation_mtime_ns != stop_generation_mtime_ns {
+            return false;
+        }
     }
 
     let session_matches = entry
@@ -518,4 +546,60 @@ fn recent_turn_stop_matches_watcher_range(
     session_matches
         && now.saturating_duration_since(entry.recorded_at)
             <= RECENT_TURN_STOP_METADATA_FALLBACK_TTL
+}
+
+#[cfg(test)]
+mod recent_turn_stop_range_tests {
+    use super::*;
+
+    fn recent_stop(
+        channel_id: ChannelId,
+        recorded_at: std::time::Instant,
+        stop_generation_mtime_ns: Option<i64>,
+    ) -> RecentTurnStop {
+        RecentTurnStop {
+            id: uuid::Uuid::new_v4(),
+            channel_id,
+            tmux_session_name: Some("AgentDesk-claude-adk".to_string()),
+            stop_output_offset: Some(512),
+            stop_generation_mtime_ns,
+            reason: "test".to_string(),
+            recorded_at,
+            pg_persistence: None,
+        }
+    }
+
+    #[test]
+    fn watcher_range_stop_without_generation_fails_closed() {
+        let channel_id = ChannelId::new(4105);
+        let now = std::time::Instant::now();
+        let entry = recent_stop(channel_id, now, None);
+
+        assert!(!recent_turn_stop_matches_watcher_range(
+            &entry,
+            channel_id,
+            "AgentDesk-claude-adk",
+            511,
+            now,
+        ));
+    }
+
+    #[test]
+    fn watcher_range_offset_match_has_short_ttl() {
+        let channel_id = ChannelId::new(4105);
+        let now = std::time::Instant::now();
+        let entry = recent_stop(
+            channel_id,
+            now - RECENT_TURN_STOP_OFFSET_MATCH_TTL - std::time::Duration::from_millis(1),
+            Some(1),
+        );
+
+        assert!(!recent_turn_stop_matches_watcher_range(
+            &entry,
+            channel_id,
+            "AgentDesk-claude-adk",
+            511,
+            now,
+        ));
+    }
 }

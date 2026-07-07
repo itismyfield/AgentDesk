@@ -2623,6 +2623,7 @@ fn tui_direct_rewind_seed_with_prompt_anchor_reuses_placeholder_4115() {
         true,
         false,
         seed.same_turn_rewind,
+        false,
     );
     assert!(
         !discard,
