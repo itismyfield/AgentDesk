@@ -90,7 +90,7 @@
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
 | `src/services/codex_tui/input.rs` | 1366 |
 | `src/services/discord/commands/text_commands.rs` | 1476 |
-| `src/services/discord/formatting.rs` | 2821 |
+| `src/services/discord/formatting.rs` | 2862 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
 | `src/services/discord/mod.rs` | 4138 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1337 |

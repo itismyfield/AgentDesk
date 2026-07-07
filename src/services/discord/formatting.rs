@@ -12,12 +12,11 @@ use super::{
     rate_limit_wait,
     response_sanitizer::subagent_notification_card,
 };
-use crate::utils::format::tail_with_ellipsis_bytes;
+use crate::utils::format::tail_with_ellipsis;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
 const STREAMING_PLACEHOLDER_MARGIN: usize = 10;
-const UTF8_ELLIPSIS_EXTRA_BYTES: usize = "…".len().saturating_sub(1);
 const THINKING_STATUS_MAX_BYTES: usize = 600;
 const TOOL_STATUS_MAX_BYTES: usize = 300;
 /// Invisible marker appended to newly-rendered placeholder cards so probes can
@@ -397,12 +396,27 @@ pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {
     }
 }
 
+fn char_count(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn byte_index_at_char_limit(s: &str, max_chars: usize) -> usize {
+    if max_chars == 0 {
+        0
+    } else {
+        s.char_indices()
+            .nth(max_chars)
+            .map(|(idx, _)| idx)
+            .unwrap_or(s.len())
+    }
+}
+
 pub(super) fn streaming_split_boundary(text: &str, max_len: usize) -> Option<usize> {
-    if max_len == 0 || text.len() <= max_len {
+    if max_len == 0 || char_count(text) <= max_len {
         return None;
     }
 
-    let safe_end = floor_char_boundary(text, max_len);
+    let safe_end = byte_index_at_char_limit(text, max_len);
     if safe_end == 0 {
         return None;
     }
@@ -421,7 +435,8 @@ pub(super) fn streaming_split_boundary(text: &str, max_len: usize) -> Option<usi
         .or_else(|| super::semantic_boundaries::semantic_sentence_split_boundary(window))
         .or(whitespace_split)
         .unwrap_or(safe_end);
-    let split_at = if preferred < safe_end / 2 {
+    let preferred_chars = char_count(&text[..preferred]);
+    let split_at = if preferred_chars < max_len / 2 {
         safe_end
     } else {
         preferred
@@ -441,11 +456,10 @@ fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &st
     let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
-        .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN)
-        .saturating_add(UTF8_ELLIPSIS_EXTRA_BYTES)
+        .saturating_sub(char_count(&footer) + STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let normalized = normalize_empty_lines(current_portion);
-    let body = tail_with_ellipsis_bytes(&normalized, body_budget);
+    let body = tail_with_ellipsis(&normalized, body_budget);
     format!("{}{}", body, footer)
 }
 
@@ -460,7 +474,7 @@ pub(super) fn plan_streaming_rollover(
     let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
-        .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_sub(char_count(&footer) + STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let split_at = streaming_split_boundary(current_portion, body_budget)?;
 
@@ -979,14 +993,14 @@ mod status_panel_v2_formatter_tests {
     fn plan_streaming_rollover_strips_liveness_footer_from_frozen_chunk_s0() {
         let footer = format!("\n\n{LIVENESS_FOOTER}");
         let body_budget = super::DISCORD_MSG_LIMIT
-            .saturating_sub(footer.len() + super::STREAMING_PLACEHOLDER_MARGIN)
+            .saturating_sub(super::char_count(&footer) + super::STREAMING_PLACEHOLDER_MARGIN)
             .max(1);
         let current_portion = "x".repeat(body_budget + 64);
 
         let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
             .expect("current portion should roll over once footer budget is reserved");
 
-        assert_eq!(plan.frozen_chunk.len(), body_budget);
+        assert_eq!(super::char_count(&plan.frozen_chunk), body_budget);
         assert_eq!(plan.frozen_chunk, &current_portion[..plan.split_at]);
         assert!(!plan.frozen_chunk.contains(LIVENESS_FOOTER));
         assert!(plan.display_snapshot.ends_with(&footer));
@@ -1000,19 +1014,19 @@ mod status_panel_v2_formatter_tests {
     }
 
     #[test]
-    fn plan_streaming_rollover_reserves_footer_length_before_2000_byte_limit_s0() {
+    fn plan_streaming_rollover_reserves_footer_length_before_2000_char_limit_s0() {
         let footer = format!("\n\n{LIVENESS_FOOTER}");
         let body_budget = super::DISCORD_MSG_LIMIT
-            .saturating_sub(footer.len() + super::STREAMING_PLACEHOLDER_MARGIN)
+            .saturating_sub(super::char_count(&footer) + super::STREAMING_PLACEHOLDER_MARGIN)
             .max(1);
         let current_portion = "x".repeat(body_budget + 1);
-        assert!(current_portion.len() < super::DISCORD_MSG_LIMIT);
+        assert!(super::char_count(&current_portion) < super::DISCORD_MSG_LIMIT);
 
         let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
             .expect("body fits raw Discord limit but not the reserved footer budget");
 
         assert_eq!(plan.split_at, body_budget);
-        assert!(plan.display_snapshot.len() <= super::DISCORD_MSG_LIMIT);
+        assert!(super::char_count(&plan.display_snapshot) <= super::DISCORD_MSG_LIMIT);
         assert!(plan.display_snapshot.ends_with(&footer));
     }
 
@@ -1023,7 +1037,7 @@ mod status_panel_v2_formatter_tests {
 
         assert!(plan_streaming_rollover(current_portion, LIVENESS_FOOTER).is_none());
         assert_eq!(rendered, format!("{current_portion}\n\n{LIVENESS_FOOTER}"));
-        assert!(rendered.len() < super::DISCORD_MSG_LIMIT);
+        assert!(super::char_count(&rendered) < super::DISCORD_MSG_LIMIT);
     }
 
     #[test]
@@ -1032,7 +1046,7 @@ mod status_panel_v2_formatter_tests {
         let rendered = build_streaming_placeholder_text("", &oversized_footer);
 
         assert!(plan_streaming_rollover("", &oversized_footer).is_none());
-        assert!(rendered.len() <= super::DISCORD_MSG_LIMIT);
+        assert!(super::char_count(&rendered) <= super::DISCORD_MSG_LIMIT);
         assert!(rendered.starts_with('⠸'));
         assert!(!rendered.contains("\n\n"));
     }
@@ -1388,7 +1402,7 @@ No response requested.\n\
     // #3089 A0 — characterization of the chunker + streaming-rollover splitter
     // (design §5 A0 item 1: split_message chunk boundaries; item 4: streaming
     // rollover split algorithm). Value-exact pins so any change to chunk
-    // boundaries/ordering, the `len > DISCORD_MSG_LIMIT` cliff, or the rollover
+    // boundaries/ordering, the Discord limit cliff, or the rollover
     // split point fails BEFORE the #3089 controller cutover. Nested inside this
     // `#[cfg(test)] mod` block => ZERO production LoC under the ratchet
     // (formatting.rs baseline 2802 stays unchanged).
@@ -1397,8 +1411,8 @@ No response requested.\n\
             message_split_boundary, semantic_sentence_split_boundary,
         };
         use super::super::{
-            DISCORD_MSG_LIMIT, long_message_reply_builders, plan_streaming_rollover, split_message,
-            streaming_split_boundary,
+            DISCORD_MSG_LIMIT, char_count, long_message_reply_builders, plan_streaming_rollover,
+            split_message, streaming_split_boundary,
         };
 
         // -------------------------------------------------------------------
@@ -1423,7 +1437,7 @@ No response requested.\n\
             assert_eq!(
                 chunks.len(),
                 1,
-                "a body of exactly effective_limit bytes stays a single chunk"
+                "a body of exactly effective_limit chars stays a single chunk"
             );
 
             let one_over = "a".repeat(effective_limit + 1);
@@ -1431,7 +1445,56 @@ No response requested.\n\
             assert_eq!(
                 chunks.len(),
                 2,
-                "one byte over the effective limit splits into two chunks"
+                "one char over the effective limit splits into two chunks"
+            );
+        }
+
+        #[test]
+        fn a0_split_message_keeps_700_korean_chars_as_one_chunk_issue_4214() {
+            let body = "가".repeat(700);
+            assert!(
+                body.len() > DISCORD_MSG_LIMIT,
+                "UTF-8 byte length reproduces the old premature split condition"
+            );
+            assert_eq!(char_count(&body), 700);
+
+            let chunks = split_message(&body);
+            assert_eq!(chunks.len(), 1, "700 Korean chars fit one Discord message");
+            assert_eq!(chunks[0], body);
+
+            let replies = long_message_reply_builders(&body);
+            assert_eq!(
+                replies.len(),
+                1,
+                "reply builders must not enter the delayed multi-chunk path"
+            );
+            assert_eq!(
+                replies[0].content.as_deref(),
+                Some(body.as_str()),
+                "single reply preserves the original Korean body"
+            );
+        }
+
+        #[test]
+        fn a0_split_message_bounds_long_korean_chunks_by_character_count_issue_4214() {
+            let body = "한".repeat(DISCORD_MSG_LIMIT + 25);
+            let chunks = split_message(&body);
+
+            assert!(chunks.len() >= 2, "over-limit Korean body splits");
+            assert!(
+                chunks.iter().all(|chunk| !chunk.is_empty()),
+                "no empty chunk may be emitted for Korean splits"
+            );
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| char_count(chunk) <= DISCORD_MSG_LIMIT),
+                "every emitted chunk must fit Discord's character limit"
+            );
+            assert_eq!(
+                chunks.concat(),
+                body,
+                "Korean chunks reassemble without losing or corrupting code points"
             );
         }
 
@@ -1440,8 +1503,12 @@ No response requested.\n\
             let body = "a".repeat(2500);
             let chunks = split_message(&body);
             assert_eq!(chunks.len(), 2);
-            assert_eq!(chunks[0].len(), 1990, "hard split at effective_limit");
-            assert_eq!(chunks[1].len(), 2500 - 1990, "remainder length");
+            assert_eq!(
+                char_count(&chunks[0]),
+                1990,
+                "hard split at effective_limit"
+            );
+            assert_eq!(char_count(&chunks[1]), 2500 - 1990, "remainder length");
             // Order + completeness: concatenation reproduces the input.
             assert_eq!(format!("{}{}", chunks[0], chunks[1]), body);
         }
@@ -1520,8 +1587,8 @@ No response requested.\n\
             // the relay must not prepend chunk-index prefixes.
             assert!(!first.starts_with('['));
             assert!(!second.starts_with('['));
-            assert!(first.len() <= DISCORD_MSG_LIMIT);
-            assert!(second.len() <= DISCORD_MSG_LIMIT);
+            assert!(char_count(first) <= DISCORD_MSG_LIMIT);
+            assert!(char_count(second) <= DISCORD_MSG_LIMIT);
         }
 
         // -------------------------------------------------------------------
@@ -1683,7 +1750,7 @@ No response requested.\n\
 
         #[test]
         fn a0_plan_streaming_rollover_reserves_footer_and_margin_before_the_2000_cliff() {
-            // body_budget = 2000 - ((2 + status.len()) + 10). For "STATUS" (6B):
+            // body_budget = 2000 - ((2 + char_count(status)) + 10). For "STATUS":
             // footer "\n\nSTATUS" = 8; body_budget = 2000 - 18 = 1982.
             let status = "STATUS";
             let body = "Z".repeat(2500);
@@ -1697,7 +1764,7 @@ No response requested.\n\
                 "Z".repeat(1982),
                 "frozen chunk is body[..split_at]"
             );
-            assert_eq!(plan.frozen_chunk.len(), plan.split_at);
+            assert_eq!(char_count(&plan.frozen_chunk), plan.split_at);
         }
 
         #[test]
@@ -1894,7 +1961,7 @@ pub(super) fn format_for_discord(s: &str) -> String {
 
 /// Send a message using poise Context, splitting if necessary
 pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Result<(), Error> {
-    if text.len() <= DISCORD_MSG_LIMIT {
+    if char_count(text) <= DISCORD_MSG_LIMIT {
         tracing::debug!(
             target: "discord::chunker",
             path = "send_long_message_ctx",
@@ -1932,7 +1999,7 @@ pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Resul
 pub(in crate::services::discord) fn long_message_reply_builders(
     text: &str,
 ) -> Vec<poise::CreateReply> {
-    if text.len() <= DISCORD_MSG_LIMIT {
+    if char_count(text) <= DISCORD_MSG_LIMIT {
         return vec![poise::CreateReply::default().content(text.to_string())];
     }
 
@@ -2008,7 +2075,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
-    if payload_byte_len <= DISCORD_MSG_LIMIT {
+    if char_count(text) <= DISCORD_MSG_LIMIT {
         tracing::debug!(
             target: "discord::chunker",
             path = "send_long_message_raw",
@@ -3280,6 +3347,7 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
     let total_bytes = text.len();
     let mut chunks = Vec::new();
     let mut remaining = text;
+    let mut remaining_chars = char_count(text);
     let mut in_code_block = false;
     let mut code_block_lang = String::new();
 
@@ -3287,7 +3355,7 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
         // Reserve space for code block tags we may need to add
         let tag_overhead = if in_code_block {
             // closing ``` + opening ```lang\n
-            3 + 3 + code_block_lang.len() + 1
+            3 + 3 + char_count(&code_block_lang) + 1
         } else {
             0
         };
@@ -3295,7 +3363,7 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
             .saturating_sub(tag_overhead)
             .saturating_sub(10);
 
-        if remaining.len() <= effective_limit {
+        if remaining_chars <= effective_limit {
             let mut chunk = String::new();
             if in_code_block {
                 chunk.push_str("```");
@@ -3321,7 +3389,7 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
         // Find a safe split point.
         //
         // Issue #1043 root cause #1: when the input begins with a leading `\n`
-        // and the next ~2000 bytes contain no other newline, `rfind('\n')`
+        // and the next ~2000 chars contain no other newline, `rfind('\n')`
         // returns `Some(0)`. That made `raw_chunk` empty, the chunker emitted a
         // zero-byte chunk, and Discord's REST API rejected the send with HTTP
         // 400 ("Cannot send an empty message"). The error short-circuited
@@ -3332,7 +3400,7 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
         // Fix: if a newline split would yield a zero-byte `raw_chunk`, fall
         // back to a hard split at `safe_end` (or skip the orphan newline when
         // `safe_end` is also 0 due to a multi-byte char on the boundary).
-        let safe_end = floor_char_boundary(remaining, effective_limit);
+        let safe_end = byte_index_at_char_limit(remaining, effective_limit);
         let (mut split_at, mut boundary_kind) =
             super::semantic_boundaries::message_split_boundary(remaining, safe_end, in_code_block);
         if split_at == 0 {
@@ -3341,13 +3409,14 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
                 boundary_kind = "hard_after_leading_newline";
             } else {
                 // safe_end is also 0 (e.g. multi-byte char straddling a
-                // 0-byte effective_limit). Skip one byte to guarantee
+                // 0-char effective_limit). Skip one character to guarantee
                 // forward progress and never emit an empty chunk.
                 let step = remaining
                     .char_indices()
                     .nth(1)
                     .map(|(i, _)| i)
                     .unwrap_or(remaining.len());
+                let skipped_chars = char_count(&remaining[..step]);
                 tracing::debug!(
                     target: "discord::chunker",
                     step,
@@ -3355,11 +3424,14 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
                     "split_message advance over zero-width boundary"
                 );
                 remaining = &remaining[step..];
+                remaining_chars = remaining_chars.saturating_sub(skipped_chars);
                 continue;
             }
         }
 
         let (raw_chunk, rest) = remaining.split_at(split_at);
+        let raw_chunk_chars = char_count(raw_chunk);
+        let stripped_boundary_chars = usize::from(rest.starts_with('\n'));
 
         let mut chunk = String::new();
         if in_code_block {
@@ -3400,6 +3472,9 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
                 total_bytes,
                 "split_message would have emitted an empty chunk; skipping (issue #1043 guard)"
             );
+            remaining_chars = remaining_chars
+                .saturating_sub(raw_chunk_chars)
+                .saturating_sub(stripped_boundary_chars);
             remaining = rest.strip_prefix('\n').unwrap_or(rest);
             continue;
         }
@@ -3413,6 +3488,9 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
             total_bytes,
             "split_message emit"
         );
+        remaining_chars = remaining_chars
+            .saturating_sub(raw_chunk_chars)
+            .saturating_sub(stripped_boundary_chars);
         remaining = rest.strip_prefix('\n').unwrap_or(rest);
     }
 
@@ -3452,7 +3530,7 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
     });
 
     if let Some(summary) = trimmed_summary {
-        if summary.len() + footer.len() <= DISCORD_MSG_LIMIT {
+        if char_count(summary) + char_count(&footer) <= DISCORD_MSG_LIMIT {
             return format!("{summary}{footer}");
         }
     }
@@ -3552,7 +3630,7 @@ pub(super) fn preserve_previous_tool_status(
 /// Convert a technical tool status line into a human-friendly label with emoji.
 pub(super) fn humanize_tool_status(tool_line: &str) -> String {
     // Thinking: show more detail than tool invocations, but keep the final
-    // placeholder edit safely below Discord's byte limit even for UTF-8-heavy text.
+    // placeholder edit compact even for UTF-8-heavy text.
     if tool_line.starts_with("💭") {
         return truncate_for_status_bytes(tool_line, THINKING_STATUS_MAX_BYTES);
     }
@@ -4001,6 +4079,22 @@ fn truncate_for_status_bytes(s: &str, max_bytes: usize) -> String {
     format!("{}{}", &s[..safe_end], ellipsis)
 }
 
+fn truncate_for_status_chars(s: &str, max_chars: usize) -> String {
+    let current_chars = char_count(s);
+    if current_chars <= max_chars {
+        return s.to_string();
+    }
+
+    let ellipsis = "…";
+    let body_budget = max_chars.saturating_sub(1);
+    if body_budget == 0 {
+        return ellipsis.to_string();
+    }
+
+    let safe_end = byte_index_at_char_limit(s, body_budget);
+    format!("{}{}", &s[..safe_end], ellipsis)
+}
+
 fn clamp_placeholder_status_block(status_block: &str) -> String {
-    truncate_for_status_bytes(status_block, DISCORD_MSG_LIMIT)
+    truncate_for_status_chars(status_block, DISCORD_MSG_LIMIT)
 }

@@ -452,7 +452,7 @@
 | `services::discord::dispatch_policy` | `src/services/discord/dispatch_policy.rs` | 351 | 218 | 133 |  |
 | `services::discord::footer_view_reconciler` | `src/services/discord/footer_view_reconciler/mod.rs` | 660 | 473 | 187 |  |
 | `services::discord::footer_view_reconciler::registry` | `src/services/discord/footer_view_reconciler/registry.rs` | 624 | 624 | 0 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 4006 | 2821 | 1185 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 4100 | 2862 | 1238 | giant-file |
 | `services::discord::formatting::long_send_rollback` | `src/services/discord/formatting/long_send_rollback.rs` | 314 | 314 | 0 |  |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 1189 | 969 | 220 |  |
 | `services::discord::gateway_voice_queue` | `src/services/discord/gateway_voice_queue.rs` | 95 | 17 | 78 |  |
