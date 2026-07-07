@@ -9,7 +9,6 @@
 //! `normalize_response_sent_offset` is re-imported (non-test) by the parent
 //! because the `watcher_state` sibling consumes it in production. The `_in_root`
 //! explicit-root seams keep `pub(super)` for the parent's test re-imports.
-//! Behaviour-preserving: no function body is altered.
 
 mod abandon;
 
@@ -98,6 +97,24 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity(
         return GuardedClearOutcome::Missing;
     };
     clear_inflight_state_if_matches_identity_in_root(&root, provider, channel_id, expected)
+}
+
+pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_turn_nonce(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_nonce: Option<&str>,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_inflight_state_if_matches_identity_turn_nonce_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_turn_nonce,
+    )
 }
 
 pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_generation(
@@ -371,6 +388,31 @@ pub(super) fn clear_inflight_state_if_matches_identity_in_root(
     channel_id: u64,
     expected: &InflightTurnIdentity,
 ) -> GuardedClearOutcome {
+    clear_inflight_state_if_matches_identity_turn_nonce_in_root(
+        root, provider, channel_id, expected, None,
+    )
+}
+
+fn turn_nonce_matches(expected_turn_nonce: Option<&str>, state: &InflightTurnState) -> bool {
+    match (
+        expected_turn_nonce.filter(|value| !value.is_empty()),
+        state
+            .turn_nonce
+            .as_deref()
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(expected), Some(actual)) => expected == actual,
+        _ => true,
+    }
+}
+
+pub(super) fn clear_inflight_state_if_matches_identity_turn_nonce_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_nonce: Option<&str>,
+) -> GuardedClearOutcome {
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedClearOutcome::IoError;
@@ -388,6 +430,9 @@ pub(super) fn clear_inflight_state_if_matches_identity_in_root(
         return GuardedClearOutcome::RebindOriginSkipped;
     }
     if !expected.matches_state(&state) {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    if !turn_nonce_matches(expected_turn_nonce, &state) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
     log_inflight_remove(

@@ -59,6 +59,7 @@ fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnStat
         delivery_bot: None,
         silent_turn: false,
         dispatch_id: None,
+        turn_nonce: Some(format!("turn-nonce-{user_msg_id}")),
         last_watcher_relayed_offset: None,
         last_watcher_relayed_generation_mtime_ns: None,
         restart_mode: None,

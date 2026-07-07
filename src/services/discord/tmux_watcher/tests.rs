@@ -5,8 +5,8 @@ use super::{
     discard_restored_response_seed_before_no_inflight_terminal_relay,
     legacy_wrapper_prompt_candidates_from_pane, local_cmd_no_output,
     mark_watcher_terminal_delivery_committed, merge_persisted_rollover_frozen_msg_ids,
-    reacquire_watcher_inflight_for_active_stream, should_probe_tmux_liveness,
-    terminal_relay_decision, watcher_batch_contains_assistant_event,
+    reacquire_watcher_inflight_for_active_stream, refresh_watcher_turn_identity,
+    should_probe_tmux_liveness, terminal_relay_decision, watcher_batch_contains_assistant_event,
     watcher_batch_contains_relayable_response,
     watcher_fallback_edit_failure_can_delete_original_placeholder,
     watcher_fresh_idle_finalize_decision, watcher_fresh_idle_session_bound_retry_plan,
@@ -2078,6 +2078,280 @@ fn fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn() {
     assert!(
         crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
         "pinned turn's inflight is gone after the atomic clear"
+    );
+}
+
+#[test]
+fn committed_clear_with_captured_turn_nonce_preserves_id0_followup_saved_before_late_reread() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184";
+    let channel_id = 4_184_000u64;
+
+    let mut pinned_current = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    pinned_current.turn_nonce = Some("turn-4184-current".to_string());
+    let captured_turn_nonce = pinned_current.turn_nonce.clone();
+    crate::services::discord::inflight::save_inflight_state(&pinned_current)
+        .expect("save original id-0 inflight before follow-up replacement");
+
+    let mut late_followup = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 50);
+    late_followup.turn_nonce = Some("turn-4184-followup".to_string());
+    crate::services::discord::inflight::save_inflight_state(&late_followup)
+        .expect("save id-0 follow-up inflight before late re-read");
+
+    let late_reread_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&late_followup);
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &late_reread_identity,
+            captured_turn_nonce.as_deref(),
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::UserMsgMismatch,
+        "captured nonce from the finalizing id-0 turn must not clear a newer id-0 follow-up"
+    );
+    let survived = crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+        .expect("follow-up inflight must survive");
+    assert_eq!(survived.user_msg_id, 0);
+    assert_eq!(survived.turn_start_offset, Some(50));
+    assert_eq!(survived.turn_nonce.as_deref(), Some("turn-4184-followup"));
+}
+
+#[test]
+fn loop_top_nonce_refresh_keeps_observed_nonce_for_id0_followup_at_current_offset() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184-loop-top";
+    let channel_id = 4_184_003u64;
+    let current_offset = 50;
+
+    let mut observed = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    observed.turn_nonce = Some("turn-4184-observed".to_string());
+    crate::services::discord::inflight::save_inflight_state(&observed)
+        .expect("save observed id-0 turn");
+    let mut watcher_identity =
+        Some(crate::services::discord::inflight::InflightTurnIdentity::from_state(&observed));
+    let mut captured_turn_nonce = observed.turn_nonce.clone();
+
+    let mut followup =
+        fresh_idle_inflight(provider.clone(), channel_id, session, 0, current_offset);
+    followup.turn_nonce = Some("turn-4184-followup".to_string());
+    crate::services::discord::inflight::save_inflight_state(&followup)
+        .expect("replace with id-0 follow-up before loop-top refresh");
+
+    refresh_watcher_turn_identity(
+        &mut watcher_identity,
+        &mut captured_turn_nonce,
+        &provider,
+        ChannelId::new(channel_id),
+        session,
+        current_offset,
+    );
+
+    assert_eq!(
+        captured_turn_nonce.as_deref(),
+        Some("turn-4184-observed"),
+        "follow-up row at the current consumed offset must not replace the observed turn nonce"
+    );
+
+    let followup_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&followup);
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &followup_identity,
+            captured_turn_nonce.as_deref(),
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::UserMsgMismatch,
+        "pinned observed nonce must make the late-read follow-up identity fail the guarded clear"
+    );
+    let survived = crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+        .expect("follow-up inflight must survive");
+    assert_eq!(survived.user_msg_id, 0);
+    assert_eq!(survived.turn_start_offset, Some(current_offset));
+    assert_eq!(survived.turn_nonce.as_deref(), Some("turn-4184-followup"));
+}
+
+#[test]
+fn committed_clear_with_captured_turn_nonce_clears_legacy_row_without_nonce() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184-legacy";
+    let channel_id = 4_184_001u64;
+
+    let mut legacy = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    legacy.turn_nonce = None;
+    crate::services::discord::inflight::save_inflight_state(&legacy)
+        .expect("save legacy id-0 inflight without nonce");
+    let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&legacy);
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &identity,
+            Some("turn-4184-current"),
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "legacy rows without a nonce preserve the identity-only clear contract"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
+        "legacy matching row should be cleared"
+    );
+}
+
+#[test]
+fn committed_clear_with_expected_none_clears_row_with_nonce() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184-expected-none";
+    let channel_id = 4_184_004u64;
+
+    let mut current = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    current.turn_nonce = Some("turn-4184-on-disk".to_string());
+    crate::services::discord::inflight::save_inflight_state(&current)
+        .expect("save id-0 inflight with nonce");
+    let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&current);
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider, channel_id, &identity, None,
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "expected None preserves legacy identity-only clear semantics even when the row has a nonce"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
+        "matching row should be cleared when expected nonce is absent"
+    );
+}
+
+#[test]
+fn committed_clear_filters_empty_string_turn_nonce_values() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184-empty-nonce";
+    let channel_id = 4_184_005u64;
+
+    let mut empty_on_disk = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    empty_on_disk.turn_nonce = Some(String::new());
+    crate::services::discord::inflight::save_inflight_state(&empty_on_disk)
+        .expect("save id-0 inflight with empty on-disk nonce");
+    let empty_on_disk_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&empty_on_disk);
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &empty_on_disk_identity,
+            Some("turn-4184-expected"),
+        );
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "empty on-disk nonce is filtered to legacy identity-only matching"
+    );
+
+    let mut empty_expected = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 20);
+    empty_expected.turn_nonce = Some("turn-4184-on-disk".to_string());
+    crate::services::discord::inflight::save_inflight_state(&empty_expected)
+        .expect("save id-0 inflight for empty expected nonce case");
+    let empty_expected_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&empty_expected);
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &empty_expected_identity,
+            Some(""),
+        );
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "empty expected nonce is filtered to legacy identity-only matching"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
+        "matching row should be cleared after empty nonce filtering"
+    );
+}
+
+#[test]
+fn committed_clear_with_captured_turn_nonce_clears_matching_same_turn_row() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184-current";
+    let channel_id = 4_184_002u64;
+
+    let mut current = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    current.turn_nonce = Some("turn-4184-current".to_string());
+    crate::services::discord::inflight::save_inflight_state(&current)
+        .expect("save current id-0 inflight with nonce");
+    let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&current);
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &identity,
+            current.turn_nonce.as_deref(),
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "matching nonce should clear the same turn normally"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
+        "matching current row should be cleared"
     );
 }
 
