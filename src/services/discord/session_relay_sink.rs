@@ -40,7 +40,8 @@ use self::idle_jsonl::{
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
     idle_jsonl_payload_contains_init_event, idle_jsonl_payload_contains_schedule_wakeup_setup,
     idle_jsonl_payload_contains_user_event, idle_jsonl_prepare_dedup_shared,
-    idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init, idle_relay_range_action,
+    idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init,
+    idle_jsonl_should_retry_without_dedup_shared, idle_relay_range_action,
     prune_idle_jsonl_session_state, read_jsonl_range,
 };
 
@@ -1422,6 +1423,17 @@ async fn run_idle_jsonl_relay_loop(
                 );
                 continue;
             };
+            if idle_jsonl_should_retry_without_dedup_shared(shared_for_dedup.as_ref()) {
+                tracing::debug!(
+                    provider = matched.provider.as_str(),
+                    channel = channel_id,
+                    tmux_session = %session_name,
+                    range_start = start,
+                    range_end = end,
+                    "idle JSONL relay skipped range because dedup shared data is unavailable; will retry without consuming"
+                );
+                continue;
+            }
             // #3017 single output-offset authority: this idle path and the watcher both read
             // the SAME JSONL (E-13: an inflight-less wake relayed twice). The watcher is PRIMARY
             // and advances `confirmed_end_offset`; this backstop only CONSULTS it read-only

@@ -605,7 +605,7 @@
 # #3610 PR-1: 1731 -> 1738 — pass terminal anchor (current_msg_id) explicitly to
 # shadow_mirror_delivered_frontier at the sink delivery call site (Phase B prereq;
 # irreducible 6-arg rustfmt-wrapped call). panel_msg_id has 0 prod readers -> dedup unchanged.
-"src/services/discord/session_relay_sink.rs" = 1679 # 2026-07-03 #3998 S1-f2: 1738 -> 1679 (-59 prod LoC), ratchet down after retiring the A2b rollout getter/cache and flag-OFF pin tests.
+"src/services/discord/session_relay_sink.rs" = 1690 # 2026-07-08 #4164: 1679 -> 1690 (+11 prod LoC), reviewable admission — idle JSONL now gates the producer send on dedup SharedData availability, logging provider/channel/range and retrying without cursor consumption when the offset authority is unavailable after boot. # 2026-07-03 #3998 S1-f2: 1738 -> 1679 (-59 prod LoC), ratchet down after retiring the A2b rollout getter/cache and flag-OFF pin tests.
 # #3635: placeholder_sweeper.rs crossed the 1000-prod-LoC giant threshold (993 ->
 # 1004) when the dead-watcher rebind-origin reap branch was added to the
 # rebind-origin arm of the sweep loop (the watcher-owned #897 orphan the #3581

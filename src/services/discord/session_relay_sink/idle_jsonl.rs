@@ -44,6 +44,12 @@ pub(super) enum IdleJsonlInflightGateDecision {
     ConsumeToEnd,
 }
 
+pub(super) fn idle_jsonl_should_retry_without_dedup_shared<T>(
+    shared_for_dedup: Option<&T>,
+) -> bool {
+    shared_for_dedup.is_none()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IdleJsonlSessionInitRearm {
     Keep,
@@ -406,5 +412,154 @@ mod tests {
         assert!(logged_at.contains_key("session-prune-seen"));
         assert!(!logged_at.contains_key("session-prune-gone"));
         logged_at.remove("session-prune-seen");
+    }
+
+    #[test]
+    fn idle_jsonl_missing_dedup_shared_retries_without_send_or_consume() {
+        let session_name = "AgentDesk-claude-4164-none-shared";
+        let payload = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s4164\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"wake answer\"}]}}\n"
+        )
+        .as_bytes();
+        let mut session_init_seen = HashSet::new();
+        let mut offset = 128u64;
+        let start = offset;
+        let end = start + payload.len() as u64;
+        let shared_for_dedup: Option<&()> = None;
+        let mut send_attempts = 0;
+
+        let session_has_init =
+            idle_jsonl_session_has_init(&mut session_init_seen, session_name, payload);
+        assert!(session_has_init);
+        assert_eq!(
+            idle_relay_range_action(payload, start, end, 0, false, false, session_has_init),
+            IdleRelayRangeAction::SendFull,
+            "without the missing-shared gate this eligible range would fall through to send"
+        );
+
+        let retry_without_consuming =
+            idle_jsonl_should_retry_without_dedup_shared(shared_for_dedup);
+        assert!(retry_without_consuming);
+        if !retry_without_consuming
+            && idle_relay_range_action(payload, start, end, 0, false, false, session_has_init)
+                == IdleRelayRangeAction::SendFull
+        {
+            send_attempts += 1;
+            idle_jsonl_consume_offset(
+                &mut session_init_seen,
+                session_name,
+                &mut offset,
+                end,
+                IdleJsonlSessionInitRearm::Keep,
+            );
+        }
+
+        assert_eq!(send_attempts, 0, "None-shared window must not enqueue");
+        assert_eq!(offset, start, "None-shared window must leave cursor intact");
+        assert!(
+            session_init_seen.contains(session_name),
+            "retry keeps the init marker for the next idle tick"
+        );
+    }
+
+    #[test]
+    fn idle_jsonl_shared_dedup_sends_range_once_then_skips_committed_retry() {
+        use std::sync::atomic::Ordering;
+
+        let _authority =
+            crate::services::discord::outbound::delivery_record::authority_test_seam::force(false);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(4_164);
+        let session_name = "AgentDesk-claude-4164-shared";
+        let payload = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s4164\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"wake answer\"}]}}\n"
+        )
+        .as_bytes();
+        let start = 0u64;
+        let end = payload.len() as u64;
+        let mut offset = start;
+        let mut duplicate_actor_offset = start;
+        let mut session_init_seen = HashSet::new();
+        let mut send_attempts = 0;
+
+        assert!(!idle_jsonl_should_retry_without_dedup_shared(Some(
+            shared.as_ref()
+        )));
+        let session_has_init =
+            idle_jsonl_session_has_init(&mut session_init_seen, session_name, payload);
+        let committed =
+            crate::services::discord::outbound::delivery_record::effective_committed_offset(
+                shared.as_ref(),
+                &provider,
+                channel,
+                session_name,
+                Some(end),
+            );
+        assert_eq!(committed, 0);
+        match idle_relay_range_action(
+            payload,
+            start,
+            end,
+            committed,
+            false,
+            false,
+            session_has_init,
+        ) {
+            IdleRelayRangeAction::SendFull => {
+                send_attempts += 1;
+                idle_jsonl_consume_offset(
+                    &mut session_init_seen,
+                    session_name,
+                    &mut offset,
+                    end,
+                    IdleJsonlSessionInitRearm::Keep,
+                );
+            }
+            other => panic!("first shared pass must send, got {other:?}"),
+        }
+
+        shared
+            .tmux_relay_coord(channel)
+            .confirmed_end_offset
+            .store(end, Ordering::Release);
+        let committed =
+            crate::services::discord::outbound::delivery_record::effective_committed_offset(
+                shared.as_ref(),
+                &provider,
+                channel,
+                session_name,
+                Some(end),
+            );
+        assert_eq!(committed, end);
+        match idle_relay_range_action(
+            payload,
+            start,
+            end,
+            committed,
+            false,
+            false,
+            session_init_seen.contains(session_name),
+        ) {
+            IdleRelayRangeAction::SkipAlreadyRelayed => {
+                idle_jsonl_consume_offset(
+                    &mut session_init_seen,
+                    session_name,
+                    &mut duplicate_actor_offset,
+                    end,
+                    IdleJsonlSessionInitRearm::Keep,
+                );
+            }
+            other => panic!("committed replay must dedup-skip, got {other:?}"),
+        }
+
+        assert_eq!(
+            send_attempts, 1,
+            "shared dedup sends the range exactly once"
+        );
+        assert_eq!(offset, end);
+        assert_eq!(duplicate_actor_offset, end);
     }
 }
