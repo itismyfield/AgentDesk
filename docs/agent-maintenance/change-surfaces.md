@@ -233,7 +233,7 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7167 production lines; #4229 S1
+  - `src/services/discord/tmux_watcher.rs` (7169 production lines; #4170 gated rollover recovery mirror update on edit success (+2); #4229 S1
     moved the pause/epoch-discard + prompt-too-long/auth-expired/provider-overload
     terminal exits verbatim to the non-giant
     `tmux_watcher/terminal_abort_exits.rs` child module, ratcheting the root down
