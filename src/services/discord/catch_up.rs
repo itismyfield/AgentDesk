@@ -1049,6 +1049,7 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                 &allowed_bot_ids,
                 announce_bot_id,
             );
+            let mid = msg.id.get();
             // Codex P2 round 2 on #1301: check the cap BEFORE recording the
             // recover, otherwise `stats.recovered` would tally a message we
             // refused to enqueue and the log would lie about the queue
@@ -1058,10 +1059,11 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
                 let retry_after = max_recovered_id
                     .or(scan_checkpoint)
-                    .map(|checkpoint| arm_catch_up_retry_pending(shared, channel_id, checkpoint));
+                    .unwrap_or_else(|| mid.saturating_sub(1));
+                let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🔁 catch-up: queue cap reached for channel {}; retry armed after checkpoint {:?}",
+                    "  [{ts}] 🔁 catch-up: queue cap reached for channel {}; retry armed after checkpoint {}",
                     channel_id,
                     retry_after
                 );
@@ -1102,7 +1104,6 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                 },
             )
             .await;
-            let mid = msg.id.get();
             match classify_phase2_enqueue_commit(&enqueue) {
                 Phase2EnqueueCommit::Accepted => {
                     stats.record(CatchUpClassification::Recover);
@@ -1522,7 +1523,9 @@ mod catch_up_recovery_tests {
         rearm_catch_up_retry_after_fetch_failure, should_fetch_older_recent_page,
         should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
-    use crate::services::turn_orchestrator::EnqueueRefusalReason;
+    use crate::services::turn_orchestrator::{
+        EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
+    };
     use poise::serenity_prelude as serenity;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
@@ -2219,6 +2222,94 @@ mod catch_up_recovery_tests {
                 .contains(&later_id),
             "later message must not be merged or committed in the deferred pass"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase1_recent_queue_cap_arms_retry_without_checkpoint() {
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1479671298497183835);
+        let author_id = 343742347365974026;
+        let capped_id = recent_message_id(1);
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("role_map.json"),
+            format!(
+                r#"{{
+  "byChannelId": {{
+    "{}": {{
+      "roleId": "adk-cc",
+      "promptFile": "prompt.md",
+      "provider": "claude"
+    }}
+  }}
+}}"#,
+                channel_id.get()
+            ),
+        )
+        .expect("write role map");
+
+        for index in 0..MAX_INTERVENTIONS_PER_CHANNEL {
+            let message_id = recent_message_id(100 + index as u64);
+            let enqueue = super::super::mailbox_enqueue_intervention(
+                &shared,
+                &provider,
+                channel_id,
+                Intervention {
+                    author_id: serenity::UserId::new(author_id),
+                    author_is_bot: false,
+                    message_id,
+                    queued_generation: crate::services::discord::runtime_store::load_generation(),
+                    source_message_ids: vec![message_id],
+                    source_message_queued_generations: Vec::new(),
+                    source_text_segments: Vec::new(),
+                    text: format!("queued turn {index}"),
+                    mode: InterventionMode::Soft,
+                    created_at: Instant::now(),
+                    reply_context: None,
+                    has_reply_boundary: false,
+                    merge_consecutive: false,
+                    pending_uploads: Vec::new(),
+                    voice_announcement: None,
+                },
+            )
+            .await;
+            assert!(catch_up_enqueue_accepted(&enqueue));
+        }
+
+        let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(
+            snapshot.intervention_queue.len(),
+            MAX_INTERVENTIONS_PER_CHANNEL
+        );
+        assert!(shared.last_message_ids.get(&channel_id).is_none());
+
+        let api = TestCatchUpDiscordApi {
+            current_user_id: Some(9001),
+            binding_status: RuntimeChannelBindingStatus::Owned,
+            fetch_error: None,
+            messages: vec![catch_up_test_message(
+                channel_id,
+                capped_id,
+                author_id,
+                "queued after clear",
+            )],
+            fetch_attempts: None,
+            cleanup_hook: None,
+        };
+        let retry_checkpoints = HashMap::new();
+
+        catch_up_missed_messages_inner_with_api(&api, &shared, &provider, &retry_checkpoints).await;
+
+        assert!(shared.last_message_ids.get(&channel_id).is_none());
+        let pending = shared
+            .catch_up_retry_pending
+            .get(&channel_id)
+            .expect("Recent queue cap should arm catch-up retry");
+        assert_eq!(pending.checkpoint, capped_id.get().saturating_sub(1));
+        assert_eq!(pending.fetch_failures, 0);
     }
 
     #[test]
