@@ -188,7 +188,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     let mut all_data_first_forwarded_relay_sequence =
         *relay.all_data_first_forwarded_relay_sequence;
 
-    macro_rules! commit_persistent_collect_state {
+    macro_rules! commit_persistent_state {
         () => {{
             *parser.current_offset = current_offset;
             *parser.all_data = all_data.clone();
@@ -211,7 +211,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
 
     macro_rules! commit_collect_state {
         () => {{
-            commit_persistent_collect_state!();
+            commit_persistent_state!();
             monitor.monitor_auto_turn_claimed = monitor_auto_turn_claimed;
             monitor.monitor_auto_turn_deferred = monitor_auto_turn_deferred;
             monitor.monitor_auto_turn_finished = monitor_auto_turn_finished;
@@ -245,7 +245,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
     }
     if decoded_data.text.is_empty() && all_data.is_empty() {
-        commit_persistent_collect_state!();
+        commit_persistent_state!();
         return CollectOutcome::ContinueWatcherLoop;
     }
     all_data.push_str(&decoded_data.text);
