@@ -111,6 +111,42 @@ pub(in crate::services::discord) fn kickoff_thread_parents_after_finalize(
     }
 }
 
+/// #4198: callers snapshot before any yielding release cleanup, then remove
+/// only this value so a same-channel follow-up's replacement survives.
+pub(in crate::services::discord) fn snapshot_role_override(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::model::id::ChannelId,
+) -> Option<serenity::model::id::ChannelId> {
+    shared
+        .dispatch
+        .role_overrides
+        .get(&channel_id)
+        .map(|entry| *entry.value())
+}
+
+pub(in crate::services::discord) async fn clear_watchdog_and_kick_thread_parents_after_turn_release(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::model::id::ChannelId,
+) {
+    super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+    let thread_parent_kickoffs = collect_and_clear_thread_parents(shared, channel_id);
+    kickoff_thread_parents_after_finalize(shared, provider, thread_parent_kickoffs);
+}
+
+pub(in crate::services::discord) fn remove_owned_role_override(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::model::id::ChannelId,
+    owned_role_override: Option<serenity::model::id::ChannelId>,
+) {
+    if let Some(owned) = owned_role_override {
+        shared
+            .dispatch
+            .role_overrides
+            .remove_if(&channel_id, |_, current| *current == owned);
+    }
+}
+
 /// #3350 ②: pure verdict — must this finalize ENSURE the #3303 DeferredClaim
 /// marker for the row it is finalizing? (Same pure-gate pattern as the
 /// `should_complete_…` helpers.) All six gates must hold:
@@ -298,6 +334,7 @@ pub(super) async fn already_finalized_active_state(
         return;
     }
 
+    let owned_role_override = snapshot_role_override(shared, key.channel_id);
     let _ = crate::services::discord::inflight::clear_inflight_state_if_matches(
         provider,
         key.channel_id.get(),
@@ -322,11 +359,10 @@ pub(super) async fn already_finalized_active_state(
         .cancelled
         .store(true, std::sync::atomic::Ordering::Relaxed);
     super::super::saturating_decrement_global_active(shared);
-    super::super::clear_watchdog_deadline_override(key.channel_id.get()).await;
-    let thread_parent_kickoffs = collect_and_clear_thread_parents(shared, key.channel_id);
-    kickoff_thread_parents_after_finalize(shared, provider, thread_parent_kickoffs);
+    clear_watchdog_and_kick_thread_parents_after_turn_release(shared, provider, key.channel_id)
+        .await;
     if !finish.has_pending {
-        shared.dispatch.role_overrides.remove(&key.channel_id);
+        remove_owned_role_override(shared, key.channel_id, owned_role_override);
     }
 }
 
@@ -622,6 +658,38 @@ mod tests {
             .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(user_msg_id))
             .await;
         token
+    }
+
+    #[test]
+    fn remove_owned_role_override_preserves_replacement_and_removes_owned_value() {
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_198_001);
+        let owned = ChannelId::new(4_198_002);
+        let replacement = ChannelId::new(4_198_003);
+
+        shared.dispatch.role_overrides.insert(channel_id, owned);
+        let owned_role_override = snapshot_role_override(&shared, channel_id);
+        shared
+            .dispatch
+            .role_overrides
+            .insert(channel_id, replacement);
+        remove_owned_role_override(&shared, channel_id, owned_role_override);
+        assert!(
+            shared
+                .dispatch
+                .role_overrides
+                .get(&channel_id)
+                .is_some_and(|current| *current == replacement),
+            "cleanup for turn A must not remove turn B's replacement override"
+        );
+
+        shared.dispatch.role_overrides.insert(channel_id, owned);
+        let owned_role_override = snapshot_role_override(&shared, channel_id);
+        remove_owned_role_override(&shared, channel_id, owned_role_override);
+        assert!(
+            !shared.dispatch.role_overrides.contains_key(&channel_id),
+            "cleanup must remove the override when turn A's owned value is still current"
+        );
     }
 
     fn recorded_actions(records: &[ReactionCleanupRecord]) -> Vec<(u64, u64, char, bool)> {
