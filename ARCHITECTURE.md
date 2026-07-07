@@ -627,6 +627,7 @@ src/
 │   │   │   ├── entry.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── liveness.rs
+│   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── panel_decisions_tests.rs
