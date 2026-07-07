@@ -145,13 +145,6 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # against current source facts.
 # The generator hard-fails (exit 2) on giant-file registry drift: unregistered
 # new giants, ghost registrations left after decomposition, or deadline-less
-echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036) ==="
-# Generic committed markdown freshness drift is warning-only for ordinary PRs
-# and is refreshed by the weekly regen-docs workflow. This CI invocation writes
-# the current generated view into the workspace so the checks below compare
-# against current source facts.
-# The generator hard-fails (exit 2) on giant-file registry drift: unregistered
-# new giants, ghost registrations left after decomposition, or deadline-less
 # [[entry]] tables in scripts/giant_file_registry.toml. Generated-docs drift
 # (exit 1) is a hard fail in PRs to prevent drift merging and spawning
 # duplicate downstream inventory refresh PRs.
