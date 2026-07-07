@@ -9,7 +9,7 @@ use super::GuardedCleanupTargetAuthor;
 use super::ops::strip_placeholder_indicators_for_preserve;
 use crate::services::discord;
 
-pub(super) fn placeholder_real_body_exposure_evidence(
+pub(crate) fn placeholder_real_body_exposure_evidence(
     provider: &ProviderKind,
     _response_sent_offset: usize,
     last_edit_text: &str,
@@ -24,7 +24,7 @@ pub(super) fn placeholder_real_body_exposure_evidence(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GuardedDeliveredElsewhereSignal {
+pub(crate) enum GuardedDeliveredElsewhereSignal {
     Protected { evidence: &'static str },
     Found { evidence: &'static str },
     NotFound,
@@ -42,7 +42,7 @@ impl GuardedDeliveredElsewhereSignal {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum GuardedNonterminalDeleteDecision {
+pub(crate) enum GuardedNonterminalDeleteDecision {
     PreserveNoEdit {
         evidence: &'static str,
     },
@@ -71,7 +71,7 @@ fn delivered_frontier_same_coordinate_space(
     }
 }
 
-pub(super) fn guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+pub(crate) fn guarded_cleanup_delivered_elsewhere_signal_from_anchor(
     channel_id: ChannelId,
     message_id: MessageId,
     delivered_range: (u64, u64),
@@ -105,7 +105,7 @@ pub(super) fn guarded_cleanup_delivered_elsewhere_signal_from_anchor(
     }
 }
 
-pub(super) fn guarded_cleanup_delivered_elsewhere_signal(
+pub(crate) fn guarded_cleanup_delivered_elsewhere_signal(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -135,7 +135,7 @@ pub(super) fn guarded_cleanup_delivered_elsewhere_signal(
     )
 }
 
-pub(super) fn guarded_nonterminal_delete_decision(
+pub(crate) fn guarded_nonterminal_delete_decision(
     provider: &ProviderKind,
     response_sent_offset: usize,
     last_edit_text: &str,

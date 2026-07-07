@@ -28,7 +28,7 @@ pub(super) fn strip_placeholder_indicators_for_preserve(
         .trim_end()
         .to_string()
 }
-pub(super) async fn apply_placeholder_suppression(
+pub(crate) async fn apply_placeholder_suppression(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -136,7 +136,7 @@ pub(super) async fn apply_placeholder_suppression(
     }
 }
 
-pub(super) fn record_placeholder_cleanup(
+pub(crate) fn record_placeholder_cleanup(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -169,7 +169,7 @@ pub(super) fn record_placeholder_cleanup(
     shared.ui.placeholder_cleanup.record(record);
 }
 
-pub(super) async fn delete_terminal_placeholder(
+pub(crate) async fn delete_terminal_placeholder(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -191,7 +191,7 @@ pub(super) async fn delete_terminal_placeholder(
     .await
 }
 
-pub(super) async fn delete_nonterminal_placeholder(
+pub(crate) async fn delete_nonterminal_placeholder(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -214,7 +214,7 @@ pub(super) async fn delete_nonterminal_placeholder(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn delete_nonterminal_placeholder_unless_delivered(
+pub(crate) async fn delete_nonterminal_placeholder_unless_delivered(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -248,7 +248,7 @@ pub(super) async fn delete_nonterminal_placeholder_unless_delivered(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn delete_terminal_placeholder_unless_delivered(
+pub(crate) async fn delete_terminal_placeholder_unless_delivered(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -419,7 +419,7 @@ async fn delete_placeholder_unless_delivered(
 /// `terminal_full_replay_cleanup_msg_ids`). On the remainder-only path
 /// (`false`) the frozen prefixes carry the legit, already-delivered
 /// `[0..response_sent_offset]` prose and MUST be preserved — return nothing.
-pub(super) fn watcher_rollover_prefixes_to_delete_on_terminal(
+pub(crate) fn watcher_rollover_prefixes_to_delete_on_terminal(
     session_bound_fallback_uses_full_body: bool,
     frozen_rollover_msg_ids: &[MessageId],
 ) -> Vec<MessageId> {
@@ -435,7 +435,7 @@ pub(super) fn watcher_rollover_prefixes_to_delete_on_terminal(
 /// the sink's drain-and-delete of `terminal_full_replay_cleanup_msg_ids`; each
 /// id is a non-terminal streamed prefix so `DeleteNonterminal` is used. No-op on
 /// the remainder-only path (see [`watcher_rollover_prefixes_to_delete_on_terminal`]).
-pub(super) async fn delete_watcher_rollover_frozen_prefixes(
+pub(crate) async fn delete_watcher_rollover_frozen_prefixes(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -568,12 +568,12 @@ async fn edit_placeholder_with_operation(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FallbackPlaceholderCleanupDecision {
+pub(crate) enum FallbackPlaceholderCleanupDecision {
     RelayCommitted,
     PreserveInflightForCleanupRetry,
 }
 
-pub(super) fn fallback_placeholder_cleanup_decision(
+pub(crate) fn fallback_placeholder_cleanup_decision(
     cleanup: &PlaceholderCleanupOutcome,
 ) -> FallbackPlaceholderCleanupDecision {
     if cleanup.is_committed() {
