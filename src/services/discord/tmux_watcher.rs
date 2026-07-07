@@ -2598,32 +2598,26 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         .and_then(|state| state.output_path.as_deref())
                         .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len())),
                 );
-                let fresh_idle_pending_session_bound_delivery = pinned_pre_cleanup_inflight
-                    .as_ref()
-                    .and_then(|state| {
-                        let turn_start_offset = state.turn_start_offset?;
-                        (state.tmux_session_name.as_deref() == Some(tmux_session_name.as_str())
-                            && turn_start_offset < current_offset
-                            && state.effective_relay_owner_kind()
-                                == crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay
-                            && !state.session_bound_delivered
-                            && fresh_idle_effective_committed_offset < current_offset)
-                            .then_some(turn_start_offset)
-                    });
-                if let Some(turn_start_offset) = fresh_idle_pending_session_bound_delivery {
-                    let retry_offset = turn_start_offset.max(fresh_idle_effective_committed_offset);
+                let fresh_idle_pending_session_bound_delivery =
+                    watcher_fresh_idle_session_bound_retry_plan(
+                        pinned_pre_cleanup_inflight.as_ref(),
+                        &tmux_session_name,
+                        current_offset,
+                        fresh_idle_effective_committed_offset,
+                    );
+                if let Some(plan) = fresh_idle_pending_session_bound_delivery {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         provider = watcher_provider.as_str(),
                         channel = channel_id.get(),
                         tmux_session = %tmux_session_name,
-                        turn_start_offset,
+                        turn_start_offset = plan.turn_start_offset,
                         current_offset,
                         committed = fresh_idle_effective_committed_offset,
-                        retry_offset,
+                        retry_offset = plan.retry_offset,
                         "  [{ts}] 👁 watcher fresh ready-for-input idle refused finalize: session-bound terminal body is not effectively committed; preserving inflight and rewinding for retry"
                     );
-                    current_offset = retry_offset;
+                    current_offset = plan.retry_offset;
                     all_data.clear();
                     all_data_start_offset = current_offset;
                     all_data_fully_mirrored_to_session_relay = true;
@@ -5080,8 +5074,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // `DELIVERY_LEASE_DEADLINE_MS` the sink commits+releases (→ committed>=end →
             // SkipAlreadyCommitted) or dies (→ deadline lapses → reclaim + SendFull).
             // The sole arm closing the slow-sink-in-flight duplicate (#3151).
-            let plan =
-                crate::services::discord::replace_outcome_policy::watcher_partial_continuation_retry_plan();
+            let plan = watcher_wait_inflight_retry_plan();
             retry_terminal_delivery_from_offset = plan.retry_offset;
             plan.relay_ok
         } else if watcher_lease_b2_skip {

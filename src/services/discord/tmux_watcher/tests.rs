@@ -9,15 +9,16 @@ use super::{
     terminal_relay_decision, watcher_batch_contains_assistant_event,
     watcher_batch_contains_relayable_response,
     watcher_fallback_edit_failure_can_delete_original_placeholder,
-    watcher_fresh_idle_finalize_decision, watcher_handle_no_dispatch_post_work_idle_body,
-    watcher_inflight_absence_is_abandonment, watcher_output_progressed_recently,
-    watcher_should_clear_stale_terminal_message_ids, watcher_should_delete_suppressed_placeholder,
+    watcher_fresh_idle_finalize_decision, watcher_fresh_idle_session_bound_retry_plan,
+    watcher_handle_no_dispatch_post_work_idle_body, watcher_inflight_absence_is_abandonment,
+    watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
+    watcher_should_delete_suppressed_placeholder,
     watcher_should_direct_send_after_session_bound_ack,
     watcher_should_reclaim_orphan_turn_placeholder,
     watcher_should_suppress_streaming_after_bridge_delivery,
     watcher_stream_seed_after_restored_seed_discard, watcher_terminal_commit_side_effects_for_test,
     watcher_terminal_edit_consumes_placeholder, watcher_terminal_response_for_direct_send,
-    watcher_terminal_rewind_seed,
+    watcher_terminal_rewind_seed, watcher_wait_inflight_retry_plan,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::InflightTurnState;
@@ -1668,6 +1669,144 @@ fn fresh_idle_done_finalizes_and_unknown_routes_by_emptiness() {
         FreshIdleFinalizeDecision::DeferEmptyUnknown,
         "empty Unknown (non-JSONL prompt could be awaiting input) → defer, not finalize"
     );
+}
+
+/// #3293: the `fresh_idle_inflight` fixtures below resolve the runtime store
+/// root, so these tests pin `AGENTDESK_ROOT_DIR` to a tempdir under the shared
+/// env lock and clear it on drop like every other env-touching watcher test.
+struct RootEnvGuard;
+
+impl Drop for RootEnvGuard {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    }
+}
+
+fn pin_runtime_root_for_test() -> (
+    std::sync::MutexGuard<'static, ()>,
+    tempfile::TempDir,
+    RootEnvGuard,
+) {
+    let lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().expect("runtime root");
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+    (lock, root, RootEnvGuard)
+}
+
+#[test]
+fn fresh_idle_done_uncommitted_session_bound_tail_rewinds_before_finalize_4169() {
+    let _env = pin_runtime_root_for_test();
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-9874169";
+    let channel_id = 987_4169u64;
+    let turn_start_offset = 100u64;
+    let committed_offset = 150u64;
+    let consumed_end = 240u64;
+    let mut current_turn =
+        fresh_idle_inflight(provider, channel_id, session, 9169, turn_start_offset);
+    current_turn.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    current_turn.session_bound_delivered = false;
+
+    let plan = watcher_fresh_idle_session_bound_retry_plan(
+        Some(&current_turn),
+        session,
+        consumed_end,
+        committed_offset,
+    )
+    .expect("uncommitted session-bound tail must block fresh-idle finalize");
+    assert_eq!(plan.turn_start_offset, turn_start_offset);
+    assert_eq!(
+        plan.retry_offset, committed_offset,
+        "retry resumes at the committed floor, preserving the undelivered tail"
+    );
+
+    let mut all_data = b"{\"type\":\"system\",\"ready_for_input\":true}\n".to_vec();
+    let current_offset = plan.retry_offset;
+    all_data.clear();
+    let all_data_start_offset = current_offset;
+
+    assert!(
+        current_offset < consumed_end,
+        "fresh-idle guard must not advance the watcher watermark past the undelivered body"
+    );
+    assert_eq!(all_data_start_offset, committed_offset);
+    assert!(all_data.is_empty());
+    assert_eq!(
+        current_turn.effective_relay_owner_kind(),
+        RelayOwnerKind::SessionBoundRelay,
+        "the inflight row remains retry evidence instead of being identity-cleared"
+    );
+    assert!(!current_turn.session_bound_delivered);
+}
+
+#[test]
+fn fresh_idle_done_committed_session_bound_tail_finalizes_normally_4169() {
+    use crate::services::discord::turn_finalizer::CompletionSignal;
+
+    let _env = pin_runtime_root_for_test();
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-9874170";
+    let channel_id = 987_4170u64;
+    let turn_start_offset = 100u64;
+    let consumed_end = 240u64;
+    let mut current_turn =
+        fresh_idle_inflight(provider, channel_id, session, 9170, turn_start_offset);
+    current_turn.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    current_turn.session_bound_delivered = true;
+
+    assert_eq!(
+        watcher_fresh_idle_session_bound_retry_plan(
+            Some(&current_turn),
+            session,
+            consumed_end,
+            consumed_end,
+        ),
+        None,
+        "committed >= consumed end keeps the legit fresh-idle finalize path unchanged"
+    );
+    assert_eq!(
+        watcher_fresh_idle_finalize_decision(
+            CompletionSignal::Done,
+            false,
+            false,
+            false,
+            Some(&current_turn),
+            session,
+            consumed_end,
+        ),
+        FreshIdleFinalizeDecision::Finalize { user_msg_id: 9170 },
+        "normal delivered Done completion still finalizes with the pinned turn id"
+    );
+}
+
+#[test]
+fn wait_inflight_defer_arms_same_rewind_seed_4169() {
+    let plan = watcher_wait_inflight_retry_plan();
+    assert!(!plan.relay_ok, "WaitInFlight is not a terminal commit");
+    assert!(
+        plan.retry_offset,
+        "WaitInFlight must re-arm the #4115 same-range rewind"
+    );
+
+    let rollover_ids = vec![MessageId::new(4101), MessageId::new(4102)];
+    let seed = watcher_terminal_rewind_seed(WatcherTerminalRewindSeedInput {
+        placeholder_msg_id: Some(MessageId::new(4169)),
+        status_panel_msg_id: Some(MessageId::new(4170)),
+        response_sent_offset: 0,
+        last_edit_text: "streamed terminal body",
+        task_notification_kind: None,
+        finish_mailbox_on_completion: true,
+        injected_prompt_message_id: Some(9171),
+        streaming_rollover_frozen_msg_ids: &rollover_ids,
+    })
+    .expect("WaitInFlight retry keeps restored-turn evidence for the next pass");
+    assert!(seed.same_turn_rewind);
+    assert_eq!(seed.current_msg_id, MessageId::new(4169));
+    assert_eq!(seed.status_message_id, Some(MessageId::new(4170)));
+    assert_eq!(seed.last_edit_text, "streamed terminal body");
+    assert_eq!(seed.streaming_rollover_frozen_msg_ids, rollover_ids);
 }
 
 // #3016 phase-5b1 — Unknown (non-JSONL runtime) keeps the SAME wrong-turn-race

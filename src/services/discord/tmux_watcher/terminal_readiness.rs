@@ -17,7 +17,8 @@
 use super::super::RestoredWatcherTurn;
 use super::*;
 use crate::services::discord::replace_outcome_policy::{
-    WatcherSendFailureClass, watcher_send_failure_retry_plan,
+    WatcherSendFailureClass, WatcherTerminalRelayPlan, watcher_partial_continuation_retry_plan,
+    watcher_send_failure_retry_plan,
 };
 
 pub(super) fn adopt_watcher_terminal_message_ids_from_inflight(
@@ -131,6 +132,37 @@ pub(super) fn watcher_terminal_rewind_seed(
             streaming_rollover_frozen_msg_ids: input.streaming_rollover_frozen_msg_ids.to_vec(),
             same_turn_rewind: true,
         })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FreshIdleSessionBoundRetryPlan {
+    pub(super) turn_start_offset: u64,
+    pub(super) retry_offset: u64,
+}
+
+pub(super) fn watcher_fresh_idle_session_bound_retry_plan(
+    pinned_pre_cleanup_inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+    fresh_idle_effective_committed_offset: u64,
+) -> Option<FreshIdleSessionBoundRetryPlan> {
+    pinned_pre_cleanup_inflight.and_then(|state| {
+        let turn_start_offset = state.turn_start_offset?;
+        (state.tmux_session_name.as_deref() == Some(tmux_session_name)
+            && turn_start_offset < current_offset
+            && state.effective_relay_owner_kind()
+                == crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay
+            && !state.session_bound_delivered
+            && fresh_idle_effective_committed_offset < current_offset)
+            .then_some(FreshIdleSessionBoundRetryPlan {
+                turn_start_offset,
+                retry_offset: turn_start_offset.max(fresh_idle_effective_committed_offset),
+            })
+    })
+}
+
+pub(super) fn watcher_wait_inflight_retry_plan() -> WatcherTerminalRelayPlan {
+    watcher_partial_continuation_retry_plan()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
