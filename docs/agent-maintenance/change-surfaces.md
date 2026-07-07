@@ -152,7 +152,7 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1638 lines; +32 from #4105 adding
+  - `src/services/discord/tmux.rs` (1630 lines; -8 from #4198 routing the restored-watcher release D-section through the shared `turn_finalizer::cleanup` helpers (`snapshot_role_override` / `clear_watchdog_and_kick_thread_parents_after_turn_release` / `remove_owned_role_override`); +32 from #4105 adding
     cross-turn restored-seed identity (`RestoredWatcherTurn.turn_identity` +
     `restored_seed_reassigned_to_different_turn`) so a long-lived watcher reused
     for a new turn drops the prior turn's stale `full_response` seed; +101 from #4106 adding
@@ -228,7 +228,7 @@
     in-bounds/monotonic local mutation block collapsed into the helper, and the
     function gained a `require_identity: Option<&InflightTurnIdentity>` param so a
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
-    suppression helpers to `tmux_placeholder_suppression.rs`;
+    suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (7174 production lines; #4049 S4-b1
     inventory sync records the current hotfile count with 9 ratchet lines of
@@ -912,16 +912,12 @@
     regression tests, which pushed the production surface over the 1000-line
     giant-file threshold, so this file is now a registered giant. Bugfix /
     queue-safety only; split before adding new pending-start behavior).
-  - `src/services/discord/tmux_placeholder_suppression.rs` (1092 production lines;
-    the placeholder edit/delete suppression decision surface. #4150 r4 added the
-    two-signal anchor check (registry tombstone fused with the live inflight row),
-    the delivered-elsewhere current-generation frontier probe with
-    same-coordinate-space proof (durable frontier mirrored by the live in-memory
-    frontier + anchor end <= output EOF), and watcher-vs-cross-actor author
-    detection producing a 9-row decision table, which pushed the production surface
-    over the 1000-line giant threshold, so this file is now a registered giant
-    (decompose_issue #4176). Bugfix / delete-gate correctness only; split the
-    decision logic from the evidence/edit helpers before adding new behavior).
+  - `src/services/discord/tmux_placeholder_suppression/{mod,evidence,ops}.rs`
+    (348 / 259 / 584 production lines after #4176; formerly
+    `tmux_placeholder_suppression.rs` at 1092 production lines. The facade keeps
+    the pure placeholder-suppression decision core, `evidence.rs` owns frontier /
+    proof / EOF helpers, and `ops.rs` owns Discord edit/delete cleanup operations.
+    All three files are below the giant-file threshold).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
@@ -1116,15 +1112,15 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind.rs` (1084 lines; crossed
-    the giant threshold in #4091 r3/r4 when manual rebind gained ClaudeTui
-    transcript adoption — candidate probing, EOF-forced start offsets for
-    adopted transcripts (never reuse wrapper-jsonl coordinates on a different
-    file), and runtime-binding re-registration; +27 from r5 driving the durable
-    guarded CAS save (persisted last_offset/turn_start_offset := EOF +
-    runtime_kind/session_id in the same locked save) so a restart cannot
-    resurrect wrapper coordinates against the adopted transcript. Registered in
-    scripts/giant_file_registry.toml; decompose_issue #4157.)
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (785 prod lines
+    after #4157; no longer a prod giant. Keeps the manual rebind entrypoints,
+    rollback carrier, session refresh, active-turn re-registration hook, and
+    watcher claim/spawn path. `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs`
+    (233 prod lines) owns the Codex-TUI replay/resume helper cluster, and
+    `src/services/discord/recovery_engine/manual_rebind/adoption.rs` (77 prod
+    lines) owns transcript-adoption offset and binding decisions. The retired
+    `manual_rebind.rs` giant registration was removed from
+    scripts/giant_file_registry.toml.)
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
@@ -1136,7 +1132,7 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2724 lines; +7 from #4178 computing `capture_advancing` via `stall_liveness::stall_watchdog_capture_offset_advancing` in `run_stall_watchdog_pass` and threading it into `stall_watchdog_should_force_clean` so a live-but-relay-stalled turn is not force-cleaned; +28 from #4111 r9 capturing the force-clean repair boundary before the watcher snapshot and threading it into the start-bounded stale-mailbox release, plus the test-only force-clean post-cleanup hook seam; +7 from #4111 r7 capturing repair_started_at and passing it to the start-bounded guarded finish so a same-message-id fresh mailbox claim in the clear->finish gap is never finished; +38 from #4111 r6 guarding the post-clear mailbox finish with `mailbox_finish_turn_if_matches` pinned to the cleared turn's user_msg_id (a fresh turn claiming the freed mailbox between clear and finish keeps its token; runtime/session cleanup now runs only when the guarded finish removed the cleared turn's token); +60 from #4111 r4 reworking `clear_idle_tmux_stale_turn` to clear-before-teardown — load ONE candidate row, capture the pin from it, re-check `idle_tmux_repair_has_unrelayed_tail_answer` on that same row (closes the manual stale-mailbox route's TOCTOU), run the generation-pinned guarded clear FIRST, and only on Cleared proceed to mailbox/runtime teardown; non-Cleared outcomes return None with WARNs, preserving mailbox/session/inflight; +4 from #4111 routing the leak-recover offset re-save through the identity-guarded locked field-patch helper (no unlocked whole-row save); +23 from #4048
+  - `src/services/discord/health/recovery.rs` (2750 lines; +26 from #4198 snapshotting the owned role override before the yielding D-section cleanup and replacing the unconditional `role_overrides.remove` with the shared `remove_owned_role_override` guarded remove at both recovery bundles; +7 from #4178 computing `capture_advancing` via `stall_liveness::stall_watchdog_capture_offset_advancing` in `run_stall_watchdog_pass` and threading it into `stall_watchdog_should_force_clean` so a live-but-relay-stalled turn is not force-cleaned; +28 from #4111 r9 capturing the force-clean repair boundary before the watcher snapshot and threading it into the start-bounded stale-mailbox release, plus the test-only force-clean post-cleanup hook seam; +7 from #4111 r7 capturing repair_started_at and passing it to the start-bounded guarded finish so a same-message-id fresh mailbox claim in the clear->finish gap is never finished; +38 from #4111 r6 guarding the post-clear mailbox finish with `mailbox_finish_turn_if_matches` pinned to the cleared turn's user_msg_id (a fresh turn claiming the freed mailbox between clear and finish keeps its token; runtime/session cleanup now runs only when the guarded finish removed the cleared turn's token); +60 from #4111 r4 reworking `clear_idle_tmux_stale_turn` to clear-before-teardown — load ONE candidate row, capture the pin from it, re-check `idle_tmux_repair_has_unrelayed_tail_answer` on that same row (closes the manual stale-mailbox route's TOCTOU), run the generation-pinned guarded clear FIRST, and only on Cleared proceed to mailbox/runtime teardown; non-Cleared outcomes return None with WARNs, preserving mailbox/session/inflight; +4 from #4111 routing the leak-recover offset re-save through the identity-guarded locked field-patch helper (no unlocked whole-row save); +23 from #4048
     round 4 requiring strict provider-less stale-mailbox repair to verify a
     peeked local mailbox has an active token or queue before treating it as
     ownership evidence; +45 from #4048 round 3 scoping provider-less

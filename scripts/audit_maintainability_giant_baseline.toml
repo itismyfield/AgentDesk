@@ -542,7 +542,13 @@
 # cannot reset, instead of a brittle tick count (codex review #3672 finding). One
 # new argument line plus a 2-line explanatory comment at the existing call site;
 # splitting recovery.rs is out of scope.
-"src/services/discord/health/recovery.rs" = 2736
+# #4198 reviewable admission (+14 net): both recovery D-section bundles now
+# snapshot the owned role override BEFORE the yielding watchdog/thread-parent
+# cleanup and replace the unconditional `role_overrides.remove` with the shared
+# `turn_finalizer::cleanup::remove_owned_role_override` guarded remove, so a
+# concurrent same-channel counter-model follow-up's override survives turn
+# cleanup. Decompose remains owned by the existing recovery surgery track.
+"src/services/discord/health/recovery.rs" = 2750
 # inflight.rs was decomposed in #3835: the store-side CAS "save" cluster moved to
 # inflight/save_store.rs, the "clear" cluster to inflight/clear_store/mod.rs, and
 # the shared persist/lock + validate primitives to inflight/store.rs (each sub-1000

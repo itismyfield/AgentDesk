@@ -1204,6 +1204,11 @@ async fn apply_relay_recovery_decision(
                 if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
                     watcher.cancel.store(true, Ordering::Relaxed);
                 }
+                // #4198: snapshot before the yielding finish/cleanup awaits so
+                // the remove below cannot clobber a same-channel follow-up's
+                // freshly inserted override.
+                let owned_role_override =
+                    super::turn_finalizer::cleanup::snapshot_role_override(shared, channel);
                 let finish = mailbox_finish_turn(shared, provider, channel).await;
                 if let Some(token) = finish.removed_token.as_ref() {
                     token.cancelled.store(true, Ordering::Relaxed);
@@ -1222,7 +1227,11 @@ async fn apply_relay_recovery_decision(
                 shared.restart.recovering_channels.remove(&channel);
                 shared.turn_start_times.remove(&channel);
                 if !finish.has_pending {
-                    shared.dispatch.role_overrides.remove(&channel);
+                    super::turn_finalizer::cleanup::remove_owned_role_override(
+                        shared,
+                        channel,
+                        owned_role_override,
+                    );
                 }
                 mailbox_clear_recovery_marker(shared, channel).await;
                 let after = mailbox_snapshot(shared, channel).await;

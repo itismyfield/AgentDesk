@@ -19,6 +19,12 @@ pub(crate) struct PendingQueueItem {
     #[serde(default)]
     pub(crate) author_is_bot: bool,
     pub(crate) message_id: u64,
+    /// #4180: original wall-clock timestamp for `Intervention::created_at`,
+    /// persisted as Unix milliseconds so restart restore can recreate the
+    /// monotonic age instead of stamping the item as newly queued.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) created_at_wall_time_ms: Option<u64>,
     #[serde(default)]
     pub(crate) queued_generation: u64,
     #[serde(default)]
@@ -270,10 +276,64 @@ pub(crate) fn cleanup_stale_pending_queue_tmp_files_all_tokens() -> Vec<PendingQ
     )
 }
 
+fn system_time_to_unix_millis(time: SystemTime) -> Option<u64> {
+    let millis = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    u64::try_from(millis).ok()
+}
+
+fn system_time_from_unix_millis(millis: u64) -> Option<SystemTime> {
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis))
+}
+
+fn created_at_wall_time_ms_from_instant(
+    created_at: Instant,
+    reference_wall_time: SystemTime,
+    reference_instant: Instant,
+) -> Option<u64> {
+    let created_at_wall_time = reference_instant
+        .checked_duration_since(created_at)
+        .and_then(|age| reference_wall_time.checked_sub(age))
+        .unwrap_or(reference_wall_time);
+    system_time_to_unix_millis(created_at_wall_time)
+}
+
+fn created_at_instant_from_wall_time_ms(
+    created_at_wall_time_ms: Option<u64>,
+    reference_wall_time: SystemTime,
+    reference_instant: Instant,
+) -> Instant {
+    let Some(created_at_wall_time) = created_at_wall_time_ms.and_then(system_time_from_unix_millis)
+    else {
+        return reference_instant;
+    };
+    match reference_wall_time.duration_since(created_at_wall_time) {
+        Ok(age) => reference_instant
+            .checked_sub(age)
+            .unwrap_or(reference_instant),
+        // #4180 review: a persisted wall time in OUR future means the wall
+        // clock stepped backward across the restart, so the item's true age is
+        // unknowable (no cross-restart monotonic source). Clamping to "fresh"
+        // (`reference_instant`) would re-open the LastItemDedup false-reject
+        // this module exists to close, so restore the item as already OUTSIDE
+        // the dedup window — preferring a possible duplicate dispatch over a
+        // silently dropped re-send, consistent with the relay's
+        // duplicate-over-loss stance. (A backward step small enough to keep
+        // `duration_since` in `Ok` remains undetectable; documented residual.)
+        Err(_) => reference_instant
+            .checked_sub(super::INTERVENTION_DEDUP_WINDOW + Duration::from_secs(1))
+            .unwrap_or(reference_instant),
+    }
+}
+
 fn pending_queue_item_from_intervention(
     intervention: &Intervention,
     channel_id: ChannelId,
     dispatch_role_override: Option<u64>,
+    reference_wall_time: SystemTime,
+    reference_instant: Instant,
 ) -> PendingQueueItem {
     let source_message_queued_generations: Vec<PendingQueueSourceGeneration> = intervention
         .source_message_queued_generations()
@@ -300,6 +360,11 @@ fn pending_queue_item_from_intervention(
         author_id: intervention.author_id.get(),
         author_is_bot: intervention.author_is_bot,
         message_id: intervention.message_id.get(),
+        created_at_wall_time_ms: created_at_wall_time_ms_from_instant(
+            intervention.created_at,
+            reference_wall_time,
+            reference_instant,
+        ),
         queued_generation: intervention.queued_generation,
         source_message_ids: if intervention.source_message_ids.is_empty() {
             vec![intervention.message_id.get()]
@@ -359,10 +424,18 @@ pub(crate) fn save_channel_queue(
             }
         };
     }
+    let reference_instant = Instant::now();
+    let reference_wall_time = SystemTime::now();
     let items: Vec<PendingQueueItem> = queue
         .iter()
         .map(|intervention| {
-            pending_queue_item_from_intervention(intervention, channel_id, dispatch_role_override)
+            pending_queue_item_from_intervention(
+                intervention,
+                channel_id,
+                dispatch_role_override,
+                reference_wall_time,
+                reference_instant,
+            )
         })
         .collect();
     let json = serde_json::to_string_pretty(&items)
@@ -390,8 +463,15 @@ pub(super) fn save_channel_pending_dispatch_marker(
             channel_id.get()
         ));
     };
-    let item =
-        pending_queue_item_from_intervention(intervention, channel_id, dispatch_role_override);
+    let reference_instant = Instant::now();
+    let reference_wall_time = SystemTime::now();
+    let item = pending_queue_item_from_intervention(
+        intervention,
+        channel_id,
+        dispatch_role_override,
+        reference_wall_time,
+        reference_instant,
+    );
     let json = serde_json::to_string_pretty(&item)
         .map_err(|error| format!("serialize pending dispatch {}: {error}", path.display()))?;
     let context = crate::services::discord::runtime_store::AtomicWriteContext::new(
@@ -464,7 +544,11 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     removed
 }
 
-fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> Intervention {
+fn pending_queue_item_to_intervention(
+    item: PendingQueueItem,
+    reference_wall_time: SystemTime,
+    reference_instant: Instant,
+) -> Intervention {
     let mut source_message_ids: Vec<MessageId> = item
         .source_message_ids
         .into_iter()
@@ -518,6 +602,11 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
             SourceMessageTextSegment::new(MessageId::new(segment.message_id), segment.text)
         })
         .collect();
+    let created_at = created_at_instant_from_wall_time_ms(
+        item.created_at_wall_time_ms,
+        reference_wall_time,
+        reference_instant,
+    );
     Intervention {
         author_id: UserId::new(item.author_id),
         author_is_bot: item.author_is_bot,
@@ -528,7 +617,7 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
         source_text_segments,
         text: item.text,
         mode: InterventionMode::Soft,
-        created_at: now,
+        created_at,
         reply_context: item.reply_context,
         has_reply_boundary: item.has_reply_boundary,
         merge_consecutive: item.merge_consecutive,
@@ -556,19 +645,24 @@ pub(crate) fn load_channel_pending_dispatch_marker(
         return None;
     };
     let restored_override = item.override_channel_id.map(ChannelId::new);
+    let reference_instant = Instant::now();
+    let reference_wall_time = SystemTime::now();
     Some((
-        pending_queue_item_to_intervention(item, Instant::now()),
+        pending_queue_item_to_intervention(item, reference_wall_time, reference_instant),
         restored_override,
     ))
 }
 
 fn pending_queue_items_to_interventions(
     items: Vec<PendingQueueItem>,
-    now: Instant,
+    reference_wall_time: SystemTime,
+    reference_instant: Instant,
 ) -> Vec<Intervention> {
     items
         .into_iter()
-        .map(|item| pending_queue_item_to_intervention(item, now))
+        .map(|item| {
+            pending_queue_item_to_intervention(item, reference_wall_time, reference_instant)
+        })
         .collect()
 }
 
@@ -595,7 +689,8 @@ pub(crate) fn load_pending_queues(
     let Ok(entries) = fs::read_dir(&dir) else {
         return (HashMap::new(), HashMap::new());
     };
-    let now = Instant::now();
+    let reference_instant = Instant::now();
+    let reference_wall_time = SystemTime::now();
     let mut result: HashMap<ChannelId, Vec<Intervention>> = HashMap::new();
     let mut restored_overrides: HashMap<ChannelId, ChannelId> = HashMap::new();
     for entry in entries.filter_map(|e| e.ok()) {
@@ -623,7 +718,8 @@ pub(crate) fn load_pending_queues(
         if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
             restored_overrides.insert(ChannelId::new(channel_id), ChannelId::new(override_id));
         }
-        let interventions = pending_queue_items_to_interventions(items, now);
+        let interventions =
+            pending_queue_items_to_interventions(items, reference_wall_time, reference_instant);
         if !interventions.is_empty() {
             result.insert(ChannelId::new(channel_id), interventions);
         }
@@ -675,7 +771,10 @@ pub(super) fn load_channel_pending_queue(
         .iter()
         .find_map(|item| item.override_channel_id)
         .map(ChannelId::new);
-    let interventions = pending_queue_items_to_interventions(items, Instant::now());
+    let reference_instant = Instant::now();
+    let reference_wall_time = SystemTime::now();
+    let interventions =
+        pending_queue_items_to_interventions(items, reference_wall_time, reference_instant);
     (interventions, restored_override)
 }
 
@@ -699,5 +798,133 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
                 path.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::turn_orchestrator::test_support::{AGENTDESK_ROOT_DIR_ENV, lock_test_env};
+
+    /// #3293: `pending_queue_item_to_intervention` resolves the runtime store
+    /// root (via `runtime_store::load_generation`), so these tests must pin
+    /// `AGENTDESK_ROOT_DIR` to a tempdir under the shared env lock and clear
+    /// it on drop like every other env-touching queue test.
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+        }
+    }
+
+    fn intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            queued_generation: 1,
+            source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at,
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    #[test]
+    fn persisted_created_at_wall_time_restores_original_age() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        const SAVE_WALL_TIME_MS: u64 = 1_700_000_000_000;
+        let save_instant = Instant::now();
+        let save_wall_time = SystemTime::UNIX_EPOCH + Duration::from_millis(SAVE_WALL_TIME_MS);
+        let original_age = Duration::from_secs(240);
+        let downtime = Duration::from_secs(7);
+        let created_at = save_instant.checked_sub(original_age).unwrap();
+        let item = pending_queue_item_from_intervention(
+            &intervention(10, "same text", created_at),
+            ChannelId::new(20),
+            None,
+            save_wall_time,
+            save_instant,
+        );
+
+        assert_eq!(
+            item.created_at_wall_time_ms,
+            Some(SAVE_WALL_TIME_MS - 240_000)
+        );
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("created_at_wall_time_ms"));
+
+        let reloaded_item = serde_json::from_str::<PendingQueueItem>(&json).unwrap();
+        let reload_instant = save_instant.checked_add(downtime).unwrap();
+        let reload_wall_time = save_wall_time.checked_add(downtime).unwrap();
+        let restored =
+            pending_queue_item_to_intervention(reloaded_item, reload_wall_time, reload_instant);
+
+        assert_eq!(
+            reload_instant.duration_since(restored.created_at),
+            original_age + downtime
+        );
+    }
+
+    #[test]
+    fn legacy_payload_without_created_at_wall_time_falls_back_to_reload_now() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let legacy_json = r#"{"author_id":1,"message_id":10,"text":"legacy"}"#;
+        let item = serde_json::from_str::<PendingQueueItem>(legacy_json).unwrap();
+        assert_eq!(item.created_at_wall_time_ms, None);
+
+        let reference_instant = Instant::now();
+        let reference_wall_time = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_010_000);
+        let restored =
+            pending_queue_item_to_intervention(item, reference_wall_time, reference_instant);
+
+        assert_eq!(restored.created_at, reference_instant);
+    }
+
+    #[test]
+    fn backward_clock_restore_lands_outside_dedup_window() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        // Persisted wall time is AHEAD of the reload reference wall time: the
+        // wall clock stepped backward across the restart. The restored age
+        // must land outside `INTERVENTION_DEDUP_WINDOW` so a distinct re-send
+        // is never falsely rejected as `LastItemDedup` (duplicate-over-loss).
+        const RELOAD_WALL_TIME_MS: u64 = 1_700_000_000_000;
+        let json = format!(
+            r#"{{"author_id":1,"message_id":10,"text":"skewed","created_at_wall_time_ms":{}}}"#,
+            RELOAD_WALL_TIME_MS + 30_000
+        );
+        let item = serde_json::from_str::<PendingQueueItem>(&json).unwrap();
+
+        let reference_instant = Instant::now();
+        let reference_wall_time =
+            SystemTime::UNIX_EPOCH + Duration::from_millis(RELOAD_WALL_TIME_MS);
+        let restored =
+            pending_queue_item_to_intervention(item, reference_wall_time, reference_instant);
+
+        assert!(
+            reference_instant.duration_since(restored.created_at)
+                > crate::services::turn_orchestrator::INTERVENTION_DEDUP_WINDOW,
+            "a backward-clock restore must not look fresh enough to suppress a re-send"
+        );
     }
 }

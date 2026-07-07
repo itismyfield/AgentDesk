@@ -58,7 +58,7 @@ mod state_extractors;
 // cluster and unit tests) into a leaf module. `RebindOutcome` / `RebindError` stay
 // in this root module (shared with `rebind_runtime` + external callers); the entry
 // point is re-exported below so external call sites stay byte-identical.
-#[path = "recovery_engine/manual_rebind.rs"]
+#[path = "recovery_engine/manual_rebind/mod.rs"]
 mod manual_rebind;
 #[path = "recovery_engine/manual_rebind_output_path.rs"]
 mod manual_rebind_output_path;
