@@ -1739,10 +1739,11 @@
   - `src/server/mod.rs` (2806 lines; +140 from #4089 claude-accounts cswap surface — leader/forced rate-limit refresh serialization (shared async Mutex critical section), fire-and-forget switch refresh with 8s bound, and the sync_claude_rate_limit_cache_once extraction; follow-up decomposition candidate: move the claude rate-limit sync block into a sibling module; +42 from #3573 auto-resume tick + backoff-race fix; #3628 wires failure→pause producer behind the same knob, net -1 line from comment condensation; #3651 net ~0 — the message_outbox_loop is the foreground headless-delivery drain and must NOT be backpressured, so its earlier backpressure gate was removed during codex review; #3740 adds the boot hook for token-analytics cache prewarm; #3722 removes duplicate startup reseed when callers already completed guarded startup initialization; +20 from #3870 fail-closed bind-security guard at the listener bind site — force-loopback when non-loopback host + no auth_token).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1508 lines).
-  - `src/reconcile.rs` (1863 lines; #3685 rebind-origin stale-inflight
-    preservation review hardening; periodic reconcile loop covering stale
-    inflights, orphan uploads, dispatched-session drift, and queue-review
-    drift — split before adding non-bugfix behavior).
+  - `src/reconcile.rs` (1902 lines; +39 from #4104 standardized inflight-row
+    removal logging at the `sweep_stale_inflight_files` site; #3685 rebind-origin
+    stale-inflight preservation review hardening; periodic reconcile loop
+    covering stale inflights, orphan uploads, dispatched-session drift, and
+    queue-review drift — split before adding non-bugfix behavior).
   - `src/server/maintenance.rs` (1014 lines; #3909 added the leader-only voice
     TTS cache/temp sweep (`ProgressTtsCacheSweepJob`, 15th MaintenanceJob) +
     runtime-config threading, tipping the per-job-impl static registry over the
