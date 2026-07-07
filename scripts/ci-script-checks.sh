@@ -69,7 +69,7 @@ echo "=== CI runner hardening guard ==="
 
 echo "=== Scratch file guard ==="
 FAIL=0
-for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh test_scratch.rs plan.txt pr-body.md test.sh test.sql; do
+for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql; do
   if [ -f "$scratch_file" ]; then
     echo "ERROR: Scratch file detected in repository root: $scratch_file"
     FAIL=1
@@ -145,8 +145,17 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # against current source facts.
 # The generator hard-fails (exit 2) on giant-file registry drift: unregistered
 # new giants, ghost registrations left after decomposition, or deadline-less
-# [[entry]] tables in scripts/giant_file_registry.toml.
-"$PYTHON" scripts/generate_inventory_docs.py
+echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036) ==="
+# Generic committed markdown freshness drift is warning-only for ordinary PRs
+# and is refreshed by the weekly regen-docs workflow. This CI invocation writes
+# the current generated view into the workspace so the checks below compare
+# against current source facts.
+# The generator hard-fails (exit 2) on giant-file registry drift: unregistered
+# new giants, ghost registrations left after decomposition, or deadline-less
+# [[entry]] tables in scripts/giant_file_registry.toml. Generated-docs drift
+# (exit 1) is a hard fail in PRs to prevent drift merging and spawning
+# duplicate downstream inventory refresh PRs.
+"$PYTHON" scripts/generate_inventory_docs.py --check
 
 echo "=== API docs coverage gate (#3719) ==="
 "$PYTHON" scripts/check_api_docs_coverage.py

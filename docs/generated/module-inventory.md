@@ -90,7 +90,7 @@
 | `db::auto_queue::consultation` | `src/db/auto_queue/consultation.rs` | 112 | 112 | 0 |  |
 | `db::auto_queue::entries` | `src/db/auto_queue/entries.rs` | 1508 | 1508 | 0 | giant-file |
 | `db::auto_queue::phase_gates` | `src/db/auto_queue/phase_gates.rs` | 3116 | 1639 | 1477 | giant-file |
-| `db::auto_queue::queries` | `src/db/auto_queue/queries.rs` | 533 | 533 | 0 |  |
+| `db::auto_queue::queries` | `src/db/auto_queue/queries.rs` | 535 | 535 | 0 |  |
 | `db::auto_queue::runs` | `src/db/auto_queue/runs.rs` | 291 | 291 | 0 |  |
 | `db::auto_queue::slot_predicate` | `src/db/auto_queue/slot_predicate.rs` | 249 | 104 | 145 |  |
 | `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 204 | 204 | 0 |  |
@@ -108,7 +108,7 @@
 | `db::dispatches::outbox::diagnostics` | `src/db/dispatches/outbox/diagnostics.rs` | 127 | 127 | 0 |  |
 | `db::dispatches::outbox::followup` | `src/db/dispatches/outbox/followup.rs` | 91 | 91 | 0 |  |
 | `db::dispatches::outbox::model` | `src/db/dispatches/outbox/model.rs` | 74 | 74 | 0 |  |
-| `db::dispatches::outbox::notify` | `src/db/dispatches/outbox/notify.rs` | 73 | 73 | 0 |  |
+| `db::dispatches::outbox::notify` | `src/db/dispatches/outbox/notify.rs` | 75 | 75 | 0 |  |
 | `db::dispatches::outbox::retry` | `src/db/dispatches/outbox/retry.rs` | 60 | 60 | 0 |  |
 | `db::idempotency` | `src/db/idempotency.rs` | 659 | 302 | 357 |  |
 | `db::intake_outbox` | `src/db/intake_outbox.rs` | 1779 | 630 | 1149 |  |
@@ -270,7 +270,7 @@
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 | 266 | 0 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 | 17 | 0 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 1290 | 1290 | 0 | giant-file |
-| `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 919 | 483 | 436 |  |
+| `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 901 | 465 | 436 |  |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 185 | 185 | 0 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 96 | 96 | 0 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 485 | 485 | 0 |  |
@@ -381,7 +381,7 @@
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 1258 | 627 | 631 |  |
-| `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 356 | 154 | 202 |  |
+| `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
 | `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 417 | 336 | 81 |  |
 | `services::cluster::intake_worker_capabilities` | `src/services/cluster/intake_worker_capabilities.rs` | 83 | 83 | 0 |  |
 | `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1021 | 751 | 270 |  |

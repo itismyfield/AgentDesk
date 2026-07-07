@@ -435,10 +435,10 @@ test("kanban-rules marks DoD-only gate failures as awaiting_dod instead of escal
             status: "in_progress",
             priority: "high",
             assigned_agent_id: "agent-4",
-            deferred_dod_json: JSON.stringify({
+            deferred_dod_json: {
               items: ["add tests", "update docs"],
               verified: ["add tests"]
-            })
+            }
           }
         ]
       }

@@ -420,25 +420,7 @@ async fn local_forget_pg(state: &AppState, id: &str) -> Result<bool, String> {
 }
 
 fn uuid_like() -> String {
-    // Unique enough for this endpoint without pulling uuid into this module:
-    // nanos + thread id fingerprint. Collisions within the same millisecond
-    // would require the same thread firing two inserts back-to-back, which
-    // the PRIMARY KEY constraint will surface loudly if it ever happens.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tid = format!("{:?}", std::thread::current().id());
-    format!("{nanos:x}-{}", simple_hash(&tid))
-}
-
-fn simple_hash(value: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    uuid::Uuid::new_v4().to_string()
 }
 
 // ── Memento bridge (remember only; recall/forget TBD) ────────────

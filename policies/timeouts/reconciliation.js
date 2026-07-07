@@ -161,22 +161,18 @@ module.exports = function attachReconciliation(timeouts, helpers) {
           // Check 1: DoD completion
           // Format: { items: ["task1", "task2"], verified: ["task1"] }
           if (card.deferred_dod_json) {
-            try {
-              var dod = typeof card.deferred_dod_json === "string"
-                ? JSON.parse(card.deferred_dod_json)
-                : card.deferred_dod_json;
-              var items = dod && Array.isArray(dod.items) ? dod.items : [];
-              var verified = dod && Array.isArray(dod.verified)
-                ? dod.verified
-                : (dod && typeof dod.verified === "undefined" ? [] : null);
-              if (items.length > 0 && verified) {
-                var unverified = 0;
-                for (var di2 = 0; di2 < items.length; di2++) {
-                  if (verified.indexOf(items[di2]) === -1) unverified++;
-                }
-                if (unverified > 0) reasons.push("DoD 미완료: " + (items.length - unverified) + "/" + items.length);
+            var dod = card.deferred_dod_json;
+            var items = dod && Array.isArray(dod.items) ? dod.items : [];
+            var verified = dod && Array.isArray(dod.verified)
+              ? dod.verified
+              : (dod && typeof dod.verified === "undefined" ? [] : null);
+            if (items.length > 0 && verified) {
+              var unverified = 0;
+              for (var di2 = 0; di2 < items.length; di2++) {
+                if (verified.indexOf(items[di2]) === -1) unverified++;
               }
-            } catch (e) {}
+              if (unverified > 0) reasons.push("DoD 미완료: " + (items.length - unverified) + "/" + items.length);
+            }
           }
           // Minimum work duration heuristic intentionally removed to keep PM
           // escalation aligned with objective failure states only. Replay logic

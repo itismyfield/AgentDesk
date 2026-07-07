@@ -564,8 +564,18 @@ export default function OfficeManagerView({
                     return (
                       <SurfaceCard
                         key={agent.id}
+                        role="switch"
+                        aria-checked={assigned}
+                        aria-label={tr(`${agent.name_ko || agent.name} - 오피스 멤버 토글`, `Toggle ${agent.name} in office members`)}
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            void toggleMember(agent.id);
+                          }
+                        }}
                         onClick={() => void toggleMember(agent.id)}
-                        className="cursor-pointer rounded-2xl border px-3 py-3 text-left transition-colors disabled:opacity-60"
+                        className="cursor-pointer rounded-2xl border px-3 py-3 text-left transition-colors disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-[var(--th-bg-surface)]"
                         style={{
                           borderColor: assigned ? `${selectedOffice.color}55` : "rgba(148,163,184,0.18)",
                           background: assigned ? `color-mix(in srgb, ${selectedOffice.color} 12%, var(--th-bg-surface))` : "var(--th-bg-surface)",

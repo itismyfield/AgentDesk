@@ -88,10 +88,10 @@ pub async fn run_has_blocking_phase_gate_pg(
     run_id: &str,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>(
-        "SELECT COUNT(*) > 0
+        "SELECT EXISTS(SELECT 1
          FROM auto_queue_phase_gates
          WHERE run_id = $1
-           AND status IN ('pending', 'failed')",
+           AND status IN ('pending', 'failed'))",
     )
     .bind(run_id)
     .fetch_one(pool)
@@ -103,10 +103,10 @@ pub(super) async fn run_has_blocking_phase_gate_on_pg_tx(
     run_id: &str,
 ) -> Result<bool, String> {
     sqlx::query_scalar::<_, bool>(
-        "SELECT COUNT(*) > 0
+        "SELECT EXISTS(SELECT 1
          FROM auto_queue_phase_gates
          WHERE run_id = $1
-           AND status IN ('pending', 'failed')",
+           AND status IN ('pending', 'failed'))",
     )
     .bind(run_id)
     .fetch_one(&mut **tx)

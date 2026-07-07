@@ -153,14 +153,14 @@ pub async fn slot_has_active_dispatch_excluding_pg(
     // reusable. Without the join, paused-run entries kept the slot
     // permanently "active" until `clear_inactive_slot_assignments_pg` ran.
     let auto_queue_active = sqlx::query_scalar::<_, bool>(
-        "SELECT COUNT(*) > 0
+        "SELECT EXISTS(SELECT 1
          FROM auto_queue_entries e
          LEFT JOIN auto_queue_runs r ON r.id = e.run_id
          WHERE e.agent_id = $1
            AND e.slot_index = $2
            AND e.status = 'dispatched'
            AND COALESCE(e.dispatch_id, '') != $3
-           AND COALESCE(r.status, 'active') NOT IN ('paused', 'cancelled')",
+           AND COALESCE(r.status, 'active') NOT IN ('paused', 'cancelled'))",
     )
     .bind(agent_id)
     .bind(slot_index)
