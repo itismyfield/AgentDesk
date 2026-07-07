@@ -1112,15 +1112,15 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind.rs` (1084 lines; crossed
-    the giant threshold in #4091 r3/r4 when manual rebind gained ClaudeTui
-    transcript adoption — candidate probing, EOF-forced start offsets for
-    adopted transcripts (never reuse wrapper-jsonl coordinates on a different
-    file), and runtime-binding re-registration; +27 from r5 driving the durable
-    guarded CAS save (persisted last_offset/turn_start_offset := EOF +
-    runtime_kind/session_id in the same locked save) so a restart cannot
-    resurrect wrapper coordinates against the adopted transcript. Registered in
-    scripts/giant_file_registry.toml; decompose_issue #4157.)
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (785 prod lines
+    after #4157; no longer a prod giant. Keeps the manual rebind entrypoints,
+    rollback carrier, session refresh, active-turn re-registration hook, and
+    watcher claim/spawn path. `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs`
+    (233 prod lines) owns the Codex-TUI replay/resume helper cluster, and
+    `src/services/discord/recovery_engine/manual_rebind/adoption.rs` (77 prod
+    lines) owns transcript-adoption offset and binding decisions. The retired
+    `manual_rebind.rs` giant registration was removed from
+    scripts/giant_file_registry.toml.)
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat

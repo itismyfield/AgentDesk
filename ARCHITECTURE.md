@@ -519,10 +519,13 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── section_dedupe.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── manual_rebind/
+│   │   │   │   ├── adoption.rs
+│   │   │   │   ├── codex_tui_replay.rs
+│   │   │   │   └── mod.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── jsonl_extract.rs
-│   │   │   ├── manual_rebind.rs
 │   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
