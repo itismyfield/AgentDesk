@@ -1,7 +1,7 @@
 use super::{
-    FreshIdleFinalizeDecision, SessionBoundRelayAckOutcome, TuiCompletionGateOutcome,
-    WatcherTerminalKind, WatcherTerminalRewindSeedInput, build_watcher_streaming_edit_text,
-    committed_anchor_cleanup_is_stale_for_newer_turn,
+    FreshIdleFinalizeDecision, RestoredWatcherTurn, SessionBoundRelayAckOutcome,
+    TuiCompletionGateOutcome, WatcherTerminalKind, WatcherTerminalRewindSeedInput,
+    build_watcher_streaming_edit_text, committed_anchor_cleanup_is_stale_for_newer_turn,
     discard_restored_response_seed_before_no_inflight_terminal_relay,
     legacy_wrapper_prompt_candidates_from_pane, local_cmd_no_output,
     mark_watcher_terminal_delivery_committed, merge_persisted_rollover_frozen_msg_ids,
@@ -15,13 +15,14 @@ use super::{
     watcher_should_direct_send_after_session_bound_ack,
     watcher_should_reclaim_orphan_turn_placeholder,
     watcher_should_suppress_streaming_after_bridge_delivery,
-    watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
-    watcher_terminal_response_for_direct_send, watcher_terminal_rewind_seed,
+    watcher_stream_seed_after_restored_seed_discard, watcher_terminal_commit_side_effects_for_test,
+    watcher_terminal_edit_consumes_placeholder, watcher_terminal_response_for_direct_send,
+    watcher_terminal_rewind_seed,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
-use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
+use crate::services::discord::inflight::{InflightTurnIdentity, RelayOwnerKind, TurnSource};
 use crate::services::discord::replace_outcome_policy::{
     WatcherRewindAttemptDisposition, WatcherSendFailureClass,
     classify_watcher_send_failure_message, watcher_full_send_failure_retry_plan,
@@ -2623,6 +2624,7 @@ fn tui_direct_rewind_seed_with_prompt_anchor_reuses_placeholder_4115() {
         true,
         false,
         seed.same_turn_rewind,
+        false,
     );
     assert!(
         !discard,
@@ -2635,6 +2637,45 @@ fn tui_direct_rewind_seed_with_prompt_anchor_reuses_placeholder_4115() {
         Some(placeholder),
         "retry pass edits the original placeholder instead of POSTing a second one"
     );
+}
+
+#[test]
+fn cross_turn_watcher_reuse_discards_restored_seed_through_watcher_wiring_4105() {
+    let seed_identity = InflightTurnIdentity {
+        user_msg_id: 0,
+        started_at: "2026-07-07T01:00:00Z".to_string(),
+        tmux_session_name: Some("AgentDesk-claude-adk".to_string()),
+        turn_start_offset: Some(100),
+    };
+    let current_identity = InflightTurnIdentity {
+        started_at: "2026-07-07T01:00:10Z".to_string(),
+        turn_start_offset: Some(240),
+        ..seed_identity.clone()
+    };
+    let restored = RestoredWatcherTurn {
+        current_msg_id: MessageId::new(4105),
+        status_message_id: None,
+        response_sent_offset: 0,
+        full_response: "WARMUP".to_string(),
+        last_edit_text: String::new(),
+        task_notification_kind: None,
+        finish_mailbox_on_completion: false,
+        injected_prompt_message_id: Some(9001),
+        turn_identity: Some(seed_identity),
+        streaming_rollover_frozen_msg_ids: Vec::new(),
+        same_turn_rewind: false,
+    };
+
+    let disposition = watcher_stream_seed_after_restored_seed_discard(
+        Some(restored),
+        Some(&current_identity),
+        Some(9001),
+    );
+
+    assert!(disposition.seed_reassigned_to_different_turn);
+    assert!(disposition.discard_restored_seed);
+    assert!(disposition.stream_seed.full_response.is_empty());
+    assert_eq!(disposition.stream_seed.response_sent_offset, 0);
 }
 
 #[test]

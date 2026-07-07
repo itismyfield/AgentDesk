@@ -148,7 +148,10 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1606 lines; +101 from #4106 adding
+  - `src/services/discord/tmux.rs` (1638 lines; +32 from #4105 adding
+    cross-turn restored-seed identity (`RestoredWatcherTurn.turn_identity` +
+    `restored_seed_reassigned_to_different_turn`) so a long-lived watcher reused
+    for a new turn drops the prior turn's stale `full_response` seed; +101 from #4106 adding
     `release_restored_watcher_active_turn_before_panel_edit` — hoists the
     identity-guarded mailbox release + `global_active` decrement + the
     finalizer's D-side channel cleanup ahead of the awaited status-panel edit so

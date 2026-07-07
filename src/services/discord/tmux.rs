@@ -169,6 +169,10 @@ pub(super) struct RestoredWatcherTurn {
     /// restored inflight, carried so a watcher-owned re-acquire (after the row
     /// is cleared mid-turn) can re-pin it instead of orphaning the `⏳`.
     pub(super) injected_prompt_message_id: Option<u64>,
+    /// Identity of the inflight row that seeded this restore. A long-lived watcher
+    /// may consume the seed only after a later direct-input turn starts; compare
+    /// this to the current row before carrying response text forward.
+    turn_identity: Option<super::inflight::InflightTurnIdentity>,
     /// #3871: frozen streamed rollover-prefix message ids restored from the
     /// persisted row so a terminal full-body fallback in a later iteration / after
     /// a restart still deletes every accumulated prefix (no residual duplicate).
@@ -252,6 +256,7 @@ pub(super) fn restored_watcher_turn_from_inflight(
         task_notification_kind: state.task_notification_kind,
         finish_mailbox_on_completion,
         injected_prompt_message_id: state.injected_prompt_message_id,
+        turn_identity: Some(super::inflight::InflightTurnIdentity::from_state(state)),
         streaming_rollover_frozen_msg_ids: state
             .streaming_rollover_frozen_msg_ids
             .iter()
@@ -292,51 +297,129 @@ fn should_discard_restored_seed_for_idle_direct_prompt(
     prompt_anchor_present: bool,
     seed_has_undelivered_body: bool,
     same_turn_rewind_seed: bool,
+    seed_reassigned_to_different_turn: bool,
 ) -> bool {
     restored_turn_present
-        && prompt_anchor_present
-        && !seed_has_undelivered_body
         && !same_turn_rewind_seed
+        && ((prompt_anchor_present && !seed_has_undelivered_body)
+            || seed_reassigned_to_different_turn)
+}
+
+fn restored_seed_reassigned_to_different_turn(
+    restored_turn: Option<&RestoredWatcherTurn>,
+    current_turn_identity: Option<&super::inflight::InflightTurnIdentity>,
+    prompt_anchor_message_id: Option<u64>,
+) -> bool {
+    let Some(restored) = restored_turn else {
+        return false;
+    };
+    if restored.same_turn_rewind {
+        return false;
+    }
+    if let (Some(seed_anchor), Some(current_anchor)) = (
+        restored.injected_prompt_message_id,
+        prompt_anchor_message_id,
+    ) && seed_anchor != current_anchor
+    {
+        return true;
+    }
+    if let (Some(seed_identity), Some(current_identity)) =
+        (restored.turn_identity.as_ref(), current_turn_identity)
+    {
+        return seed_identity != current_identity;
+    }
+    false
 }
 #[cfg(test)]
 mod restored_seed_discard_tests {
-    use super::should_discard_restored_seed_for_idle_direct_prompt;
+    use super::{
+        RestoredWatcherTurn, restored_seed_reassigned_to_different_turn,
+        should_discard_restored_seed_for_idle_direct_prompt, watcher_stream_seed,
+    };
+    use crate::services::discord::inflight::InflightTurnIdentity;
+    use poise::serenity_prelude::MessageId;
 
     #[test]
     fn idle_direct_prompt_preserves_restored_seed_with_undelivered_body() {
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, true, true, false,
+            true, true, true, false, false,
         ));
     }
 
     #[test]
     fn idle_direct_prompt_still_discards_empty_restored_seed_with_anchor() {
         assert!(should_discard_restored_seed_for_idle_direct_prompt(
-            true, true, false, false,
+            true, true, false, false, false,
         ));
     }
 
     #[test]
     fn idle_direct_prompt_preserves_same_turn_rewind_seed_with_anchor() {
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, true, false, true,
+            true, true, false, true, true,
         ));
     }
 
     #[test]
     fn idle_direct_prompt_discard_still_requires_restored_turn_and_anchor() {
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, false, false, false,
+            true, false, false, false, false,
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, false, true, false,
+            true, false, true, false, false,
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            false, true, false, false,
+            false, true, false, false, false,
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            false, true, true, false,
+            false, true, true, false, false,
         ));
+    }
+
+    #[test]
+    fn cross_turn_watcher_reuse_discards_restored_seed_before_terminal_commit() {
+        let seed_identity = InflightTurnIdentity {
+            user_msg_id: 0,
+            started_at: "2026-07-07T01:00:00Z".to_string(),
+            tmux_session_name: Some("AgentDesk-claude-adk".to_string()),
+            turn_start_offset: Some(100),
+        };
+        let current_identity = InflightTurnIdentity {
+            started_at: "2026-07-07T01:00:10Z".to_string(),
+            turn_start_offset: Some(240),
+            ..seed_identity.clone()
+        };
+        let restored = RestoredWatcherTurn {
+            current_msg_id: MessageId::new(4105),
+            status_message_id: None,
+            response_sent_offset: 0,
+            full_response: "WARMUP".to_string(),
+            last_edit_text: String::new(),
+            task_notification_kind: None,
+            finish_mailbox_on_completion: false,
+            injected_prompt_message_id: Some(9001),
+            turn_identity: Some(seed_identity),
+            streaming_rollover_frozen_msg_ids: Vec::new(),
+            same_turn_rewind: false,
+        };
+
+        let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            Some(&current_identity),
+            Some(9002),
+        );
+        assert!(seed_reassigned_to_different_turn);
+        assert!(should_discard_restored_seed_for_idle_direct_prompt(
+            true,
+            true,
+            true,
+            restored.same_turn_rewind,
+            seed_reassigned_to_different_turn,
+        ));
+
+        let stream_seed = watcher_stream_seed(None);
+        assert!(stream_seed.full_response.is_empty());
+        assert_eq!(stream_seed.response_sent_offset, 0);
     }
 }
 
