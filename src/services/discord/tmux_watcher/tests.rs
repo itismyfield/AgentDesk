@@ -1,7 +1,8 @@
 use super::{
-    FreshIdleFinalizeDecision, RestoredWatcherTurn, SessionBoundRelayAckOutcome,
-    TuiCompletionGateOutcome, WatcherTerminalKind, WatcherTerminalRewindSeedInput,
-    build_watcher_streaming_edit_text, committed_anchor_cleanup_is_stale_for_newer_turn,
+    FreshIdleFinalizeDecision, RelaySlotGuard, RestoredWatcherTurn, SessionBoundRelayAckOutcome,
+    TuiCompletionGateOutcome, WATCHER_RELAY_EMISSION_TIMEOUT, WatcherTerminalKind,
+    WatcherTerminalRewindSeedInput, build_watcher_streaming_edit_text,
+    committed_anchor_cleanup_is_stale_for_newer_turn,
     discard_restored_response_seed_before_no_inflight_terminal_relay,
     legacy_wrapper_prompt_candidates_from_pane, local_cmd_no_output,
     mark_watcher_terminal_delivery_committed, merge_persisted_rollover_frozen_msg_ids,
@@ -11,7 +12,8 @@ use super::{
     watcher_fallback_edit_failure_can_delete_original_placeholder,
     watcher_fresh_idle_finalize_decision, watcher_fresh_idle_session_bound_retry_plan,
     watcher_handle_no_dispatch_post_work_idle_body, watcher_inflight_absence_is_abandonment,
-    watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
+    watcher_output_progressed_recently, watcher_relay_emission_timeout_failure_plan,
+    watcher_relay_emission_with_timeout, watcher_should_clear_stale_terminal_message_ids,
     watcher_should_delete_suppressed_placeholder,
     watcher_should_direct_send_after_session_bound_ack,
     watcher_should_reclaim_orphan_turn_placeholder,
@@ -2982,6 +2984,204 @@ fn watcher_full_send_rewind_cap_degrades_after_three_attempts_4154() {
     assert_eq!(
         watcher_rewind_attempt_disposition(4),
         WatcherRewindAttemptDisposition::GiveUp
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn relay_emission_timeout_rewinds_and_releases_slot_4194() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let slot = Arc::new(AtomicU64::new(4_194));
+    let slot_for_task = slot.clone();
+    let timeout_task = tokio::spawn(async move {
+        let mut slot_guard = RelaySlotGuard::new(slot_for_task);
+        let result = watcher_relay_emission_with_timeout(std::future::pending::<()>()).await;
+        assert!(
+            result.is_err(),
+            "never-resolving emission must trip the watchdog timeout"
+        );
+
+        let plan = watcher_relay_emission_timeout_failure_plan(
+            &ProviderKind::Claude,
+            ChannelId::new(4_194),
+            "AgentDesk-claude-adk-cc",
+            128,
+            256,
+        );
+        assert!(!plan.relay_ok, "timeout is never treated as delivered");
+        assert!(
+            plan.retry_offset,
+            "timeout must enter the rewind retry path"
+        );
+
+        let placeholder = MessageId::new(41_940);
+        let status_panel = MessageId::new(41_941);
+        let seed = watcher_terminal_rewind_seed(WatcherTerminalRewindSeedInput {
+            placeholder_msg_id: Some(placeholder),
+            status_panel_msg_id: Some(status_panel),
+            response_sent_offset: 64,
+            last_edit_text: "streamed prefix before hung emission",
+            task_notification_kind: None,
+            finish_mailbox_on_completion: true,
+            injected_prompt_message_id: Some(7),
+            streaming_rollover_frozen_msg_ids: &[MessageId::new(41_942)],
+        })
+        .expect("timeout retry must preserve the original delivery row context");
+        assert_eq!(seed.current_msg_id, placeholder);
+        assert_eq!(seed.status_message_id, Some(status_panel));
+        assert_eq!(seed.response_sent_offset, 64);
+        assert_eq!(seed.last_edit_text, "streamed prefix before hung emission");
+        assert!(
+            seed.same_turn_rewind,
+            "timeout retry evidence must survive restored-seed guards"
+        );
+
+        slot_guard.release();
+        plan
+    });
+
+    tokio::task::yield_now().await;
+    assert_eq!(
+        slot.load(Ordering::Acquire),
+        4_194,
+        "slot stays held while the emission future is hung"
+    );
+
+    tokio::time::advance(WATCHER_RELAY_EMISSION_TIMEOUT + std::time::Duration::from_millis(1))
+        .await;
+    tokio::task::yield_now().await;
+    let plan = timeout_task.await.expect("timeout task joins");
+    assert_eq!(
+        plan,
+        watcher_send_failure_retry_plan(WatcherSendFailureClass::Transient),
+        "timeout must use the existing transient send-failure retry disposition"
+    );
+    assert_eq!(
+        slot.load(Ordering::Acquire),
+        0,
+        "timeout retry branch releases the relay slot"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn relay_emission_timeout_fast_future_is_unchanged_4194() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let slot = Arc::new(AtomicU64::new(99));
+    let mut slot_guard = RelaySlotGuard::new(slot.clone());
+    let result = watcher_relay_emission_with_timeout(async { "delivered" })
+        .await
+        .expect("fast emission should not timeout");
+
+    assert_eq!(result, "delivered");
+    assert_eq!(
+        slot.load(Ordering::Acquire),
+        99,
+        "fast success path leaves existing slot-release timing unchanged"
+    );
+    slot_guard.release();
+    assert_eq!(slot.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn relay_emission_timeout_wiring_source_assertion_4194() {
+    let module_src = include_str!("../tmux_watcher.rs");
+    const BODY_WRAPPER_ANCHOR: &str =
+        "let relay_ok = match watcher_relay_emission_with_timeout(async {";
+    const BODY_TIMEOUT_RETRY_ANCHOR: &str = r#"Err(_) => {
+                let plan = watcher_relay_emission_timeout_failure_plan(
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    data_start_offset,
+                    current_offset,
+                );
+                retry_terminal_delivery_from_offset = plan.retry_offset;
+                plan.relay_ok
+            }"#;
+
+    assert!(
+        module_src.contains(BODY_WRAPPER_ANCHOR),
+        "terminal relay expression must remain enclosed by watcher_relay_emission_with_timeout"
+    );
+    assert!(
+        module_src.contains(BODY_TIMEOUT_RETRY_ANCHOR),
+        "body timeout Err arm must keep failed-undelivered rewind semantics"
+    );
+}
+
+#[test]
+fn completion_chrome_timeout_wiring_source_assertion_4194() {
+    let module_src = include_str!("../tmux_watcher.rs");
+    let helper_src = include_str!("session_bound_ack.rs");
+    const COMPLETION_TIMEOUT_CONST_ANCHOR: &str =
+        "pub(super) const WATCHER_RELAY_COMPLETION_CHROME_TIMEOUT: std::time::Duration";
+    const COMPLETION_TIMEOUT_HELPER_ANCHOR: &str =
+        "pub(super) async fn watcher_completion_chrome_with_timeout<T>";
+    const COMPLETION_TIMEOUT_WARN_ANCHOR: &str = "watcher: completion chrome step timed out after terminal body commit; skipping remaining chrome without rewind";
+
+    assert!(helper_src.contains(COMPLETION_TIMEOUT_CONST_ANCHOR));
+    assert!(helper_src.contains(COMPLETION_TIMEOUT_HELPER_ANCHOR));
+    assert!(helper_src.contains(COMPLETION_TIMEOUT_WARN_ANCHOR));
+
+    let completion_start = module_src
+        .find("let mut completion_chrome_timed_out = false;")
+        .expect("completion chrome skip flag must exist");
+    let release_rel = module_src[completion_start..]
+        .find("// Release the emission slot regardless of success.")
+        .expect("completion source slice must reach the slot release comment");
+    let completion_src = &module_src[completion_start..completion_start + release_rel];
+
+    assert!(
+        !completion_src.contains("retry_terminal_delivery_from_offset"),
+        "completion chrome timeouts must not request terminal-delivery rewind"
+    );
+    assert!(
+        completion_src.contains("if !completion_chrome_timed_out"),
+        "completion chrome timeout must skip remaining chrome steps before slot release"
+    );
+    assert_completion_chrome_wrap(
+        completion_src,
+        "completed_panel_usage_backfill_and_compact",
+        "backfill_completed_panel_usage_and_maybe_inject_compact",
+    );
+    assert_completion_chrome_wrap(
+        completion_src,
+        "session_panel_lifecycle_refresh",
+        "refresh_watcher_session_panel_from_lifecycle",
+    );
+    assert_completion_chrome_wrap(
+        completion_src,
+        "terminal_footer_or_status_panel_completion",
+        "complete_watcher_terminal_footer_or_status_panel_with_sniffer",
+    );
+    assert_completion_chrome_wrap(
+        completion_src,
+        "stale_streaming_footer_reconcile",
+        "crate::services::discord::http::edit_channel_message",
+    );
+}
+
+fn assert_completion_chrome_wrap(source: &str, step_anchor: &str, call_anchor: &str) {
+    let step_idx = source
+        .find(step_anchor)
+        .unwrap_or_else(|| panic!("missing completion timeout step anchor: {step_anchor}"));
+    let prefix = &source[..step_idx];
+    let call_idx = prefix
+        .rfind(call_anchor)
+        .unwrap_or_else(|| panic!("missing completion call anchor: {call_anchor}"));
+    let wrapper_idx = prefix
+        .rfind("watcher_completion_chrome_with_timeout(")
+        .unwrap_or_else(|| panic!("missing completion timeout wrapper for: {step_anchor}"));
+    assert!(
+        wrapper_idx < call_idx,
+        "timeout wrapper must enclose call anchor for {step_anchor}"
+    );
+    assert!(
+        step_idx - wrapper_idx < 3_000,
+        "timeout warning anchor drifted too far from wrapper for {step_anchor}"
     );
 }
 

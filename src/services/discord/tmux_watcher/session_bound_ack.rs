@@ -433,6 +433,71 @@ impl Drop for RelaySlotGuard {
     }
 }
 
+/// Bound the slot-held watcher terminal emission. Serenity's HTTP client can
+/// otherwise sit forever in transport wait / 429 retry, keeping
+/// `TmuxRelayCoord::relay_slot` non-zero and wedging later watcher passes.
+pub(super) const WATCHER_RELAY_EMISSION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
+pub(super) async fn watcher_relay_emission_with_timeout<T>(
+    emission: impl std::future::Future<Output = T>,
+) -> Result<T, tokio::time::error::Elapsed> {
+    tokio::time::timeout(WATCHER_RELAY_EMISSION_TIMEOUT, emission).await
+}
+
+/// Bound post-commit chrome while the emission slot is still held. The terminal
+/// body is already committed by this phase, so timeout means "skip cosmetic
+/// completion work" rather than "rewind and retry terminal delivery".
+pub(super) const WATCHER_RELAY_COMPLETION_CHROME_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+pub(super) async fn watcher_completion_chrome_with_timeout<T>(
+    chrome_step: impl std::future::Future<Output = T>,
+) -> Result<T, tokio::time::error::Elapsed> {
+    tokio::time::timeout(WATCHER_RELAY_COMPLETION_CHROME_TIMEOUT, chrome_step).await
+}
+
+pub(super) fn warn_watcher_completion_chrome_timeout(
+    watcher_provider: &crate::services::provider::ProviderKind,
+    channel_id: poise::serenity_prelude::ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    current_offset: u64,
+    chrome_step: &'static str,
+) {
+    tracing::warn!(
+        provider = %watcher_provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        data_start_offset,
+        current_offset,
+        chrome_step,
+        timeout_secs = WATCHER_RELAY_COMPLETION_CHROME_TIMEOUT.as_secs(),
+        "watcher: completion chrome step timed out after terminal body commit; skipping remaining chrome without rewind"
+    );
+}
+
+pub(super) fn watcher_relay_emission_timeout_failure_plan(
+    watcher_provider: &crate::services::provider::ProviderKind,
+    channel_id: poise::serenity_prelude::ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> crate::services::discord::replace_outcome_policy::WatcherTerminalRelayPlan {
+    tracing::warn!(
+        provider = %watcher_provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        data_start_offset,
+        current_offset,
+        timeout_secs = WATCHER_RELAY_EMISSION_TIMEOUT.as_secs(),
+        "watcher: terminal relay emission timed out; treating as failed-undelivered for retry"
+    );
+    crate::services::discord::replace_outcome_policy::watcher_send_failure_retry_plan(
+        crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::Transient,
+    )
+}
+
 pub(super) async fn wait_for_session_bound_relay_delivery_ack(
     target: Option<&SessionBoundRelayAckTarget>,
     timeout: std::time::Duration,

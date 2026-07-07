@@ -4963,7 +4963,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         );
 
         let mut retry_terminal_delivery_from_offset = false;
-        let relay_ok = if session_bound_relay_owns_terminal_delivery {
+        // #4194: bound every await in the slot-held terminal relay expression.
+        // On timeout, fall into the same failed-undelivered rewind path as a
+        // transient send failure; never advance watermarks from this branch.
+        let relay_ok = match watcher_relay_emission_with_timeout(async {
+            if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 👁 Delegating terminal response to session-bound StreamRelay sink ({} chars, offset {}, task_notification_kind={})",
@@ -5766,6 +5770,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .await;
             }
             false
+            }
+        })
+        .await
+        {
+            Ok(relay_ok) => relay_ok,
+            Err(_) => {
+                let plan = watcher_relay_emission_timeout_failure_plan(
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    data_start_offset,
+                    current_offset,
+                );
+                retry_terminal_delivery_from_offset = plan.retry_offset;
+                plan.relay_ok
+            }
         };
         if retry_terminal_delivery_from_offset {
             // #4115: bound the terminal-delivery rewind so a persistently failing
@@ -5933,6 +5953,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // the guard-miss-expected context so that EXPECTED no-op logs at debug
         // instead of spamming the wrong-turn WARN on every normal completion.
         let mut pre_panel_release_drove_finalize = false;
+        let mut completion_chrome_timed_out = false;
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
             // #2849: watcher-completed turns never traverse the bridge
@@ -5945,10 +5966,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // also internally gated to context_window != 0. #3262: the same
             // turn-idle helper also injects `/compact` when live Claude usage
             // crosses the configured threshold (claude-only, once-per-cycle).
-            crate::services::discord::adk_session::backfill_completed_panel_usage_and_maybe_inject_compact(
-                &shared, channel_id, &state, &watcher_provider, &tmux_session_name,
+            if watcher_completion_chrome_with_timeout(
+                crate::services::discord::adk_session::backfill_completed_panel_usage_and_maybe_inject_compact(
+                    &shared, channel_id, &state, &watcher_provider, &tmux_session_name,
+                ),
             )
-            .await;
+            .await
+            .is_err()
+            {
+                warn_watcher_completion_chrome_timeout(
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    data_start_offset,
+                    current_offset,
+                    "completed_panel_usage_backfill_and_compact",
+                );
+                completion_chrome_timed_out = true;
+            }
             // #2427 D wire (Codex round 2 HIGH-1): the watcher loop is not
             // turn-scoped — a new turn may have rewritten on-disk inflight by now, so
             // re-reading user_msg_id and feeding it into `clear_inflight_state_if_matches`
@@ -6014,21 +6049,36 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 })
                 .map(|inflight| inflight.user_msg_id)
                 .unwrap_or(0);
-            refresh_watcher_session_panel_from_lifecycle(
-                &shared,
-                channel_id,
-                session_panel_lifecycle_user_msg_id,
-                &tmux_session_name,
-                &watcher_provider, // #3983 item4: one-shot session banner render
-            )
-            .await;
+            if !completion_chrome_timed_out
+                && watcher_completion_chrome_with_timeout(
+                    refresh_watcher_session_panel_from_lifecycle(
+                        &shared,
+                        channel_id,
+                        session_panel_lifecycle_user_msg_id,
+                        &tmux_session_name,
+                        &watcher_provider, // #3983 item4: one-shot session banner render
+                    ),
+                )
+                .await
+                .is_err()
+            {
+                warn_watcher_completion_chrome_timeout(
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    data_start_offset,
+                    current_offset,
+                    "session_panel_lifecycle_refresh",
+                );
+                completion_chrome_timed_out = true;
+            }
             // #3142: gate the EDIT/finalize + orphan-store reconciliation on
             // `!inflight_before_relay_is_stale_newer_turn`. When the pre-relay
             // snapshot is a stale NEWER turn the older committed range must NOT touch
             // that newer turn's panel (or its orphan record). The current in-range
             // turn's own panel, if any, is created via the streaming sources and is
             // unaffected (in-range => gate false => completion fires as today).
-            if !inflight_before_relay_is_stale_newer_turn {
+            if !completion_chrome_timed_out && !inflight_before_relay_is_stale_newer_turn {
                 // #3969 root invariant: read the CHOKEPOINT-FRESH inflight (this
                 // `inflight_before_relay` is re-loaded after the synthetic row exists,
                 // unlike the stale `:1017` flag) and suppress the #3089 footer for any
@@ -6086,33 +6136,47 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             .await;
                     }
                 }
-                complete_watcher_terminal_footer_or_status_panel_with_sniffer(
-                    &http,
-                    &shared,
-                    channel_id,
-                    &watcher_provider,
-                    status_panel_started_at,
-                    single_message_panel_footer_mode,
-                    &mut completion_footer_spin_idx,
-                    completion_footer_terminal_target.clone(),
-                    placeholder_msg_id,
-                    &last_edit_text,
-                    status_panel_msg_id,
-                    &mut last_status_panel_text,
-                    task_notification_kind,
-                    Some(tmux_session_name.clone()),
-                    |tmux_session_name| async move {
-                        crate::services::discord::tmux::sniff_background_agent_pending_for_completion(
-                            tmux_session_name.as_deref(),
-                        )
-                        .await
-                    },
-                    status_panel_completion_user_msg_id,
-                    turn_is_external_input_for_session,
-                    turn_is_non_managed_tui_mirror,
-                    two_message_status_panel_generation_superseded,
+                if watcher_completion_chrome_with_timeout(
+                    complete_watcher_terminal_footer_or_status_panel_with_sniffer(
+                        &http,
+                        &shared,
+                        channel_id,
+                        &watcher_provider,
+                        status_panel_started_at,
+                        single_message_panel_footer_mode,
+                        &mut completion_footer_spin_idx,
+                        completion_footer_terminal_target.clone(),
+                        placeholder_msg_id,
+                        &last_edit_text,
+                        status_panel_msg_id,
+                        &mut last_status_panel_text,
+                        task_notification_kind,
+                        Some(tmux_session_name.clone()),
+                        |tmux_session_name| async move {
+                            crate::services::discord::tmux::sniff_background_agent_pending_for_completion(
+                                tmux_session_name.as_deref(),
+                            )
+                            .await
+                        },
+                        status_panel_completion_user_msg_id,
+                        turn_is_external_input_for_session,
+                        turn_is_non_managed_tui_mirror,
+                        two_message_status_panel_generation_superseded,
+                    ),
                 )
-                .await;
+                .await
+                .is_err()
+                {
+                    warn_watcher_completion_chrome_timeout(
+                        &watcher_provider,
+                        channel_id,
+                        &tmux_session_name,
+                        data_start_offset,
+                        current_offset,
+                        "terminal_footer_or_status_panel_completion",
+                    );
+                    completion_chrome_timed_out = true;
+                }
             } // #3142: end `if !inflight_before_relay_is_stale_newer_turn` (EDIT/finalize gate)
             // #3003 single-chokepoint reclaim safety: after completion the turn
             // frame ends and the next frame re-seeds `status_panel_msg_id`, so the
@@ -6272,6 +6336,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // block, and an already-finalized body is left untouched.
         if terminal_output_committed
             && !lifecycle_stage_paused
+            && !completion_chrome_timed_out
             && !single_message_panel_footer_mode
             && let Some(placeholder) = placeholder_msg_id
             && let Some(finalized) = finalize_watcher_streaming_footer(
@@ -6280,15 +6345,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &watcher_provider,
             )
         {
-            match crate::services::discord::http::edit_channel_message(
-                &http,
-                channel_id,
-                placeholder,
-                &finalized,
+            match watcher_completion_chrome_with_timeout(
+                crate::services::discord::http::edit_channel_message(
+                    &http,
+                    channel_id,
+                    placeholder,
+                    &finalized,
+                ),
             )
             .await
             {
-                Ok(_) => {
+                Ok(Ok(_)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 👁 #3104 reconciled stale '계속 처리 중' streaming footer on channel {} msg {} at idle",
@@ -6296,12 +6363,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         placeholder.get()
                     );
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         "  [{ts}] ⚠ #3104 failed to reconcile stale streaming footer on channel {} msg {}: {error}",
                         channel_id.get(),
                         placeholder.get()
+                    );
+                }
+                Err(_) => {
+                    warn_watcher_completion_chrome_timeout(
+                        &watcher_provider,
+                        channel_id,
+                        &tmux_session_name,
+                        data_start_offset,
+                        current_offset,
+                        "stale_streaming_footer_reconcile",
                     );
                 }
             }
