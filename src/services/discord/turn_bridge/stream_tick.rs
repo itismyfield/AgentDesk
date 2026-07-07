@@ -102,6 +102,7 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) status_panel_dirty: &'a mut bool,
     pub(super) spin_idx: &'a mut usize,
     pub(super) last_status_panel_edit: &'a mut tokio::time::Instant,
+    pub(super) last_status_edit: &'a mut tokio::time::Instant,
     pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
     pub(super) last_status_panel_text: &'a mut String,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
@@ -159,6 +160,7 @@ pub(super) async fn run_bridge_stream_tick(
     let mut status_panel_dirty = *state.status_panel_dirty;
     let mut spin_idx = *state.spin_idx;
     let mut last_status_panel_edit = *state.last_status_panel_edit;
+    let mut last_status_edit = *state.last_status_edit;
     let mut status_panel_msg_id = *state.status_panel_msg_id;
     let mut last_status_panel_text = std::mem::take(state.last_status_panel_text);
     let mut watcher_owns_assistant_relay = *state.watcher_owns_assistant_relay;
@@ -657,6 +659,7 @@ pub(super) async fn run_bridge_stream_tick(
     *state.status_panel_dirty = status_panel_dirty;
     *state.spin_idx = spin_idx;
     *state.last_status_panel_edit = last_status_panel_edit;
+    *state.last_status_edit = last_status_edit;
     *state.status_panel_msg_id = status_panel_msg_id;
     *state.last_status_panel_text = last_status_panel_text;
     *state.watcher_owns_assistant_relay = watcher_owns_assistant_relay;

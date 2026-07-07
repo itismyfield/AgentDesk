@@ -755,7 +755,7 @@
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 80 | 80 | 0 |  |
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 301 | 144 | 157 |  |
 | `services::discord::turn_bridge::status_panel` | `src/services/discord/turn_bridge/status_panel.rs` | 684 | 684 | 0 |  |
-| `services::discord::turn_bridge::stream_tick` | `src/services/discord/turn_bridge/stream_tick.rs` | 677 | 677 | 0 |  |
+| `services::discord::turn_bridge::stream_tick` | `src/services/discord/turn_bridge/stream_tick.rs` | 680 | 680 | 0 |  |
 | `services::discord::turn_bridge::streaming_edit_text` | `src/services/discord/turn_bridge/streaming_edit_text.rs` | 619 | 219 | 400 |  |
 | `services::discord::turn_bridge::task_notification_lifecycle` | `src/services/discord/turn_bridge/task_notification_lifecycle.rs` | 221 | 104 | 117 |  |
 | `services::discord::turn_bridge::terminal_controller_cutover` | `src/services/discord/turn_bridge/terminal_controller_cutover.rs` | 1838 | 960 | 878 |  |

@@ -46,13 +46,6 @@ direct_discord_sends = [
   # announce-token fallback is removed; deliver_outbound currently collapses
   # HTTP status / Discord error code into a string on edit failures.
   "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:2bf7e5b93d0fda6b",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:07b7e52940af8eab",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1cc530214eb6c5d6",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:cb8dfde9e6d19e3b",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:edafac97f164fd68",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:b4849c24f5cb7d09",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
   # #4230 S1: existing turn_bridge direct gateway calls re-fingerprinted after
   # the stream/status tick block moved verbatim to turn_bridge/stream_tick.rs.
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:40a1288799a3f040",

@@ -1535,8 +1535,7 @@ pub(super) fn spawn_turn_bridge(
         // bypass the status interval once, then normal throttling resumes.
         let mut first_answer_relayed = false;
         let status_interval = super::status_update_interval();
-        let mut last_session_panel_lifecycle_refresh =
-            tokio::time::Instant::now() - status_interval;
+        let mut last_session_panel_lifecycle_refresh = tokio::time::Instant::now() - status_interval;
         let mut status_panel_msg_id = status_panel_message_id_for_turn(
             &mut inflight_state,
             bridge.reuse_status_panel_message,
@@ -3344,6 +3343,7 @@ pub(super) fn spawn_turn_bridge(
                     status_panel_dirty: &mut status_panel_dirty,
                     spin_idx: &mut spin_idx,
                     last_status_panel_edit: &mut last_status_panel_edit,
+                    last_status_edit: &mut last_status_edit,
                     status_panel_msg_id: &mut status_panel_msg_id,
                     last_status_panel_text: &mut last_status_panel_text,
                     watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
