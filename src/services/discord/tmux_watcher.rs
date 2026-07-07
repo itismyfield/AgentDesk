@@ -2813,27 +2813,26 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // on-disk clear must not wipe a FOLLOW-UP turn's inflight.
                         // The earlier read→check→unconditional-clear spanned TWO
                         // locks, so a follow-up saved on another worker thread in
-                        // the gap was wiped. `clear_inflight_state_if_matches_identity`
-                        // (inflight.rs) closes the window atomically: read +
-                        // validate + unlink under ONE sidecar lock, deleting only
-                        // while the on-disk identity (`user_msg_id` + `started_at`
-                        // + `tmux_session_name`) still equals the PINNED turn's
-                        // (`pinned_pre_cleanup_inflight`, the same snapshot that
-                        // derived `user_msg_id` above) — a follow-up's identity
-                        // differs (`UserMsgMismatch`), guaranteed no-op. The
-                        // finalize-skip for a NEWER pinned turn stays a SEPARATE
-                        // decision in `watcher_fresh_idle_finalize_decision`;
-                        // finalize below runs on the PINNED id (idempotent)
-                        // regardless of the clear outcome.
+                        // the gap was wiped. The nonce-aware guarded clear closes
+                        // the window atomically: read + validate + unlink under ONE
+                        // sidecar lock, deleting only while the on-disk FULL
+                        // identity (`user_msg_id` + `started_at` + `tmux_session_name`
+                        // + `turn_start_offset`) and, when both rows carry one, the
+                        // `turn_nonce` still equal the PINNED pre-cleanup snapshot.
+                        // A nonce-distinct follow-up is a no-op; finalize still runs on the PINNED id.
                         let pinned_clear_identity = pinned_pre_cleanup_inflight.as_ref().map(
                             crate::services::discord::inflight::InflightTurnIdentity::from_state,
                         );
+                        let pinned_clear_turn_nonce = pinned_pre_cleanup_inflight
+                            .as_ref()
+                            .and_then(|state| state.turn_nonce.as_deref());
                         if let Some(pinned_clear_identity) = pinned_clear_identity.as_ref() {
                             let clear_outcome =
-                                crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+                                crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
                                     &watcher_provider,
                                     channel_id.get(),
                                     pinned_clear_identity,
+                                    pinned_clear_turn_nonce,
                                 );
                             match clear_outcome {
                                 crate::services::discord::inflight::GuardedClearOutcome::Cleared => {

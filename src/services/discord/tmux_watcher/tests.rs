@@ -2361,6 +2361,95 @@ fn committed_clear_with_captured_turn_nonce_clears_matching_same_turn_row() {
     );
 }
 
+#[test]
+fn fresh_idle_clear_uses_pinned_nonce_to_preserve_id0_full_identity_alias_followup() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tmp.path(),
+    );
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4273-fresh-idle";
+    let channel_id = 4_273_000u64;
+
+    let mut pinned_current = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 50);
+    pinned_current.started_at = "2026-07-08 01:33:00".to_string();
+    pinned_current.turn_nonce = Some("turn-4273-pinned".to_string());
+    crate::services::discord::inflight::save_inflight_state(&pinned_current)
+        .expect("save pinned pre-cleanup id-0 inflight");
+
+    let pinned_pre_cleanup_inflight =
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+            .expect("load pinned pre-cleanup snapshot");
+    let pinned_clear_identity = InflightTurnIdentity::from_state(&pinned_pre_cleanup_inflight);
+    let pinned_clear_turn_nonce = pinned_pre_cleanup_inflight.turn_nonce.as_deref();
+
+    let mut alias_followup = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 50);
+    alias_followup.started_at = pinned_pre_cleanup_inflight.started_at.clone();
+    alias_followup.turn_nonce = Some("turn-4273-followup".to_string());
+    assert!(
+        pinned_clear_identity.matches_state(&alias_followup),
+        "test fixture must alias the pinned full identity"
+    );
+    assert_ne!(
+        pinned_clear_turn_nonce,
+        alias_followup.turn_nonce.as_deref(),
+        "only the observed-turn nonce distinguishes the follow-up"
+    );
+    crate::services::discord::inflight::save_inflight_state(&alias_followup)
+        .expect("save id-0 full-identity-alias follow-up");
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &pinned_clear_identity,
+            pinned_clear_turn_nonce,
+        );
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::UserMsgMismatch,
+        "fresh-idle clear must not delete an id-0 full-identity alias with a different nonce"
+    );
+    let survived = crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+        .expect("different-nonce follow-up must survive");
+    assert_eq!(survived.user_msg_id, 0);
+    assert_eq!(survived.started_at, pinned_pre_cleanup_inflight.started_at);
+    assert_eq!(survived.turn_start_offset, Some(50));
+    assert_eq!(survived.turn_nonce.as_deref(), Some("turn-4273-followup"));
+
+    let mut same_nonce_row = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 50);
+    same_nonce_row.started_at = pinned_current.started_at.clone();
+    same_nonce_row.turn_nonce = Some("turn-4273-pinned".to_string());
+    assert!(
+        pinned_clear_identity.matches_state(&same_nonce_row),
+        "same-nonce fixture must still match the pinned full identity"
+    );
+    crate::services::discord::inflight::save_inflight_state(&same_nonce_row)
+        .expect("save id-0 full-identity row with matching nonce");
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &pinned_clear_identity,
+            pinned_clear_turn_nonce,
+        );
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "fresh-idle clear should still delete the same id-0 row when the nonce matches"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
+        "same-nonce matching row should be cleared"
+    );
+}
+
 // #3016 S3 — end-to-end through the REAL completion signal AND the REAL
 // finalizer actor: a genuine empty/suppressed delegated completion whose
 // on-disk transcript HAS a structural terminator (Claude `result`) finalizes
