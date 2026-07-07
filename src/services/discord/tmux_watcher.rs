@@ -429,6 +429,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &watcher_provider,
             channel_id,
             &tmux_session_name,
+            current_offset,
         );
 
         // If paused (Discord handler is processing its own turn), keep the
