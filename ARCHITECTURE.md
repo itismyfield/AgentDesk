@@ -650,8 +650,11 @@ src/
 │   │   │   └── utf8_chunk_decoder_tests.rs
 │   │   ├── tui_direct_abort_marker/
 │   │   │   ├── deferred_claim.rs
+│   │   │   ├── drain.rs
 │   │   │   ├── mod.rs
-│   │   │   └── store.rs
+│   │   │   ├── store.rs
+│   │   │   ├── sweep.rs
+│   │   │   └── tombstone.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── synthetic_start/
 │   │   │   │   └── stale_reclaim.rs
