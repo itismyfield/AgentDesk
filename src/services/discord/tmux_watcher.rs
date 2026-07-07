@@ -321,6 +321,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         });
     let mut watcher_turn_identity =
         matching_watcher_turn_identity(restored_inflight.as_ref(), &tmux_session_name);
+    let mut watcher_turn_nonce =
+        matching_watcher_turn_nonce(restored_inflight.as_ref(), &tmux_session_name);
     let mut last_relayed_offset: Option<u64> = restored_inflight
         .as_ref()
         .and_then(|s| s.last_watcher_relayed_offset);
@@ -423,6 +425,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
         refresh_watcher_turn_identity(
             &mut watcher_turn_identity,
+            &mut watcher_turn_nonce,
             &watcher_provider,
             channel_id,
             &tmux_session_name,
@@ -2848,6 +2851,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             "tmux_session": tmux_session_name.as_str(),
                                             "offset": current_offset,
                                         }),
+                                    );
+                                }
+                                crate::services::discord::inflight::GuardedClearOutcome::IoError => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::warn!(
+                                        clear_outcome = ?clear_outcome,
+                                        "  [{ts}] ⚠ watcher fresh ready-for-input idle for {tmux_session_name}: atomic identity-matched clear failed with IO error at offset {current_offset}; see preceding inflight guarded-clear error detail"
                                     );
                                 }
                                 other => {
@@ -6771,6 +6781,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             } else {
                 None
             };
+            let pinned_committed_clear_turn_nonce = if !completion_is_stale_for_newer_turn {
+                watcher_turn_nonce.as_deref()
+            } else {
+                None
+            };
 
             if !completion_is_stale_for_newer_turn
                 && let Some(committed) = inflight_state.as_ref()
@@ -6802,10 +6817,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             if !completion_is_stale_for_newer_turn {
                 if let Some(pinned_clear_identity) = pinned_committed_clear_identity.as_ref() {
                     let clear_outcome =
-                        crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+                        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
                             &provider_kind,
                             channel_id.get(),
                             pinned_clear_identity,
+                            pinned_committed_clear_turn_nonce,
                         );
                     match clear_outcome {
                         crate::services::discord::inflight::GuardedClearOutcome::Cleared => {
@@ -6852,6 +6868,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 terminal_output_committed
                                     && watcher_tui_gate_outcome.should_emit_completion(),
                                 false,
+                            );
+                        }
+                        crate::services::discord::inflight::GuardedClearOutcome::IoError => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                clear_outcome = ?clear_outcome,
+                                "  [{ts}] ⚠ watcher committed-output clear for {tmux_session_name}: atomic identity-matched clear failed with IO error at offset {current_offset}; see preceding inflight guarded-clear error detail"
                             );
                         }
                         other => {

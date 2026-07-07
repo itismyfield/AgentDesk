@@ -254,6 +254,11 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Active dispatch ID for long-turn diagnostics.
     #[serde(default)]
     pub dispatch_id: Option<String>,
+    /// Immutable per-row turn discriminator used by identity-guarded clears.
+    /// Additive `#[serde(default)]` field: legacy rows deserialize as `None` and
+    /// keep the identity-only clear contract.
+    #[serde(default)]
+    pub turn_nonce: Option<String>,
     /// Last tmux output offset from which a watcher relayed a response.
     /// Persisted so that replacement watcher instances can skip already-delivered output.
     #[serde(default)]
@@ -892,6 +897,7 @@ impl InflightTurnState {
             delivery_bot: None,
             silent_turn: false,
             dispatch_id: None,
+            turn_nonce: Some(uuid::Uuid::new_v4().to_string()),
             last_watcher_relayed_offset: None,
             last_watcher_relayed_generation_mtime_ns: None,
             restart_mode: None,

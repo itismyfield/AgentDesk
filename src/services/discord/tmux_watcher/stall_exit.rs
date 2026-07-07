@@ -47,24 +47,39 @@ pub(super) async fn finalize_pinned_watcher_exit(
             channel_id.get(),
             &identity,
         );
-    if !matches!(
-        clear_outcome,
+    match clear_outcome {
         crate::services::discord::inflight::GuardedClearOutcome::Cleared
-            | crate::services::discord::inflight::GuardedClearOutcome::Missing
-    ) {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            stop_source,
-            clear_outcome = ?clear_outcome,
-            pinned_user_msg_id = pinned_inflight.user_msg_id,
-            finalizer_turn_id,
-            "watcher exit inflight clear skipped because the current row no longer matches the pinned turn"
-        );
-        return PinnedWatcherExitResult {
-            clear_outcome: Some(clear_outcome),
-            submitted_terminal: false,
-        };
+        | crate::services::discord::inflight::GuardedClearOutcome::Missing => {}
+        crate::services::discord::inflight::GuardedClearOutcome::IoError => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                stop_source,
+                clear_outcome = ?clear_outcome,
+                pinned_user_msg_id = pinned_inflight.user_msg_id,
+                finalizer_turn_id,
+                "watcher exit inflight clear failed with IO error; see preceding inflight guarded-clear error detail"
+            );
+            return PinnedWatcherExitResult {
+                clear_outcome: Some(clear_outcome),
+                submitted_terminal: false,
+            };
+        }
+        _ => {
+            tracing::info!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                stop_source,
+                clear_outcome = ?clear_outcome,
+                pinned_user_msg_id = pinned_inflight.user_msg_id,
+                finalizer_turn_id,
+                "watcher exit inflight clear skipped because the current row no longer matches the pinned turn"
+            );
+            return PinnedWatcherExitResult {
+                clear_outcome: Some(clear_outcome),
+                submitted_terminal: false,
+            };
+        }
     }
 
     let _ = shared

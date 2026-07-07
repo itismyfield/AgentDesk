@@ -166,6 +166,15 @@ pub(super) fn matching_watcher_turn_identity(
         .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
 }
 
+pub(super) fn matching_watcher_turn_nonce(
+    state: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<String> {
+    state
+        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
+        .and_then(|state| state.turn_nonce.clone())
+}
+
 /// #3016 (codex R2): pick the `user_msg_id` handed to the normal-completion
 /// finalize, gated on the OUTPUT-RANGE relationship so we only ever finalize
 /// the turn whose output THIS completion actually is.
@@ -470,6 +479,7 @@ pub(super) fn committed_anchor_cleanup_is_stale_for_newer_turn(
 
 pub(super) fn refresh_watcher_turn_identity(
     current: &mut Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    current_turn_nonce: &mut Option<String>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -477,6 +487,7 @@ pub(super) fn refresh_watcher_turn_identity(
     let inflight =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
     *current = matching_watcher_turn_identity(inflight.as_ref(), tmux_session_name);
+    *current_turn_nonce = matching_watcher_turn_nonce(inflight.as_ref(), tmux_session_name);
 }
 
 #[cfg(test)]

@@ -2081,6 +2081,125 @@ fn fresh_idle_clear_gate_skips_when_late_reread_is_newer_turn() {
     );
 }
 
+#[test]
+fn committed_clear_with_captured_turn_nonce_preserves_id0_followup_saved_before_late_reread() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184";
+    let channel_id = 4_184_000u64;
+
+    let mut pinned_current = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    pinned_current.turn_nonce = Some("turn-4184-current".to_string());
+    let captured_turn_nonce = pinned_current.turn_nonce.clone();
+    crate::services::discord::inflight::save_inflight_state(&pinned_current)
+        .expect("save original id-0 inflight before follow-up replacement");
+
+    let mut late_followup = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 50);
+    late_followup.turn_nonce = Some("turn-4184-followup".to_string());
+    crate::services::discord::inflight::save_inflight_state(&late_followup)
+        .expect("save id-0 follow-up inflight before late re-read");
+
+    let late_reread_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&late_followup);
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &late_reread_identity,
+            captured_turn_nonce.as_deref(),
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::UserMsgMismatch,
+        "captured nonce from the finalizing id-0 turn must not clear a newer id-0 follow-up"
+    );
+    let survived = crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+        .expect("follow-up inflight must survive");
+    assert_eq!(survived.user_msg_id, 0);
+    assert_eq!(survived.turn_start_offset, Some(50));
+    assert_eq!(survived.turn_nonce.as_deref(), Some("turn-4184-followup"));
+}
+
+#[test]
+fn committed_clear_with_captured_turn_nonce_clears_legacy_row_without_nonce() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184-legacy";
+    let channel_id = 4_184_001u64;
+
+    let mut legacy = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    legacy.turn_nonce = None;
+    crate::services::discord::inflight::save_inflight_state(&legacy)
+        .expect("save legacy id-0 inflight without nonce");
+    let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&legacy);
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &identity,
+            Some("turn-4184-current"),
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "legacy rows without a nonce preserve the identity-only clear contract"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
+        "legacy matching row should be cleared"
+    );
+}
+
+#[test]
+fn committed_clear_with_captured_turn_nonce_clears_matching_same_turn_row() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4184-current";
+    let channel_id = 4_184_002u64;
+
+    let mut current = fresh_idle_inflight(provider.clone(), channel_id, session, 0, 10);
+    current.turn_nonce = Some("turn-4184-current".to_string());
+    crate::services::discord::inflight::save_inflight_state(&current)
+        .expect("save current id-0 inflight with nonce");
+    let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&current);
+
+    let outcome =
+        crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+            &provider,
+            channel_id,
+            &identity,
+            current.turn_nonce.as_deref(),
+        );
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared,
+        "matching nonce should clear the same turn normally"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(&provider, channel_id).is_none(),
+        "matching current row should be cleared"
+    );
+}
+
 // #3016 S3 — end-to-end through the REAL completion signal AND the REAL
 // finalizer actor: a genuine empty/suppressed delegated completion whose
 // on-disk transcript HAS a structural terminator (Claude `result`) finalizes

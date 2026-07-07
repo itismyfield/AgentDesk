@@ -158,6 +158,7 @@ pub(in crate::services::discord) use self::clear_store::{
     clear_inflight_state_if_matches_identity,
     clear_inflight_state_if_matches_identity_after_delivery,
     clear_inflight_state_if_matches_identity_generation,
+    clear_inflight_state_if_matches_identity_turn_nonce,
     clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence,
     clear_rebind_origin_inflight_state_if_matches_identity,
     refresh_inflight_last_offset_if_matches_identity,
@@ -175,6 +176,7 @@ use self::clear_store::normalize_response_sent_offset;
 use self::clear_store::{
     clear_inflight_state_if_matches_identity_after_delivery_in_root,
     clear_inflight_state_if_matches_identity_in_root,
+    clear_inflight_state_if_matches_identity_turn_nonce_in_root,
     clear_inflight_state_if_matches_tmux_response_in_root,
     clear_rebind_origin_inflight_state_if_matches_identity_in_root,
     refresh_inflight_last_offset_if_matches_identity_in_root,
