@@ -639,6 +639,7 @@ src/
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── single_message_footer_tests.rs
 │   │   │   ├── stall_exit.rs
+│   │   │   ├── streaming_status_tick.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── terminal_abort_exits.rs

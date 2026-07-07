@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-07-04 (against #4049 S4-a2 queue-marker reconciler migration, landed on top of the #4081 delivery-record fingerprint sidecar — freeze counts re-synced to the regenerated module inventory).
+> Last refreshed: 2026-07-08 (against #4229 S3 streaming-status-tick extraction — freeze counts re-synced to the regenerated module inventory).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -233,7 +233,11 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6764 production lines; #4229 S2
+  - `src/services/discord/tmux_watcher.rs` (5975 production lines; #4229 S3
+    moved the throttled streaming status tick (orphan reclaim, streaming
+    suppression, status-panel create/bind, rollover, re-anchor, placeholder
+    edit) verbatim to `tmux_watcher/streaming_status_tick.rs`, ratcheting the
+    root down after behavior-preserving decompose; #4229 S2
     moved the loop poll prologue (heartbeat/pause/rotation/initial-read/empty-poll/post-terminal suppression)
     verbatim to the non-giant `tmux_watcher/loop_poll_prologue.rs` child module,
     ratcheting the root down after behavior-preserving decompose; #4170 gated

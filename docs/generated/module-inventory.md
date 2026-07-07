@@ -683,7 +683,7 @@
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 82 | 82 | 0 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 602 | 479 | 123 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 6766 | 6766 | 0 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 5975 | 5975 | 0 | giant-file |
 | `services::discord::tmux_watcher::commit_decisions` | `src/services/discord/tmux_watcher/commit_decisions.rs` | 296 | 174 | 122 |  |
 | `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 250 | 250 | 0 |  |
 | `services::discord::tmux_watcher::completion_producer` | `src/services/discord/tmux_watcher/completion_producer.rs` | 54 | 54 | 0 |  |
@@ -700,6 +700,7 @@
 | `services::discord::tmux_watcher::session_bound_ack` | `src/services/discord/tmux_watcher/session_bound_ack.rs` | 523 | 523 | 0 |  |
 | `services::discord::tmux_watcher::single_message_footer` | `src/services/discord/tmux_watcher/single_message_footer.rs` | 533 | 419 | 114 |  |
 | `services::discord::tmux_watcher::stall_exit` | `src/services/discord/tmux_watcher/stall_exit.rs` | 295 | 110 | 185 |  |
+| `services::discord::tmux_watcher::streaming_status_tick` | `src/services/discord/tmux_watcher/streaming_status_tick.rs` | 963 | 963 | 0 |  |
 | `services::discord::tmux_watcher::supervisor_relay` | `src/services/discord/tmux_watcher/supervisor_relay.rs` | 619 | 619 | 0 |  |
 | `services::discord::tmux_watcher::terminal_abort_exits` | `src/services/discord/tmux_watcher/terminal_abort_exits.rs` | 537 | 537 | 0 |  |
 | `services::discord::tmux_watcher::terminal_long_chunks` | `src/services/discord/tmux_watcher/terminal_long_chunks.rs` | 303 | 303 | 0 |  |
