@@ -140,6 +140,54 @@ use self::supervisor_relay::*;
 use self::terminal_readiness::*;
 use self::utf8_chunk_decoder::*;
 
+#[derive(Debug)]
+struct RestoredSeedDisposition {
+    stream_seed: WatcherStreamSeed,
+    discard_restored_seed: bool,
+    seed_reassigned_to_different_turn: bool,
+    restored_seed_undelivered_body_len: usize,
+    prompt_anchor_present: bool,
+}
+
+fn watcher_stream_seed_after_restored_seed_discard(
+    restored_turn_seed: Option<RestoredWatcherTurn>,
+    current_turn_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    prompt_anchor_message_id: Option<u64>,
+) -> RestoredSeedDisposition {
+    let seed_from_rewind = restored_seed_from_rewind(restored_turn_seed.as_ref());
+    let restored_seed_undelivered_body_len = restored_turn_seed
+        .as_ref()
+        .and_then(|seed| seed.full_response.get(seed.response_sent_offset..))
+        .map(|body| body.trim().chars().count())
+        .unwrap_or(0);
+    let restored_seed_has_body = restored_seed_undelivered_body_len > 0;
+    let prompt_anchor_present = prompt_anchor_message_id.is_some();
+    let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(
+        restored_turn_seed.as_ref(),
+        current_turn_identity,
+        prompt_anchor_message_id,
+    );
+    let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
+        restored_turn_seed.is_some(),
+        prompt_anchor_present,
+        restored_seed_has_body,
+        seed_from_rewind,
+        seed_reassigned_to_different_turn,
+    );
+    let stream_seed = watcher_stream_seed(if discard_restored_seed {
+        None
+    } else {
+        restored_turn_seed
+    });
+    RestoredSeedDisposition {
+        stream_seed,
+        discard_restored_seed,
+        seed_reassigned_to_different_turn,
+        restored_seed_undelivered_body_len,
+        prompt_anchor_present,
+    }
+}
+
 /// Background watcher variant used by restart recovery to continue editing an
 /// existing streaming placeholder instead of creating a new one.
 pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
@@ -821,57 +869,38 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut pending_terminal_rewind_seed,
             &mut restored_turn,
         );
-        let seed_from_rewind = restored_seed_from_rewind(restored_turn_seed.as_ref());
-        let restored_seed_undelivered_body_len = restored_turn_seed
-            .as_ref()
-            .and_then(|seed| seed.full_response.get(seed.response_sent_offset..))
-            .map(|body| body.trim().chars().count())
-            .unwrap_or(0);
-        let restored_seed_has_body = restored_seed_undelivered_body_len > 0;
         let prompt_anchor_for_seed_discard =
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id.get(),
             );
-        let prompt_anchor_present_for_seed_discard = prompt_anchor_for_seed_discard.is_some();
-        let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(
-            restored_turn_seed.as_ref(),
+        let seed_disposition = watcher_stream_seed_after_restored_seed_discard(
+            restored_turn_seed,
             watcher_turn_identity.as_ref(),
             prompt_anchor_for_seed_discard.map(|anchor| anchor.message_id),
         );
-        let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
-            restored_turn_seed.is_some(),
-            prompt_anchor_present_for_seed_discard,
-            restored_seed_has_body,
-            seed_from_rewind,
-            seed_reassigned_to_different_turn,
-        );
-        if !discard_restored_seed
-            && prompt_anchor_present_for_seed_discard
-            && restored_seed_has_body
+        if !seed_disposition.discard_restored_seed
+            && seed_disposition.prompt_anchor_present
+            && seed_disposition.restored_seed_undelivered_body_len > 0
         {
             tracing::info!(
                 channel = channel_id.get(),
-                body_len = restored_seed_undelivered_body_len,
+                body_len = seed_disposition.restored_seed_undelivered_body_len,
                 tmux_session = %tmux_session_name,
                 "watcher: preserving restored stream seed with undelivered body for idle SSH-direct prompt"
             );
         }
-        if discard_restored_seed {
+        if seed_disposition.discard_restored_seed {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 👁 watcher: discarding restored stream seed for idle SSH-direct prompt on channel {} (tmux={}, cross_turn={})",
                 channel_id.get(),
                 tmux_session_name,
-                seed_reassigned_to_different_turn
+                seed_disposition.seed_reassigned_to_different_turn
             );
         }
-        let stream_seed = watcher_stream_seed(if discard_restored_seed {
-            None
-        } else {
-            restored_turn_seed
-        });
+        let stream_seed = seed_disposition.stream_seed;
         let restored_response_seed = stream_seed.full_response.clone();
         let restored_assistant_text_seen = !restored_response_seed.trim().is_empty();
         // #3041 P1-3 (Part a, B1): the `restored_assistant_text_seen` →

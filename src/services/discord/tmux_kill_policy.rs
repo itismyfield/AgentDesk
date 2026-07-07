@@ -2,7 +2,6 @@ use super::*;
 
 const RECENT_TURN_STOP_CAPACITY: usize = 128;
 const RECENT_TURN_STOP_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-const RECENT_TURN_STOP_OFFSET_MATCH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 pub(in crate::services::discord) const RECENT_TURN_STOP_METADATA_FALLBACK_TTL: std::time::Duration =
     std::time::Duration::from_secs(60);
 /// Slack between the cancel boundary recorded at stop time and the wrapper's
@@ -508,9 +507,6 @@ fn recent_turn_stop_matches_watcher_range(
     if let (Some(entry_tmux), Some(stop_offset)) =
         (entry.tmux_session_name.as_deref(), entry.stop_output_offset)
     {
-        if now.saturating_duration_since(entry.recorded_at) > RECENT_TURN_STOP_OFFSET_MATCH_TTL {
-            return false;
-        }
         let Some(stop_generation_mtime_ns) =
             entry.stop_generation_mtime_ns.filter(|mtime| *mtime > 0)
         else {
@@ -520,30 +516,31 @@ fn recent_turn_stop_matches_watcher_range(
         if current_generation_mtime_ns != stop_generation_mtime_ns {
             return false;
         }
+        // Keep this scoped by generation + offset, not by a short wall-clock TTL:
+        // same-session follow-up output starts at/after the stop EOF, while a
+        // respawned tmux wrapper changes the generation mtime and fails closed.
         // Exact EOF equality means the next watcher range starts after a clean
         // cancel boundary. Only ranges that began before the stop EOF belong to
         // the canceled turn.
         return entry_tmux == tmux_session_name && data_start_offset < stop_offset;
     }
 
-    if entry.tmux_session_name.is_some() && entry.stop_generation_mtime_ns.is_none() {
+    // Range suppression must prove a tmux-generation scope. Sessionless
+    // tombstones remain valid for watcher-death classification, but not for
+    // output suppression.
+    let Some(entry_tmux) = entry.tmux_session_name.as_deref() else {
+        return false;
+    };
+    let Some(stop_generation_mtime_ns) = entry.stop_generation_mtime_ns.filter(|mtime| *mtime > 0)
+    else {
+        return false;
+    };
+    let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+    if current_generation_mtime_ns != stop_generation_mtime_ns {
         return false;
     }
-    if let (Some(_entry_tmux), Some(stop_generation_mtime_ns)) = (
-        entry.tmux_session_name.as_deref(),
-        entry.stop_generation_mtime_ns.filter(|mtime| *mtime > 0),
-    ) {
-        let current_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
-        if current_generation_mtime_ns != stop_generation_mtime_ns {
-            return false;
-        }
-    }
 
-    let session_matches = entry
-        .tmux_session_name
-        .as_deref()
-        .map_or(true, |entry_tmux| entry_tmux == tmux_session_name);
-    session_matches
+    entry_tmux == tmux_session_name
         && now.saturating_duration_since(entry.recorded_at)
             <= RECENT_TURN_STOP_METADATA_FALLBACK_TTL
 }
@@ -555,12 +552,13 @@ mod recent_turn_stop_range_tests {
     fn recent_stop(
         channel_id: ChannelId,
         recorded_at: std::time::Instant,
+        tmux_session_name: Option<&str>,
         stop_generation_mtime_ns: Option<i64>,
     ) -> RecentTurnStop {
         RecentTurnStop {
             id: uuid::Uuid::new_v4(),
             channel_id,
-            tmux_session_name: Some("AgentDesk-claude-adk".to_string()),
+            tmux_session_name: tmux_session_name.map(str::to_string),
             stop_output_offset: Some(512),
             stop_generation_mtime_ns,
             reason: "test".to_string(),
@@ -573,7 +571,7 @@ mod recent_turn_stop_range_tests {
     fn watcher_range_stop_without_generation_fails_closed() {
         let channel_id = ChannelId::new(4105);
         let now = std::time::Instant::now();
-        let entry = recent_stop(channel_id, now, None);
+        let entry = recent_stop(channel_id, now, Some("AgentDesk-claude-adk"), None);
 
         assert!(!recent_turn_stop_matches_watcher_range(
             &entry,
@@ -585,20 +583,54 @@ mod recent_turn_stop_range_tests {
     }
 
     #[test]
-    fn watcher_range_offset_match_has_short_ttl() {
+    fn watcher_range_sessionless_stop_fails_closed() {
         let channel_id = ChannelId::new(4105);
         let now = std::time::Instant::now();
-        let entry = recent_stop(
-            channel_id,
-            now - RECENT_TURN_STOP_OFFSET_MATCH_TTL - std::time::Duration::from_millis(1),
-            Some(1),
-        );
+        let entry = recent_stop(channel_id, now, None, Some(1));
 
         assert!(!recent_turn_stop_matches_watcher_range(
             &entry,
             channel_id,
             "AgentDesk-claude-adk",
             511,
+            now,
+        ));
+    }
+
+    #[test]
+    fn watcher_range_offset_match_uses_generation_and_offset_without_short_ttl() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+
+        let channel_id = ChannelId::new(4105);
+        let tmux_session_name = "AgentDesk-claude-adk";
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+        std::fs::write(&generation_path, "1").expect("generation marker");
+        let stop_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+        assert!(stop_generation_mtime_ns > 0);
+
+        let now = std::time::Instant::now();
+        let entry = recent_stop(
+            channel_id,
+            now - std::time::Duration::from_secs(30),
+            Some(tmux_session_name),
+            Some(stop_generation_mtime_ns),
+        );
+
+        assert!(recent_turn_stop_matches_watcher_range(
+            &entry,
+            channel_id,
+            tmux_session_name,
+            511,
+            now,
+        ));
+        assert!(!recent_turn_stop_matches_watcher_range(
+            &entry,
+            channel_id,
+            tmux_session_name,
+            512,
             now,
         ));
     }
