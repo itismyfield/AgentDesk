@@ -349,6 +349,8 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
         }
     }
 
+    let owned_role_override =
+        discord::turn_finalizer::cleanup::snapshot_role_override(&shared, channel_id);
     let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
     let mut termination_recorded = false;
     if let Some(token) = finish.removed_token.as_ref() {
@@ -378,6 +380,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
         &provider,
         channel_id,
         &finish,
+        owned_role_override,
         "runtime_stop_fallback",
         cleanup_requested,
     )
@@ -770,6 +773,7 @@ async fn apply_runtime_hard_stop_cleanup(
     provider: &ProviderKind,
     channel_id: ChannelId,
     finish: &discord::FinishTurnResult,
+    owned_role_override: Option<ChannelId>,
     stop_source: &'static str,
     stop_watcher: bool,
 ) -> bool {
@@ -778,19 +782,19 @@ async fn apply_runtime_hard_stop_cleanup(
         discord::saturating_decrement_global_active(shared);
     }
 
-    discord::clear_watchdog_deadline_override(channel_id.get()).await;
-    let thread_parent_kickoffs =
-        discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(shared, channel_id);
-    discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
-        shared,
-        provider,
-        thread_parent_kickoffs,
-    );
+    discord::turn_finalizer::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
+        shared, provider, channel_id,
+    )
+    .await;
     shared.restart.recovering_channels.remove(&channel_id);
     shared.turn_start_times.remove(&channel_id);
 
     if !finish.has_pending {
-        shared.dispatch.role_overrides.remove(&channel_id);
+        discord::turn_finalizer::cleanup::remove_owned_role_override(
+            shared,
+            channel_id,
+            owned_role_override,
+        );
     }
 
     if stop_watcher && let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
@@ -824,22 +828,23 @@ async fn apply_runtime_hard_stop_finalizer_cleanup_pre_release(
     provider: &ProviderKind,
     channel_id: ChannelId,
     has_pending: bool,
+    owned_role_override: Option<ChannelId>,
     pinned_tmux_session_name: Option<&str>,
     stop_watcher: bool,
 ) -> bool {
-    discord::clear_watchdog_deadline_override(channel_id.get()).await;
-    let thread_parent_kickoffs =
-        discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(shared, channel_id);
-    discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
-        shared,
-        provider,
-        thread_parent_kickoffs,
-    );
+    discord::turn_finalizer::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
+        shared, provider, channel_id,
+    )
+    .await;
     shared.restart.recovering_channels.remove(&channel_id);
     shared.turn_start_times.remove(&channel_id);
 
     if !has_pending {
-        shared.dispatch.role_overrides.remove(&channel_id);
+        discord::turn_finalizer::cleanup::remove_owned_role_override(
+            shared,
+            channel_id,
+            owned_role_override,
+        );
     }
 
     if stop_watcher {
@@ -907,6 +912,8 @@ where
         revalidated.clear_outcome,
         discord::inflight::GuardedClearOutcome::Cleared
     );
+    let owned_role_override =
+        discord::turn_finalizer::cleanup::snapshot_role_override(shared, channel_id);
     let pre_release_has_pending = !shared
         .mailbox(channel_id)
         .snapshot()
@@ -918,6 +925,7 @@ where
         provider,
         channel_id,
         pre_release_has_pending,
+        owned_role_override,
         pinned_tmux_session_name,
         true,
     )
@@ -1038,6 +1046,8 @@ pub async fn clear_idle_tmux_stale_turn(
         );
         return None;
     }
+    let owned_role_override =
+        discord::turn_finalizer::cleanup::snapshot_role_override(&shared, channel_id);
     #[cfg(test)]
     {
         // Bind the cloned hook first so the mutex guard (a non-Send temporary
@@ -1074,8 +1084,16 @@ pub async fn clear_idle_tmux_stale_turn(
         }
     };
     let runtime_session_cleared = if finish.removed_token.is_some() {
-        apply_runtime_hard_stop_cleanup(&shared, &provider, channel_id, &finish, stop_source, false)
-            .await
+        apply_runtime_hard_stop_cleanup(
+            &shared,
+            &provider,
+            channel_id,
+            &finish,
+            owned_role_override,
+            stop_source,
+            false,
+        )
+        .await
     } else {
         false
     };
@@ -1162,6 +1180,8 @@ pub async fn finish_cancelled_provider_channel_mailbox(
     };
 
     let before = runtime.shared.restart.global_active.load(Ordering::Acquire);
+    let owned_role_override =
+        discord::turn_finalizer::cleanup::snapshot_role_override(&runtime.shared, channel_id);
     let finish = discord::mailbox_finish_cancelled_turn(&runtime.shared, channel_id).await;
     if finish.removed_token.is_none() {
         return FinishCancelledMailboxResult {
@@ -1177,6 +1197,7 @@ pub async fn finish_cancelled_provider_channel_mailbox(
         &runtime.provider,
         channel_id,
         &finish,
+        owned_role_override,
         stop_source,
         true,
     )
@@ -1222,6 +1243,10 @@ async fn runtime_turn_cleanup_by_lookup(
         )
         .await
     {
+        let owned_role_override = discord::turn_finalizer::cleanup::snapshot_role_override(
+            &runtime.shared,
+            runtime.channel_id,
+        );
         let finish =
             discord::mailbox_finish_turn(&runtime.shared, &runtime.provider, runtime.channel_id)
                 .await;
@@ -1230,6 +1255,7 @@ async fn runtime_turn_cleanup_by_lookup(
             &runtime.provider,
             runtime.channel_id,
             &finish,
+            owned_role_override,
             stop_source,
             stop_watcher,
         )

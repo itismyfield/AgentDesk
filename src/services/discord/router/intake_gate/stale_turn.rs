@@ -218,6 +218,12 @@ async fn release_queue_blocked_stale_active_turn(
         "  [{ts}] 🔓 QUEUE-GUARD: stale active-turn proof for channel {} has no live owner; releasing mailbox and proceeding",
         channel_id
     );
+    // #4198: snapshot before the yielding watchdog/finish awaits so the remove
+    // below cannot clobber a same-channel follow-up's freshly inserted override.
+    let owned_role_override =
+        crate::services::discord::turn_finalizer::cleanup::snapshot_role_override(
+            shared, channel_id,
+        );
     crate::services::discord::inflight::delete_inflight_state_file(provider, channel_id.get());
     crate::services::discord::clear_watchdog_deadline_override(channel_id.get()).await;
     let finish = mailbox_finish_turn(shared, provider, channel_id).await;
@@ -239,7 +245,11 @@ async fn release_queue_blocked_stale_active_turn(
         thread_parent_kickoffs,
     );
     if !finish.has_pending {
-        shared.dispatch.role_overrides.remove(&channel_id);
+        crate::services::discord::turn_finalizer::cleanup::remove_owned_role_override(
+            shared,
+            channel_id,
+            owned_role_override,
+        );
     }
     true
 }

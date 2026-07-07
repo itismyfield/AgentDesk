@@ -572,14 +572,6 @@ deadline = "2026-10-31"
 decompose_issue = "#3405"
 
 [[entry]]
-# Crossed 1000-prod-LoC at #4150 r4 (two-signal anchor + delivered-elsewhere
-# frontier probe with same-coordinate proof + author detection, 9-row table).
-file = "src/services/discord/tmux_placeholder_suppression.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4176"
-
-[[entry]]
 # Crossed 1000-prod-LoC at #4159 r3 (offset-provenance DeferredClaim gating).
 file = "src/services/discord/tui_direct_abort_marker/mod.rs"
 owner = "discord-relay"

@@ -48,7 +48,7 @@ use super::{
     SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, lock_tmux_watcher_registry, rate_limit_wait,
 };
 // Extracted lifecycle code stays a tmux child module until its callers split out.
-#[path = "tmux_placeholder_suppression.rs"]
+#[path = "tmux_placeholder_suppression/mod.rs"]
 mod placeholder_suppression;
 #[path = "tmux_reattach_offsets.rs"]
 mod tmux_reattach_offsets;
@@ -2082,12 +2082,9 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
     // clear_watchdog_deadline_override), during which a fresh same-channel
     // counter-model follow-up can insert its OWN override (intake_turn.rs) even
     // before it claims the slot. A bare channel-keyed remove would clobber that;
-    // remove_if only drops the value we still own.
-    let pre_release_role_override = shared
-        .dispatch
-        .role_overrides
-        .get(&channel_id)
-        .map(|entry| *entry.value());
+    // remove_owned_role_override only drops the value we still own.
+    let pre_release_role_override =
+        super::turn_finalizer::cleanup::snapshot_role_override(shared, channel_id);
 
     let finish = super::mailbox_finish_turn_if_matches(
         shared,
@@ -2114,21 +2111,16 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
     token.cancelled.store(true, Ordering::Relaxed);
     super::saturating_decrement_global_active(shared);
 
-    super::clear_watchdog_deadline_override(channel_id.get()).await;
-    let thread_parent_kickoffs =
-        super::turn_finalizer::cleanup::collect_and_clear_thread_parents(shared, channel_id);
-    super::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
-        shared,
-        provider,
-        thread_parent_kickoffs,
-    );
-    if !finish.has_pending
-        && let Some(owned) = pre_release_role_override
-    {
-        shared
-            .dispatch
-            .role_overrides
-            .remove_if(&channel_id, |_, current| *current == owned);
+    super::turn_finalizer::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
+        shared, provider, channel_id,
+    )
+    .await;
+    if !finish.has_pending {
+        super::turn_finalizer::cleanup::remove_owned_role_override(
+            shared,
+            channel_id,
+            pre_release_role_override,
+        );
     }
     true
 }
