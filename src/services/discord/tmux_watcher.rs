@@ -2371,15 +2371,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             error
                                         );
                                         rate_limit_wait(&shared, channel_id).await;
-                                        let _ =
-                                            crate::services::discord::http::edit_channel_message(
-                                                &http,
-                                                channel_id,
-                                                msg_id,
-                                                &plan.display_snapshot,
-                                            )
-                                            .await;
-                                        last_edit_text = plan.display_snapshot;
+                                        if crate::services::discord::http::edit_channel_message(
+                                            &http,
+                                            channel_id,
+                                            msg_id,
+                                            &plan.display_snapshot,
+                                        )
+                                        .await
+                                        .is_ok()
+                                        {
+                                            last_edit_text = plan.display_snapshot;
+                                        }
                                         break;
                                     }
                                 }

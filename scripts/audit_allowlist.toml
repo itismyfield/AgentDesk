@@ -98,7 +98,7 @@ footer_view_writes = [
   "src/services/discord/tmux_watcher.rs#footer_view_writes:5415d09ce6a6466a",
   "src/services/discord/tmux_watcher.rs#footer_view_writes:68c7489b59d3819b",
   "src/services/discord/tmux_watcher.rs#footer_view_writes:f1a4678b93b4a816",
-  "src/services/discord/tmux_watcher.rs#footer_view_writes:882a806a2deac7bf",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:86ad44e4e40a8ff1",
   "src/services/discord/tmux_watcher.rs#footer_view_writes:cdb10010e940c7dc",
   "src/services/discord/tmux_watcher.rs#footer_view_writes:9b7c3dd700213b46",
   "src/services/discord/tmux_watcher.rs#footer_view_writes:7512a09d4bb439fc",
