@@ -1237,6 +1237,137 @@ async fn normal_completion_finalizes_with_both_legacy_flags_false() {
     );
 }
 
+#[test]
+fn pre_panel_release_decrements_before_same_channel_followup_claims() {
+    use std::sync::atomic::Ordering;
+
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+    runtime.block_on(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_4106);
+        let tmux_session_name = "AgentDesk-claude-adk-cc-9874106";
+        let turn_a = 4106_001;
+        let turn_b = 4106_002;
+
+        shared
+            .tmux_watchers
+            .insert(channel_id, test_watcher_handle(tmux_session_name));
+
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(42),
+                MessageId::new(turn_a),
+            )
+            .await
+        );
+        crate::services::discord::increment_global_active(&shared, "test_turn_a_start");
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+
+        assert!(super::should_submit_restored_watcher_finalize(
+            false, turn_a
+        ));
+        assert!(
+            super::release_restored_watcher_active_turn_before_panel_edit(
+                &shared, &provider, channel_id, turn_a,
+            )
+            .await,
+            "the pre-panel hoist must release and decrement turn A before the awaited edit"
+        );
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            0,
+            "turn A's global_active count is gone before the panel edit can race"
+        );
+
+        // Test double for the awaited Discord status-panel edit: while it is
+        // suspended, a same-channel follow-up claims the mailbox slot.
+        let (panel_started_tx, panel_started_rx) = tokio::sync::oneshot::channel();
+        let (panel_done_tx, panel_done_rx) = tokio::sync::oneshot::channel();
+        let panel_edit = tokio::spawn(async move {
+            let _ = panel_started_tx.send(());
+            panel_done_rx.await.expect("panel edit released");
+        });
+        panel_started_rx.await.expect("panel edit started");
+
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(43),
+                MessageId::new(turn_b),
+            )
+            .await,
+            "the follow-up should be able to claim the mailbox during the panel await"
+        );
+        crate::services::discord::increment_global_active(&shared, "test_turn_b_start");
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            1,
+            "only the follow-up turn should be counted while the panel edit is in flight"
+        );
+        panel_done_tx.send(()).expect("release panel edit");
+        panel_edit.await.expect("panel edit task");
+
+        let drove_late_a = super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            turn_a,
+            false,
+            true,
+            false,
+            None,
+            "pre_panel_release_race_late_turn_a_finalize",
+        )
+        .await;
+        assert!(drove_late_a);
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            1,
+            "turn A's late finalizer must not double-decrement turn B's active count"
+        );
+        assert!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_some(),
+            "turn B remains the live active mailbox owner after turn A's late finalize"
+        );
+
+        super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            turn_b,
+            false,
+            true,
+            false,
+            None,
+            "pre_panel_release_race_turn_b_finalize",
+        )
+        .await;
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            0,
+            "after the follow-up finalizes, global_active returns to zero with no permanent leak"
+        );
+    });
+}
+
 // #3016 codex R1 (wrong-turn finalize guard). Companion to the decouple
 // test above. Exercises the SAFETY PROPERTY the Issue-1 call-site fix
 // depends on: once `normal_completion = true` finalizes UNCONDITIONALLY,

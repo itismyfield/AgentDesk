@@ -118,7 +118,19 @@ pub(super) async fn do_finalize(
     //     is what guarantees no underflow even under a transitional
     //     double-call.
     if finish.removed_token.is_some() {
-        crate::services::discord::saturating_decrement_global_active(shared);
+        let decremented = crate::services::discord::saturating_decrement_global_active(shared);
+        let global_active = shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(
+            target: "agentdesk::global_active",
+            channel_id = channel_id.get(),
+            user_msg_id = key.user_msg_id,
+            global_active,
+            decremented,
+            "global_active decrement"
+        );
     }
     // The CHANNEL-SCOPED trailing side-effects (D)/(E) below mutate per-channel
     // routing/watchdog state that belongs to whatever turn is CURRENTLY active

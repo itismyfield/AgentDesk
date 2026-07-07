@@ -1949,6 +1949,34 @@ async fn finish_restored_watcher_active_turn(
     true
 }
 
+async fn release_restored_watcher_active_turn_before_panel_edit(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    finalizer_turn_id: u64,
+) -> bool {
+    if finalizer_turn_id == 0 {
+        return false;
+    }
+
+    let finish = super::mailbox_finish_turn_if_matches(
+        shared,
+        provider,
+        channel_id,
+        MessageId::new(finalizer_turn_id),
+    )
+    .await;
+    let Some(token) = finish.removed_token.as_ref() else {
+        return false;
+    };
+
+    // Mirror the watcher finalizer's release-side behavior: the watcher path
+    // cancels the removed token but does not mark completion-cleanup.
+    token.cancelled.store(true, Ordering::Relaxed);
+    super::saturating_decrement_global_active(shared);
+    true
+}
+
 /// Background watcher that continuously tails a tmux output file.
 /// When Claude produces output from terminal input (not Discord), relay it to Discord.
 #[path = "tmux_watcher.rs"]

@@ -6002,6 +6002,41 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         status_panel_msg_id,
                         inflight_before_relay.as_ref(),
                     );
+                // #4106: release the exact pinned active slot before the awaited
+                // status-panel edit. If a same-channel follow-up claims the mailbox
+                // while Discord is round-tripping the edit, the late finalizer below
+                // will identity-miss and must be an idempotent no-op decrement.
+                if !lifecycle_stage_paused {
+                    let pre_panel_inflight_state_for_finalize =
+                        crate::services::discord::inflight::load_inflight_state(
+                            &watcher_provider,
+                            channel_id.get(),
+                        );
+                    let pre_panel_completion_is_stale_for_newer_turn =
+                        committed_completion_is_stale_for_newer_turn(
+                            inflight_before_relay.as_ref(),
+                            pre_panel_inflight_state_for_finalize.as_ref(),
+                            &tmux_session_name,
+                            current_offset,
+                        );
+                    let pre_panel_restored_finalizer_turn_id = pinned_finalizer_turn_id(
+                        inflight_before_relay.as_ref(),
+                        &tmux_session_name,
+                        current_offset,
+                    );
+                    if should_submit_restored_watcher_finalize(
+                        pre_panel_completion_is_stale_for_newer_turn,
+                        pre_panel_restored_finalizer_turn_id,
+                    ) {
+                        let _ = release_restored_watcher_active_turn_before_panel_edit(
+                            &shared,
+                            &watcher_provider,
+                            channel_id,
+                            pre_panel_restored_finalizer_turn_id,
+                        )
+                        .await;
+                    }
+                }
                 complete_watcher_terminal_footer_or_status_panel_with_sniffer(
                     &http,
                     &shared,
