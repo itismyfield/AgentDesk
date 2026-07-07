@@ -209,26 +209,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
         }};
     }
 
-    macro_rules! commit_collect_state {
-        () => {{
-            commit_persistent_state!();
-            monitor.monitor_auto_turn_claimed = monitor_auto_turn_claimed;
-            monitor.monitor_auto_turn_deferred = monitor_auto_turn_deferred;
-            monitor.monitor_auto_turn_finished = monitor_auto_turn_finished;
-            monitor.monitor_auto_turn_synthetic_msg_id = monitor_auto_turn_synthetic_msg_id;
-            monitor.monitor_auto_turn_ledger_generation = monitor_auto_turn_ledger_generation;
-            render_seed.placeholder_msg_id = placeholder_msg_id;
-            render_seed.placeholder_from_restored_inflight = placeholder_from_restored_inflight;
-            render_seed.status_panel_msg_id = status_panel_msg_id;
-            render_seed.last_status_panel_text = last_status_panel_text.clone();
-            render_seed.last_edit_text = last_edit_text.clone();
-            render_seed.response_sent_offset = response_sent_offset;
-            render_seed.watcher_streaming_rollover_frozen_msg_ids =
-                watcher_streaming_rollover_frozen_msg_ids.clone();
-            render_seed.completion_footer_terminal_target =
-                completion_footer_terminal_target.clone();
-        }};
-    }
     // Collect the full turn: keep reading until we see a "result" event.
     // #1216: append to the outer-scope `all_data` so any leftover from a
     // previous iteration (multi-turn buffer split at the first `result`)
@@ -400,6 +380,29 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // the byte-offset-derived synthetic id repeats after a wrapper respawn).
     let mut monitor_auto_turn_synthetic_msg_id: Option<MessageId> = None;
     let mut monitor_auto_turn_ledger_generation: Option<u64> = None;
+    // NOTE(r3): defined after the reset-local declarations above — macro_rules
+    // bodies resolve local identifiers with definition-site hygiene, so this
+    // macro must come after every local it commits (E0425 otherwise).
+    macro_rules! commit_collect_state {
+        () => {{
+            commit_persistent_state!();
+            monitor.monitor_auto_turn_claimed = monitor_auto_turn_claimed;
+            monitor.monitor_auto_turn_deferred = monitor_auto_turn_deferred;
+            monitor.monitor_auto_turn_finished = monitor_auto_turn_finished;
+            monitor.monitor_auto_turn_synthetic_msg_id = monitor_auto_turn_synthetic_msg_id;
+            monitor.monitor_auto_turn_ledger_generation = monitor_auto_turn_ledger_generation;
+            render_seed.placeholder_msg_id = placeholder_msg_id;
+            render_seed.placeholder_from_restored_inflight = placeholder_from_restored_inflight;
+            render_seed.status_panel_msg_id = status_panel_msg_id;
+            render_seed.last_status_panel_text = last_status_panel_text.clone();
+            render_seed.last_edit_text = last_edit_text.clone();
+            render_seed.response_sent_offset = response_sent_offset;
+            render_seed.watcher_streaming_rollover_frozen_msg_ids =
+                watcher_streaming_rollover_frozen_msg_ids.clone();
+            render_seed.completion_footer_terminal_target =
+                completion_footer_terminal_target.clone();
+        }};
+    }
     // #1009: 1-shot tracker for the monitor-auto-turn preamble hint so the
     // hint text is emitted exactly once per watcher turn frame.
     let mut monitor_auto_turn_preamble_injected = false;
