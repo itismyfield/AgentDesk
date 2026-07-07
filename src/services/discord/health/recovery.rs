@@ -5232,6 +5232,9 @@ mod hard_stop_completion_event_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn providerless_strict_repair_ignores_empty_mailbox_created_by_snapshot_scan() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Claude;
@@ -5275,21 +5278,21 @@ mod hard_stop_completion_event_tests {
             .await
             .expect("providerless pre-repair snapshot should find second runtime's mailbox");
         assert!(observed.has_pending_queue);
-        let first_snapshot = first
-            .mailbox_peek(channel)
-            .expect("providerless snapshot scan should materialize first runtime mailbox")
-            .snapshot()
-            .await;
-        assert!(first_snapshot.cancel_token.is_none());
-        assert!(first_snapshot.intervention_queue.is_empty());
+        // cfcdcd6135572601af287e2165afae34b3ddd464 (#4068) made health
+        // snapshots peek-only: observation must not materialize or globalize
+        // an empty first-runtime mailbox.
+        assert!(
+            first.mailbox_peek(channel).is_none(),
+            "providerless snapshot scan must leave the first runtime without local mailbox evidence"
+        );
         let global_after_observation =
             crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel)
                 .expect("snapshot scan should leave a process-global handle");
         let global_snapshot = global_after_observation.snapshot().await;
-        assert!(global_snapshot.cancel_token.is_none());
+        assert!(global_snapshot.cancel_token.is_some());
         assert!(
-            global_snapshot.intervention_queue.is_empty(),
-            "pre-repair observation should clobber the global handle to first runtime's empty mailbox"
+            !global_snapshot.intervention_queue.is_empty(),
+            "pre-repair observation should keep the global handle on the owning second runtime"
         );
 
         let mut first_rx =
@@ -5306,7 +5309,7 @@ mod hard_stop_completion_event_tests {
 
         assert!(
             result.had_active_turn,
-            "strict repair must skip first runtime's empty mailbox and finalize second runtime"
+            "strict repair must select and finalize the owning second runtime"
         );
         assert!(result.has_pending_queue);
         assert!(
@@ -5325,13 +5328,11 @@ mod hard_stop_completion_event_tests {
             "empty first runtime must not be selected or publish completion"
         );
 
-        let first_after = first
-            .mailbox_peek(channel)
-            .expect("empty first runtime mailbox should remain only as observation artifact")
-            .snapshot()
-            .await;
-        assert!(first_after.cancel_token.is_none());
-        assert!(first_after.intervention_queue.is_empty());
+        let first_after = first.mailbox_peek(channel);
+        assert!(
+            first_after.is_none(),
+            "empty first runtime mailbox should not be created by observation or repair"
+        );
         let second_after = second
             .mailbox_peek(channel)
             .expect("owning second runtime mailbox should remain registered")
