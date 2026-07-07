@@ -5886,6 +5886,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             terminal_delivery_committed,
         );
 
+        // #4106: whether the pre-panel early release below actually released THIS
+        // turn's mailbox slot. When it did, the late
+        // `finish_restored_watcher_active_turn` for the same pinned id is a
+        // deterministic identity-guard miss; carrying this flag routes it through
+        // the guard-miss-expected context so that EXPECTED no-op logs at debug
+        // instead of spamming the wrong-turn WARN on every normal completion.
+        let mut pre_panel_release_drove_finalize = false;
+
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
             // #2849: watcher-completed turns never traverse the bridge
             // StatusUpdate path, so the completed panel can lack the Context
@@ -6028,13 +6036,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         pre_panel_completion_is_stale_for_newer_turn,
                         pre_panel_restored_finalizer_turn_id,
                     ) {
-                        let _ = release_restored_watcher_active_turn_before_panel_edit(
-                            &shared,
-                            &watcher_provider,
-                            channel_id,
-                            pre_panel_restored_finalizer_turn_id,
-                        )
-                        .await;
+                        pre_panel_release_drove_finalize =
+                            release_restored_watcher_active_turn_before_panel_edit(
+                                &shared,
+                                &watcher_provider,
+                                channel_id,
+                                pre_panel_restored_finalizer_turn_id,
+                            )
+                            .await;
                     }
                 }
                 complete_watcher_terminal_footer_or_status_panel_with_sniffer(
@@ -6868,7 +6877,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 completion_is_stale_for_newer_turn,
                 restored_finalizer_turn_id,
             ) {
-                finish_restored_watcher_active_turn(
+                finish_restored_watcher_active_turn_with_ctx(
                     &shared,
                     &provider_kind,
                     channel_id,
@@ -6890,6 +6899,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     inflight_before_relay.as_ref().map(
                         crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row,
                     ),
+                    // #4106: when the pre-panel early release already drove the
+                    // release of this pinned id, the late submit here is a
+                    // deterministic identity-guard miss; route it through the
+                    // guard-miss-expected context so the EXPECTED no-op logs at
+                    // debug instead of the wrong-turn WARN. When the early release
+                    // did NOT drive it, keep the plain watcher() context so a
+                    // genuine wrong-turn miss still WARNs.
+                    if pre_panel_release_drove_finalize {
+                        crate::services::discord::turn_finalizer::FinalizeContext::watcher_after_pre_panel_release()
+                    } else {
+                        crate::services::discord::turn_finalizer::FinalizeContext::watcher()
+                    },
                     "restored watcher completed with queued backlog",
                 )
                 .await

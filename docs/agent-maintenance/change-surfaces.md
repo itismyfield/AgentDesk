@@ -148,7 +148,7 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1571 lines; +66 from #4106 adding
+  - `src/services/discord/tmux.rs` (1606 lines; +101 from #4106 adding
     `release_restored_watcher_active_turn_before_panel_edit` — hoists the
     identity-guarded mailbox release + `global_active` decrement + the
     finalizer's D-side channel cleanup ahead of the awaited status-panel edit so
@@ -156,7 +156,13 @@
     finalizer identity-miss and permanently skip the decrement; the D-side
     role-override drop snapshots the owned value before any await and uses
     `remove_if` so a fresh counter-model follow-up inserting its own override
-    during the release is not clobbered; -7 from #4048 S3 removing the
+    during the release is not clobbered. The #4106r2 WARN-fix splits
+    `finish_restored_watcher_active_turn` into a thin wrapper (pins
+    `FinalizeContext::watcher()` for all legacy/recovery callers, unchanged
+    signature) + a `_with_ctx` inner that takes an explicit context, so the
+    post-early-release watcher site can route its now-DETERMINISTIC identity-guard
+    miss through `watcher_after_pre_panel_release` and log at debug instead of
+    spamming the wrong-turn WARN on every normal completion; -7 from #4048 S3 removing the
     restored-watcher direct queue-kickoff path in favor of the finalizer
     completion-event drain trigger; -12 from #4047 S2-b deleting
     the GateTimeout submit path and adding the shared bounded

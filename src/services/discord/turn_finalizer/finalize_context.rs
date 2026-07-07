@@ -67,6 +67,22 @@ impl FinalizeContext {
         }
     }
 
+    /// #4106: the watcher's late normal-completion finalize when the pre-panel
+    /// early release (`release_restored_watcher_active_turn_before_panel_edit`)
+    /// already released THIS turn's mailbox slot ahead of the awaited status-
+    /// panel edit. Identical side-effect knobs to `watcher()`, but the identity-
+    /// guard miss is now EXPECTED: the early release is the real releaser and
+    /// this late submit is a deterministic idempotent no-op, so the guarded-miss
+    /// log downgrades from WARN to debug. This keeps the WARN scoped to a GENUINE
+    /// wrong-turn finalize (the anomaly operators diagnose the concurrency-cap
+    /// wedge with) instead of firing on every steady-state normal completion.
+    pub(in crate::services::discord) fn watcher_after_pre_panel_release() -> Self {
+        Self {
+            expected_idempotent_guard_miss: true,
+            ..Self::watcher()
+        }
+    }
+
     /// Monitor-auto-turn / recovery terminal (#3016 phase 4): the caller owns
     /// the inflight clear (or there is none — synthetic monitor turn / recovery
     /// already cleared it), does NOT mark completion-cleanup, does NOT drain
@@ -113,5 +129,37 @@ impl FinalizeContext {
 
     pub(in crate::services::discord) fn is_backstop_reconcile_path(self) -> bool {
         self.expected_idempotent_guard_miss
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FinalizeContext;
+
+    /// #4106: the post-early-release watcher context must be identical to the
+    /// plain `watcher()` context on EVERY side-effect knob and differ ONLY in
+    /// expecting the identity-guard miss. That single difference is what
+    /// downgrades the now-deterministic late guarded miss from WARN to debug
+    /// WITHOUT changing any finalize side effect (inflight/completion-cleanup/
+    /// voice/queue semantics stay exactly the watcher path's).
+    #[test]
+    fn watcher_after_pre_panel_release_only_flips_expected_guard_miss() {
+        let base = FinalizeContext::watcher();
+        let after = FinalizeContext::watcher_after_pre_panel_release();
+
+        // The one intended difference.
+        assert!(!base.expected_idempotent_guard_miss);
+        assert!(after.expected_idempotent_guard_miss);
+        assert!(!base.is_backstop_reconcile_path());
+        assert!(after.is_backstop_reconcile_path());
+
+        // Every other knob is unchanged — no side-effect drift.
+        assert_eq!(after.clear_inflight, base.clear_inflight);
+        assert_eq!(
+            after.allow_completion_cleanup,
+            base.allow_completion_cleanup
+        );
+        assert_eq!(after.drain_voice, base.drain_voice);
+        assert_eq!(after.kickoff_queue, base.kickoff_queue);
     }
 }

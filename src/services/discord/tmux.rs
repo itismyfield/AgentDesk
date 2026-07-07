@@ -1875,6 +1875,41 @@ async fn finish_restored_watcher_active_turn(
     claim_snapshot: Option<super::turn_finalizer::SyntheticClaimSnapshot>,
     stop_source: &'static str,
 ) -> bool {
+    // Default context for every caller EXCEPT the #4106 post-early-release site,
+    // which routes through `finish_restored_watcher_active_turn_with_ctx` directly
+    // to downgrade its EXPECTED identity-guard miss from WARN to debug.
+    finish_restored_watcher_active_turn_with_ctx(
+        shared,
+        provider,
+        channel_id,
+        finalizer_turn_id,
+        finish_mailbox_on_completion,
+        normal_completion,
+        _kickoff_queue,
+        claim_snapshot,
+        super::turn_finalizer::FinalizeContext::watcher(),
+        stop_source,
+    )
+    .await
+}
+
+/// #4106: inner finalize that accepts an explicit `FinalizeContext`. The thin
+/// wrapper above pins `FinalizeContext::watcher()` for all legacy callers; the
+/// post-early-release watcher site passes `watcher_after_pre_panel_release()` so
+/// its deterministic (already-released) identity-guard miss logs at debug.
+#[allow(clippy::too_many_arguments)]
+async fn finish_restored_watcher_active_turn_with_ctx(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    finalizer_turn_id: u64,
+    finish_mailbox_on_completion: bool,
+    normal_completion: bool,
+    _kickoff_queue: bool,
+    claim_snapshot: Option<super::turn_finalizer::SyntheticClaimSnapshot>,
+    finalize_ctx: super::turn_finalizer::FinalizeContext,
+    stop_source: &'static str,
+) -> bool {
     // The mailbox is cleared now when EITHER gate holds:
     //   * `normal_completion` → confirmed terminal output committed / pane idle
     //     (#3016 option A). The canonical post-phase-5b1 finalize trigger.
@@ -1923,7 +1958,7 @@ async fn finish_restored_watcher_active_turn(
             ),
             provider.clone(),
             super::turn_finalizer::TerminalEvent::Complete,
-            super::turn_finalizer::FinalizeContext::watcher(),
+            finalize_ctx,
             claim_snapshot,
             shared.clone(),
         )
