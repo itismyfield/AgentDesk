@@ -462,14 +462,17 @@ src/
 │   │   │   ├── relay_integrity.rs
 │   │   │   └── scrollback.rs
 │   │   ├── inflight/
+│   │   │   ├── clear_store/
+│   │   │   │   ├── abandon.rs
+│   │   │   │   └── mod.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
-│   │   │   ├── clear_store.rs
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
+│   │   │   ├── removal.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   └── watcher_state.rs

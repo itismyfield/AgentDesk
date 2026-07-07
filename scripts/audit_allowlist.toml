@@ -13,10 +13,6 @@
 # normally stay empty; add entries only for temporary parser gaps with an
 # open extraction issue.
 giant_files = [
-  # #4104 (step-1) added standardized inflight-row removal logging at 11 clear
-  # sites, re-inflating this decomposition product 989->1060 prod LoC. Decompose
-  # owned by #4201 (deadline 2026-10-31); registered in giant_file_registry.toml.
-  "src/services/discord/inflight/clear_store.rs",
 ]
 
 # Namespace size caps: per-namespace production Rust file limits configured in

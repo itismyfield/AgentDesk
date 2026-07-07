@@ -131,7 +131,11 @@
   stop/reattach/claim/restore lifecycle, including the #1222 single-owner
   claim path and #1283 cancel-induced reattach contract),
   `src/services/discord/tmux.rs` (watcher loop and remaining tmux relay
-  parsing), `src/services/discord/inflight.rs` (state file contract).
+  parsing), `src/services/discord/inflight.rs` (state file facade/contract),
+  `src/services/discord/inflight/removal.rs` (load-time prune + removal
+  logging), `src/services/discord/inflight/clear_store/mod.rs` and
+  `src/services/discord/inflight/clear_store/abandon.rs` (clear/abandon
+  store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/services/discord/watchers/lifecycle.rs` (2052 lines — canonical
@@ -1617,8 +1621,10 @@
 - active_callsite_coverage: n/a.
 - invariants: watcher single-owner per #1222; placeholder lifecycle invariants
   per #1112; `/api/inflight/rebind` is the only path that synthesises an
-  inflight state file (`src/services/discord/inflight.rs:107`,
-  `:415`, `:952`). Cancel-induced death must trigger immediate re-attach
+  inflight state file (through the `src/services/discord/inflight.rs` facade,
+  with stale/removal loading in `src/services/discord/inflight/removal.rs` and
+  clear/abandon CAS paths in `src/services/discord/inflight/clear_store/`).
+  Cancel-induced death must trigger immediate re-attach
   (#1283 contract, see `src/services/discord/watchers/lifecycle.rs`).
 - allowed_changes: `bugfix` only on `tmux.rs` and the giant Discord modules.
   `extraction` requires a follow-up issue.
