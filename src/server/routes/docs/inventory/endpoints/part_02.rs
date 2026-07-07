@@ -320,7 +320,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 json!({"error": "agent not found: ghost"}),
             )
             .with_curl("curl -X PATCH http://localhost:8787/api/agents/project-agentdesk -H 'Content-Type: application/json' -d '{\"name\":\"AgentDesk\"}'"),
-        ep("DELETE", "/api/agents/{id}", "agents", "Delete agent // TODO: example"),
+        ep("DELETE", "/api/agents/{id}", "agents", "Delete agent").with_example(
+            json!({"path": {"id": "project-agentdesk"}}),
+            json!({"ok": true}),
+        ),
         ep(
             "POST",
             "/api/agents/{id}/archive",
@@ -341,13 +344,17 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/agents/{id}/unarchive",
             "agents",
-            "Restore an archived agent config binding and mark archive state unarchived. // TODO: example",
+            "Restore an archived agent config binding and mark archive state unarchived.",
+        )
+        .with_example(
+            json!({"path": {"id": "project-agentdesk"}}),
+            json!({"ok": true, "agent_id": "project-agentdesk", "archive_state": "unarchived", "status": "idle"}),
         ),
         ep(
             "POST",
             "/api/agents/{id}/duplicate",
             "agents",
-            "Duplicate an agent by reusing /api/agents/setup with the source prompt as template. // TODO: example",
+            "Duplicate an agent by reusing /api/agents/setup with the source prompt as template.",
         )
         .with_params([
             ("id", path_param("Source agent id")),
@@ -355,66 +362,98 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("channel_id", body_param("string", true, "Existing Discord channel snowflake")),
             ("provider", body_param("string", false, "Provider override")),
             ("dry_run", body_param("boolean", false, "Preview setup mutations only").with_default(false)),
-        ]),
+        ])
+        .with_example(
+            json!({"path": {"id": "project-agentdesk"}, "body": {"new_agent_id": "project-agentdesk-copy", "channel_id": "1473922824350601297", "provider": "codex", "dry_run": true}}),
+            json!({"ok": true, "duplicate": true, "source_agent_id": "project-agentdesk", "new_agent_id": "project-agentdesk-copy", "setup": {"dry_run": true}}),
+        ),
         ep(
             "GET",
             "/api/onboarding/status",
             "onboarding",
-            "Get onboarding status // TODO: example",
+            "Get onboarding status",
         ),
         ep(
             "GET",
             "/api/onboarding/draft",
             "onboarding",
-            "Get onboarding resume draft // TODO: example",
+            "Get onboarding resume draft",
         ),
         ep(
             "PUT",
             "/api/onboarding/draft",
             "onboarding",
-            "Persist onboarding resume draft // TODO: example",
+            "Persist onboarding resume draft",
+        )
+        .with_example(
+            json!({"body": {"version": 1, "step": 2, "selected_guild": "1490141479707086938", "agents": []}}),
+            json!({"ok": true, "available": true, "secret_policy": "redacted"}),
         ),
         ep(
             "DELETE",
             "/api/onboarding/draft",
             "onboarding",
-            "Clear onboarding resume draft // TODO: example",
+            "Clear onboarding resume draft",
+        )
+        .with_example(
+            json!({}),
+            json!({"ok": true, "available": false, "secret_policy": "redacted"}),
         ),
         ep(
             "POST",
             "/api/onboarding/validate-token",
             "onboarding",
-            "Validate onboarding token // TODO: example",
+            "Validate onboarding token",
+        )
+        .with_example(
+            json!({"body": {"token": "discord-bot-token"}}),
+            json!({"valid": true, "bot_id": "123456789012345678", "bot_name": "agentdesk-bot", "avatar": null}),
         ),
         ep(
             "GET",
             "/api/onboarding/channels",
             "onboarding",
-            "List onboarding candidate channels // TODO: example",
+            "List onboarding candidate channels",
         ),
         ep(
             "POST",
             "/api/onboarding/channels",
             "onboarding",
-            "Persist onboarding channel selection // TODO: example",
+            "Persist onboarding channel selection",
+        )
+        .with_example(
+            json!({"body": {"token": "discord-bot-token"}}),
+            json!({"guilds": [{"id": "1490141479707086938", "name": "AgentDesk"}], "channels": [{"id": "1473922824350601297", "name": "agentdesk"}]}),
         ),
         ep(
             "POST",
             "/api/onboarding/complete",
             "onboarding",
-            "Complete onboarding // TODO: example",
+            "Complete onboarding",
+        )
+        .with_example(
+            json!({"body": {"token": "discord-bot-token", "guild_id": "1490141479707086938", "provider": "codex", "channels": [{"channel_id": "1473922824350601297", "channel_name": "agentdesk", "role_id": "project-agentdesk"}]}}),
+            json!({"ok": true, "provider": "codex", "rerun_policy": "safe"}),
         ),
         ep(
             "POST",
             "/api/onboarding/check-provider",
             "onboarding",
-            "Validate provider installation and credentials // TODO: example",
+            "Validate provider installation and credentials",
+        )
+        .with_example(
+            json!({"body": {"provider": "codex"}}),
+            json!({"installed": true, "logged_in": true, "version": "codex 1.0.0", "path": "/usr/local/bin/codex"}),
         ),
         ep(
             "POST",
             "/api/onboarding/generate-prompt",
             "onboarding",
-            "Generate onboarding prompt // TODO: example",
+            "Generate onboarding prompt",
+        )
+        .with_example(
+            json!({"body": {"name": "Docs Agent", "description": "Maintains API docs", "provider": "codex"}}),
+            json!({"prompt": "You maintain concise API documentation."}),
         ),
         ep(
             "POST",
@@ -480,13 +519,17 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/agents/{id}/offices",
             "agents",
-            "List offices for agent // TODO: example",
+            "List offices for agent",
         ),
         ep(
             "POST",
             "/api/agents/{id}/signal",
             "agents",
-            "Send runtime signal to agent // TODO: example",
+            "Send runtime signal to agent",
+        )
+        .with_example(
+            json!({"path": {"id": "project-agentdesk"}, "body": {"signal": "blocked", "reason": "waiting on review"}}),
+            json!({"ok": true, "card_id": "card-1", "signal": "blocked"}),
         ),
         ep(
             "POST",
@@ -578,13 +621,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/agents/{id}/cron",
             "agents",
-            "List cron jobs for agent // TODO: example",
+            "List cron jobs for agent",
         ),
         ep(
             "GET",
             "/api/agents/{id}/skills",
             "agents",
-            "List skills for agent // TODO: example",
+            "List skills for agent",
         ),
         ep(
             "GET",
@@ -635,7 +678,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/agents/{id}/turn",
             "agents",
-            "Get active turn status and recent output // TODO: example",
+            "Get active turn status and recent output",
         )
     ]
 }

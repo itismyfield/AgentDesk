@@ -97,28 +97,28 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/kanban-cards/{id}/reviews",
             "kanban",
-            "List reviews for card // TODO: example",
+            "List reviews for card",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
             "GET",
             "/api/kanban-cards/{id}/review-state",
             "kanban",
-            "Get canonical review-state record for card // TODO: example",
+            "Get canonical review-state record for card",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
             "GET",
             "/api/kanban-cards/{id}/audit-log",
             "kanban",
-            "Get audit log for card // TODO: example",
+            "Get audit log for card",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
             "GET",
             "/api/kanban-cards/{id}/comments",
             "kanban",
-            "Get GitHub comments for linked card issue // TODO: example",
+            "Get GitHub comments for linked card issue",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
@@ -244,37 +244,57 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/kanban-repos",
             "kanban-repos",
-            "List kanban repos // TODO: example",
+            "List kanban repos",
         ),
         ep(
             "POST",
             "/api/kanban-repos",
             "kanban-repos",
-            "Create kanban repo // TODO: example",
+            "Create kanban repo",
+        )
+        .with_example(
+            json!({"body": {"repo": "itismyfield/AgentDesk"}}),
+            json!({"repo": {"id": "itismyfield/AgentDesk", "display_name": "AgentDesk", "sync_enabled": true, "last_synced_at": null}}),
         ),
         ep(
             "PATCH",
             "/api/kanban-repos/{owner}/{repo}",
             "kanban-repos",
-            "Update kanban repo // TODO: example",
+            "Update kanban repo",
+        )
+        .with_example(
+            json!({"path": {"owner": "itismyfield", "repo": "AgentDesk"}, "body": {"default_agent_id": "project-agentdesk"}}),
+            json!({"repo": {"id": "itismyfield/AgentDesk", "default_agent_id": "project-agentdesk", "sync_enabled": true}}),
         ),
         ep(
             "DELETE",
             "/api/kanban-repos/{owner}/{repo}",
             "kanban-repos",
-            "Delete kanban repo // TODO: example",
+            "Delete kanban repo",
+        )
+        .with_example(
+            json!({"path": {"owner": "itismyfield", "repo": "AgentDesk"}}),
+            json!({"ok": true}),
         ),
         ep(
             "PATCH",
             "/api/kanban-reviews/{id}/decisions",
             "reviews",
-            "Update review decisions // TODO: example",
+            "Update review decisions",
+        )
+        .with_example(
+            json!({"path": {"id": "review-1"}, "body": {"decisions": [{"item_id": 1, "decision": "accept"}]}}),
+            json!({"review": {"dispatch_id": "review-1", "decisions": [{"item_id": 1, "decision": "accept"}]}}),
         ),
         ep(
             "POST",
             "/api/kanban-reviews/{id}/trigger-rework",
             "reviews",
-            "Trigger rework for review // TODO: example",
+            "Trigger rework for review",
+        )
+        .with_example(
+            json!({"path": {"id": "review-1"}}),
+            json!({"ok": true}),
         ),
         ep(
             "POST",
@@ -515,37 +535,61 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/internal/link-dispatch-thread",
             "internal",
-            "Link dispatch to an existing Discord thread // TODO: example",
+            "Link dispatch to an existing Discord thread",
+        )
+        .with_example(
+            json!({"body": {"dispatch_id": "dispatch-1", "thread_id": "1500000000000000001", "channel_id": "1500000000000000000"}}),
+            json!({"ok": true, "card_id": "card-1"}),
         ),
         ep(
             "GET",
             "/api/internal/card-thread",
             "internal",
-            "Resolve thread metadata for a card // TODO: example",
+            "Resolve thread metadata for a card",
+        )
+        .with_example(
+            json!({"query": {"dispatch_id": "dispatch-1"}}),
+            json!({"card_id": "card-1", "active_thread_id": "1500000000000000001", "dispatch_type": "implementation"}),
         ),
         ep(
             "GET",
             "/api/internal/pending-dispatch-for-thread",
             "internal",
-            "Find pending dispatch bound to a thread // TODO: example",
+            "Find pending dispatch bound to a thread",
+        )
+        .with_example(
+            json!({"query": {"thread_id": "1500000000000000001"}}),
+            json!({"dispatch_id": "dispatch-1"}),
         ),
         ep(
             "GET",
             "/api/pipeline/stages",
             "pipeline",
-            "List pipeline stages // TODO: example",
+            "List pipeline stages",
+        )
+        .with_example(
+            json!({"query": {"repo": "itismyfield/AgentDesk"}}),
+            json!({"stages": [{"stage_name": "implementation", "stage_order": 1, "provider": "codex"}]}),
         ),
         ep(
             "PUT",
             "/api/pipeline/stages",
             "pipeline",
-            "Replace all pipeline stages // TODO: example",
+            "Replace all pipeline stages",
+        )
+        .with_example(
+            json!({"body": {"repo": "itismyfield/AgentDesk", "stages": [{"stage_name": "implementation", "stage_order": 1, "provider": "codex", "timeout_minutes": 60, "on_failure": "fail"}]}}),
+            json!({"stages": [{"repo_id": "itismyfield/AgentDesk", "stage_name": "implementation", "stage_order": 1}]}),
         ),
         ep(
             "DELETE",
             "/api/pipeline/stages",
             "pipeline",
-            "Delete pipeline stages // TODO: example",
+            "Delete pipeline stages",
+        )
+        .with_example(
+            json!({"query": {"repo": "itismyfield/AgentDesk"}}),
+            json!({"deleted": true, "count": 3}),
         ),
         ep(
             "GET",
@@ -568,25 +612,33 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/pipeline/cards/{card_id}/history",
             "pipeline",
-            "Get card transition history // TODO: example",
+            "Get card transition history",
+        )
+        .with_example(
+            json!({"path": {"card_id": "card-1"}}),
+            json!({"history": [{"from_status": "backlog", "to_status": "ready", "reason": "operator"}]}),
         ),
         ep(
             "GET",
             "/api/pipeline/cards/{card_id}/transcripts",
             "pipeline",
-            "List completed turn transcripts linked to card dispatches // TODO: example",
+            "List completed turn transcripts linked to card dispatches",
+        )
+        .with_example(
+            json!({"path": {"card_id": "card-1"}, "query": {"limit": 2}}),
+            json!({"card_id": "card-1", "transcripts": [{"dispatch_id": "dispatch-1", "agent_id": "project-agentdesk"}]}),
         ),
         ep(
             "GET",
             "/api/pipeline/config/default",
             "pipeline",
-            "Get default pipeline config // TODO: example",
+            "Get default pipeline config",
         ),
         ep(
             "GET",
             "/api/pipeline/config/effective",
             "pipeline",
-            "Get effective merged pipeline config // TODO: example",
+            "Get effective merged pipeline config",
         )
         .with_params([
             (
@@ -597,36 +649,56 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "agent_id",
                 query_param("string", false, "Agent id for config resolution"),
             ),
-        ]),
+        ])
+        .with_example(
+            json!({"query": {"repo": "itismyfield/AgentDesk", "agent_id": "project-agentdesk"}}),
+            json!({"stages": [{"stage_name": "implementation", "provider": "codex"}], "source": "merged"}),
+        ),
         ep(
             "GET",
             "/api/pipeline/config/repo/{owner}/{repo}",
             "pipeline",
-            "Get repo pipeline override // TODO: example",
+            "Get repo pipeline override",
+        )
+        .with_example(
+            json!({"path": {"owner": "itismyfield", "repo": "AgentDesk"}}),
+            json!({"repo": "itismyfield/AgentDesk", "pipeline_config": {"stages": []}}),
         ),
         ep(
             "PUT",
             "/api/pipeline/config/repo/{owner}/{repo}",
             "pipeline",
-            "Set repo pipeline override // TODO: example",
+            "Set repo pipeline override",
+        )
+        .with_example(
+            json!({"path": {"owner": "itismyfield", "repo": "AgentDesk"}, "body": {"config": {"stages": [{"name": "implementation"}]}}}),
+            json!({"ok": true, "repo": "itismyfield/AgentDesk"}),
         ),
         ep(
             "GET",
             "/api/pipeline/config/agent/{agent_id}",
             "pipeline",
-            "Get agent pipeline override // TODO: example",
+            "Get agent pipeline override",
+        )
+        .with_example(
+            json!({"path": {"agent_id": "project-agentdesk"}}),
+            json!({"agent_id": "project-agentdesk", "pipeline_config": {"stages": []}}),
         ),
         ep(
             "PUT",
             "/api/pipeline/config/agent/{agent_id}",
             "pipeline",
-            "Set agent pipeline override // TODO: example",
+            "Set agent pipeline override",
+        )
+        .with_example(
+            json!({"path": {"agent_id": "project-agentdesk"}, "body": {"config": {"stages": [{"name": "review"}]}}}),
+            json!({"ok": true, "agent_id": "project-agentdesk"}),
         ),
         ep(
             "GET",
             "/api/pipeline/config/graph",
             "pipeline",
-            "Get pipeline graph // TODO: example",
+            "Get pipeline graph",
         )
         .with_params([
             (
@@ -637,7 +709,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "agent_id",
                 query_param("string", false, "Agent id for config resolution"),
             ),
-        ]),
-        ep("GET", "/api/github/repos", "github", "List GitHub repos // TODO: example")
+        ])
+        .with_example(
+            json!({"query": {"repo": "itismyfield/AgentDesk", "agent_id": "project-agentdesk"}}),
+            json!({"nodes": [{"id": "implementation", "label": "Implementation"}], "edges": []}),
+        ),
+        ep("GET", "/api/github/repos", "github", "List GitHub repos")
     ]
 }
