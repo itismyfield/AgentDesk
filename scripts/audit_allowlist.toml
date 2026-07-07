@@ -53,6 +53,15 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:edafac97f164fd68",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:b4849c24f5cb7d09",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
+  # #4230 S1: existing turn_bridge direct gateway calls re-fingerprinted after
+  # the stream/status tick block moved verbatim to turn_bridge/stream_tick.rs.
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:40a1288799a3f040",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:03ea2acdb96e58a5",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:f31f0c69052ee4c5",
+  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:7aef9562406e0468",
+  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:3749de8c4b7edb9e",
+  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:029e6a0f4f88558e",
+  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:c82e55fb11948939",
   # #3560: footer-mode migration reconcile — edits a pre-default-ON *separate*
   # status panel to a migration notice before dropping its handle (behaviorally
   # the same direct resume-notice edit already allowlisted in mod.rs; extracted

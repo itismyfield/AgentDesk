@@ -1224,8 +1224,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6193 lines; production LoC; +11
-    from #4185: on the restart-cancel epilogue's guarded-save IdentityMismatch the
+  - `src/services/discord/turn_bridge/mod.rs` (5692 lines; production LoC; -501
+    from #4230 S1 moving `CompletionGuard`/`InflightCleanupGuard` to
+    `turn_bridge/guards.rs` and the post-drain stream/status tick to
+    `turn_bridge/stream_tick.rs`; behavior-preserving decompose. Prior +11 from
+    #4185: on the restart-cancel epilogue's guarded-save IdentityMismatch the
     epilogue now calls `patch_restart_full_response_if_identity_unchanged` so the
     API_FRICTION-cleaned `full_response` reaches the restart-preserved durable row;
     patch helper + guards live in `inflight/save_store.rs`, this hotfile carries

@@ -7,6 +7,7 @@ mod context_window;
 mod early_tui_completion;
 mod finalize_epilogue;
 mod followup_requeue;
+mod guards;
 mod headless_delivery;
 mod memory_lifecycle;
 mod output_lifecycle;
@@ -18,6 +19,7 @@ mod single_message_footer;
 mod skill_usage;
 mod stale_resume;
 mod status_panel;
+mod stream_tick;
 mod streaming_edit_text;
 mod task_notification_lifecycle;
 mod terminal_controller_cutover;
@@ -172,6 +174,7 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 // Items used by spawn_turn_bridge from submodules
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
+use guards::{CompletionGuard, InflightCleanupGuard};
 use headless_delivery::{
     SYNTHETIC_HEADLESS_RECOVERY_PLACEHOLDER_ID,
     cleanup_headless_streaming_placeholder_after_delivery, enqueue_headless_delivery,
@@ -205,6 +208,7 @@ use status_panel::{
     record_status_panel_events, should_open_long_running_placeholder_controller,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
 };
+use stream_tick::{BridgeStreamTickContext, BridgeStreamTickState, run_bridge_stream_tick};
 use terminal_delivery::{
     BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
     bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
@@ -1496,85 +1500,12 @@ pub(super) fn spawn_turn_bridge(
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
         let completion_tx = bridge.completion_tx;
-        // Guard: ensure completion_tx fires even if the task panics or
-        // exits early, preventing the parent from hanging on completion_rx.
-        //
-        // #2448: also publish an explicit `InflightSignal::Completed`
-        // broadcast on drop so any per-turn relay tasks (currently the
-        // standby JSONL relay) can exit immediately instead of polling
-        // against a wall-clock deadline. The broadcast send is best-effort
-        // — if no subscriber is registered, `send` returns Err and we
-        // ignore it.
-        struct CompletionGuard {
-            tx: Option<tokio::sync::oneshot::Sender<()>>,
-            broadcaster: tokio::sync::broadcast::Sender<super::inflight::InflightSignal>,
-            channel_id: ChannelId,
-        }
-        impl Drop for CompletionGuard {
-            fn drop(&mut self) {
-                if let Some(tx) = self.tx.take() {
-                    let _ = tx.send(());
-                }
-                let _ = self
-                    .broadcaster
-                    .send(super::inflight::InflightSignal::Completed {
-                        channel_id: self.channel_id.get(),
-                    });
-            }
-        }
         let _completion_guard = CompletionGuard {
             tx: completion_tx,
             broadcaster: shared_owned.inflight_signals.clone(),
             channel_id,
         };
 
-        // Guard: ensure inflight state file is cleaned up even if the task
-        // panics or exits early.  On the normal path we defuse the guard
-        // after the explicit clear_inflight_state() call.
-        //
-        // #3161 (codex P2): the Drop runs on ANY abnormal exit (panic / early
-        // return after the mailbox release but before the explicit defuse). A
-        // plain unconditional `clear_inflight_state` here is identity-blind and
-        // can delete a row this turn does NOT own — e.g. a NEWER turn already
-        // re-wrote the channel's inflight after this turn released the mailbox.
-        // The guard now carries THIS turn's `user_msg_id` and routes the
-        // abnormal-path clear through the identity-aware guarded clears, so it
-        // only removes the row when the on-disk identity still matches THIS
-        // turn (non-zero) or is a genuine zero-id-owned row (zero). A newer
-        // owner yields `UserMsgMismatch` and is preserved.
-        struct InflightCleanupGuard {
-            provider: Option<ProviderKind>,
-            channel_id: u64,
-            user_msg_id: u64,
-            token_hash: String,
-        }
-        impl Drop for InflightCleanupGuard {
-            fn drop(&mut self) {
-                if let Some(ref provider) = self.provider {
-                    // #3859: this Drop runs on ANY abnormal exit (panic /
-                    // early-return) while the turn may still own a live
-                    // "🔄 처리 중" placeholder. Route through the abandon-request
-                    // helper — identical ownership guards to the plain guarded
-                    // clear, but it durably records the placeholder for the
-                    // placeholder sweeper to finalize to "중단됨" BEFORE deleting
-                    // the row (which still frees the channel immediately).
-                    if self.user_msg_id != 0 {
-                        super::inflight::request_inflight_abandon_if_matches(
-                            provider,
-                            self.channel_id,
-                            self.user_msg_id,
-                            &self.token_hash,
-                        );
-                    } else {
-                        super::inflight::request_inflight_abandon_if_matches_zero_owned(
-                            provider,
-                            self.channel_id,
-                            &self.token_hash,
-                        );
-                    }
-                }
-            }
-        }
         let mut inflight_guard = InflightCleanupGuard {
             provider: Some(provider.clone()),
             channel_id: channel_id.get(),
@@ -3379,494 +3310,62 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            if shared_owned.ui.status_panel_v2_enabled
-                && last_session_panel_lifecycle_refresh.elapsed() >= status_interval
-            {
-                last_session_panel_lifecycle_refresh = tokio::time::Instant::now();
-                status_panel_dirty |= refresh_session_panel_line_from_lifecycle(
-                    shared_owned.as_ref(),
+            run_bridge_stream_tick(
+                BridgeStreamTickContext {
+                    shared_owned: shared_owned.clone(),
+                    gateway: gateway.clone(),
                     channel_id,
-                    turn_id.as_str(),
-                    inflight_state.tmux_session_name.as_deref(),
-                    &provider, // #3983 item4: one-shot session banner render
-                )
-                .await;
-            }
-
-            let indicator = SPINNER[spin_idx % SPINNER.len()];
-            spin_idx += 1;
-
-            // #3813 Phase 2: hold the status-panel / footer edit off the shared
-            // rate lane while the opening answer is pending so the #4006 fast lane
-            // wins it. `status_panel_dirty` stays set → renders next interval. See
-            // status_panel_edit_defer_for_first_answer for the #3477 guard.
-            let defer_status_panel_for_first_answer = status_panel_edit_defer_for_first_answer(
-                first_answer_relayed,
-                !response_portion_after_offset(&full_response, response_sent_offset).is_empty(),
-            );
-
-            if shared_owned.ui.status_panel_v2_enabled
-                && bridge_status_panel_dirty_should_edit_separate_panel(
-                    status_panel_dirty,
+                    provider: &provider,
+                    turn_id: turn_id.as_str(),
+                    status_interval,
                     single_message_panel_footer_mode,
-                )
-                && !defer_status_panel_for_first_answer
-                && last_status_panel_edit.elapsed() >= status_interval
-                && let Some(status_msg_id) = status_panel_msg_id
-            {
-                let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
-                    channel_id,
-                    &provider,
-                    status_panel_started_at,
-                );
-                if panel_text != last_status_panel_text {
-                    match gateway
-                        .edit_message(channel_id, status_msg_id, &panel_text)
-                        .await
-                    {
-                        Ok(()) => {
-                            last_status_panel_text = panel_text;
-                            last_status_panel_edit = tokio::time::Instant::now();
-                            inflight_state.status_message_id = Some(status_msg_id.get());
-                            state_dirty = true;
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                "[turn_bridge] failed to edit status-panel-v2 message {} in channel {}: {}",
-                                status_msg_id,
-                                channel_id,
-                                error
-                            );
-                        }
-                    }
-                }
-                status_panel_dirty = false;
-            }
-            if single_message_panel_footer_mode
-                && status_panel_dirty
-                && !defer_status_panel_for_first_answer
-                && last_status_panel_edit.elapsed() >= status_interval
-            {
-                refresh_bridge_footer(
-                    shared_owned.as_ref(),
-                    channel_id,
                     footer_owner,
-                    indicator,
-                )
-                .await;
-                last_status_panel_edit = tokio::time::Instant::now();
-                status_panel_dirty = false;
-            }
-            if !watcher_owns_assistant_relay && !standby_relay_owns_output {
-                // #3805 P2 (PR-D): track whether an answer rollover created a fresh
-                // tail message this interval, so the two-message status panel is
-                // re-anchored BELOW it exactly once (not on quiet intervals).
-                let mut rolled_over_this_interval = false;
-                loop {
-                    let current_portion =
-                        response_portion_after_offset(&full_response, response_sent_offset);
-                    // #3813 AC#1 tail: mark first-output pre-rollover (first_output<=first_relay).
-                    bridge_spans.mark_first_output(!current_portion.is_empty());
-                    if done || current_portion.is_empty() {
-                        break;
-                    }
-
-                    let indicator = SPINNER[spin_idx % SPINNER.len()];
-                    let status_block = build_bridge_single_message_panel_status_block(
-                        shared_owned.as_ref(),
-                        channel_id,
-                        &provider,
-                        status_panel_started_at,
-                        indicator,
-                        prev_tool_status.as_deref(),
-                        current_tool_line.as_deref(),
-                        &full_response,
-                    );
-                    if bridge_streaming_rollover_should_skip(current_portion) {
-                        break;
-                    }
-                    let Some(plan) =
-                        super::formatting::plan_streaming_rollover(current_portion, &status_block)
-                    else {
-                        break;
-                    };
-
-                    match gateway
-                        .edit_message(channel_id, current_msg_id, &plan.frozen_chunk)
-                        .await
-                    {
-                        Ok(()) => match gateway.send_message(channel_id, &status_block).await {
-                            Ok(next_msg_id) => {
-                                let next_response_sent_offset =
-                                    response_sent_offset + plan.split_at;
-                                assert_response_sent_offset_progress(
-                                    &provider,
-                                    channel_id,
-                                    dispatch_id.as_deref(),
-                                    adk_session_key.as_deref(),
-                                    &turn_id,
-                                    response_sent_offset,
-                                    next_response_sent_offset,
-                                    &full_response,
-                                    "src/services/discord/turn_bridge/mod.rs:rollover_response_sent_offset",
-                                );
-                                response_sent_offset = next_response_sent_offset;
-                                bridge_confirmed_response_sent_offset = response_sent_offset;
-                                streaming_rollover_frozen_msg_ids.push(current_msg_id);
-                                mirror_frozen_prefix_ids(
-                                    &streaming_rollover_frozen_msg_ids,
-                                    &mut inflight_state,
-                                );
-                                current_msg_id = next_msg_id;
-                                rolled_over_this_interval = true;
-                                last_edit_text = status_block;
-                                last_status_edit = tokio::time::Instant::now() - status_interval;
-                                inflight_state.current_msg_id = current_msg_id.get();
-                                inflight_state.current_msg_len = last_edit_text.len();
-                                inflight_state.response_sent_offset = response_sent_offset;
-                                inflight_state.full_response = full_response.clone();
-                                state_dirty = true;
-                                // #3813 AC#1 tail: rollover send = bridge first relay.
-                                bridge_spans.mark_first_relay(true);
-                                if let Some((_, _, _, _, pending_new_key)) =
-                                    pending_long_running_retarget_after_state_save.as_mut()
-                                {
-                                    *pending_new_key =
-                                        super::placeholder_controller::PlaceholderKey {
-                                            provider: provider.clone(),
-                                            channel_id,
-                                            message_id: current_msg_id,
-                                        };
-                                }
-                                if let Some((pending_key, _, _, _)) =
-                                    pending_long_running_open_after_state_save.as_mut()
-                                {
-                                    pending_key.message_id = current_msg_id;
-                                }
-                                // #1255: rollover retargets the controller to the
-                                // new message and detaches the old key first.
-                                if let Some((old_key, snapshot, close_trigger, ack_consumed)) =
-                                    long_running_placeholder_active.as_ref()
-                                {
-                                    let new_key = super::placeholder_controller::PlaceholderKey {
-                                        provider: provider.clone(),
-                                        channel_id,
-                                        message_id: current_msg_id,
-                                    };
-                                    pending_long_running_retarget_after_state_save =
-                                        Some((
-                                            old_key.clone(),
-                                            snapshot.clone(),
-                                            *close_trigger,
-                                            *ack_consumed,
-                                            new_key,
-                                        ));
-                                    state_dirty = true;
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    "[discord] failed to create rollover placeholder in channel {}: {}",
-                                    channel_id,
-                                    error
-                                );
-                                let _ = gateway
-                                    .edit_message(channel_id, current_msg_id, &plan.display_snapshot)
-                                    .await;
-                                last_edit_text = plan.display_snapshot;
-                                break;
-                            }
-                        },
-                        Err(error) => {
-                            tracing::warn!(
-                                "[discord] failed to freeze rollover chunk for message {} in channel {}: {}",
-                                current_msg_id,
-                                channel_id,
-                                error
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                // #3805 P2 (PR-D): after a mid-turn answer rollover the live status
-                // panel is now stranded ABOVE the new tail answer chunk. Under the
-                // two-message flag, re-anchor it BELOW the new answer (send new,
-                // retire old, bump the generation epoch) so it stays pinned to the
-                // latest chunk. Gate is OFF-inert → the rollover path is
-                // byte-identical when the flag is off.
-                if rolled_over_this_interval
-                    && two_message_panel::two_message_should_reanchor_panel_on_rollover(
-                        shared_owned.ui.two_message_panel_enabled,
-                        status_panel_msg_id.is_some(),
-                    )
-                {
-                    let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
-                        channel_id,
-                        &provider,
-                        status_panel_started_at,
-                    );
-                    let reanchored =
-                        two_message_panel::reanchor_bridge_two_message_status_panel_below_answer(
-                            gateway.as_ref(),
-                            shared_owned.as_ref(),
-                            channel_id,
-                            &provider,
-                            &panel_text,
-                            current_msg_id,
-                            &mut status_panel_msg_id,
-                            &mut inflight_state,
-                            &mut status_panel_generation,
-                            &mut last_status_panel_text,
-                        )
-                        .await;
-                    if reanchored {
-                        state_dirty = true;
-                    }
-                }
-
-                let current_portion =
-                    response_portion_after_offset(&full_response, response_sent_offset);
-                let status_block = build_bridge_single_message_panel_status_block(
-                    shared_owned.as_ref(),
-                    channel_id,
-                    &provider,
                     status_panel_started_at,
-                    indicator,
-                    prev_tool_status.as_deref(),
-                    current_tool_line.as_deref(),
-                    &full_response,
-                );
-                let stable_display_text = build_turn_bridge_streaming_edit_text(
-                    shared_owned.ui.status_panel_v2_enabled,
-                    current_portion,
-                    &status_block,
-                    &provider,
-                );
+                    done,
+                    standby_relay_owns_output,
+                    watcher_owner_channel_id,
+                    full_response: full_response.as_str(),
+                    dispatch_id: dispatch_id.clone(),
+                    adk_session_key: adk_session_key.clone(),
+                    adk_session_name: adk_session_name.clone(),
+                    adk_session_info: adk_session_info.clone(),
+                    adk_cwd: adk_cwd.clone(),
+                    role_binding: role_binding.clone(),
+                    current_tool_line: current_tool_line.clone(),
+                    last_tool_name: last_tool_name.clone(),
+                    last_tool_summary: last_tool_summary.clone(),
+                    prev_tool_status: prev_tool_status.clone(),
+                    spinner: SPINNER,
+                    live_long_run_heartbeat_interval: LIVE_LONG_RUN_HEARTBEAT_INTERVAL,
+                },
+                BridgeStreamTickState {
+                    state_dirty: &mut state_dirty,
+                    last_session_panel_lifecycle_refresh: &mut last_session_panel_lifecycle_refresh,
+                    status_panel_dirty: &mut status_panel_dirty,
+                    spin_idx: &mut spin_idx,
+                    last_status_panel_edit: &mut last_status_panel_edit,
+                    status_panel_msg_id: &mut status_panel_msg_id,
+                    last_status_panel_text: &mut last_status_panel_text,
+                    watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                    watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                    response_sent_offset: &mut response_sent_offset,
+                    bridge_confirmed_response_sent_offset: &mut bridge_confirmed_response_sent_offset,
+                    streaming_rollover_frozen_msg_ids: &mut streaming_rollover_frozen_msg_ids,
+                    current_msg_id: &mut current_msg_id,
+                    last_edit_text: &mut last_edit_text,
+                    first_answer_relayed: &mut first_answer_relayed,
+                    inflight_state: &mut inflight_state,
+                    bridge_spans: &mut bridge_spans,
+                    status_panel_generation: &mut status_panel_generation,
+                    pending_long_running_open_after_state_save: &mut pending_long_running_open_after_state_save,
+                    pending_long_running_retarget_after_state_save: &mut pending_long_running_retarget_after_state_save,
+                    long_running_placeholder_active: &mut long_running_placeholder_active,
+                    last_adk_heartbeat: &mut last_adk_heartbeat,
+                    last_inflight_long_run_heartbeat: &mut last_inflight_long_run_heartbeat,
+                },
+            )
+            .await;
 
-                if super::single_message_panel::streaming_footer_text_changed(
-                    single_message_panel_footer_mode,
-                    &last_edit_text,
-                    &stable_display_text,
-                )
-                    && !done
-                    && bridge_streaming_edit_gate_open(
-                        last_status_edit.elapsed() >= status_interval,
-                        first_answer_relayed,
-                        current_portion.is_empty(),
-                    )
-                    && long_running_placeholder_active.is_none()
-                    && pending_long_running_open_after_state_save.is_none()
-                    && pending_long_running_retarget_after_state_save.is_none()
-                {
-                    let edit_ok = TurnGateway::edit_message(
-                        gateway.as_ref(),
-                        channel_id,
-                        current_msg_id,
-                        &stable_display_text,
-                    )
-                    .await
-                    .is_ok();
-                    last_status_edit = tokio::time::Instant::now();
-                    if edit_ok {
-                        first_answer_relayed |= !current_portion.is_empty();
-                        // #3813 AC#1 tail: first bridge-owned relay delivered.
-                        bridge_spans.mark_first_relay(!current_portion.is_empty());
-                        last_edit_text = stable_display_text;
-                        inflight_state.current_msg_id = current_msg_id.get();
-                        inflight_state.current_msg_len = last_edit_text.len();
-                        inflight_state.response_sent_offset = response_sent_offset;
-                        inflight_state.full_response = full_response.clone();
-                        state_dirty = true;
-                    }
-                }
-            }
-
-            if shared_owned.ui.placeholder_live_events_enabled
-                && watcher_owns_assistant_relay
-                && let Some((key, input, _, _)) = long_running_placeholder_active.as_ref()
-                && let Some(block) = shared_owned.ui.placeholder_live_events.render_block(channel_id)
-            {
-                let outcome = shared_owned
-                    .ui.placeholder_controller
-                    .ensure_active_with_live_events(
-                        gateway.as_ref(),
-                        key.clone(),
-                        input.clone(),
-                        block,
-                    )
-                    .await;
-                if matches!(
-                    outcome,
-                    super::placeholder_controller::PlaceholderControllerOutcome::Edited
-                ) {
-                    state_dirty = true;
-                }
-            }
-
-            if bridge_should_reclaim_relay_from_missing_watcher(
-                watcher_owns_assistant_relay,
-                standby_relay_owns_output,
-                live_watcher_registered_for_relay(shared_owned.as_ref(), watcher_owner_channel_id),
-            ) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ turn_bridge reclaiming assistant relay for channel {} after watcher disappeared",
-                    channel_id.get()
-                );
-                watcher_owns_assistant_relay = false;
-                watcher_relay_available_for_turn = false;
-                inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
-                rewind_and_persist_delivery_on_reclaim(
-                    &full_response,
-                    bridge_confirmed_response_sent_offset,
-                    &mut response_sent_offset,
-                    &mut inflight_state,
-                    channel_id,
-                );
-                state_dirty = true;
-            }
-
-            if state_dirty
-                || pending_long_running_open_after_state_save.is_some()
-                || pending_long_running_retarget_after_state_save.is_some()
-                || inflight_state.current_tool_line != current_tool_line
-                || inflight_state.last_tool_name != last_tool_name
-                || inflight_state.last_tool_summary != last_tool_summary
-                || inflight_state.prev_tool_status != prev_tool_status
-            {
-                inflight_state.current_tool_line = current_tool_line.clone();
-                inflight_state.last_tool_name = last_tool_name.clone();
-                inflight_state.last_tool_summary = last_tool_summary.clone();
-                inflight_state.prev_tool_status = prev_tool_status.clone();
-                match save_inflight_state(&inflight_state) {
-                    Ok(()) => {
-                        if let Some((key, snapshot, close_trigger, ack_consumed)) =
-                            pending_long_running_open_after_state_save.take()
-                        {
-                            if key.message_id == current_msg_id
-                                && long_running_placeholder_active.is_none()
-                            {
-                                let outcome = ensure_active_placeholder_card(
-                                    shared_owned.as_ref(),
-                                    gateway.as_ref(),
-                                    key.clone(),
-                                    snapshot.clone(),
-                                )
-                                .await;
-                                use super::placeholder_controller::PlaceholderControllerOutcome::*;
-                                if matches!(outcome, Edited | Coalesced) {
-                                    long_running_placeholder_active =
-                                        Some((key, snapshot, close_trigger, ack_consumed));
-                                } else {
-                                    inflight_state.long_running_placeholder_active = false;
-                                    if let Err(error) = save_inflight_state(&inflight_state) {
-                                        tracing::warn!(
-                                            "[turn_bridge] failed to persist long-running placeholder open failure in channel {}: {}",
-                                            channel_id,
-                                            error
-                                        );
-                                    }
-                                }
-                            } else {
-                                inflight_state.long_running_placeholder_active = false;
-                                if let Err(error) = save_inflight_state(&inflight_state) {
-                                    tracing::warn!(
-                                        "[turn_bridge] failed to persist stale long-running placeholder open drop in channel {}: {}",
-                                        channel_id,
-                                        error
-                                    );
-                                }
-                            }
-                        }
-                        if let Some((
-                            old_key,
-                            snapshot,
-                            close_trigger,
-                            ack_consumed,
-                            new_key,
-                        )) = pending_long_running_retarget_after_state_save.take()
-                        {
-                            let active_still_matches_old_key = long_running_placeholder_active
-                                .as_ref()
-                                .is_some_and(|(active_key, _, _, _)| *active_key == old_key);
-                            if active_still_matches_old_key {
-                                shared_owned.ui.placeholder_controller.detach(&old_key);
-                                let outcome = ensure_active_placeholder_card(
-                                    shared_owned.as_ref(),
-                                    gateway.as_ref(),
-                                    new_key.clone(),
-                                    snapshot.clone(),
-                                )
-                                .await;
-                                use super::placeholder_controller::PlaceholderControllerOutcome::*;
-                                if matches!(outcome, Edited | Coalesced) {
-                                    long_running_placeholder_active =
-                                        Some((new_key, snapshot, close_trigger, ack_consumed));
-                                } else {
-                                    // Retarget edit failed — drop the flag so the
-                                    // regular streaming loop and sweeper resume
-                                    // normal handling.
-                                    long_running_placeholder_active = None;
-                                    inflight_state.long_running_placeholder_active = false;
-                                    if let Err(error) = save_inflight_state(&inflight_state) {
-                                        tracing::warn!(
-                                            "[turn_bridge] failed to persist long-running placeholder retarget failure in channel {}: {}",
-                                            channel_id,
-                                            error
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            "[turn_bridge] failed to persist inflight state before moving placeholder pin in channel {}: {}",
-                            channel_id,
-                            error
-                        );
-                    }
-                }
-            }
-
-            if last_adk_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
-                post_adk_session_status(
-                    adk_session_key.as_deref(),
-                    adk_session_name.as_deref(),
-                    Some(provider.as_str()),
-                    "working",
-                    &provider,
-                    adk_session_info.as_deref(),
-                    None,
-                    adk_cwd.as_deref(),
-                    dispatch_id.as_deref(),
-                    adk_session_name.as_deref().and_then(
-                        crate::services::discord::adk_session::parse_thread_channel_id_from_name,
-                    ),
-                    Some(channel_id),
-                    role_binding
-                        .as_ref()
-                        .map(|binding| binding.role_id.as_str()),
-                    shared_owned.api_port,
-                )
-                .await;
-                last_adk_heartbeat = std::time::Instant::now();
-            }
-
-            // codex round-8 P1: keep `placeholder_sweeper` from abandoning a
-            // healthy long-running tool wait by bumping inflight mtime every
-            // 30s while a placeholder is owned. If the turn dies, this loop
-            // stops firing → mtime stops advancing → sweeper can abandon
-            // normally past `ABANDON_THRESHOLD_SECS`.
-            if long_running_placeholder_active.is_some()
-                && last_inflight_long_run_heartbeat.elapsed()
-                    >= LIVE_LONG_RUN_HEARTBEAT_INTERVAL
-            {
-                inflight_state.updated_at = chrono::Utc::now().to_rfc3339();
-                let _ = save_inflight_state(&inflight_state);
-                last_inflight_long_run_heartbeat = std::time::Instant::now();
-            }
         }
 
         // #3813 AC#1 tail: emit bridge-side latency spans once at loop exit
