@@ -60,13 +60,17 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/turns/{channel_id}/extend-timeout",
             "queue",
-            "Extend live turn timeout // TODO: example",
+            "Extend live turn timeout",
+        )
+        .with_example(
+            json!({"path": {"channel_id": "1473922824350601297"}, "body": {"extend_secs": 1800}}),
+            json!({"ok": true, "channel_id": "1473922824350601297", "requested_extend_secs": 1800, "applied_extend_secs": 1800, "remaining_minutes": 30}),
         ),
         ep(
             "POST",
             "/api/channels/{channel_id}/monitoring",
             "monitoring",
-            "Create or update a channel monitoring status entry // TODO: example",
+            "Create or update a channel monitoring status entry",
         )
         .with_params([
             ("channel_id", path_param("Discord channel ID")),
@@ -75,25 +79,37 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "description",
                 body_param("string", true, "Human-readable status description"),
             ),
-        ]),
+        ])
+        .with_example(
+            json!({"path": {"channel_id": "1473922824350601297"}, "body": {"key": "relay", "description": "Relay queue is healthy"}}),
+            json!({"status": "ok", "active_count": 1}),
+        ),
         ep(
             "GET",
             "/api/channels/{channel_id}/monitoring",
             "monitoring",
-            "List channel monitoring status entries // TODO: example",
+            "List channel monitoring status entries",
         )
-        .with_params([("channel_id", path_param("Discord channel ID"))]),
+        .with_params([("channel_id", path_param("Discord channel ID"))])
+        .with_example(
+            json!({"path": {"channel_id": "1473922824350601297"}}),
+            json!({"status": "ok", "active_count": 1, "entries": [{"key": "relay", "description": "Relay queue is healthy"}]}),
+        ),
         ep(
             "DELETE",
             "/api/channels/{channel_id}/monitoring/{key}",
             "monitoring",
-            "Remove a channel monitoring status entry // TODO: example",
+            "Remove a channel monitoring status entry",
         )
         .with_params([
             ("channel_id", path_param("Discord channel ID")),
             ("key", path_param("Monitoring entry key")),
-        ]),
-        ep("GET", "/api/analytics", "analytics", "Observability counters and structured events // TODO: example")
+        ])
+        .with_example(
+            json!({"path": {"channel_id": "1473922824350601297", "key": "relay"}}),
+            json!({"status": "ok", "active_count": 0}),
+        ),
+        ep("GET", "/api/analytics", "analytics", "Observability counters and structured events")
             .with_params([
                 (
                     "provider",
@@ -111,7 +127,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "limit",
                     query_param("integer", false, "Maximum recent events to return").with_default(100),
                 ),
-            ]),
+            ])
+            .with_example(
+                json!({"query": {"provider": "codex", "channelId": "1473922824350601297", "eventType": "turn_started", "limit": 25}}),
+                json!({"counters": [{"provider": "codex", "channel_id": "1473922824350601297", "turns_total": 12}], "recent_events": [{"event_type": "turn_started", "provider": "codex"}]}),
+            ),
         ep(
             "GET",
             "/api/analytics/invariants",
@@ -171,7 +191,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/quality/events",
             "analytics",
-            "Agent quality raw event stream // TODO: example",
+            "Agent quality raw event stream",
         )
         .with_params([
             (
@@ -186,34 +206,38 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "limit",
                 query_param("integer", false, "Maximum recent events to return").with_default(200),
             ),
-        ]),
-        ep("GET", "/api/streaks", "analytics", "Agent activity streaks // TODO: example"),
-        ep("GET", "/api/achievements", "analytics", "Agent achievements // TODO: example"),
+        ])
+        .with_example(
+            json!({"query": {"agent_id": "project-agentdesk", "days": 7, "limit": 50}}),
+            json!({"events": [{"agent_id": "project-agentdesk", "event_type": "turn_completed", "quality_score": 0.95}]}),
+        ),
+        ep("GET", "/api/streaks", "analytics", "Agent activity streaks"),
+        ep("GET", "/api/achievements", "analytics", "Agent achievements"),
         ep(
             "GET",
             "/api/activity-heatmap",
             "analytics",
-            "Activity heatmap by hour // TODO: example",
+            "Activity heatmap by hour",
         ),
-        ep("GET", "/api/audit-logs", "analytics", "Audit logs // TODO: example"),
+        ep("GET", "/api/audit-logs", "analytics", "Audit logs"),
         ep(
             "GET",
             "/api/machine-status",
             "analytics",
-            "Machine online status // TODO: example",
+            "Machine online status",
         ),
         ep(
             "GET",
             "/api/rate-limits",
             "analytics",
-            "Cached rate limits per provider // TODO: example",
+            "Cached rate limits per provider",
         ),
-        ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot // TODO: example"),
+        ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot"),
         ep(
             "GET",
             "/api/token-analytics",
             "analytics",
-            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns // TODO: example",
+            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns",
         )
         .with_params([(
             "period",
@@ -227,7 +251,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             }
             .with_enum(&["7d", "30d", "90d"])
             .with_default("30d"),
-        )]),
+        )])
+        .with_example(
+            json!({"query": {"period": "30d", "fresh": "1"}}),
+            json!({"period": "30d", "summary": {"total_tokens": 12000, "total_cost": 1.23}, "daily": [], "heatmap": []}),
+        ),
         ep(
             "GET",
             "/api/home/kpi-trends",
@@ -261,7 +289,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/skills-trend",
             "analytics",
-            "Skill usage trend by day // TODO: example",
+            "Skill usage trend by day",
+        )
+        .with_example(
+            json!({"query": {"days": 30}}),
+            json!({"days": 30, "trend": [{"date": "2026-07-08", "skill_name": "memory-read", "calls": 4}]}),
         ),
         ep(
             "GET",
@@ -394,7 +426,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/reviews/tuning/aggregate",
             "reviews",
-            "Aggregate review-tuning outcomes // TODO: example",
+            "Aggregate review-tuning outcomes",
         ),
         ep(
             "POST",

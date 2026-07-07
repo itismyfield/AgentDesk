@@ -87,13 +87,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/agents/{id}/transcripts",
             "agents",
-            "List recent completed turn transcripts for agent // TODO: example",
+            "List recent completed turn transcripts for agent",
         ),
         ep(
             "GET",
             "/api/agents/{id}/timeline",
             "agents",
-            "Agent activity timeline // TODO: example",
+            "Agent activity timeline",
         ),
         ep(
             "GET",
@@ -176,13 +176,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"error": "metric must be one of turn_success_rate|review_pass_rate"}),
         )
         .with_curl("curl 'http://localhost:8787/api/agents/quality/ranking?metric=turn_success_rate&window=7d&limit=10'"),
-        ep("GET", "/api/sessions", "sessions", "List sessions // TODO: example"),
-        ep("GET", "/api/policies", "policies", "List policies // TODO: example"),
+        ep("GET", "/api/sessions", "sessions", "List sessions"),
+        ep("GET", "/api/policies", "policies", "List policies"),
         ep(
             "GET",
             "/api/auth/session",
             "auth",
-            "Get current auth session // TODO: example",
+            "Get current auth session",
         ),
         ep("GET", "/api/kanban-cards", "kanban", "List kanban cards")
             .with_params([
@@ -294,7 +294,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/kanban-cards/stalled",
             "kanban",
-            "List stalled cards // TODO: example",
+            "List stalled cards",
         ),
         ep(
             "POST",
@@ -450,9 +450,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "DELETE",
             "/api/kanban-cards/{id}",
             "kanban",
-            "Delete card // TODO: example",
+            "Delete card",
         )
-        .with_params([("id", path_param("Kanban card ID"))]),
+        .with_params([("id", path_param("Kanban card ID"))])
+        .with_example(
+            json!({"path": {"id": "card-1"}}),
+            json!({"ok": true}),
+        ),
         ep(
             "POST",
             "/api/kanban-cards/{id}/assign",

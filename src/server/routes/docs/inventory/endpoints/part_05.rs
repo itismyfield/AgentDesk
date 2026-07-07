@@ -156,7 +156,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"error": "dod must contain at least one item"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/github/issues/create -H 'Content-Type: application/json' -d '{\"repo\":\"ADK\",\"title\":\"Example\",\"background\":\"bg\",\"content\":[\"do thing\"],\"dod\":[\"it works\"]}'"),
-        ep("POST", "/api/github/repos", "github", "Register GitHub repo // TODO: example"),
+        ep("POST", "/api/github/repos", "github", "Register GitHub repo").with_example(
+            json!({"body": {"id": "itismyfield/AgentDesk"}}),
+            json!({"repo": {"id": "itismyfield/AgentDesk", "display_name": "AgentDesk", "sync_enabled": true, "last_synced_at": null}}),
+        ),
         ep(
             "POST",
             "/api/github/repos/{owner}/{repo}/sync",
@@ -202,102 +205,159 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/github-repos",
             "github-dashboard",
-            "List GitHub repos for dashboard // TODO: example",
+            "List GitHub repos for dashboard",
         ),
         ep(
             "GET",
             "/api/github-issues",
             "github-dashboard",
-            "List GitHub issues for dashboard // TODO: example",
+            "List GitHub issues for dashboard",
+        )
+        .with_example(
+            json!({"query": {"repo": "itismyfield/AgentDesk", "state": "open", "limit": 20}}),
+            json!({"repo": "itismyfield/AgentDesk", "issues": [{"number": 4227, "title": "Docs inventory sweep", "state": "OPEN"}]}),
         ),
         ep(
             "PATCH",
             "/api/github-issues/{owner}/{repo}/{number}/close",
             "github-dashboard",
-            "Close GitHub issue from dashboard // TODO: example",
+            "Close GitHub issue from dashboard",
+        )
+        .with_example(
+            json!({"path": {"owner": "itismyfield", "repo": "AgentDesk", "number": 4227}}),
+            json!({"ok": true, "repo": "itismyfield/AgentDesk", "number": 4227}),
         ),
         ep(
             "GET",
             "/api/github-closed-today",
             "github-dashboard",
-            "List issues closed today // TODO: example",
+            "List issues closed today",
         ),
-        ep("GET", "/api/offices", "offices", "List offices // TODO: example"),
-        ep("POST", "/api/offices", "offices", "Create office // TODO: example"),
+        ep("GET", "/api/offices", "offices", "List offices"),
+        ep("POST", "/api/offices", "offices", "Create office").with_example(
+            json!({"body": {"name": "Engineering", "layout": "kanban"}}),
+            json!({"office": {"id": "office-1", "name": "Engineering", "layout": "kanban"}}),
+        ),
         ep(
             "PATCH",
             "/api/offices/reorder",
             "offices",
-            "Reorder offices // TODO: example",
+            "Reorder offices",
+        )
+        .with_example(
+            json!({"body": [{"id": "office-1", "sort_order": 1}]}),
+            json!({"ok": true, "updated": 1}),
         ),
-        ep("PATCH", "/api/offices/{id}", "offices", "Update office // TODO: example"),
-        ep("DELETE", "/api/offices/{id}", "offices", "Delete office // TODO: example"),
+        ep("PATCH", "/api/offices/{id}", "offices", "Update office").with_example(
+            json!({"path": {"id": "office-1"}, "body": {"name": "Platform", "layout": "matrix"}}),
+            json!({"office": {"id": "office-1", "name": "Platform", "layout": "matrix"}}),
+        ),
+        ep("DELETE", "/api/offices/{id}", "offices", "Delete office").with_example(
+            json!({"path": {"id": "office-1"}}),
+            json!({"ok": true}),
+        ),
         ep(
             "POST",
             "/api/offices/{id}/agents",
             "offices",
-            "Add agent to office // TODO: example",
+            "Add agent to office",
+        )
+        .with_example(
+            json!({"path": {"id": "office-1"}, "body": {"agent_id": "project-agentdesk", "department_id": "dept-platform"}}),
+            json!({"ok": true}),
         ),
         ep(
             "POST",
             "/api/offices/{id}/agents/batch",
             "offices",
-            "Batch add agents to office // TODO: example",
+            "Batch add agents to office",
+        )
+        .with_example(
+            json!({"path": {"id": "office-1"}, "body": {"agent_ids": ["project-agentdesk", "adk-dashboard"]}}),
+            json!({"ok": true}),
         ),
         ep(
             "DELETE",
             "/api/offices/{id}/agents/{agentId}",
             "offices",
-            "Remove agent from office // TODO: example",
+            "Remove agent from office",
+        )
+        .with_example(
+            json!({"path": {"id": "office-1", "agentId": "project-agentdesk"}}),
+            json!({"ok": true}),
         ),
         ep(
             "PATCH",
             "/api/offices/{id}/agents/{agentId}",
             "offices",
-            "Update office agent // TODO: example",
+            "Update office agent",
+        )
+        .with_example(
+            json!({"path": {"id": "office-1", "agentId": "project-agentdesk"}, "body": {"department_id": "dept-platform"}}),
+            json!({"ok": true}),
         ),
         ep(
             "GET",
             "/api/departments",
             "departments",
-            "List departments // TODO: example",
+            "List departments",
         ),
         ep(
             "POST",
             "/api/departments",
             "departments",
-            "Create department // TODO: example",
+            "Create department",
+        )
+        .with_example(
+            json!({"body": {"name": "Platform", "office_id": "office-1"}}),
+            json!({"department": {"id": "dept-platform", "name": "Platform", "office_id": "office-1"}}),
         ),
         ep(
             "PATCH",
             "/api/departments/reorder",
             "departments",
-            "Reorder departments // TODO: example",
+            "Reorder departments",
+        )
+        .with_example(
+            json!({"body": {"order": [{"id": "dept-platform", "sort_order": 1}]}}),
+            json!({"ok": true, "updated": 1}),
         ),
         ep(
             "PATCH",
             "/api/departments/{id}",
             "departments",
-            "Update department // TODO: example",
+            "Update department",
+        )
+        .with_example(
+            json!({"path": {"id": "dept-platform"}, "body": {"name": "Runtime", "office_id": "office-1"}}),
+            json!({"department": {"id": "dept-platform", "name": "Runtime", "office_id": "office-1"}}),
         ),
         ep(
             "DELETE",
             "/api/departments/{id}",
             "departments",
-            "Delete department // TODO: example",
+            "Delete department",
+        )
+        .with_example(
+            json!({"path": {"id": "dept-platform"}}),
+            json!({"ok": true}),
         ),
-        ep("GET", "/api/stats", "stats", "Get system stats // TODO: example"),
+        ep("GET", "/api/stats", "stats", "Get system stats"),
         ep(
             "GET",
             "/api/stats/memento",
             "stats",
-            "Get hourly Memento logical call counts and dedup hit rates // TODO: example",
+            "Get hourly Memento logical call counts and dedup hit rates",
         )
         .with_params([(
             "hours",
             query_param("integer", false, "Trailing window size in hours (1-168)")
                 .with_default(24),
-        )]),
+        )])
+        .with_example(
+            json!({"query": {"hours": 24}}),
+            json!({"hours": 24, "calls": [{"hour": "2026-07-08T00:00:00Z", "logical_calls": 12, "dedup_hits": 3}]}),
+        ),
         ep(
             "GET",
             "/api/settings",
@@ -649,7 +709,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "DELETE",
             "/api/dispatched-sessions/cleanup",
             "dispatched-sessions",
-            "Delete stale dispatched sessions // TODO: example",
+            "Delete stale dispatched sessions",
+        )
+        .with_example(
+            json!({}),
+            json!({"ok": true, "deleted": 2}),
         )
     ]
 }
