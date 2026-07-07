@@ -4903,6 +4903,9 @@ mod stall_watchdog_auto_heal_tests {
 
     #[tokio::test]
     async fn stall_watchdog_cleanup_releases_residual_orphan_pending_token() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Codex;
@@ -4980,15 +4983,23 @@ mod hard_stop_completion_event_tests {
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
     struct EnvVarReset {
+        _lock: std::sync::MutexGuard<'static, ()>,
         key: &'static str,
         previous: Option<std::ffi::OsString>,
     }
 
     impl EnvVarReset {
         fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let previous = std::env::var_os(key);
             unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
+            Self {
+                _lock: lock,
+                key,
+                previous,
+            }
         }
     }
 
