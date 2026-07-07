@@ -148,7 +148,12 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1505 lines; -7 from #4048 S3 removing the
+  - `src/services/discord/tmux.rs` (1554 lines; +49 from #4106 adding
+    `release_restored_watcher_active_turn_before_panel_edit` — hoists the
+    identity-guarded mailbox release + `global_active` decrement + the
+    finalizer's D-side channel cleanup ahead of the awaited status-panel edit so
+    a same-channel follow-up racing the edit can no longer make the late
+    finalizer identity-miss and permanently skip the decrement; -7 from #4048 S3 removing the
     restored-watcher direct queue-kickoff path in favor of the finalizer
     completion-event drain trigger; -12 from #4047 S2-b deleting
     the GateTimeout submit path and adding the shared bounded

@@ -1279,6 +1279,13 @@ fn pre_panel_release_decrements_before_same_channel_followup_claims() {
         assert!(super::should_submit_restored_watcher_finalize(
             false, turn_a
         ));
+        // #4106 review-fix: the early release must ALSO run the finalizer's
+        // D-side channel cleanup (the late do_finalize will guarded-miss and skip
+        // it). Seed a channel role override and assert the hoist clears it.
+        shared
+            .dispatch
+            .role_overrides
+            .insert(channel_id, ChannelId::new(555_4106));
         assert!(
             super::release_restored_watcher_active_turn_before_panel_edit(
                 &shared, &provider, channel_id, turn_a,
@@ -1290,6 +1297,10 @@ fn pre_panel_release_decrements_before_same_channel_followup_claims() {
             shared.restart.global_active.load(Ordering::Relaxed),
             0,
             "turn A's global_active count is gone before the panel edit can race"
+        );
+        assert!(
+            !shared.dispatch.role_overrides.contains_key(&channel_id),
+            "the pre-panel hoist must run turn A's D-side channel cleanup (role override removed), not just the decrement"
         );
 
         // Test double for the awaited Discord status-panel edit: while it is

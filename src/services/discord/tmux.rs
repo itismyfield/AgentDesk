@@ -1970,10 +1970,31 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
         return false;
     };
 
-    // Mirror the watcher finalizer's release-side behavior: the watcher path
-    // cancels the removed token but does not mark completion-cleanup.
+    // #4106 review-fix: cancel the removed token, decrement the counter, AND run
+    // the finalizer's D-side channel cleanup here. Hoisting the release ahead of
+    // the awaited panel edit makes the LATE do_finalize see removed_token=None
+    // and take the guarded-miss SKIP branch (finalize.rs), so without this the
+    // cleanup would be dropped on every normal completion. Running it here is
+    // safe: we release turn A into a still-idle channel (no newer turn has
+    // claimed yet, since a follow-up needs cancel_token.is_none() which this
+    // release just produced), so it cannot clobber a follow-up's channel state.
+    // Mirrors the finalizer non-miss branch (finalize.rs D-section) and the
+    // recovery release bundle (health/recovery.rs); voice drain is omitted
+    // because the watcher finalize path sets drain_voice=false.
     token.cancelled.store(true, Ordering::Relaxed);
     super::saturating_decrement_global_active(shared);
+
+    super::clear_watchdog_deadline_override(channel_id.get()).await;
+    let thread_parent_kickoffs =
+        super::turn_finalizer::cleanup::collect_and_clear_thread_parents(shared, channel_id);
+    super::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
+        shared,
+        provider,
+        thread_parent_kickoffs,
+    );
+    if !finish.has_pending {
+        shared.dispatch.role_overrides.remove(&channel_id);
+    }
     true
 }
 
