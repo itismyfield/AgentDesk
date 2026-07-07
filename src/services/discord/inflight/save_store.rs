@@ -98,6 +98,7 @@ impl std::fmt::Display for CreateNewInflightError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::InflightRestartMode;
     use crate::services::provider::ProviderKind;
 
     struct EnvReset(Option<std::ffi::OsString>);
@@ -135,6 +136,133 @@ mod tests {
         );
         state.turn_start_offset = None;
         state
+    }
+
+    fn api_friction_response_pair() -> (String, String) {
+        let raw = concat!(
+            "Visible answer before marker.\n",
+            "API_FRICTION: {\"endpoint\":\"GET /api/docs\",",
+            "\"friction_type\":\"missing_docs\",",
+            "\"summary\":\"docs endpoint omitted the category\",",
+            "\"workaround\":\"used live route metadata\",",
+            "\"suggested_fix\":\"document the category response\"}\n",
+            "Visible answer after marker."
+        )
+        .to_string();
+        let extracted = crate::services::api_friction::extract_api_friction_reports(&raw);
+        assert_eq!(extracted.reports.len(), 1);
+        assert!(extracted.parse_errors.is_empty());
+        assert!(!extracted.cleaned_response.contains("API_FRICTION:"));
+        (raw, extracted.cleaned_response)
+    }
+
+    fn state_with_full_response(
+        channel_id: u64,
+        full_response: &str,
+        tmux_session_name: &str,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("adk-test".to_string()),
+            343_742_347_365_974_026,
+            77_010,
+            18,
+            "user prompt".to_string(),
+            Some("session".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some(format!("/tmp/{tmux_session_name}.jsonl")),
+            None,
+            512,
+        );
+        state.full_response = full_response.to_string();
+        state.response_sent_offset = 0;
+        state
+    }
+
+    #[test]
+    fn restart_full_response_patch_strips_api_friction_after_guarded_save_declines() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let (raw, cleaned) = api_friction_response_pair();
+        let mut state =
+            state_with_full_response(44_085, &raw, "AgentDesk-codex-restart-clean-4185");
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        save_inflight_state(&state).expect("seed raw restart-preserved row");
+
+        let mut cleaned_snapshot = state.clone();
+        cleaned_snapshot.full_response = cleaned.clone();
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged(
+                &cleaned_snapshot,
+                "test::restart_cleaned_guarded_save_declines",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "the broad identity-refresh save must keep refusing restart-owned rows"
+        );
+        assert_eq!(
+            patch_restart_full_response_if_identity_unchanged(
+                &cleaned_snapshot,
+                "test::restart_cleaned_patch",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+
+        let persisted = super::super::load_inflight_state(&ProviderKind::Codex, state.channel_id)
+            .expect("persisted restart row");
+        assert_eq!(persisted.full_response, cleaned);
+        assert!(!persisted.full_response.contains("API_FRICTION:"));
+        assert_ne!(persisted.full_response, raw);
+        assert_eq!(
+            persisted.restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
+        assert_eq!(persisted.current_msg_id, state.current_msg_id);
+        assert_eq!(persisted.response_sent_offset, state.response_sent_offset);
+    }
+
+    #[test]
+    fn non_restart_identity_refresh_save_still_persists_cleaned_api_friction_text() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let (raw, cleaned) = api_friction_response_pair();
+        let mut state = state_with_full_response(44_086, &raw, "AgentDesk-codex-normal-clean-4185");
+        save_inflight_state(&state).expect("seed raw normal row");
+
+        state.full_response = cleaned.clone();
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged(
+                &state,
+                "test::normal_cleaned_identity_refresh",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+        assert_eq!(
+            patch_restart_full_response_if_identity_unchanged(
+                &state,
+                "test::normal_cleaned_restart_patch_refuses",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "the restart-only patch must not participate in ordinary rows"
+        );
+
+        let persisted = super::super::load_inflight_state(&ProviderKind::Codex, state.channel_id)
+            .expect("persisted normal row");
+        assert_eq!(persisted.full_response, cleaned);
+        assert!(!persisted.full_response.contains("API_FRICTION:"));
+        assert!(persisted.restart_mode.is_none());
     }
 
     #[test]
@@ -726,6 +854,121 @@ pub(super) fn save_inflight_state_if_identity_unchanged_in_root(
                 snapshot_identity = ?expected,
                 error = %error,
                 "inflight identity-refresh save failed; leaving durable row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
+}
+
+/// #4185: after restart-cancel, the broad identity-refresh save intentionally
+/// refuses restart-marked rows. This narrow RMW keeps that guard intact and
+/// patches only the cleaned terminal `full_response` back onto the same
+/// restart-preserved row.
+pub(in crate::services::discord) fn patch_restart_full_response_if_identity_unchanged(
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    patch_restart_full_response_if_identity_unchanged_in_root(&root, state, caller)
+}
+
+pub(super) fn patch_restart_full_response_if_identity_unchanged_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    let Some(provider) = state.provider_kind() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    if state.restart_mode.is_none() {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    let path = inflight_state_path(root, &provider, state.channel_id);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return GuardedSaveOutcome::IoError;
+    }
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedSaveOutcome::Missing;
+    };
+    let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedSaveOutcome::IdentityMismatch;
+    };
+    let expected = InflightTurnIdentity::from_state(state);
+    let durable = InflightTurnIdentity::from_state(&on_disk);
+    if state.user_msg_id == 0 && state.turn_start_offset.is_none() {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            caller = caller,
+            snapshot_identity = ?expected,
+            durable_identity = ?durable,
+            "restart-preserved full_response patch skipped because offsetless id-0 snapshot cannot safely match a durable row"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if !expected.matches_state(&on_disk)
+        || on_disk.restart_mode.is_none()
+        || on_disk.restart_mode != state.restart_mode
+        || on_disk.restart_generation != state.restart_generation
+        || on_disk.rebind_origin
+        || on_disk.output_path != state.output_path
+    {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            caller = caller,
+            snapshot_identity = ?expected,
+            durable_identity = ?durable,
+            snapshot_restart_mode = ?state.restart_mode,
+            durable_restart_mode = ?on_disk.restart_mode,
+            snapshot_restart_generation = ?state.restart_generation,
+            durable_restart_generation = ?on_disk.restart_generation,
+            durable_rebind_origin = on_disk.rebind_origin,
+            snapshot_output_path = ?state.output_path.as_deref(),
+            durable_output_path = ?on_disk.output_path.as_deref(),
+            "restart-preserved full_response patch skipped because durable row is not the same restart-preserved turn"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    on_disk.full_response = state.full_response.clone();
+    if on_disk.response_sent_offset > on_disk.full_response.len()
+        || !on_disk
+            .full_response
+            .is_char_boundary(on_disk.response_sent_offset)
+    {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            caller = caller,
+            response_sent_offset = on_disk.response_sent_offset,
+            full_response_len = on_disk.full_response.len(),
+            "restart-preserved full_response patch skipped because the existing response offset would become invalid"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    match persist_under_lock(
+        root,
+        &path,
+        &on_disk,
+        "src/services/discord/inflight.rs:patch_restart_full_response_if_identity_unchanged_in_root",
+    ) {
+        Ok(()) => GuardedSaveOutcome::Saved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                caller = caller,
+                error = %error,
+                "restart-preserved full_response patch failed; leaving durable row untouched"
             );
             GuardedSaveOutcome::IoError
         }

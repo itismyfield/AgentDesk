@@ -6387,10 +6387,21 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if cancelled && cancel_token.restart_mode().is_some() {
-            let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+            use crate::services::discord::inflight::{
+                GuardedSaveOutcome, patch_restart_full_response_if_identity_unchanged,
+                save_inflight_state_if_identity_unchanged,
+            };
+
+            let guarded_outcome = save_inflight_state_if_identity_unchanged(
                 &inflight_state,
                 "turn_bridge::restart_mode_preserve@6330",
             );
+            if matches!(guarded_outcome, GuardedSaveOutcome::IdentityMismatch) {
+                let _ = patch_restart_full_response_if_identity_unchanged(
+                    &inflight_state,
+                    "turn_bridge::restart_full_response_patch@6330",
+                );
+            }
             inflight_guard.provider.take();
         } else if preserve_inflight_for_cleanup_retry || bridge_output_owner.is_some() {
             // #3041 P1-2 (codex P1-2 R3): on a delivery-lease `Skip` the live
