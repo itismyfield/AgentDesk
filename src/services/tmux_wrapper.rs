@@ -50,6 +50,16 @@ fn install_wrapper_signal_handlers() {
 #[cfg(not(unix))]
 fn install_wrapper_signal_handlers() {}
 
+fn redacted_stderr_line(args: std::fmt::Arguments<'_>) -> String {
+    crate::logging::redact_log_text(&args.to_string())
+}
+
+macro_rules! redacted_eprintln {
+    ($($arg:tt)*) => {
+        eprintln!("{}", redacted_stderr_line(format_args!($($arg)*)));
+    };
+}
+
 /// Input mode for the wrapper subprocess.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputMode {
@@ -88,7 +98,7 @@ pub fn run(
     let prompt = match std::fs::read_to_string(prompt_file) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("\x1b[31mError reading prompt file: {}\x1b[0m", e);
+            redacted_eprintln!("\x1b[31mError reading prompt file: {}\x1b[0m", e);
             std::process::exit(1);
         }
     };
@@ -126,7 +136,7 @@ pub fn run(
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("\x1b[31mFailed to start Claude: {}\x1b[0m", e);
+            redacted_eprintln!("\x1b[31mFailed to start Claude: {}\x1b[0m", e);
             std::process::exit(1);
         }
     };
@@ -180,7 +190,7 @@ pub fn run(
                 while !exited.load(Ordering::Relaxed) {
                     let signal = WRAPPER_SIGNAL.load(Ordering::SeqCst);
                     if signal != 0 {
-                        eprintln!(
+                        redacted_eprintln!(
                             "\x1b[33m[wrapper signal {signal} received — terminating Claude tree]\x1b[0m"
                         );
                         crate::services::process::kill_pid_tree(child_pid);
@@ -201,7 +211,7 @@ pub fn run(
             match crate::services::tmux_common::RotatingJsonlWriter::open(&output_file_path) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("\x1b[31mFailed to open output file: {}\x1b[0m", e);
+                    redacted_eprintln!("\x1b[31mFailed to open output file: {}\x1b[0m", e);
                     return;
                 }
             };
@@ -292,7 +302,7 @@ pub fn run(
                 Ok(l) => l,
                 Err(_) => break,
             };
-            eprintln!("\x1b[90m[stderr] {}\x1b[0m", line);
+            redacted_eprintln!("\x1b[90m[stderr] {}\x1b[0m", line);
             collected.push_str(&line);
             collected.push('\n');
 
@@ -395,7 +405,7 @@ pub fn run(
                 {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!("\x1b[90m[input fifo error: {}]\x1b[0m", e);
+                        redacted_eprintln!("\x1b[90m[input fifo error: {}]\x1b[0m", e);
                         return;
                     }
                 };
@@ -481,7 +491,7 @@ pub fn run(
     // Write exit reason file for recovery diagnostics
     let exit_reason_path = format!("{}.exit_reason", output_file);
     let _ = std::fs::write(&exit_reason_path, &exit_reason);
-    eprintln!("\x1b[90m[exit reason: {exit_reason}]\x1b[0m");
+    redacted_eprintln!("\x1b[90m[exit reason: {exit_reason}]\x1b[0m");
 
     // Only clean up output/FIFO if exit was normal (exit:0).
     // Abnormal exits preserve files for post-mortem analysis by dcserver recovery.
@@ -489,11 +499,13 @@ pub fn run(
         let _ = std::fs::remove_file(output_file);
         let _ = std::fs::remove_file(input_fifo);
     } else {
-        eprintln!("\x1b[33m[preserving output files for post-mortem: {output_file}]\x1b[0m");
+        redacted_eprintln!(
+            "\x1b[33m[preserving output files for post-mortem: {output_file}]\x1b[0m"
+        );
     }
 
     eprintln!();
-    eprintln!("\x1b[90m--- Session ended ({exit_reason}) ---\x1b[0m");
+    redacted_eprintln!("\x1b[90m--- Session ended ({exit_reason}) ---\x1b[0m");
 }
 
 /// #3207 (part 1): is this `result` event a deliberate turn-abort (from a
@@ -628,7 +640,7 @@ pub(crate) fn render_for_terminal(json_line: &str) {
             let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
             if subtype == "init" {
                 if let Some(sid) = json.get("session_id").and_then(|v| v.as_str()) {
-                    eprintln!("\x1b[90m[session: {}]\x1b[0m", sid);
+                    redacted_eprintln!("\x1b[90m[session: {}]\x1b[0m", sid);
                 }
             }
         }
@@ -650,9 +662,13 @@ pub(crate) fn render_for_terminal(json_line: &str) {
                             let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                             let detail = format_tool_detail(name, item);
                             if detail.is_empty() {
-                                eprintln!("\x1b[36m[{}]\x1b[0m", name);
+                                redacted_eprintln!("\x1b[36m[{}]\x1b[0m", name);
                             } else {
-                                eprintln!("\x1b[36m[{}]\x1b[0m \x1b[90m{}\x1b[0m", name, detail);
+                                redacted_eprintln!(
+                                    "\x1b[36m[{}]\x1b[0m \x1b[90m{}\x1b[0m",
+                                    name,
+                                    detail
+                                );
                             }
                         }
                         _ => {}
@@ -688,7 +704,7 @@ pub(crate) fn render_for_terminal(json_line: &str) {
                 if let Some(errors) = json.get("errors").and_then(|v| v.as_array()) {
                     for e in errors {
                         if let Some(s) = e.as_str() {
-                            eprintln!("\x1b[31m{}\x1b[0m", s);
+                            redacted_eprintln!("\x1b[31m{}\x1b[0m", s);
                         }
                     }
                 }
@@ -722,6 +738,24 @@ fn append_jsonl_line_and_sync(path: &str, line: &str) -> std::io::Result<()> {
     let mut output = crate::services::tmux_common::RotatingJsonlWriter::open(path)?;
     output.write_line(line)?;
     output.sync_all()
+}
+
+#[cfg(test)]
+mod stderr_redaction_tests {
+    use super::redacted_stderr_line;
+
+    #[test]
+    fn redacted_stderr_line_masks_assignment_secret() {
+        let rendered = redacted_stderr_line(format_args!(
+            "\x1b[31mFailed to start Claude: OPENAI_API_KEY=sk-live-secret\x1b[0m"
+        ));
+
+        assert!(
+            rendered.contains("OPENAI_API_KEY=***"),
+            "rendered={rendered}"
+        );
+        assert!(!rendered.contains("sk-live-secret"), "rendered={rendered}");
+    }
 }
 
 #[cfg(test)]

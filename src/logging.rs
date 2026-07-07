@@ -257,6 +257,10 @@ struct RedactingIoGuard<W> {
     inner: W,
 }
 
+/// Redacts bytes written through tracing stdout and the dcserver rotating log
+/// writer. The tmux wrapper also redacts dynamic stderr messages by explicitly
+/// calling `redact_log_text`; arbitrary `println!`/`eprintln!` calls are not
+/// globally intercepted.
 impl<'a> MakeWriter<'a> for RedactingStdout {
     type Writer = RedactingIoGuard<io::Stdout>;
 
@@ -267,9 +271,13 @@ impl<'a> MakeWriter<'a> for RedactingStdout {
     }
 }
 
+pub(crate) fn redact_log_text(text: &str) -> String {
+    crate::utils::redact::redact_known_secrets(text)
+}
+
 fn redacted_log_bytes(buf: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(buf);
-    crate::utils::redact::redact_known_secrets(&text).into_bytes()
+    redact_log_text(&text).into_bytes()
 }
 
 impl<W: Write> Write for RedactingIoGuard<W> {
