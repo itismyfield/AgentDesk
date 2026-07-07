@@ -1238,7 +1238,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (1230 lines; production LoC; -1262
+  - `src/services/discord/turn_bridge/mod.rs` (1232 lines; production LoC; -1260
     from #4230 S6 moving the main stream loop shell + remaining event arms to
     `turn_bridge/stream_loop.rs`; behavior-preserving decompose. Prior -1339
     from #4230 S5 moving the terminal outcome delivery block to

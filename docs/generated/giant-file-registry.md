@@ -32,7 +32,7 @@
 | `src/services/discord/tui_direct_pending_start.rs` | 1495 | discord-relay | 2026-08-31 | #3540 |
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1051 | discord-relay | 2026-10-31 | #4019 |
 | `src/services/discord/tui_task_card.rs` | 1065 | discord-relay | 2026-10-31 | #3405 |
-| `src/services/discord/turn_bridge/mod.rs` | 1230 | discord-relay | 2026-08-31 | #3038 |
+| `src/services/discord/turn_bridge/mod.rs` | 1232 | discord-relay | 2026-08-31 | #3038 |
 | `src/services/discord/turn_bridge/stream_loop.rs` | 1638 | discord-relay | 2026-08-31 | #4230 |
 | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 1669 | discord-relay | 2026-08-31 | #4230 |
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |

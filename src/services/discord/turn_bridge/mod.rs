@@ -938,6 +938,11 @@ fn maybe_refresh_active_turn_activity_heartbeat_at(
 ) {
 }
 
+// Shared by the bridge task body below and the extracted stream_loop.rs
+// (#4230 S6) — must live at module scope so both resolve them.
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -967,7 +972,6 @@ pub(super) fn spawn_turn_bridge(
         turn_id = %bridge_turn_id,
     );
     super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
-        const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut rx = spawn_stream_message_receiver_adapter(rx);
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
@@ -1147,8 +1151,6 @@ pub(super) fn spawn_turn_bridge(
         // as alive. Without this, a healthy 5+ minute background tool would
         // exceed `ABANDON_THRESHOLD_SECS` and the sweeper would cancel it.
         let mut last_inflight_long_run_heartbeat = std::time::Instant::now();
-        const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration =
-            std::time::Duration::from_secs(30);
         let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
         let mut terminal_control_ready_observed = false;
         let mut terminal_control_drain_until: Option<std::time::Instant> = None;
