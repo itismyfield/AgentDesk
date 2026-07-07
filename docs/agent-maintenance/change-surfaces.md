@@ -1227,7 +1227,10 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (5692 lines; production LoC; -501
+  - `src/services/discord/turn_bridge/mod.rs` (5017 lines; production LoC; -673
+    from #4230 S2 moving the runtime handoff stream arms and
+    `handle_watcher_runtime_handoff` to
+    `turn_bridge/runtime_handoff_loop.rs`; behavior-preserving decompose. Prior -501
     from #4230 S1 moving `CompletionGuard`/`InflightCleanupGuard` to
     `turn_bridge/guards.rs` and the post-drain stream/status tick to
     `turn_bridge/stream_tick.rs`; behavior-preserving decompose. Prior +11 from
