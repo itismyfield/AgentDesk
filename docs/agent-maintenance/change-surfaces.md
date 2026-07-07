@@ -1221,7 +1221,12 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6182 lines; production LoC; +4
+  - `src/services/discord/turn_bridge/mod.rs` (6193 lines; production LoC; +11
+    from #4185: on the restart-cancel epilogue's guarded-save IdentityMismatch the
+    epilogue now calls `patch_restart_full_response_if_identity_unchanged` so the
+    API_FRICTION-cleaned `full_response` reaches the restart-preserved durable row;
+    patch helper + guards live in `inflight/save_store.rs`, this hotfile carries
+    only the guarded call-site. Prior +4
     from #4103 setting `completion_footer_terminal_text = Some(delivery_response)`
     in the `enqueue_headless_delivery` success arm so headless (API/cron/routine)
     turns render single-message completion chrome via `note_turn_completed_footer`
@@ -1981,6 +1986,16 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `shared_state::RestartLifecycle`, leaving a single `restart: RestartLifecycle`
   group field on `SharedData` with the type re-exported for surface freeze),
   `src/services/discord_config_audit.rs` (1288; +15 from #3692 leader-ownership gate on the config-audit agent sync path).
+- `src/services/discord/inflight/save_store.rs` (1069; crossed the 1000
+  threshold in #4185 — added the restart-only locked `full_response` patch
+  helper `patch_restart_full_response_if_identity_unchanged` (identity +
+  restart_mode/generation equality + rebind/output_path invariance + id-0
+  offsetless refusal + response_sent_offset boundary check) plus its regression
+  tests, so the API_FRICTION-cleaned response reaches restart-preserved rows
+  that the broad guarded save intentionally refuses) — guarded inflight
+  save/patch authority. Keep growth bugfix-only; decomposition tracked in
+  #4280 (move inline tests to a child module, extract identity-gate
+  predicates).
 - `src/services/discord/catch_up.rs` (1077; +70 from #4118 bugfix — retry-mode
   REST fetch failure re-arms `catch_up_retry_pending` with a bounded attempt
   cap (4) instead of one-shot consumption, so a transient fetch error no longer

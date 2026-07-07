@@ -570,3 +570,14 @@ file = "src/services/discord/catch_up.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3405"
+
+[[entry]]
+# Crossed the 1000-prod-LoC giant threshold in #4185 when the restart-only
+# locked full_response patch helper and its regression tests were added so the
+# API_FRICTION-cleaned response reaches restart-preserved rows. Decomposition
+# should move the top-of-file inline test module into a save_store/tests.rs
+# child and extract the shared identity-gate predicates (#4280).
+file = "src/services/discord/inflight/save_store.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4280"
