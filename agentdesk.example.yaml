@@ -170,6 +170,20 @@ voice:
 
 shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
 
+# 런타임 MCP 서버 카탈로그입니다. 기본값은 비어 있으며, MEMENTO_ACCESS_KEY가 있으면 memento가 자동 보강됩니다.
+# Codex/OpenCode/Qwen/Gemini MCP 설정 동기화와 Claude MCP 인자 생성에 필요할 때만 추가하세요.
+# mcp_servers:
+#   example-server:
+#     url: "http://127.0.0.1:8765/mcp"
+#     auth:
+#       type: bearer
+#       token_env_var: "EXAMPLE_MCP_TOKEN"
+
+# 리뷰 계열 dispatch에서 MCP 서버를 슬림 모드로 남길 추가 allowlist입니다.
+# 기본 allowlist에는 memento/github/filesystem/rg/apply_patch 계열이 포함되고, 여기는 빈 목록이 기본값입니다.
+# review_mcp_allowlist:
+#   - "example-server"
+
 agents:
   - id: ch-td
     name: "TD"
@@ -310,12 +324,30 @@ memory:
     endpoint: "http://127.0.0.1:8765"
     access_key_env: "MEMENTO_API_KEY"
 
+mcp:
+  # Claude MCP credential/config 파일을 감시해 변경 시 활성 Claude 세션에 /restart 알림을 보냅니다.
+  # 기본값은 watch_credentials=true, credential_notify_dedupe_secs=300입니다. 알림 소음이 크면 조정하세요.
+  watch_credentials: true
+  credential_notify_dedupe_secs: 300
+
 policies:
   dir: "./policies"
   hot_reload: true
 
 data:
   dir: "~/.adk"
+
+# PostgreSQL control-plane 연결 설정입니다. 기본값은 enabled=false, 127.0.0.1:5432/agentdesk, user=agentdesk입니다.
+# routines/cluster/dispatch 저장소를 실제 PG로 사용할 때 활성화하고, foreground_reserve 기본 6은 전경 turn용 여유 풀입니다.
+# database:
+#   enabled: false
+#   host: "127.0.0.1"
+#   port: 5432
+#   dbname: "agentdesk"
+#   user: "agentdesk"
+#   password: "REPLACE_ME"
+#   pool_max: 18
+#   foreground_reserve: 6
 
 kanban:
   manager_channel_id: "123456789012345678"
@@ -326,6 +358,13 @@ kanban:
 review:
   enabled: true
   max_rounds: 3
+
+placeholder:
+  # Discord placeholder/status-panel UI 플래그입니다. 기본값은 live_events_enabled=true,
+  # status_panel_v2_enabled=true, two_message_panel_enabled=false입니다. 패널 롤아웃/롤백 때 조정하세요.
+  live_events_enabled: true
+  status_panel_v2_enabled: true
+  two_message_panel_enabled: false
 
 runtime:
   requested_timeout_min: 45
@@ -368,6 +407,34 @@ automation:
   strategy_mode: "direct-first"
   allowed_authors: "REPLACE_ME,octocat"
 
+# JS routine worker 설정입니다. 기본값은 enabled=false, dir=./routines, tick=30초이며 PostgreSQL 없이는 실행되지 않습니다.
+# 운영 자동화 루틴을 켤 때 enabled를 true로 바꾸고 additional_dirs로 operator script를 덧붙이세요.
+# routines:
+#   enabled: false
+#   dir: "./routines"
+#   additional_dirs:
+#     - "~/.adk/routines"
+#   tick_interval_secs: 30
+#   max_due_per_tick: 10
+#   max_agent_polls_per_tick: 10
+#   default_timezone: "Asia/Seoul"
+#   agent_timeout_secs: 1800
+#   max_checkpoint_bytes: 262144
+#   hot_reload: true
+#   stale_paused_alert_secs: 0
+#   stale_paused_alert_ttl_secs: 86400
+#   failure_pause_auto_resume_secs: 0
+
+# 자동/수동 escalation 대상 설정입니다. 기본값은 mode=pm, owner_user_id/pm_channel_id 없음,
+# schedule은 pm_hours=00:00-08:00, timezone=Asia/Seoul로 해석됩니다. user/scheduled 라우팅 때 설정하세요.
+# escalation:
+#   mode: pm
+#   owner_user_id: "YOUR_DISCORD_USER_ID"
+#   pm_channel_id: "YOUR_PM_CHANNEL_ID"
+#   schedule:
+#     pm_hours: "00:00-08:00"
+#     timezone: "Asia/Seoul"
+
 # Onboarding wizard / project-agentfactory rules — externalize what was once
 # hardcoded inside the Discord factory prompt. (#1110, Epic #912 Phase P6)
 #
@@ -402,5 +469,7 @@ onboarding:
     - opencode
   default_provider: claude
 
-# Dashboard edits still write runtime overrides into kv_meta.
-# On restart, YAML values above are treated as the canonical startup baseline.
+# agentdesk.yaml 변경을 감시해 hot-swappable 설정을 재적용합니다. 기본값은 true입니다.
+# server/database/discord/providers/agents/mcp/routines 등 부팅 바인딩 변경은 재시작 필요로 기록됩니다.
+# Dashboard runtime override는 kv_meta에 남지만 재시작 기준 baseline은 위 YAML입니다.
+config_hot_reload: true
