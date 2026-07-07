@@ -224,7 +224,7 @@
     in-bounds/monotonic local mutation block collapsed into the helper, and the
     function gained a `require_identity: Option<&InflightTurnIdentity>` param so a
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
-    suppression helpers to `tmux_placeholder_suppression.rs`;
+    suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (7174 production lines; #4049 S4-b1
     inventory sync records the current hotfile count with 9 ratchet lines of
@@ -908,16 +908,12 @@
     regression tests, which pushed the production surface over the 1000-line
     giant-file threshold, so this file is now a registered giant. Bugfix /
     queue-safety only; split before adding new pending-start behavior).
-  - `src/services/discord/tmux_placeholder_suppression.rs` (1092 production lines;
-    the placeholder edit/delete suppression decision surface. #4150 r4 added the
-    two-signal anchor check (registry tombstone fused with the live inflight row),
-    the delivered-elsewhere current-generation frontier probe with
-    same-coordinate-space proof (durable frontier mirrored by the live in-memory
-    frontier + anchor end <= output EOF), and watcher-vs-cross-actor author
-    detection producing a 9-row decision table, which pushed the production surface
-    over the 1000-line giant threshold, so this file is now a registered giant
-    (decompose_issue #4176). Bugfix / delete-gate correctness only; split the
-    decision logic from the evidence/edit helpers before adding new behavior).
+  - `src/services/discord/tmux_placeholder_suppression/{mod,evidence,ops}.rs`
+    (348 / 259 / 584 production lines after #4176; formerly
+    `tmux_placeholder_suppression.rs` at 1092 production lines. The facade keeps
+    the pure placeholder-suppression decision core, `evidence.rs` owns frontier /
+    proof / EOF helpers, and `ops.rs` owns Discord edit/delete cleanup operations.
+    All three files are below the giant-file threshold).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO

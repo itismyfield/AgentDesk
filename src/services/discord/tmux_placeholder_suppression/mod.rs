@@ -1,19 +1,41 @@
-use std::sync::Arc;
-
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, MessageId};
+use serenity::MessageId;
 
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
 
 use super::super::formatting::{build_streaming_placeholder_text, truncate_str};
-use super::super::outbound::delivery_frontier_probe;
-use super::super::placeholder_cleanup::{
-    PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
-    classify_delete_error, committed_terminal_anchor_protects_delete,
-};
-use super::super::{SharedData, rate_limit_wait};
 use crate::services::discord;
+
+#[cfg(test)]
+use super::super::outbound::delivery_frontier_probe;
+#[cfg(test)]
+use super::super::placeholder_cleanup::committed_terminal_anchor_protects_delete;
+#[cfg(test)]
+use serenity::ChannelId;
+
+mod evidence;
+mod ops;
+
+pub(super) use self::evidence::{
+    GuardedDeliveredElsewhereSignal, GuardedNonterminalDeleteDecision,
+    guarded_cleanup_delivered_elsewhere_signal, guarded_nonterminal_delete_decision,
+    placeholder_real_body_exposure_evidence,
+};
+pub(super) use self::ops::{
+    FallbackPlaceholderCleanupDecision, apply_placeholder_suppression,
+    delete_nonterminal_placeholder, delete_nonterminal_placeholder_unless_delivered,
+    delete_terminal_placeholder, delete_terminal_placeholder_unless_delivered,
+    delete_watcher_rollover_frozen_prefixes, fallback_placeholder_cleanup_decision,
+    record_placeholder_cleanup, watcher_rollover_prefixes_to_delete_on_terminal,
+};
+
+#[cfg(test)]
+use self::evidence::{
+    apply_terminal_committed_delete_proof_gate,
+    guarded_cleanup_delivered_elsewhere_signal_from_anchor,
+};
+use self::ops::strip_placeholder_indicators_for_preserve;
 
 const SUPPRESSED_INTERNAL_LABEL: &str = "(자동으로 처리된 내부 작업이라 여기서 멈췄어요)";
 const SUPPRESSED_RESTART_LABEL: &str =
@@ -28,14 +50,12 @@ pub(super) fn watcher_should_render_status_only_placeholder(
         || current_tool_line.is_some_and(|line| !line.trim().is_empty())
         || task_notification_kind.is_some()
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SuppressedPlaceholderAction {
     None,
     Delete,
     Edit(String),
 }
-
 pub(super) fn rewrite_placeholder_as_terminal_suppressed(
     text: &str,
     label: &str,
@@ -71,7 +91,6 @@ pub(super) fn rewrite_placeholder_as_terminal_suppressed(
         composed
     }
 }
-
 pub(super) fn reconstructed_inflight_placeholder_body(
     state: &discord::inflight::InflightTurnState,
     provider: &ProviderKind,
@@ -90,7 +109,6 @@ pub(super) fn reconstructed_inflight_placeholder_body(
     );
     build_streaming_placeholder_text(&current_portion, &status_block)
 }
-
 fn orphan_suppressed_placeholder_action(
     state: &discord::inflight::InflightTurnState,
     provider: &ProviderKind,
@@ -122,7 +140,6 @@ fn orphan_suppressed_placeholder_action(
         provider,
     ))
 }
-
 /// Unified entry point for every placeholder-suppression decision.
 ///
 /// Three production sites produced identical edit/delete/log scaffolding before
@@ -174,247 +191,12 @@ pub(super) enum PlaceholderSuppressDecision {
     Edit(String),
     Delete,
 }
-
-fn strip_placeholder_indicators_for_preserve(text: &str, provider: &ProviderKind) -> String {
-    discord::single_message_panel::strip_placeholder_terminal_status(text, provider)
-        .trim_end()
-        .to_string()
-}
-
-pub(super) fn placeholder_real_body_exposure_evidence(
-    provider: &ProviderKind,
-    _response_sent_offset: usize,
-    last_edit_text: &str,
-) -> Option<&'static str> {
-    let stripped_body =
-        discord::single_message_panel::strip_placeholder_terminal_status(last_edit_text, provider);
-    if stripped_body.trim().is_empty() {
-        None
-    } else {
-        Some("last_edit_text_body")
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GuardedDeliveredElsewhereSignal {
-    Protected { evidence: &'static str },
-    Found { evidence: &'static str },
-    NotFound,
-    Ambiguous { evidence: &'static str },
-}
-
-impl GuardedDeliveredElsewhereSignal {
-    fn evidence(self) -> &'static str {
-        match self {
-            Self::Protected { evidence }
-            | Self::Found { evidence }
-            | Self::Ambiguous { evidence } => evidence,
-            Self::NotFound => "no_delivered_elsewhere_signal",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GuardedCleanupTargetAuthor {
     Watcher,
     CrossActor,
     Unknown,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum GuardedNonterminalDeleteDecision {
-    PreserveNoEdit {
-        evidence: &'static str,
-    },
-    PreserveWithStrip {
-        evidence: &'static str,
-        cleaned_body: String,
-    },
-    Delete {
-        evidence: &'static str,
-    },
-}
-
-fn delivered_frontier_same_coordinate_space(
-    anchor: delivery_frontier_probe::CurrentGenerationAnchor,
-    current_output_eof: Option<u64>,
-    live_committed_end: Option<u64>,
-) -> Result<(), &'static str> {
-    let Some(current_output_eof) = current_output_eof else {
-        return Err("current_generation_anchor_coordinate_unproven");
-    };
-    if anchor.range.1 > current_output_eof {
-        return Err("current_generation_anchor_exceeds_current_eof");
-    }
-    match live_committed_end {
-        Some(committed_end) if committed_end == anchor.range.1 => Ok(()),
-        _ => Err("current_generation_anchor_live_frontier_mismatch"),
-    }
-}
-
-fn guarded_cleanup_delivered_elsewhere_signal_from_anchor(
-    channel_id: ChannelId,
-    message_id: MessageId,
-    delivered_range: (u64, u64),
-    anchor: delivery_frontier_probe::CurrentGenerationAnchor,
-    current_output_eof: Option<u64>,
-    live_committed_end: Option<u64>,
-) -> GuardedDeliveredElsewhereSignal {
-    let (range_start, range_end) = delivered_range;
-    if range_end <= range_start {
-        return GuardedDeliveredElsewhereSignal::NotFound;
-    }
-    if anchor.panel_channel_id == channel_id.get() && anchor.panel_msg_id == message_id.get() {
-        return GuardedDeliveredElsewhereSignal::Protected {
-            evidence: "current_generation_anchor_same_message",
-        };
-    }
-    if range_start >= anchor.range.0 && range_end <= anchor.range.1 {
-        return match delivered_frontier_same_coordinate_space(
-            anchor,
-            current_output_eof,
-            live_committed_end,
-        ) {
-            Ok(()) => GuardedDeliveredElsewhereSignal::Found {
-                evidence: "current_generation_anchor_different_message",
-            },
-            Err(evidence) => GuardedDeliveredElsewhereSignal::Ambiguous { evidence },
-        };
-    }
-    GuardedDeliveredElsewhereSignal::Ambiguous {
-        evidence: "current_generation_anchor_range_mismatch",
-    }
-}
-
-pub(super) fn guarded_cleanup_delivered_elsewhere_signal(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    delivered_range: Option<(u64, u64)>,
-    current_output_eof: Option<u64>,
-    live_committed_end: Option<u64>,
-) -> GuardedDeliveredElsewhereSignal {
-    let Some(delivered_range) = delivered_range else {
-        return GuardedDeliveredElsewhereSignal::NotFound;
-    };
-    let Some(anchor) = delivery_frontier_probe::current_generation_delivered_anchor(
-        provider,
-        channel_id,
-        tmux_session_name,
-        current_output_eof,
-    ) else {
-        return GuardedDeliveredElsewhereSignal::NotFound;
-    };
-    guarded_cleanup_delivered_elsewhere_signal_from_anchor(
-        channel_id,
-        message_id,
-        delivered_range,
-        anchor,
-        current_output_eof,
-        live_committed_end,
-    )
-}
-
-pub(super) fn guarded_nonterminal_delete_decision(
-    provider: &ProviderKind,
-    response_sent_offset: usize,
-    last_edit_text: &str,
-    committed_terminal_anchor: bool,
-    delivered_elsewhere: GuardedDeliveredElsewhereSignal,
-    target_author: GuardedCleanupTargetAuthor,
-) -> GuardedNonterminalDeleteDecision {
-    // Decision table (rows are evaluated in this order):
-    // terminal anchor | * | * | * => PreserveNoEdit
-    // no terminal anchor | Protected(same-message frontier) | * | * => PreserveNoEdit
-    // no terminal anchor | Found(different message + same coordinate) | * | * => Delete
-    // no terminal anchor | Ambiguous | body present | Watcher => PreserveWithStrip
-    // no terminal anchor | Ambiguous | body present | CrossActor/Unknown => PreserveNoEdit
-    // no terminal anchor | Ambiguous | body absent | * => PreserveNoEdit
-    // no terminal anchor | NotFound | body present | Watcher => PreserveWithStrip
-    // no terminal anchor | NotFound | body present | CrossActor/Unknown => PreserveNoEdit
-    // no terminal anchor | NotFound | body absent | * => Delete
-    //
-    // The Found+absent row is the disposable chrome case where a different
-    // message is positively proven to hold the delivered body. Ambiguous+absent
-    // preserves fail-safe because there is no positive proof deletion is safe.
-    if committed_terminal_anchor {
-        return GuardedNonterminalDeleteDecision::PreserveNoEdit {
-            evidence: "committed_terminal_anchor",
-        };
-    }
-    if let GuardedDeliveredElsewhereSignal::Protected { evidence } = delivered_elsewhere {
-        return GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence };
-    }
-    if let GuardedDeliveredElsewhereSignal::Found { evidence } = delivered_elsewhere {
-        return GuardedNonterminalDeleteDecision::Delete { evidence };
-    }
-    if let Some(evidence) =
-        placeholder_real_body_exposure_evidence(provider, response_sent_offset, last_edit_text)
-    {
-        return match target_author {
-            GuardedCleanupTargetAuthor::Watcher => {
-                GuardedNonterminalDeleteDecision::PreserveWithStrip {
-                    evidence,
-                    cleaned_body: strip_placeholder_indicators_for_preserve(
-                        last_edit_text,
-                        provider,
-                    ),
-                }
-            }
-            GuardedCleanupTargetAuthor::CrossActor | GuardedCleanupTargetAuthor::Unknown => {
-                GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence }
-            }
-        };
-    }
-    if let GuardedDeliveredElsewhereSignal::Ambiguous { evidence } = delivered_elsewhere {
-        return GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence };
-    }
-    GuardedNonterminalDeleteDecision::Delete {
-        evidence: delivered_elsewhere.evidence(),
-    }
-}
-
-/// #4158 hardening — the terminal-committed cleanup gate.
-///
-/// The SkipAlreadyCommitted arm runs only AFTER the offset authority proved a
-/// terminal delivery committed this range, so a LIVE placeholder there MIGHT be
-/// the very message the session-bound sink delivered into (the sink's
-/// `PlaceholderEdit(current_msg_id)` route, `session_relay_sink.rs`). The base
-/// decision table's final `NotFound + body-absent → Delete` fallthrough is
-/// correct for the no-response arm (nothing was delivered, so the placeholder is
-/// disposable chrome), but in the terminal-committed arm that same row would
-/// delete a sink-delivered body whenever no positive delivered-elsewhere anchor
-/// exists — e.g. the durable delivered-frontier shadow is disabled
-/// (`AGENTDESK_DELIVERY_RECORD_SHADOW` default OFF), so
-/// `current_generation_delivered_anchor` returns `None` → `NotFound`, and the
-/// sink's delivery marks `session_bound_delivered`, NOT the
-/// `terminal_delivery_committed` that `committed_terminal_anchor_protects_delete`
-/// keys on. So neither guard fires and the body-bearing placeholder is deleted.
-///
-/// Callers that pass `require_delivered_elsewhere_proof = true` therefore delete
-/// ONLY on POSITIVE `Found` proof (a DIFFERENT message demonstrably holds the
-/// committed range); every non-`Found` `Delete` is downgraded to a fail-safe
-/// preserve. `Protected`/`Ambiguous`/body-exposure preserve paths are unchanged.
-/// With the shadow anchor ENABLED (production) a real #4158 residue still yields
-/// `Found` → delete, so the fix is unchanged there; this only closes the
-/// shadow-disabled message-loss window.
-fn apply_terminal_committed_delete_proof_gate(
-    decision: GuardedNonterminalDeleteDecision,
-    has_positive_delivered_elsewhere: bool,
-    require_delivered_elsewhere_proof: bool,
-) -> GuardedNonterminalDeleteDecision {
-    if require_delivered_elsewhere_proof
-        && !has_positive_delivered_elsewhere
-        && matches!(decision, GuardedNonterminalDeleteDecision::Delete { .. })
-    {
-        return GuardedNonterminalDeleteDecision::PreserveNoEdit {
-            evidence: "terminal_committed_requires_delivered_elsewhere_proof",
-        };
-    }
-    decision
-}
-
 pub(super) fn decide_placeholder_suppression(
     ctx: &PlaceholderSuppressContext<'_>,
 ) -> PlaceholderSuppressDecision {
@@ -518,285 +300,7 @@ pub(super) fn decide_placeholder_suppression(
         }
     }
 }
-
-pub(super) async fn apply_placeholder_suppression(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    placeholder_msg_id: Option<serenity::MessageId>,
-    origin: PlaceholderSuppressOrigin,
-    decision: PlaceholderSuppressDecision,
-    detail: Option<&str>,
-) {
-    let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
-    match decision {
-        PlaceholderSuppressDecision::None => {}
-        PlaceholderSuppressDecision::Preserve {
-            reason,
-            cleaned_body,
-        } => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 👁 {} preserved placeholder ({reason}){detail_suffix}",
-                origin.log_scope()
-            );
-            if let Some(msg_id) = placeholder_msg_id {
-                if cleaned_body.is_empty() {
-                    delete_nonterminal_placeholder(
-                        http,
-                        channel_id,
-                        shared,
-                        provider,
-                        tmux_session_name,
-                        msg_id,
-                        origin.log_scope(),
-                    )
-                    .await;
-                } else {
-                    edit_preserve_placeholder(
-                        http,
-                        channel_id,
-                        shared,
-                        provider,
-                        tmux_session_name,
-                        msg_id,
-                        &cleaned_body,
-                        origin.log_scope(),
-                    )
-                    .await;
-                }
-            }
-        }
-        PlaceholderSuppressDecision::Delete => {
-            if let Some(msg_id) = placeholder_msg_id {
-                let outcome = delete_terminal_placeholder(
-                    http,
-                    channel_id,
-                    shared,
-                    provider,
-                    tmux_session_name,
-                    msg_id,
-                    origin.log_scope(),
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    message_id = msg_id.get(),
-                    outcome = ?outcome,
-                    "  [{ts}] 👁 {} delete placeholder result{detail_suffix}",
-                    origin.log_scope()
-                );
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 👁 {} delete placeholder skipped (no placeholder_msg_id){detail_suffix}",
-                    origin.log_scope()
-                );
-            }
-        }
-        PlaceholderSuppressDecision::Edit(content) => {
-            if let Some(msg_id) = placeholder_msg_id {
-                let outcome = edit_terminal_placeholder(
-                    http,
-                    channel_id,
-                    shared,
-                    provider,
-                    tmux_session_name,
-                    msg_id,
-                    &content,
-                    origin.log_scope(),
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    message_id = msg_id.get(),
-                    outcome = ?outcome,
-                    "  [{ts}] 👁 {} edit placeholder result{detail_suffix}",
-                    origin.log_scope()
-                );
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 👁 {} edit placeholder skipped (no placeholder_msg_id){detail_suffix}",
-                    origin.log_scope()
-                );
-            }
-        }
-    }
-}
-
-pub(super) fn record_placeholder_cleanup(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    message_id: MessageId,
-    tmux_session_name: &str,
-    operation: PlaceholderCleanupOperation,
-    outcome: PlaceholderCleanupOutcome,
-    source: &'static str,
-) {
-    if let PlaceholderCleanupOutcome::Failed { class, detail } = &outcome {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ placeholder cleanup {} failed ({}) for channel {} msg {}: {}",
-            operation.as_str(),
-            class.as_str(),
-            channel_id.get(),
-            message_id.get(),
-            detail
-        );
-    }
-    let record = PlaceholderCleanupRecord {
-        provider: provider.clone(),
-        channel_id,
-        message_id,
-        tmux_session_name: Some(tmux_session_name.to_string()),
-        operation,
-        outcome,
-        source,
-    };
-    shared.ui.placeholder_cleanup.record(record);
-}
-
-pub(super) async fn delete_terminal_placeholder(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    source: &'static str,
-) -> PlaceholderCleanupOutcome {
-    delete_placeholder_with_operation(
-        http,
-        channel_id,
-        shared,
-        provider,
-        tmux_session_name,
-        message_id,
-        PlaceholderCleanupOperation::DeleteTerminal,
-        source,
-    )
-    .await
-}
-
-pub(super) async fn delete_nonterminal_placeholder(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    source: &'static str,
-) -> PlaceholderCleanupOutcome {
-    delete_placeholder_with_operation(
-        http,
-        channel_id,
-        shared,
-        provider,
-        tmux_session_name,
-        message_id,
-        PlaceholderCleanupOperation::DeleteNonterminal,
-        source,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn delete_nonterminal_placeholder_unless_delivered(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    live_inflight: Option<&discord::inflight::InflightTurnState>,
-    delivered_range: Option<(u64, u64)>,
-    response_sent_offset: usize,
-    last_edit_text: &str,
-    source: &'static str,
-) -> Option<PlaceholderCleanupOutcome> {
-    delete_placeholder_unless_delivered(
-        http,
-        channel_id,
-        shared,
-        provider,
-        tmux_session_name,
-        message_id,
-        live_inflight,
-        delivered_range,
-        response_sent_offset,
-        last_edit_text,
-        // Nonterminal cleanup never runs behind a proven terminal commit, so it
-        // keeps the base decision table (no positive-proof requirement).
-        false,
-        PlaceholderCleanupOperation::DeleteNonterminal,
-        source,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn delete_terminal_placeholder_unless_delivered(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    live_inflight: Option<&discord::inflight::InflightTurnState>,
-    delivered_range: Option<(u64, u64)>,
-    response_sent_offset: usize,
-    last_edit_text: &str,
-    require_delivered_elsewhere_proof: bool,
-    source: &'static str,
-) -> Option<PlaceholderCleanupOutcome> {
-    delete_placeholder_unless_delivered(
-        http,
-        channel_id,
-        shared,
-        provider,
-        tmux_session_name,
-        message_id,
-        live_inflight,
-        delivered_range,
-        response_sent_offset,
-        last_edit_text,
-        require_delivered_elsewhere_proof,
-        PlaceholderCleanupOperation::DeleteTerminal,
-        source,
-    )
-    .await
-}
-
-fn cleanup_output_eof_from_path(path: &str) -> Option<u64> {
-    if path.trim().is_empty() {
-        return None;
-    }
-    std::fs::metadata(path).ok().map(|meta| meta.len())
-}
-
-fn cleanup_current_output_eof(
-    shared: &SharedData,
-    live_inflight: Option<&discord::inflight::InflightTurnState>,
-    tmux_session_name: &str,
-) -> Option<u64> {
-    if let Some(eof) = live_inflight
-        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
-        .and_then(|state| state.output_path.as_deref())
-        .and_then(cleanup_output_eof_from_path)
-    {
-        return Some(eof);
-    }
-    shared
-        .tmux_watchers
-        .watcher_output_path(tmux_session_name)
-        .and_then(|path| cleanup_output_eof_from_path(&path))
-}
-
-fn guarded_cleanup_target_author(
+pub(super) fn guarded_cleanup_target_author(
     live_inflight: Option<&discord::inflight::InflightTurnState>,
     message_id: MessageId,
 ) -> GuardedCleanupTargetAuthor {
@@ -814,312 +318,6 @@ fn guarded_cleanup_target_author(
         | discord::inflight::RelayOwnerKind::Unknown => GuardedCleanupTargetAuthor::CrossActor,
     }
 }
-
-#[allow(clippy::too_many_arguments)]
-async fn delete_placeholder_unless_delivered(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    live_inflight: Option<&discord::inflight::InflightTurnState>,
-    delivered_range: Option<(u64, u64)>,
-    response_sent_offset: usize,
-    last_edit_text: &str,
-    require_delivered_elsewhere_proof: bool,
-    operation: PlaceholderCleanupOperation,
-    source: &'static str,
-) -> Option<PlaceholderCleanupOutcome> {
-    let committed_terminal_anchor = committed_terminal_anchor_protects_delete(
-        &shared.ui.placeholder_cleanup,
-        provider,
-        channel_id,
-        message_id,
-        live_inflight,
-    );
-    let current_output_eof = cleanup_current_output_eof(shared, live_inflight, tmux_session_name);
-    let live_committed_end =
-        crate::services::discord::tmux::committed_frontier_for_current_generation(
-            shared,
-            channel_id,
-            tmux_session_name,
-        );
-    let delivered_elsewhere = guarded_cleanup_delivered_elsewhere_signal(
-        provider,
-        channel_id,
-        tmux_session_name,
-        message_id,
-        delivered_range,
-        current_output_eof,
-        live_committed_end,
-    );
-    let target_author = guarded_cleanup_target_author(live_inflight, message_id);
-    // #4158 hardening: capture the positive-proof signal BEFORE the decision
-    // consumes `delivered_elsewhere`, so the terminal-committed proof gate can
-    // reason about it without a clone.
-    let has_positive_delivered_elsewhere = matches!(
-        delivered_elsewhere,
-        GuardedDeliveredElsewhereSignal::Found { .. }
-    );
-    let decision = apply_terminal_committed_delete_proof_gate(
-        guarded_nonterminal_delete_decision(
-            provider,
-            response_sent_offset,
-            last_edit_text,
-            committed_terminal_anchor,
-            delivered_elsewhere,
-            target_author,
-        ),
-        has_positive_delivered_elsewhere,
-        require_delivered_elsewhere_proof,
-    );
-    match decision {
-        GuardedNonterminalDeleteDecision::PreserveNoEdit { evidence } => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                message_id = message_id.get(),
-                evidence = %evidence,
-                source = source,
-                response_sent_offset = response_sent_offset,
-                "  [{ts}] 👁 preserved delivered placeholder without edit during guarded cleanup for {tmux_session_name}"
-            );
-            None
-        }
-        GuardedNonterminalDeleteDecision::PreserveWithStrip {
-            evidence,
-            cleaned_body,
-        } => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                message_id = message_id.get(),
-                evidence = %evidence,
-                source = source,
-                response_sent_offset = response_sent_offset,
-                "  [{ts}] 👁 preserved exposed placeholder with stripped streaming chrome during guarded cleanup for {tmux_session_name}"
-            );
-            let outcome = edit_preserve_placeholder(
-                http,
-                channel_id,
-                shared,
-                provider,
-                tmux_session_name,
-                message_id,
-                &cleaned_body,
-                source,
-            )
-            .await;
-            if !outcome.is_committed() {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    message_id = message_id.get(),
-                    source = source,
-                    "  [{ts}] ⚠ guarded cleanup strip-preserve edit failed; keeping placeholder for {tmux_session_name}"
-                );
-            }
-            None
-        }
-        GuardedNonterminalDeleteDecision::Delete { evidence } => {
-            tracing::debug!(
-                message_id = message_id.get(),
-                evidence = %evidence,
-                source = source,
-                response_sent_offset = response_sent_offset,
-                "guarded cleanup deleting placeholder for {tmux_session_name}"
-            );
-            Some(
-                delete_placeholder_with_operation(
-                    http,
-                    channel_id,
-                    shared,
-                    provider,
-                    tmux_session_name,
-                    message_id,
-                    operation,
-                    source,
-                )
-                .await,
-            )
-        }
-    }
-}
-
-/// #3871: which streamed rollover-prefix message ids the watcher MUST delete
-/// after a terminal delivery so the frozen prefixes don't duplicate the body.
-///
-/// When a `>DISCORD_MSG_LIMIT` answer rolls over mid-stream, the prefix
-/// placeholder is FROZEN as a standalone permanent message and a fresh
-/// placeholder is opened for the remainder. The terminal full-body fallback
-/// (`session_bound_fallback_uses_full_body`) re-posts the WHOLE body as ordered
-/// chunks, so every frozen prefix is now a duplicate copy of bytes already in
-/// the replay → delete them all (watcher parity with the sink's
-/// `terminal_full_replay_cleanup_msg_ids`). On the remainder-only path
-/// (`false`) the frozen prefixes carry the legit, already-delivered
-/// `[0..response_sent_offset]` prose and MUST be preserved — return nothing.
-pub(super) fn watcher_rollover_prefixes_to_delete_on_terminal(
-    session_bound_fallback_uses_full_body: bool,
-    frozen_rollover_msg_ids: &[MessageId],
-) -> Vec<MessageId> {
-    if session_bound_fallback_uses_full_body {
-        frozen_rollover_msg_ids.to_vec()
-    } else {
-        Vec::new()
-    }
-}
-
-/// #3871: delete the streamed rollover-prefix messages the watcher froze during
-/// streaming, after a terminal full-body replay re-posted their bytes. Mirrors
-/// the sink's drain-and-delete of `terminal_full_replay_cleanup_msg_ids`; each
-/// id is a non-terminal streamed prefix so `DeleteNonterminal` is used. No-op on
-/// the remainder-only path (see [`watcher_rollover_prefixes_to_delete_on_terminal`]).
-pub(super) async fn delete_watcher_rollover_frozen_prefixes(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    session_bound_fallback_uses_full_body: bool,
-    frozen_rollover_msg_ids: Vec<MessageId>,
-) {
-    for frozen_prefix in watcher_rollover_prefixes_to_delete_on_terminal(
-        session_bound_fallback_uses_full_body,
-        &frozen_rollover_msg_ids,
-    ) {
-        rate_limit_wait(shared, channel_id).await;
-        let _ = delete_nonterminal_placeholder(
-            http,
-            channel_id,
-            shared,
-            provider,
-            tmux_session_name,
-            frozen_prefix,
-            "watcher_terminal_rollover_prefix_dedup_3871",
-        )
-        .await;
-    }
-}
-
-async fn delete_placeholder_with_operation(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    operation: PlaceholderCleanupOperation,
-    source: &'static str,
-) -> PlaceholderCleanupOutcome {
-    let outcome = match channel_id.delete_message(http, message_id).await {
-        Ok(_) => PlaceholderCleanupOutcome::Succeeded,
-        Err(error) => classify_delete_error(&error.to_string()),
-    };
-    record_placeholder_cleanup(
-        shared,
-        provider,
-        channel_id,
-        message_id,
-        tmux_session_name,
-        operation,
-        outcome.clone(),
-        source,
-    );
-    outcome
-}
-
-async fn edit_terminal_placeholder(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    content: &str,
-    source: &'static str,
-) -> PlaceholderCleanupOutcome {
-    edit_placeholder_with_operation(
-        http,
-        channel_id,
-        shared,
-        provider,
-        tmux_session_name,
-        message_id,
-        content,
-        PlaceholderCleanupOperation::EditTerminal,
-        source,
-    )
-    .await
-}
-
-async fn edit_preserve_placeholder(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    content: &str,
-    source: &'static str,
-) -> PlaceholderCleanupOutcome {
-    edit_placeholder_with_operation(
-        http,
-        channel_id,
-        shared,
-        provider,
-        tmux_session_name,
-        message_id,
-        content,
-        PlaceholderCleanupOperation::EditPreserve,
-        source,
-    )
-    .await
-}
-
-async fn edit_placeholder_with_operation(
-    http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    message_id: MessageId,
-    content: &str,
-    operation: PlaceholderCleanupOperation,
-    source: &'static str,
-) -> PlaceholderCleanupOutcome {
-    rate_limit_wait(shared, channel_id).await;
-    let outcome =
-        match discord::http::edit_channel_message(http, channel_id, message_id, content).await {
-            Ok(_) => PlaceholderCleanupOutcome::Succeeded,
-            Err(error) => PlaceholderCleanupOutcome::failed(error.to_string()),
-        };
-    record_placeholder_cleanup(
-        shared,
-        provider,
-        channel_id,
-        message_id,
-        tmux_session_name,
-        operation,
-        outcome.clone(),
-        source,
-    );
-    outcome
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FallbackPlaceholderCleanupDecision {
-    RelayCommitted,
-    PreserveInflightForCleanupRetry,
-}
-
-pub(super) fn fallback_placeholder_cleanup_decision(
-    cleanup: &PlaceholderCleanupOutcome,
-) -> FallbackPlaceholderCleanupDecision {
-    if cleanup.is_committed() {
-        FallbackPlaceholderCleanupDecision::RelayCommitted
-    } else {
-        FallbackPlaceholderCleanupDecision::PreserveInflightForCleanupRetry
-    }
-}
-
 fn suppressed_placeholder_action(
     has_placeholder: bool,
     provider: &ProviderKind,
@@ -1148,7 +346,6 @@ fn suppressed_placeholder_action(
         SuppressedPlaceholderAction::Delete
     }
 }
-
 #[cfg(test)]
 mod placeholder_suppression_tests {
     use super::*;

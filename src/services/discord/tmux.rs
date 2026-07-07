@@ -48,7 +48,7 @@ use super::{
     SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, lock_tmux_watcher_registry, rate_limit_wait,
 };
 // Extracted lifecycle code stays a tmux child module until its callers split out.
-#[path = "tmux_placeholder_suppression.rs"]
+#[path = "tmux_placeholder_suppression/mod.rs"]
 mod placeholder_suppression;
 #[path = "tmux_reattach_offsets.rs"]
 mod tmux_reattach_offsets;

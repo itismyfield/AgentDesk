@@ -606,6 +606,10 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── tmux_placeholder_suppression/
+│   │   │   ├── evidence.rs
+│   │   │   ├── mod.rs
+│   │   │   └── ops.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── completion_gate.rs
@@ -818,7 +822,6 @@ src/
 │   │   ├── tmux_lifecycle.rs
 │   │   ├── tmux_output_stream.rs
 │   │   ├── tmux_overload_retry.rs
-│   │   ├── tmux_placeholder_suppression.rs
 │   │   ├── tmux_reaper.rs
 │   │   ├── tmux_reattach_offsets.rs
 │   │   ├── tmux_restart_handoff.rs
