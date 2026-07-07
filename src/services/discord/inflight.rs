@@ -294,6 +294,7 @@ pub(super) fn delete_inflight_state_file(provider: &ProviderKind, channel_id: u6
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return false;
     };
+    log_inflight_remove_for_path(provider, channel_id, "delete_inflight_state_file", &path);
     fs::remove_file(path).is_ok()
 }
 
@@ -315,6 +316,54 @@ fn bump_save_generation_for_write(path: &Path, state: &mut InflightTurnState) {
 
 fn turn_id_for_state(state: &InflightTurnState) -> Option<String> {
     (state.user_msg_id != 0).then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id))
+}
+
+fn channel_id_from_path(path: &Path) -> u64 {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn user_msg_id_for_inflight_remove_log(path: &Path) -> u64 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| parse_inflight_state_content(&content).ok())
+        .map(|state| state.user_msg_id)
+        .unwrap_or(0)
+}
+
+fn log_inflight_remove(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    reason: &'static str,
+    path: &Path,
+) {
+    tracing::warn!(
+        target: "agentdesk::inflight_remove",
+        provider = %provider.as_str(),
+        channel_id,
+        user_msg_id,
+        reason,
+        path = %path.display(),
+        "discord inflight state row removal"
+    );
+}
+
+fn log_inflight_remove_for_path(
+    provider: &ProviderKind,
+    channel_id: u64,
+    reason: &'static str,
+    path: &Path,
+) {
+    log_inflight_remove(
+        provider,
+        channel_id,
+        user_msg_id_for_inflight_remove_log(path),
+        reason,
+        path,
+    );
 }
 
 fn record_inflight_invariant(
@@ -434,6 +483,13 @@ pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
         if state.tmux_session_name.as_deref() != Some(tmux_name) {
             continue;
         }
+        log_inflight_remove(
+            provider,
+            state.channel_id,
+            state.user_msg_id,
+            "clear_inflight_by_tmux_name",
+            &path,
+        );
         if fs::remove_file(&path).is_ok() {
             cleared = true;
         }
@@ -610,6 +666,13 @@ fn invalidate_stale_generation_in_root(
             Some(row_generation) if row_generation == current_generation => continue,
             Some(_) => {}
         }
+        log_inflight_remove(
+            provider,
+            state.channel_id,
+            state.user_msg_id,
+            "invalidate_stale_generation_boot",
+            &path,
+        );
         if fs::remove_file(&path).is_ok() {
             // Only emit observability when called via the env wrapper —
             // raw `_in_root` calls are unit tests and we want to keep
@@ -831,6 +894,12 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
                     match read_inflight_state_content(&path) {
                         Some(locked_state) => (locked_state, false),
                         None => {
+                            log_inflight_remove_for_path(
+                                provider,
+                                channel_id_from_path(&path),
+                                "load_inflight_states_from_root_malformed",
+                                &path,
+                            );
                             let _ = fs::remove_file(&path);
                             continue;
                         }
@@ -847,10 +916,23 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
                 continue;
             };
             let Some(locked_state) = read_inflight_state_content(&path) else {
+                log_inflight_remove_for_path(
+                    provider,
+                    channel_id_from_path(&path),
+                    "load_inflight_states_from_root_provider_mismatch",
+                    &path,
+                );
                 let _ = fs::remove_file(&path);
                 continue;
             };
             if locked_state.provider_kind().as_ref() != Some(provider) {
+                log_inflight_remove(
+                    provider,
+                    locked_state.channel_id,
+                    locked_state.user_msg_id,
+                    "load_inflight_states_from_root_provider_mismatch",
+                    &path,
+                );
                 let _ = fs::remove_file(&path);
                 continue;
             }
@@ -862,10 +944,23 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
                 continue;
             };
             let Some(locked_state) = read_inflight_state_content(&path) else {
+                log_inflight_remove_for_path(
+                    provider,
+                    channel_id_from_path(&path),
+                    "load_inflight_states_from_root_stale",
+                    &path,
+                );
                 let _ = fs::remove_file(&path);
                 continue;
             };
             if locked_state.provider_kind().as_ref() != Some(provider) {
+                log_inflight_remove(
+                    provider,
+                    locked_state.channel_id,
+                    locked_state.user_msg_id,
+                    "load_inflight_states_from_root_stale_provider_mismatch",
+                    &path,
+                );
                 let _ = fs::remove_file(&path);
                 continue;
             }
@@ -874,6 +969,13 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
+                log_inflight_remove(
+                    provider,
+                    locked_state.channel_id,
+                    locked_state.user_msg_id,
+                    "load_inflight_states_from_root_stale",
+                    &path,
+                );
                 let _ = fs::remove_file(&path);
                 continue;
             }

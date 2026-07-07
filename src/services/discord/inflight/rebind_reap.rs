@@ -551,6 +551,13 @@ pub(super) fn reap_abandoned_rebind_origin_locked_in_root(
     if !should_reap_abandoned_rebind_origin(&locked, age_secs, current_generation) {
         return RebindReapOutcome::Skipped;
     }
+    log_inflight_remove(
+        provider,
+        locked.channel_id,
+        locked.user_msg_id,
+        "reap_abandoned_rebind_origin_locked",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => RebindReapOutcome::Reaped,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => RebindReapOutcome::Missing,
@@ -632,6 +639,13 @@ pub(super) fn reap_dead_watcher_rebind_origin_locked_in_root(
             return RebindReapOutcome::Skipped;
         }
     }
+    log_inflight_remove(
+        provider,
+        locked.channel_id,
+        locked.user_msg_id,
+        "reap_dead_watcher_rebind_origin_locked",
+        &path,
+    );
     match fs::remove_file(&path) {
         Ok(()) => RebindReapOutcome::Reaped,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => RebindReapOutcome::Missing,

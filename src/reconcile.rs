@@ -1637,6 +1637,44 @@ pub(crate) fn sweep_stale_inflight_files() -> usize {
     sweep_stale_inflight_files_at(&root, STALE_INFLIGHT_MAX_AGE)
 }
 
+fn inflight_remove_log_channel_id(path: &std::path::Path) -> u64 {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn inflight_remove_log_user_msg_id(path: &std::path::Path) -> u64 {
+    #[derive(serde::Deserialize)]
+    struct InflightRemoveLogFields {
+        #[serde(default)]
+        user_msg_id: u64,
+    }
+
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<InflightRemoveLogFields>(&body).ok())
+        .map(|fields| fields.user_msg_id)
+        .unwrap_or(0)
+}
+
+fn log_stale_inflight_remove(path: &std::path::Path) {
+    let provider = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    tracing::warn!(
+        target: "agentdesk::inflight_remove",
+        provider = %provider,
+        channel_id = inflight_remove_log_channel_id(path),
+        user_msg_id = inflight_remove_log_user_msg_id(path),
+        reason = "sweep_stale_inflight_files",
+        path = %path.display(),
+        "discord inflight state row removal"
+    );
+}
+
 pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Duration) -> usize {
     use std::fs;
     use std::time::SystemTime;
@@ -1710,6 +1748,7 @@ pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Dur
             if is_managed_lifecycle {
                 continue;
             }
+            log_stale_inflight_remove(&fpath);
             if fs::remove_file(&fpath).is_ok() {
                 removed += 1;
                 tracing::info!(
