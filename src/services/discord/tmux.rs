@@ -1959,6 +1959,18 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
         return false;
     }
 
+    // #4106 review-fix (codex): snapshot the channel role override THIS turn owns
+    // BEFORE any await. The removal below runs after awaits (mailbox finish +
+    // clear_watchdog_deadline_override), during which a fresh same-channel
+    // counter-model follow-up can insert its OWN override (intake_turn.rs) even
+    // before it claims the slot. A bare channel-keyed remove would clobber that;
+    // remove_if only drops the value we still own.
+    let pre_release_role_override = shared
+        .dispatch
+        .role_overrides
+        .get(&channel_id)
+        .map(|entry| *entry.value());
+
     let finish = super::mailbox_finish_turn_if_matches(
         shared,
         provider,
@@ -1992,8 +2004,13 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
         provider,
         thread_parent_kickoffs,
     );
-    if !finish.has_pending {
-        shared.dispatch.role_overrides.remove(&channel_id);
+    if !finish.has_pending
+        && let Some(owned) = pre_release_role_override
+    {
+        shared
+            .dispatch
+            .role_overrides
+            .remove_if(&channel_id, |_, current| *current == owned);
     }
     true
 }
