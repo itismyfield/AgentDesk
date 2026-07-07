@@ -232,6 +232,23 @@ pub(in crate::services::discord) use store::{
 #[cfg(test)]
 use store::{root, tombstone_root};
 
+fn is_zero_id_commit_for_real_deferred_claim_marker(
+    marker: &AbortedAnchorMarker,
+    committed_user_msg_id: u64,
+) -> bool {
+    marker.origin == MarkerOrigin::DeferredClaim
+        && committed_user_msg_id == 0
+        && marker.foreign_user_msg_id.is_some_and(|id| id != 0)
+}
+
+/// `user_msg_id == 0` is not an identity. For the #4206 carve-out, a durable
+/// id-0 tombstone can cover a real-id DeferredClaim marker only if the tombstone
+/// was recorded at or after the marker was created.
+fn tombstone_zero_id_carveout_is_recent(marker: &AbortedAnchorMarker, t: &CommitTombstone) -> bool {
+    !is_zero_id_commit_for_real_deferred_claim_marker(marker, t.committed_user_msg_id)
+        || t.committed_at_ms >= marker.aborted_at_ms
+}
+
 /// `true` iff this tombstone is commit evidence for this marker's recorded
 /// turn: same tmux session AND the committed turn satisfies this marker kind's
 /// cover gate. Abort markers require exact foreign identity (codex-r1 positive
@@ -239,6 +256,7 @@ use store::{root, tombstone_root};
 /// plus a turn start at-or-after the recorded own-start boundary (#4159).
 fn commit_tombstone_matches_marker(marker: &AbortedAnchorMarker, t: &CommitTombstone) -> bool {
     t.tmux_session_name == marker.tmux_session_name
+        && tombstone_zero_id_carveout_is_recent(marker, t)
         && commit_identity_covers_marker(
             marker,
             t.committed_user_msg_id,
@@ -335,7 +353,7 @@ fn commit_identity_covers_marker(
                 return false;
             };
             let zero_id_commit_for_real_marker =
-                committed_user_msg_id == 0 && marker.foreign_user_msg_id.is_some_and(|id| id != 0);
+                is_zero_id_commit_for_real_deferred_claim_marker(marker, committed_user_msg_id);
             if marker.foreign_user_msg_id != Some(committed_user_msg_id)
                 && !zero_id_commit_for_real_marker
             {
@@ -551,9 +569,9 @@ fn deferred_claim_live_inflight_is_pinned(
 /// promotion): a tombstone satisfying the marker's commit-evidence gate
 /// ALREADY durable at record time means that turn terminal-committed before
 /// this marker existed (its drain pass could never see it) → stamp covered
-/// with the commit instant. No wall-clock condition — the structural argument
-/// that makes the sweep 대조's `>=` safe ([`post_abort_commit_tombstone`])
-/// holds a fortiori for evidence predating the marker.
+/// with the commit instant. The id-0-for-real-marker carve-out is the only
+/// exception: because id-0 is not an identity, that tombstone must be recorded
+/// at-or-after this marker was created.
 pub(super) fn cover_from_commit_tombstone(marker: &mut AbortedAnchorMarker) -> bool {
     if marker.covered_at_ms.is_some() {
         return false;
@@ -2533,6 +2551,23 @@ mod tests {
         )
     }
 
+    fn deferred_real_id_marker_with_offset(
+        channel: u64,
+        anchor: u64,
+        claimed_at_ms: u64,
+        turn_start_offset: u64,
+    ) -> AbortedAnchorMarker {
+        AbortedAnchorMarker::for_deferred_claim(
+            "claude".to_string(),
+            channel,
+            anchor,
+            format!("tmux-{channel}"),
+            claimed_at_ms,
+            (anchor, OWN_STARTED_AT.to_string()),
+            Some(turn_start_offset),
+        )
+    }
+
     /// R2 (#3303 happy path): the watcher chokepoint's existing drain covers a
     /// DeferredClaim marker when the OWN synthetic turn terminal-commits —
     /// exactly one `⏳ → ✅` on the pinned anchor and the marker drains. The
@@ -3019,6 +3054,99 @@ mod tests {
             post_abort_commit_tombstone(&marker),
             Some(20_012),
             "terminal evidence after the claim start covers"
+        );
+    }
+
+    #[test]
+    fn deferred_claim_zero_id_tombstone_before_marker_does_not_cover_real_id_marker() {
+        let _root = test_root();
+        let mut marker =
+            deferred_real_id_marker_with_offset(100, 1_523_971_968_775_487_621, 10_000, 200);
+
+        record_commit_tombstone_at_with_offsets(
+            9_999,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            true,
+            Some(240),
+        );
+
+        assert!(
+            !cover_from_commit_tombstone(&mut marker),
+            "a zero-id tombstone recorded before the real-id marker was created \
+             cannot be the marker's later pinned-turn commit"
+        );
+        assert_eq!(marker.covered_at_ms, None);
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            None,
+            "the sweep path must reject the same stale zero-id tombstone"
+        );
+    }
+
+    #[test]
+    fn deferred_claim_zero_id_tombstone_after_marker_covers_real_id_marker() {
+        let _root = test_root();
+        let marker =
+            deferred_real_id_marker_with_offset(100, 1_523_971_968_775_487_622, 10_000, 200);
+        record(&marker).unwrap();
+
+        record_commit_tombstone_at_with_offsets(
+            10_500,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            true,
+            Some(240),
+        );
+
+        assert_eq!(
+            post_abort_commit_tombstone(&marker),
+            Some(10_500),
+            "a zero-id commit recorded after marker creation still covers when \
+             its boundary and terminal evidence match"
+        );
+    }
+
+    #[test]
+    fn deferred_claim_zero_id_tombstone_after_restart_uses_persisted_boundary() {
+        let _root = test_root();
+        let marker =
+            deferred_real_id_marker_with_offset(100, 1_523_971_968_775_487_623, 10_000, 200);
+        record(&marker).unwrap();
+
+        let loaded = load_for_channel("claude", 100)
+            .into_iter()
+            .find(|m| m.anchor_message_id == marker.anchor_message_id)
+            .expect("marker must survive a restart-style store reload");
+        assert_eq!(loaded.foreign_started_at.as_deref(), Some(OWN_STARTED_AT));
+        assert_eq!(loaded.foreign_turn_start_offset, Some(200));
+        assert_eq!(loaded.aborted_at_ms, 10_000);
+
+        record_commit_tombstone_at_with_offsets(
+            20_000,
+            "claude",
+            "tmux-100",
+            100,
+            0,
+            OWN_STARTED_AT,
+            Some(200),
+            true,
+            Some(240),
+        );
+
+        assert_eq!(
+            post_abort_commit_tombstone(&loaded),
+            Some(20_000),
+            "a post-restart zero-id tombstone still covers the reloaded marker \
+             because the persisted boundary fields match and the tombstone is recent"
         );
     }
 
