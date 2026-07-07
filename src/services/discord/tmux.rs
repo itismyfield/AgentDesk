@@ -629,13 +629,11 @@ fn monitor_auto_turn_completion_notice(
     format!("{summary} · 대상: {label}")
 }
 
-/// #1009: Shared formatter for the monitor auto-turn suppressed-placeholder
+/// #1009: Shared formatter for the monitor auto-turn suppressed-notification
 /// summary line. Produces:
 ///   - `🔔 Monitor n회 처리 · 다음 모니터: {key1, key2, ...}` when entries > 0
 ///   - `🔔 Monitor n회 처리 · (등록된 모니터 없음)` when entries == 0
-/// Entry keys are emitted in the order the store returns them. Called from
-/// both `suppressed_placeholder_action` (via the monitor-aware wrapper) and
-/// the lifecycle-notice path so both channels use identical copy.
+/// Entry keys are emitted in the order the store returns them.
 pub(super) fn format_monitor_suppressed_label(event_count: usize, entry_keys: &[String]) -> String {
     if entry_keys.is_empty() {
         format!("🔔 Monitor {}회 처리 · (등록된 모니터 없음)", event_count)
@@ -646,21 +644,6 @@ pub(super) fn format_monitor_suppressed_label(event_count: usize, entry_keys: &[
             entry_keys.join(", ")
         )
     }
-}
-
-/// #1009: Compose the full suppressed-placeholder body for monitor auto-turn.
-/// Rebuilds the existing `last_edit_text`-preserve + label-append behaviour
-/// from `rewrite_placeholder_as_terminal_suppressed` but with the dynamic
-/// `format_monitor_suppressed_label` text. Length-guarded against
-/// `DISCORD_MSG_LIMIT` by the underlying rewrite helper.
-pub(super) fn format_monitor_suppressed_body(
-    last_edit_text: &str,
-    provider: &ProviderKind,
-    event_count: usize,
-    entry_keys: &[String],
-) -> String {
-    let label = format_monitor_suppressed_label(event_count, entry_keys);
-    rewrite_placeholder_as_terminal_suppressed(last_edit_text, &label, provider)
 }
 
 /// #1009: System-level hint injected once per monitor auto-turn entry so the

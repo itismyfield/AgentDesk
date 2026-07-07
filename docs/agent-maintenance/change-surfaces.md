@@ -152,7 +152,10 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1630 lines; -8 from #4198 routing the restored-watcher release D-section through the shared `turn_finalizer::cleanup` helpers (`snapshot_role_override` / `clear_watchdog_and_kick_thread_parents_after_turn_release` / `remove_owned_role_override`); +32 from #4105 adding
+  - `src/services/discord/tmux.rs` (1613 lines; -17 from #4151 removing
+    `format_monitor_suppressed_body` — its only caller was the unreachable #1009
+    MonitorAutoTurn suppressed-body replacement in tmux_watcher.rs (dead since
+    #1708; #4144 r2 closed the None-kind Edit path); -8 from #4198 routing the restored-watcher release D-section through the shared `turn_finalizer::cleanup` helpers (`snapshot_role_override` / `clear_watchdog_and_kick_thread_parents_after_turn_release` / `remove_owned_role_override`); +32 from #4105 adding
     cross-turn restored-seed identity (`RestoredWatcherTurn.turn_identity` +
     `restored_seed_reassigned_to_different_turn`) so a long-lived watcher reused
     for a new turn drops the prior turn's stale `full_response` seed; +101 from #4106 adding
