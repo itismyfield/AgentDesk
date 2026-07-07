@@ -627,22 +627,30 @@ mod headless_completion_footer_tests {
     /// E-1/E-22/E-23) never emitted single-message completion chrome because the
     /// `enqueue_headless_delivery` SUCCESS arm set `terminal_delivery_committed`
     /// / `terminal_body_visible` but NOT `completion_footer_terminal_text`, so
-    /// `note_turn_completed_footer` was never reached. Assert the guarded footer
-    /// write sits immediately after that arm's `terminal_body_visible = true;`
-    /// commit — a sequence unique to this arm (sibling branches register the
-    /// footer in different contexts) and absent from this test's own source, so
-    /// it does not self-match the `include_str!` include.
+    /// `note_turn_completed_footer` was never reached.
+    ///
+    /// The expected window is anchored on the `.await;` from the arm's
+    /// `cleanup_headless_streaming_placeholder_after_delivery(...).await;` — that
+    /// `.await; terminal_delivery_committed = true;` prefix occurs EXACTLY here.
+    /// The sibling non-headless replace arm produces the byte-identical footer
+    /// suffix but is prefixed by `if outcome {`, not `.await;`, so a bare-suffix
+    /// assertion would still pass off the sibling even if this write were deleted
+    /// or moved to the `Err` arm (the false-negative this anchor closes). The
+    /// literal is `\`-continued so its own compacted source (`true; \ terminal_`)
+    /// keeps the backslash and does not self-match the `include_str!` include.
     #[test]
     fn headless_enqueue_success_registers_completion_footer_text() {
         let source = compact_ws(include_str!("mod.rs"));
-        let expected = "terminal_body_visible = true; \
+        let expected = ".await; terminal_delivery_committed = true; \
+             terminal_body_visible = true; \
              if single_message_panel_footer_mode { \
              completion_footer_terminal_text = Some(delivery_response.clone()); }";
 
         assert!(
             source.contains(expected),
-            "headless enqueue success arm must set completion_footer_terminal_text \
-             right after committing terminal_body_visible (#4103 completion chrome)"
+            "headless enqueue_headless_delivery success arm must set \
+             completion_footer_terminal_text right after its post-delivery \
+             cleanup .await + terminal_body_visible commit (#4103 completion chrome)"
         );
     }
 }
