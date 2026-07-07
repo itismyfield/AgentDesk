@@ -1234,9 +1234,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (4326 lines; production LoC; -693
-    from #4230 S3 moving the completion postlude + inflight epilogue cluster
-    (including the intact #4185 restart-cancel block) to
+  - `src/services/discord/turn_bridge/mod.rs` (3831 lines; production LoC; -495
+    from #4230 S4 moving the post-loop owner classification + finalizer block to
+    `turn_bridge/post_loop_finalize.rs`; behavior-preserving decompose. Prior
+    -693 from #4230 S3 moving the completion postlude + inflight epilogue
+    cluster (including the intact #4185 restart-cancel block) to
     `turn_bridge/completion_postlude.rs`; behavior-preserving decompose. Prior
     -673 from #4230 S2 moving the runtime handoff stream arms and
     `handle_watcher_runtime_handoff` to
@@ -1432,6 +1434,14 @@
     marker cleanup, and the final queued-turn drain. The #4185 restart-cancel
     branch moved intact; discord-level `super::` refs are deepened one level;
     behavior-preserving decompose; not a giant-file).
+  - `src/services/discord/turn_bridge/post_loop_finalize.rs` (720 prod lines;
+    #4230 S4 post-loop owner classification + finalizer block extracted
+    verbatim from `spawn_turn_bridge`: stream-exit placeholder cleanup, orphaned
+    tool finalization, API friction extraction, follow-up requeue candidate,
+    review dispatch guard, bridge output owner classification, `TURN_ACTIVE`
+    publish, finalizing counters, early TUI gate, busy-watcher handoff, and
+    single-authority finalizer submission. Discord-level `super::` refs are
+    deepened one level; behavior-preserving decompose; not a giant-file).
   - `src/services/discord/turn_bridge/completion_guard.rs` (872 prod lines; no
     longer a giant-file after #3479 verbatim-extracted two leaf child modules
     under `completion_guard/` (1834 -> 872 prod). It now holds the

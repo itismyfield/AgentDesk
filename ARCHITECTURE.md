@@ -705,6 +705,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── output_lifecycle.rs
 │   │   │   ├── panel_lifecycle.rs
+│   │   │   ├── post_loop_finalize.rs
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
 │   │   │   ├── response_delivery.rs
