@@ -4597,6 +4597,118 @@ fn status_panel_unmatched_completion_fallback_pairs_by_agent_id_or_description()
 }
 
 #[test]
+fn status_panel_async_completion_agent_id_e2e_pairs_launch_ack_and_task_notification_xml() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_177_013);
+    let launch_tool_use_id = "toolu_agent_4177_launch";
+    let mismatched_tool_use_id = "toolu_agent_4177_mismatched";
+    let agent_id = "a09e45d12a68015a5";
+    let launch_desc = "Async #4177 primary slot";
+    let xml_desc = "Different #4177 terminal caption";
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Agent",
+            &json!({
+                "subagent_type": "general-purpose",
+                "description": launch_desc
+            })
+            .to_string(),
+            Some(launch_tool_use_id),
+        ),
+    );
+
+    let launch_ack = json!({
+        "type": "user",
+        "message": {
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": launch_tool_use_id,
+                "is_error": false
+            }]
+        },
+        "toolUseResult": {
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": agent_id,
+            "description": launch_desc,
+            "prompt": "...",
+            "outputFile": "/private/tmp/claude-4177/sess/tasks/a09e45d12a68015a5.output",
+            "canReadOutputFile": true
+        }
+    });
+    let launch_blocks = launch_ack["message"]["content"]
+        .as_array()
+        .expect("launch ack content blocks");
+    let promotion_events =
+        super::subagent_rollout::async_launch_promote_events(&launch_ack, launch_blocks, 0, false)
+            .expect("async launch ack should promote the slot");
+    assert!(
+        promotion_events.iter().any(|event| matches!(
+            event,
+            StatusEvent::SubagentStart {
+                agent_id: Some(extracted_agent_id),
+                tool_use_id: Some(extracted_tool_use_id),
+                background: true,
+                ..
+            } if extracted_agent_id.as_str() == agent_id
+                && extracted_tool_use_id.as_str() == launch_tool_use_id
+        )),
+        "launch ack promotion must carry toolUseResult.agentId: {promotion_events:?}"
+    );
+    events.push_status_events(channel_id, promotion_events);
+
+    let raw = format!(
+        "<task-notification>\n\
+        <task-id>{agent_id}</task-id>\n\
+        <tool-use-id>{mismatched_tool_use_id}</tool-use-id>\n\
+        <output-file>/private/tmp/claude-4177/sess/tasks/{agent_id}.output</output-file>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"{xml_desc}\" completed</summary>\n\
+        <result>Done.</result>\n\
+        </task-notification>"
+    );
+    let completion_events = status_events_from_task_notification_xml_for_footer_mode(&raw, true);
+    assert!(
+        completion_events.iter().any(|event| matches!(
+            event,
+            StatusEvent::SubagentEnd {
+                success: true,
+                agent_id: Some(extracted_agent_id),
+                desc: Some(extracted_desc),
+                tool_use_id: Some(extracted_tool_use_id),
+                ack_only: false,
+                ..
+            } if extracted_agent_id.as_str() == agent_id
+                && extracted_tool_use_id.as_str() == mismatched_tool_use_id
+                && extracted_desc.as_str() == xml_desc
+        )),
+        "task-notification XML must extract task-id as SubagentEnd agent_id: {completion_events:?}"
+    );
+    events.push_status_events(channel_id, completion_events);
+
+    let status_entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = status_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some(launch_tool_use_id))
+        .unwrap_or_else(|| panic!("launched subagent slot missing: {:?}", guard.subagents));
+    assert_eq!(slot.desc.as_str(), launch_desc);
+    assert_eq!(
+        slot.finished,
+        Some(true),
+        "mismatched tool-use-id and mismatched desc must finalize only via the aligned agent_id fallback"
+    );
+}
+
+#[test]
 fn status_panel_unmatched_completion_ambiguous_auxiliary_match_is_noop() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_177_011);

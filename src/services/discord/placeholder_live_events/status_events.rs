@@ -688,9 +688,9 @@ fn system_status_events(value: &Value) -> Vec<StatusEvent> {
     )
 }
 
-/// Returns the launching Task's tool-use id from a nested subagent record's
-/// top-level `parent_tool_use_id` (Claude Code marks every subagent-internal
-/// record with it). `None` for top-level records → normal panel path.
+/// Returns the cleaned agent/task id from a subagent task notification,
+/// accepting `agentId`/`agent_id`/`agent-id` and
+/// `task_id`/`task-id`/`taskId`. `None` for non-subagent notifications.
 fn task_notification_agent_id(value: &Value, kind: &str) -> Option<String> {
     (kind == "subagent").then(|| {
         [
@@ -702,6 +702,9 @@ fn task_notification_agent_id(value: &Value, kind: &str) -> Option<String> {
     })?
 }
 
+/// Returns the launching Task's tool-use id from a nested subagent record's
+/// top-level `parent_tool_use_id` (Claude Code marks every subagent-internal
+/// record with it). `None` for top-level records → normal panel path.
 fn subagent_parent_tool_use_id(value: &Value) -> Option<String> {
     ["parent_tool_use_id", "parentToolUseId"]
         .into_iter()

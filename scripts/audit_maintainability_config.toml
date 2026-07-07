@@ -23,7 +23,7 @@
 # new turn_anchor.rs). More specific than the `**` glob below, so it must precede it
 # for fnmatch first-match precedence.
 "src/services/discord/placeholder_live_events/status_panel.rs" = 794 # 2026-07-08 #4177: 738 -> 794 (+56), reviewable admission — store subagent agentId metadata, safely fallback-pair genuine async completions, and trim finished slots first.
-"src/services/discord/placeholder_live_events/status_events.rs" = 779 # 2026-07-08 #4177: 720 -> 779 (+59), reviewable admission — carry task-notification/toolUseResult agentId and description metadata into SubagentEnd fallback matching.
+"src/services/discord/placeholder_live_events/status_events.rs" = 782 # 2026-07-08 #4177 r2: 779 -> 782 (+3), reviewable admission — restore parent_tool_use_id doc placement and add task_notification_agent_id doc; prior #4177: 720 -> 779 (+59), carry task-notification/toolUseResult agentId and description metadata into SubagentEnd fallback matching.
 "src/services/discord/placeholder_live_events/**" = 700
 "src/services/discord/prompt_builder/**" = 700
 "src/services/discord/runtime_bootstrap/**" = 700
