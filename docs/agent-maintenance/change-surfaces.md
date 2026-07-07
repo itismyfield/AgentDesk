@@ -233,8 +233,12 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (5975 production lines; #4229 S3
-    moved the throttled streaming status tick (orphan reclaim, streaming
+  - `src/services/discord/tmux_watcher.rs` (5218 production lines; #4229 S4
+    moved the turn stream collector (seed restore/first parse-forward/monitor
+    auto-turn claim/active read-parse loop) verbatim to
+    `tmux_watcher/turn_stream_collector.rs` (1158 production lines), ratcheting
+    the root down after behavior-preserving decompose; #4229 S3 moved the
+    throttled streaming status tick (orphan reclaim, streaming
     suppression, status-panel create/bind, rollover, re-anchor, placeholder
     edit) verbatim to `tmux_watcher/streaming_status_tick.rs`, ratcheting the
     root down after behavior-preserving decompose; #4229 S2

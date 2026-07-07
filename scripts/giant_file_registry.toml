@@ -281,6 +281,15 @@ deadline = "2026-10-31"
 decompose_issue = "#3832"
 
 [[entry]]
+# #4229 S4 follow-up: turn stream collection was moved out of the watcher root
+# as an irreducible review-verified slice; keep it tracked until a later
+# behavior-preserving split can bring it below the prod-giant threshold.
+file = "src/services/discord/tmux_watcher/turn_stream_collector.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4229"
+
+[[entry]]
 # #3834 r2: restart-path scan moved out of the recovery_engine root, but the
 # verbatim `restore_inflight_turns` body remains a tracked giant until follow-up
 # slices can split the scan/session-retry internals without behavior changes.
