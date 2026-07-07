@@ -233,9 +233,12 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7174 production lines; #4049 S4-b1
-    inventory sync records the current hotfile count with 9 ratchet lines of
-    headroom; #4081
+  - `src/services/discord/tmux_watcher.rs` (7167 production lines; #4229 S1
+    moved the pause/epoch-discard + prompt-too-long/auth-expired/provider-overload
+    terminal exits verbatim to the non-giant
+    `tmux_watcher/terminal_abort_exits.rs` child module, ratcheting the root down
+    after behavior-preserving decompose; #4049 S4-b1 inventory sync recorded the
+    hotfile count; #4081
     round2 moved `commit_watcher_direct_terminal_session_idle` verbatim into
     `tmux_watcher/liveness.rs` and kept only thin duplicate-guard/long-body
     wiring in the root loop; -18 from
