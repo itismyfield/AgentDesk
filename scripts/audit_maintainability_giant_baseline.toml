@@ -38,7 +38,8 @@
 # live row" always sees the commit evidence) and passing the committed turn's
 # identity (codex r1 positive correlation; the marker logic lives in the
 # non-giant `tui_direct_abort_marker/` directory module — decomposed by #3303
-# into mod.rs + store.rs + deferred_claim.rs) — offset in the same change by
+# into mod.rs + store.rs + deferred_claim.rs, then #4175 split tombstone/drain/
+# sweep children and dropped mod.rs to 838 prod LoC) — offset in the same change by
 # compressing the #3016-S3 finalize/TOCTOU and #1670/#1708 decoupling comment
 # blocks (issue references and rationale preserved), so the file lands at
 # 9580 under the unchanged frozen baseline (no raise).

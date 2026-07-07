@@ -1,7 +1,7 @@
 # Hotfile raw-LOC ratchet baseline (#3565).
 #
 # Freezes the raw line count (`wc -l`: comments, blank lines, and test code all
-# COUNTED) of the three oversized Discord-relay hot files at their current size.
+# COUNTED) of oversized Discord-relay hot files at their current size.
 # `scripts/check_hotfile_ratchet.py` fails CI when a file's raw line count
 # exceeds its ceiling here, so these already-giant modules cannot regress and
 # grow even larger while a decomposition is pending.
@@ -23,6 +23,10 @@
 # LF-terminated source; the two agree exactly for this repo's LF-only files.
 
 [hotfile_ratchet]
+# #4175: 3589 -> 3123 raw by moving the TUI-direct abort marker tombstone,
+# drain, and sweep production paths into child modules. Inline tests stay in
+# mod.rs, so raw LoC remains high while the production root drops 1304 -> 838.
+"src/services/discord/tui_direct_abort_marker/mod.rs" = 3123
 # #3558: 10086 -> 10088 (+2), reviewable admission — both
 # `persist_watcher_stream_progress` streaming call sites thread the captured
 # `turn_identity_for_panel.as_ref()` into the new single-flock offset-TOCTOU RMW

@@ -601,10 +601,11 @@
     provider-submitted, `⏳` kept) or whose deferred claim succeeded but never
     saw its own commit pass flips `⏳ → ✅` when the pinned turn commits; the
     marker logic itself lives in the non-giant `tui_direct_abort_marker/`
-    directory module (#3303 decomposition: `mod.rs` reconcilers + Abort
-    disposition, `store.rs` durable marker/tombstone I/O, `deferred_claim.rs`
-    own-identity pin + uncapped-while-pinned disposition; sweeper TTL/hard-cap
-    `⚠` fallback + commit-tombstone 대조 semantics unchanged); the #3296
+    directory module (#3303 decomposition: `store.rs` durable marker/tombstone
+    I/O and `deferred_claim.rs` own-identity pin + uncapped-while-pinned
+    disposition; #4175 split `tombstone.rs` record/cover entry points, `drain.rs`
+    terminal-commit + visible-completion consumption, and `sweep.rs` TTL sweep
+    paths while keeping the shared cover gate in `mod.rs`); the #3296
     additions are offset in-file by compressing the #3016-S3 finalize/TOCTOU
     and #1670/#1708 decoupling comment blocks. #3038 tmux_watcher S1 then lowered
     the ratchet baseline to 8122 by moving pure decision clusters into the
@@ -894,16 +895,14 @@
     a self-contained helper) and the sibling `idle_transcript_scan.rs` is itself
     giant-capped, so the ratchet baseline was RAISED 4301 -> 4310 (a deliberate,
     reviewable admission per the baseline header) rather than split.
-  - `src/services/discord/tui_direct_abort_marker/mod.rs` (1233 production lines;
-    the abort/deferred-claim marker reconcilers + Abort disposition. #4159 r3 added
-    the output-stream offset-provenance gate on `DeferredClaim` markers — the
-    watcher only flips `⏳ → ✅` when the marker's evidence offset postdates the
-    turn-start offset (`evidence_offset >= turn_start_offset`), so a synthetic
-    turn-start whose marker reads a prior-turn terminal remnant no longer completes
-    prematurely — which pushed the reconciler surface over the 1000-line giant
-    threshold, so this file is now a registered giant (decompose_issue #4175).
-    Bugfix / anchor-completion correctness only; split the reconcilers from the
-    Abort/DeferredClaim disposition helpers before adding new marker behavior).
+  - `src/services/discord/tui_direct_abort_marker/{mod,tombstone,drain,sweep}.rs`
+    (838 / 70 / 262 / 177 production lines after #4175; formerly
+    `tui_direct_abort_marker/mod.rs` at 1304 production lines after #4206).
+    The facade keeps the shared commit-cover gate and Abort disposition helpers,
+    `tombstone.rs` owns record/cover entry points, `drain.rs` owns terminal
+    commit + visible-completion consumption, and `sweep.rs` owns the TTL sweep.
+    All files are below the giant-file threshold; the #4175 registry entry is
+    retired.
   - `src/services/discord/tui_direct_pending_start.rs` (1125 production lines;
     the deferred TUI-direct synthetic turn-start path — the pending-start claim
     queue, the no-evict promote of a stalled inflight, and the deferred-claim
