@@ -734,13 +734,14 @@
 | `services::discord::tui_prompt_relay::synthetic_start::stale_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs` | 225 | 225 | 0 |  |
 | `services::discord::tui_prompt_relay::synthetic_start_wiring` | `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs` | 137 | 137 | 0 |  |
 | `services::discord::tui_task_card` | `src/services/discord/tui_task_card.rs` | 1861 | 1065 | 796 | giant-file |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 5477 | 5017 | 460 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 4786 | 4326 | 460 | giant-file |
 | `services::discord::turn_bridge::bridge_latency_spans` | `src/services/discord/turn_bridge/bridge_latency_spans.rs` | 236 | 142 | 94 |  |
 | `services::discord::turn_bridge::cancel_finalize_policy` | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` | 581 | 131 | 450 |  |
 | `services::discord::turn_bridge::chunk_compose` | `src/services/discord/turn_bridge/chunk_compose.rs` | 68 | 68 | 0 |  |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 936 | 878 | 58 |  |
 | `services::discord::turn_bridge::completion_guard::completion_context` | `src/services/discord/turn_bridge/completion_guard/completion_context.rs` | 449 | 449 | 0 |  |
 | `services::discord::turn_bridge::completion_guard::completion_postgres` | `src/services/discord/turn_bridge/completion_guard/completion_postgres.rs` | 644 | 548 | 96 |  |
+| `services::discord::turn_bridge::completion_postlude` | `src/services/discord/turn_bridge/completion_postlude.rs` | 917 | 917 | 0 |  |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 170 | 100 | 70 |  |
 | `services::discord::turn_bridge::early_tui_completion` | `src/services/discord/turn_bridge/early_tui_completion.rs` | 71 | 71 | 0 |  |
 | `services::discord::turn_bridge::finalize_epilogue` | `src/services/discord/turn_bridge/finalize_epilogue.rs` | 306 | 156 | 150 |  |

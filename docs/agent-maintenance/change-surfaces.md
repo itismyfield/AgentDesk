@@ -1230,8 +1230,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (5017 lines; production LoC; -673
-    from #4230 S2 moving the runtime handoff stream arms and
+  - `src/services/discord/turn_bridge/mod.rs` (4326 lines; production LoC; -693
+    from #4230 S3 moving the completion postlude + inflight epilogue cluster
+    (including the intact #4185 restart-cancel block) to
+    `turn_bridge/completion_postlude.rs`; behavior-preserving decompose. Prior
+    -673 from #4230 S2 moving the runtime handoff stream arms and
     `handle_watcher_runtime_handoff` to
     `turn_bridge/runtime_handoff_loop.rs`; behavior-preserving decompose. Prior -501
     from #4230 S1 moving `CompletionGuard`/`InflightCleanupGuard` to
@@ -1417,6 +1420,14 @@
     so the parent call sites + inline tests stay byte-identical; the two
     discord-level `super::` refs (`response_sanitizer`, `DISCORD_MSG_LIMIT`)
     deepened to `super::super::`; no IO/async; not a giant-file).
+  - `src/services/discord/turn_bridge/completion_postlude.rs` (917 prod
+    lines; #4230 S3 completion postlude + inflight epilogue extracted verbatim
+    from the final post-loop tail of `spawn_turn_bridge`: status-panel completion,
+    final ADK status, watcher resume, transcript/memory/analytics persistence,
+    metrics, restart-report cleanup, inflight preserve/clear, mailbox recovery
+    marker cleanup, and the final queued-turn drain. The #4185 restart-cancel
+    branch moved intact; discord-level `super::` refs are deepened one level;
+    behavior-preserving decompose; not a giant-file).
   - `src/services/discord/turn_bridge/completion_guard.rs` (872 prod lines; no
     longer a giant-file after #3479 verbatim-extracted two leaf child modules
     under `completion_guard/` (1834 -> 872 prod). It now holds the
