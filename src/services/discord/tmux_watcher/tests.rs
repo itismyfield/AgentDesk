@@ -1682,17 +1682,21 @@ impl Drop for RootEnvGuard {
     }
 }
 
+/// #4210: tuple fields drop in declaration order, so the guard (which removes
+/// the env var) and the tempdir MUST come before the lock — otherwise the lock
+/// releases first and the deferred `remove_var` can delete a var another test
+/// (already holding the freed lock) just set.
 fn pin_runtime_root_for_test() -> (
-    std::sync::MutexGuard<'static, ()>,
-    tempfile::TempDir,
     RootEnvGuard,
+    tempfile::TempDir,
+    std::sync::MutexGuard<'static, ()>,
 ) {
     let lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     let root = tempfile::tempdir().expect("runtime root");
     unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
-    (lock, root, RootEnvGuard)
+    (RootEnvGuard, root, lock)
 }
 
 #[test]
