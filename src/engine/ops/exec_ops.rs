@@ -281,6 +281,24 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                         .join(&provider)
                         .join(format!("{channel_id}.json"));
                     if path.exists() {
+                        // #4104 (step 1): this policy op (`agentdesk.inflight.remove`)
+                        // unlinks the durable inflight row with NO identity guard and
+                        // NO lock — unlike every clear_inflight_state* path — so it is a
+                        // prime suspect for the "row vanishes mid-turn without a trace"
+                        // symptom. Emit the SAME standardized removal log an instrumented
+                        // repro greps for. This cross-module JS-op site holds raw strings
+                        // (no ProviderKind / user_msg_id in scope), so mirror the
+                        // log_inflight_remove field shape inline: parse channel_id to u64
+                        // and log user_msg_id=0 (unknown at the policy layer).
+                        tracing::warn!(
+                            target: "agentdesk::inflight_remove",
+                            provider = %provider,
+                            channel_id = channel_id.parse::<u64>().unwrap_or(0),
+                            user_msg_id = 0u64,
+                            reason = "policy_op_agentdesk_inflight_remove",
+                            path = %path.display(),
+                            "discord inflight state row removal"
+                        );
                         let _ = std::fs::remove_file(&path);
                         return format!(r#"{{"ok":true,"removed":"{}"}}"#, path.display());
                     }
