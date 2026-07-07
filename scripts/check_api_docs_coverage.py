@@ -21,24 +21,7 @@ GLOB_CHARS_RE = re.compile(r"[*?\[\]]")
 # Exact mounted routes that intentionally stay out of /api/docs. Keep this
 # dictionary narrow: no globbing, no path-prefix entries, and every reason must
 # explain why callers should not discover the route from the public docs shape.
-UNDOCUMENTED_API_ROUTES: dict[tuple[str, str], str] = {
-    (
-        "POST",
-        "/api/hook/reset-status",
-    ): "Loopback-only hook control-plane mutation for status reconciliation; not an operator-facing API.",
-    (
-        "POST",
-        "/api/hook/skill-usage",
-    ): "Loopback-only hook ingestion endpoint for skill usage telemetry; callers use docs-visible analytics routes instead.",
-    (
-        "DELETE",
-        "/api/hook/session/{sessionKey}",
-    ): "Loopback-only hook session disconnect endpoint with hook-client path casing; not part of the public API docs contract.",
-    (
-        "POST",
-        "/api/internal/escalation/emit",
-    ): "Loopback-only internal escalation emitter under /internal; not discoverable as a public operator route.",
-}
+UNDOCUMENTED_API_ROUTES: dict[tuple[str, str], str] = {}
 
 
 @dataclass(frozen=True, order=True)
