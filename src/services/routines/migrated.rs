@@ -235,15 +235,6 @@ fn migrated_launchd_builtin_required_paths(script_ref: &str) -> AppResult<Vec<Re
         });
     }
     match script_ref {
-        "migrated-launchd/agent-feedback-briefing.js" => {
-            push_migrated_env_required_path(
-                script_ref,
-                &mut paths,
-                "AGENTDESK_AGENT_FEEDBACK_INBOX",
-                "agent feedback inbox",
-                RequiredPathKind::Dir,
-            )?;
-        }
         "migrated-launchd/ai-integrated-briefing.js" => {
             push_migrated_skill_required_path(
                 script_ref,
@@ -292,26 +283,6 @@ fn migrated_launchd_builtin_required_paths(script_ref: &str) -> AppResult<Vec<Re
         _ => {}
     }
     Ok(paths)
-}
-
-fn push_migrated_env_required_path(
-    script_ref: &str,
-    paths: &mut Vec<RequiredPath>,
-    env_name: &str,
-    label: &str,
-    kind: RequiredPathKind,
-) -> AppResult<()> {
-    let path = migrated_env_path(env_name).ok_or_else(|| {
-        AppError::conflict(format!(
-            "migrated routine {script_ref} is invalid: {env_name} is unavailable"
-        ))
-    })?;
-    paths.push(RequiredPath {
-        label: label.to_string(),
-        path,
-        kind,
-    });
-    Ok(())
 }
 
 fn push_migrated_skill_required_path(

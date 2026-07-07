@@ -404,14 +404,6 @@ export function describeRoutinePurpose(routine: RoutineRecord, t: TFunction): st
       zh: "跟踪 Agent CLI、核心 crate 和 CVE 等外部依赖更新。",
     });
   }
-  if (includesAny(haystack, ["agent-feedback-briefing"])) {
-    return t({
-      ko: "에이전트 피드백과 품질 신호를 모아 브리핑합니다.",
-      en: "Summarizes agent feedback and quality signals.",
-      ja: "エージェントのフィードバックと品質シグナルを要約します。",
-      zh: "汇总智能体反馈和质量信号。",
-    });
-  }
   if (includesAny(haystack, ["banchan-day-reminder-prep"])) {
     return t({
       ko: "반찬데이 전날 장보기와 준비 알림을 보냅니다.",

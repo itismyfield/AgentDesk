@@ -358,7 +358,7 @@ mod tests {
     // still-reapable row with a definitively dead pane proceeds to the kill.
     #[test]
     fn revalidate_proceeds_only_for_dead_pane_genuine_orphan() {
-        let orphan = fresh_routine_named("agent-feedback-briefing", Some("agent-a"), None);
+        let orphan = fresh_routine_named("completed-fresh-orphan", Some("agent-a"), None);
 
         // Genuine completed orphan, pane still dead: proceed to kill.
         assert_eq!(
