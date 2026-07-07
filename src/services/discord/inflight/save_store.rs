@@ -29,10 +29,7 @@ pub(in crate::services::discord) use self::identity_gate::{
 };
 
 #[cfg(test)]
-use self::identity_gate::{
-    patch_restart_full_response_if_identity_unchanged_in_root,
-    save_inflight_state_if_identity_unchanged_in_root,
-};
+use self::identity_gate::save_inflight_state_if_identity_unchanged_in_root;
 #[cfg(test)]
 pub(super) use self::identity_gate::{
     save_existing_inflight_rebind_adoption_if_matches_identity_in_root,

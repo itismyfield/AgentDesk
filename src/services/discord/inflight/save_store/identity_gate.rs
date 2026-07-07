@@ -315,6 +315,7 @@ pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_m
     atomic_write(&path, &json)?;
     Ok(true)
 }
+
 /// Outcome of [`save_inflight_state_if_matches_identity`] — the #3041 P1-2 R3
 /// identity-guarded re-save used on a delivery-lease `Skip` epilogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
