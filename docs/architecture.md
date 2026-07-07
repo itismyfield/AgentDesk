@@ -87,6 +87,11 @@ Turn bridge decomposition anchors:
   candidate, review dispatch guard, bridge output owner classification,
   `TURN_ACTIVE` publish, finalizing counters, early TUI gate, busy-watcher
   handoff, and single-authority finalizer submission.
+- `turn_bridge/terminal_outcome_delivery.rs` — cancel, prompt-too-long,
+  recovery retry, empty response, terminal delivery lease commits,
+  terminal-controller cutover, voice completion, TUI completion gate, dispatch
+  completion/failure, watcher-delivered marking, `tv_done`, and terminal
+  status readiness.
 
 ### 2. Session + Provider Runtime (`src/services/`, `src/dispatch/`)
 

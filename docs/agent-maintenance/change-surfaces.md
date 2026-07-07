@@ -1234,7 +1234,10 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (3831 lines; production LoC; -495
+  - `src/services/discord/turn_bridge/mod.rs` (2492 lines; production LoC; -1339
+    from #4230 S5 moving the terminal outcome delivery block to
+    `turn_bridge/terminal_outcome_delivery.rs`; behavior-preserving decompose.
+    Prior -495
     from #4230 S4 moving the post-loop owner classification + finalizer block to
     `turn_bridge/post_loop_finalize.rs`; behavior-preserving decompose. Prior
     -693 from #4230 S3 moving the completion postlude + inflight epilogue
@@ -1499,6 +1502,14 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
+  - `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` (1669 lines;
+    production LoC; #4230 S5 terminal outcome delivery extracted verbatim from
+    `turn_bridge/mod.rs`: cancel, prompt-too-long, recovery retry, empty
+    response, terminal delivery leases, terminal-controller cutover, voice/TUI
+    completion, dispatch completion/failure, watcher-delivered marking, `tv_done`,
+    and terminal status readiness. Registered giant-file (#4230 decompose target
+    continuation — see `giant-file-registry.md`, owner `discord-relay`, deadline
+    2026-08-31). Bugfix only outside the #4230 decompose plan).
   - `src/services/discord/outbound/turn_output_controller.rs` (1034 prod lines;
     crossed the giant threshold in #3998 E13 when the controller-facing lease
     guard moved from `TurnKey` to `DeliveryLeaseKey` for id-0 disambiguation.
