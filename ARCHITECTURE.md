@@ -693,6 +693,7 @@ src/
 │   │   │   ├── chunk_compose.rs
 │   │   │   ├── chunk_compose_tests.rs
 │   │   │   ├── completion_guard.rs
+│   │   │   ├── completion_postlude.rs
 │   │   │   ├── context_window.rs
 │   │   │   ├── early_tui_completion.rs
 │   │   │   ├── finalize_epilogue.rs
