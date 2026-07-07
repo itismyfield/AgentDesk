@@ -146,7 +146,7 @@ pub(super) async fn run_completion_postlude(
     let restart_followup_pending = state.restart_followup_pending;
     let bridge_skip_holder_owns_inflight = state.bridge_skip_holder_owns_inflight;
     let mut inflight_guard = state.inflight_guard;
-    let mut inflight_state = state.inflight_state;
+    let inflight_state = state.inflight_state;
 
     let mut status_panel_completion_committed = true;
     if status_panel_terminal_committed
