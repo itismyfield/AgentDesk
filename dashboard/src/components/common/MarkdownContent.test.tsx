@@ -38,13 +38,17 @@ test("MarkdownContent renders links safely with target blank and noopener norefe
   expect(parsedHrefs).not.toContain("DiScOrD://evil.com/alert(1)");
 
   for (const link of links) {
-    if (link.getAttribute("href") === "https://example.com") {
+    const href = link.getAttribute("href");
+    if (
+      href === "https://example.com" ||
+      href?.startsWith("discord:")
+    ) {
       expect(link.getAttribute("target")).toBe("_blank");
       expect(link.getAttribute("rel")).toBe("noopener noreferrer");
     } else if (
-      link.getAttribute("href") === "http://localhost:3000/settings" ||
-      link.getAttribute("href") === "//localhost:3000/help" ||
-      link.getAttribute("href") === "#details"
+      href === "http://localhost:3000/settings" ||
+      href === "//localhost:3000/help" ||
+      href === "#details"
     ) {
       expect(link.hasAttribute("target")).toBe(false);
       expect(link.hasAttribute("rel")).toBe(false);

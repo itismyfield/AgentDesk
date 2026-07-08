@@ -495,24 +495,20 @@ var rules = {
       // Format: { items: ["task1", "task2"], verified: ["task1"] }
       // All items must be in verified to pass.
       if (card.deferred_dod_json) {
-        try {
-          var dod = typeof card.deferred_dod_json === "string"
-            ? JSON.parse(card.deferred_dod_json)
-            : card.deferred_dod_json;
-          var items = dod && Array.isArray(dod.items) ? dod.items : [];
-          var verified = dod && Array.isArray(dod.verified)
-            ? dod.verified
-            : (dod && typeof dod.verified === "undefined" ? [] : null);
-          if (items.length > 0 && verified) {
-            var unverified = 0;
-            for (var i = 0; i < items.length; i++) {
-              if (verified.indexOf(items[i]) === -1) unverified++;
-            }
-            if (unverified > 0) {
-              reasons.push("DoD 미완료: " + (items.length - unverified) + "/" + items.length);
-            }
+        var dod = card.deferred_dod_json;
+        var items = dod && Array.isArray(dod.items) ? dod.items : [];
+        var verified = dod && Array.isArray(dod.verified)
+          ? dod.verified
+          : (dod && typeof dod.verified === "undefined" ? [] : null);
+        if (items.length > 0 && verified) {
+          var unverified = 0;
+          for (var i = 0; i < items.length; i++) {
+            if (verified.indexOf(items[i]) === -1) unverified++;
           }
-        } catch (e) { /* parse fail = skip */ }
+          if (unverified > 0) {
+            reasons.push("DoD 미완료: " + (items.length - unverified) + "/" + items.length);
+          }
+        }
       }
 
       // Minimum work duration heuristic was intentionally removed.

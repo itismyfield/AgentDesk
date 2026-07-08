@@ -7,7 +7,7 @@ interface Props {
 }
 
 function isExternalHref(href?: string) {
-  if (!href || !/^(https?:)?\/\//i.test(href)) {
+  if (!href || !/^((https?:)?\/\/|discord:)/i.test(href)) {
     return false;
   }
 

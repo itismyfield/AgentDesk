@@ -23,6 +23,8 @@ export function AppShortcutHelpModal({
       <div
         role="dialog"
         aria-modal="true"
+        aria-labelledby="shortcut-modal-title"
+        aria-describedby="shortcut-modal-desc"
         className="relative w-full max-w-md rounded-[2rem] border p-6 shadow-2xl"
         style={{
           borderColor: "var(--th-border-subtle)",
@@ -33,13 +35,15 @@ export function AppShortcutHelpModal({
       >
         <div className="flex items-center justify-between">
           <div>
-            <div
+            <h2
+              id="shortcut-modal-title"
               className="text-lg font-semibold"
               style={{ color: "var(--th-text-heading)" }}
             >
               {isKo ? "키보드 단축키" : "Keyboard Shortcuts"}
-            </div>
+            </h2>
             <div
+              id="shortcut-modal-desc"
               className="mt-1 text-sm"
               style={{ color: "var(--th-text-muted)" }}
             >
@@ -51,6 +55,7 @@ export function AppShortcutHelpModal({
           <button
             type="button"
             onClick={onClose}
+            aria-label={isKo ? "닫기" : "Close"}
             className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--th-text-muted)]"
           >
             <X size={16} />

@@ -211,12 +211,13 @@ pub async fn get_status_entry_pg(
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
          LEFT JOIN task_dispatches td ON td.id = e.dispatch_id
-         LEFT JOIN LATERAL (
-             SELECT COUNT(*)::BIGINT AS live_session_count
-             FROM sessions s
-             WHERE s.active_dispatch_id = e.dispatch_id
-               AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
-         ) live_sessions ON TRUE
+         LEFT JOIN (
+             SELECT active_dispatch_id, COUNT(*)::BIGINT AS live_session_count
+             FROM sessions
+             WHERE COALESCE(status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
+               AND active_dispatch_id IS NOT NULL
+             GROUP BY active_dispatch_id
+         ) live_sessions ON live_sessions.active_dispatch_id = e.dispatch_id
          WHERE e.id = $1",
     )
     .bind(entry_id)
@@ -275,12 +276,13 @@ pub async fn list_status_entries_pg(
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
          LEFT JOIN task_dispatches td ON td.id = e.dispatch_id
-         LEFT JOIN LATERAL (
-             SELECT COUNT(*)::BIGINT AS live_session_count
-             FROM sessions s
-             WHERE s.active_dispatch_id = e.dispatch_id
-               AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
-         ) live_sessions ON TRUE
+         LEFT JOIN (
+             SELECT active_dispatch_id, COUNT(*)::BIGINT AS live_session_count
+             FROM sessions
+             WHERE COALESCE(status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
+               AND active_dispatch_id IS NOT NULL
+             GROUP BY active_dispatch_id
+         ) live_sessions ON live_sessions.active_dispatch_id = e.dispatch_id
          WHERE e.run_id = $1
            AND ($2::TEXT IS NULL OR e.agent_id = $2)
            AND ($3::TEXT IS NULL OR kc.repo_id = $3)

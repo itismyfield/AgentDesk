@@ -478,7 +478,7 @@ fn provider_runtime_guidance(provider: &ProviderKind) -> String {
     let provider_name = provider.as_str();
     let log_hint = dcserver_log_hint();
     format!(
-        "{provider_name} CLI 설치/PATH와 서비스 런타임 PATH를 확인하고, 연결 문제가 있으면 {log_hint} 로그와 provider 인증 상태를 점검하세요."
+        "Check {provider_name} CLI installation/PATH and service runtime PATH. If there are connection issues, check {log_hint} logs and provider authentication status."
     )
 }
 
@@ -1014,7 +1014,7 @@ fn check_opencode_serve_health_probe(configured: bool) -> Check {
             CheckGroup::ProviderRuntime,
             "OpenCode serve health",
             error,
-            "opencode serve가 정상 기동되는지 CLI 설치, 설정 파일, provider/model 인증 상태를 확인하세요.",
+            "Check CLI installation, configuration files, and provider/model authentication status to ensure opencode serve starts normally.",
         )
         .with_expected_actual("opencode serve /global/health returns 200", "probe failed")
         .with_next_steps(vec![
@@ -1032,7 +1032,7 @@ fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "DB/Dashboard Health",
             "health payload unavailable",
-            "dcserver health detail endpoint에 접근할 수 있어야 DB/dashboard 상태를 요약할 수 있습니다.",
+            "The dcserver health detail endpoint must be reachable to summarize DB/dashboard status.",
         )
         .with_subsystem("health")
         .with_fix_safety(FixSafety::NotFixable)
@@ -1068,7 +1068,7 @@ fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "DB/Dashboard Health",
             detail.clone(),
-            "DB health가 false입니다. Postgres/SQLite source-of-truth 상태를 먼저 확인하세요.",
+            "DB health is false. Check the Postgres/SQLite source-of-truth status first.",
         )
         .with_subsystem("health")
         .with_severity(Severity::Error)
@@ -1081,7 +1081,7 @@ fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "DB/Dashboard Health",
             detail.clone(),
-            "dashboard dist가 없거나 unreadable입니다. API는 동작하더라도 UI asset 배포 상태를 확인하세요.",
+            "Dashboard dist is missing or unreadable. Even if the API is working, check the UI asset deployment status.",
         )
         .with_subsystem("health")
         .with_path(health_detail_endpoint(&snapshot.base))
@@ -1093,7 +1093,7 @@ fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "DB/Dashboard Health",
             detail.clone(),
-            "health detail payload가 DB/dashboard summary를 제공하지 않습니다.",
+            "The health detail payload does not provide a DB/dashboard summary.",
         )
         .with_subsystem("health")
         .with_path(health_detail_endpoint(&snapshot.base))
@@ -1109,7 +1109,7 @@ fn check_dispatch_outbox(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "Dispatch Outbox",
             "health payload unavailable",
-            "dispatch outbox health를 읽을 수 없습니다.",
+            "Cannot read dispatch outbox health.",
         )
         .with_subsystem("dispatch_outbox")
         .with_fix_safety(FixSafety::NotFixable);
@@ -1150,7 +1150,7 @@ fn check_dispatch_outbox(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "Dispatch Outbox",
             detail.clone(),
-            "permanent dispatch outbox failure가 있습니다. delivery/follow-up 경로를 확인하세요.",
+            "There are permanent dispatch outbox failures. Check the delivery/follow-up paths.",
         )
         .with_subsystem("health")
         .with_severity(Severity::Error)
@@ -1164,7 +1164,7 @@ fn check_dispatch_outbox(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "Dispatch Outbox",
             detail.clone(),
-            "pending/retrying outbox가 남아 있습니다. oldest age가 증가하면 delivery worker를 확인하세요.",
+            "Pending/retrying outbox items remain. If oldest age increases, check the delivery worker.",
         )
         .with_subsystem("health")
         .with_path(health_detail_endpoint(&snapshot.base))
@@ -1192,7 +1192,7 @@ fn check_config_audit(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "Config Audit",
             "health payload unavailable",
-            "config audit report를 읽을 수 없습니다.",
+            "Cannot read config audit report.",
         )
         .with_subsystem("config_audit")
         .with_fix_safety(FixSafety::NotFixable);
@@ -1203,7 +1203,7 @@ fn check_config_audit(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "Config Audit",
             "no persisted config audit report in health detail",
-            "dcserver startup config audit가 아직 실행되지 않았거나 persisted report가 없습니다.",
+            "The dcserver startup config audit has not run yet, or there is no persisted report.",
         )
         .with_subsystem("config_audit")
         .with_path(health_detail_endpoint(&snapshot.base))
@@ -2555,7 +2555,7 @@ fn check_discord_bot(snapshot: &HealthSnapshot) -> Check {
                     .clone()
                     .unwrap_or_else(|| "unknown error".to_string())
             ),
-            "dcserver가 실행 중인지, /api/health가 접근 가능한지 확인하세요.",
+            "Ensure dcserver is running and /api/health is reachable.",
         )
         .with_path(health_endpoint(&snapshot.base))
         .with_expected_actual("reachable health endpoint", "health endpoint unreachable")
@@ -2576,7 +2576,7 @@ fn check_tmux() -> Check {
             CheckGroup::Core,
             "tmux",
             "not found in PATH",
-            "Claude/Codex tmux backend를 쓸 계획이면 tmux를 설치하세요.",
+            "Install tmux if you plan to use the Claude/Codex tmux backend.",
         )
         .with_path("tmux")
         .with_expected_actual("tmux available in PATH", "tmux not found")
@@ -2936,7 +2936,7 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
                     CheckGroup::Core,
                     "Server",
                     reason_detail.clone(),
-                    "health endpoint는 응답했지만 서비스 상태가 healthy가 아닙니다. degraded reason별 subsystem을 먼저 확인하세요.",
+                    "The health endpoint responded, but the service status is not healthy. Check the subsystem for each degraded reason first.",
                 )
                 .with_subsystem("health")
                 .with_severity(highest_reason_severity(&reasons))
@@ -2976,7 +2976,7 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
                 (
                     "unreachable",
                     Severity::Error,
-                    "dcserver/axum 서버가 떠 있는지와 방화벽/포트 접근 가능 여부를 확인하세요.",
+                    "Check if the dcserver/axum server is running and if the firewall/port is accessible.",
                 )
             };
             Check::fail(
@@ -3578,7 +3578,7 @@ fn check_file_descriptor_headroom() -> Check {
             CheckGroup::Core,
             "File Descriptor Headroom",
             detail,
-            "파일 디스크립터가 soft limit에 가까우면 mkfifo/spawn이 EMFILE(os error 24)로 실패할 수 있습니다. launchd plist의 SoftResourceLimits:NumberOfFiles를 올리고 dcserver/tmux를 재시작하세요.",
+            "If the file descriptor count is close to the soft limit, mkfifo/spawn may fail with EMFILE (os error 24). Increase SoftResourceLimits:NumberOfFiles in the launchd plist and restart dcserver/tmux.",
         )
         .with_expected_actual(
             format!(

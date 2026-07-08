@@ -533,6 +533,11 @@ async fn try_route_node_override(
                 reason: RanLocalReason::OpenRouteAlreadyExists,
             },
             Some(IntakeInsertConflict::DuplicateMessageAttempt) => {
+                tracing::info!(
+                    channel_id = ctx.channel_id,
+                    user_msg_id = ctx.user_msg_id,
+                    "[intake_router] duplicate Discord message (node override) — existing row already covers it; skipping local execution"
+                );
                 IntakeRouterDecision::SkippedDuplicate
             }
             None => IntakeRouterDecision::RanLocal {
@@ -993,6 +998,55 @@ mod pg_tests {
         assert_eq!(row.0, "worker-selected");
         assert_eq!(row.1, serde_json::json!([]));
         assert_eq!(row.2, "agent-node-override");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn node_override_with_duplicate_message_returns_skipped_duplicate() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-node-override-dup",
+            "ch-node-override-dup",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-selected-dup",
+            serde_json::json!(["mac-mini"]),
+            "online",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-node-override-dup");
+        ctx.node_override_instance_id = Some("worker-selected-dup");
+
+        // First call should forward.
+        let first = try_route_intake(&pool, &ctx).await;
+        match first {
+            IntakeRouterDecision::Forwarded { .. } => {}
+            other => panic!("expected first Forwarded, got {other:?}"),
+        }
+
+        // Drive the existing row to terminal so the partial unique
+        // index doesn't catch the second insert; only the 3-tuple
+        // constraint should remain.
+        sqlx::query(
+            "UPDATE intake_outbox SET status='done', completed_at=NOW()
+             WHERE channel_id='ch-node-override-dup' AND user_msg_id='9999' AND attempt_no=1",
+        )
+        .execute(&pool)
+        .await
+        .expect("terminate first");
+
+        // Second call (same Discord message) — must report SkippedDuplicate.
+        let second = try_route_intake(&pool, &ctx).await;
+        assert_eq!(second, IntakeRouterDecision::SkippedDuplicate);
 
         pool.close().await;
         pg_db.drop().await;

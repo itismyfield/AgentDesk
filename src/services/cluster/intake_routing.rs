@@ -125,24 +125,19 @@ pub(crate) fn pick_intake_target(
         };
     }
 
-    let non_leader: Vec<&&CandidateNode> = eligible
-        .iter()
-        .filter(|c| c.instance_id != leader_instance_id)
-        .collect();
-
-    if non_leader.is_empty() {
-        return IntakeRouteTarget::Local {
-            reason: LocalRouteReason::LeaderIsOnlyEligible,
-        };
-    }
-
-    let chosen = non_leader
+    let chosen = eligible
         .into_iter()
-        .min_by(|a, b| a.instance_id.cmp(&b.instance_id))
-        .expect("non_leader non-empty");
+        .filter(|c| c.instance_id != leader_instance_id)
+        .min_by(|a, b| a.instance_id.cmp(&b.instance_id));
 
-    IntakeRouteTarget::Worker {
-        instance_id: chosen.instance_id.clone(),
+    if let Some(chosen) = chosen {
+        IntakeRouteTarget::Worker {
+            instance_id: chosen.instance_id.clone(),
+        }
+    } else {
+        IntakeRouteTarget::Local {
+            reason: LocalRouteReason::LeaderIsOnlyEligible,
+        }
     }
 }
 
