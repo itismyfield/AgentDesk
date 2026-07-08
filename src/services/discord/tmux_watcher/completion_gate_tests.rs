@@ -1595,16 +1595,31 @@ fn unprocessed_tail_after_first_terminal(batch: &str) -> String {
 }
 
 fn assert_suppression_arm_uses_confirmed_end_helper(reason: &str) {
-    let module_src = include_str!("../tmux_watcher.rs");
-    let reason_idx = module_src
-        .find(reason)
+    // #4321: #4229 S2 (#4297) extracted the post-terminal-no-inflight arm into
+    // tmux_watcher/loop_poll_prologue.rs, so the suppression arms now live
+    // across the parent module and its decomposed children. Search every module
+    // that can host an `advance_watcher_confirmed_end` suppression arm so this
+    // wiring guarantee survives further extraction (each source must be an
+    // `include_str!` literal because the paths are resolved at compile time; a
+    // reason that goes missing from all of them still trips the panic below).
+    const MODULE_SOURCES: &[&str] = &[
+        include_str!("../tmux_watcher.rs"),
+        include_str!("loop_poll_prologue.rs"),
+    ];
+    let (module_src, reason_idx) = MODULE_SOURCES
+        .iter()
+        .find_map(|src| src.find(reason).map(|idx| (*src, idx)))
         .unwrap_or_else(|| panic!("missing suppression reason {reason}"));
     let call_start = module_src[..reason_idx]
         .rfind("advance_watcher_confirmed_end(")
         .unwrap_or_else(|| panic!("missing advance call for {reason}"));
     let call_src = &module_src[call_start..reason_idx];
+    // The arm may pass the batch data by reference or by value (`&all_data` when
+    // the module owns a `String`, `all_data` when it already borrows a slice);
+    // both are the same consumed-terminal-end wiring.
     assert!(
-        call_src.contains("suppressed_terminal_confirmed_end(current_offset, &all_data)"),
+        call_src.contains("suppressed_terminal_confirmed_end(current_offset, &all_data)")
+            || call_src.contains("suppressed_terminal_confirmed_end(current_offset, all_data)"),
         "suppression arm {reason} must advance only to the consumed terminal end"
     );
 }
