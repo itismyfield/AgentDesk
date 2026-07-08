@@ -453,6 +453,13 @@ pub(crate) enum ForceFailError {
          double-emit a Discord turn)"
     )]
     DisallowedStatus { id: i64, status: String },
+    #[error(
+        "intake_outbox row id={id} has no recorded provider; a retry would insert pending work \
+         that no worker can claim (claim is scoped on intake_outbox.provider since #4349). This \
+         row predates the provider column and its forwarding bot is unknowable — set \
+         intake_outbox.provider explicitly before retrying, or leave it terminal"
+    )]
+    UnknownProvider { id: i64 },
     #[error("postgres error: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -504,6 +511,19 @@ pub(crate) async fn force_fail_and_retry_as_new(
             id: stuck_id,
             status: row.status.clone(),
         });
+    }
+
+    // #4349 review r2: the retry below copies `row.provider` into a fresh
+    // `pending` row, and claim is scoped on `intake_outbox.provider`. An empty
+    // provider matches no worker, so retrying such a row would silently strand
+    // it in `pending` forever — exactly the failure migration 0079 fails closed
+    // to avoid. Refuse loudly and BEFORE any state change, so the operator sees
+    // it instead of inheriting invisible pending work.
+    //
+    // Only rows that predate the provider column and whose `claim_owner` was
+    // unusable can reach here; 0079 recovers every other row.
+    if row.provider.trim().is_empty() {
+        return Err(ForceFailError::UnknownProvider { id: stuck_id });
     }
 
     // Force-terminate if not already terminal:
@@ -777,8 +797,44 @@ mod migration_tests {
             orphan_status, "failed_post_accept",
             "post-accept row must not be misclassified as retryable pre-accept"
         );
-        // And it lands in exactly the state force_fail_and_retry_as_new accepts.
+        // It lands in a state force_fail_and_retry_as_new would otherwise accept…
         assert!(super::TRANSITION_12_ALLOWED.contains(&orphan_status.as_str()));
+
+        // …but retrying it would insert `pending` work with provider='' that no
+        // worker can claim. #4349 review r2: refuse loudly, change nothing.
+        let err = super::force_fail_and_retry_as_new(&pool, orphan_post, "operator: retry")
+            .await
+            .expect_err("orphan row with no provider must be refused");
+        match err {
+            super::ForceFailError::UnknownProvider { id } => assert_eq!(id, orphan_post),
+            other => panic!("expected UnknownProvider, got {other:?}"),
+        }
+
+        // The refusal is total: no child row, original row untouched.
+        let family: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = 'ch-g'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count family");
+        assert_eq!(family, 1, "refusal must not insert a retry attempt");
+        assert_eq!(
+            row_state(&pool, orphan_post).await,
+            ("".to_string(), "failed_post_accept".to_string())
+        );
+
+        // No pending row anywhere can carry an unclaimable empty provider.
+        let unclaimable: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox
+             WHERE provider = '' AND status IN ('pending','claimed','accepted','spawned')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count unclaimable open rows");
+        assert_eq!(
+            unclaimable, 0,
+            "migration must leave no open row that a worker can never claim"
+        );
 
         pool.close().await;
         pg_db.drop().await;

@@ -49,9 +49,15 @@ WHERE provider = ''
 --    the turn can already have emitted to Discord. Auto-retry is forbidden
 --    past `accepted` (intake_worker.rs: "a failure is post-accept and is NOT
 --    auto-retried"; the operator alert IS the recovery signal), so these must
---    never be labelled pre-accept. Mark them post-accept and leave recovery to
---    `force_fail_and_retry_as_new`, whose TRANSITION_12_ALLOWED accepts exactly
---    this state.
+--    never be labelled pre-accept.
+--
+--    These rows keep `provider = ''`. That is deliberate and it is NOT
+--    silently retryable: `force_fail_and_retry_as_new` copies `provider` into
+--    the fresh `pending` row it inserts, and claim is scoped on
+--    `intake_outbox.provider`, so a retry would strand invisible pending work.
+--    It therefore rejects an empty provider with `ForceFailError::UnknownProvider`
+--    (#4349 review r2). An operator who wants to retry one of these must first
+--    decide which bot forwarded it and set `provider` by hand.
 --
 --    Reaching here requires a malformed `claim_owner`, since `mark_accepted`
 --    only advances a row whose `claim_owner` matches. Kept as a defensive arm.
