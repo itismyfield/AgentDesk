@@ -1215,4 +1215,39 @@ mod skill_cache_freshness_tests {
             "v2\n"
         );
     }
+
+    /// #4256: an old lock (mtime far past the TTL) owned by a LIVE pid must NOT be stolen --
+    /// liveness is authoritative over the mtime-TTL backstop, so a slow-but-active holder is
+    /// never stolen out from under its own copy/swap.
+    #[test]
+    fn old_lock_with_live_holder_is_not_stolen() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("demo");
+        write_file(&source.join("SKILL.md"), "v1\n");
+        let managed = ensure_managed_skill_dir(root, "demo", &source).unwrap();
+
+        // Ancient mtime, but the recorded pid (ours) is alive.
+        let refresh_dir = root.join(".skill-refresh");
+        fs::create_dir_all(&refresh_dir).unwrap();
+        let lock = refresh_dir.join("demo.lock");
+        fs::write(&lock, format!("{}:0", std::process::id())).unwrap();
+        filetime::set_file_mtime(&lock, FileTime::from_unix_time(1_000_000, 0)).unwrap();
+
+        write_file(&source.join("SKILL.md"), "v2\n");
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v1\n",
+            "an old lock held by a live pid must not be stolen, regardless of age"
+        );
+
+        // Once released, the next refresh converges.
+        fs::remove_file(&lock).unwrap();
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v2\n"
+        );
+    }
 }

@@ -12,20 +12,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// Monotonic per-process counter that, combined with `std::process::id()`, makes every
-/// staging (and grave) directory path unique so concurrent refreshes never share one.
+/// staging/grave path and lock owner token unique so concurrent refreshes never collide.
 static REFRESH_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A lock older than this is treated as abandoned. A refresh takes milliseconds, so this is
-/// a generous backstop that recovers a crash-orphaned lock even when its PID has been reused.
-const STALE_LOCK_TTL: Duration = Duration::from_secs(60);
+/// Backstop age after which a lock whose holder liveness is *indeterminate* (non-unix, or an
+/// empty/unreadable/malformed owner token) is treated as abandoned. A live, readable PID is
+/// never aged out. Generous because it must never race a genuinely slow-but-live refresh.
+const STALE_LOCK_TTL: Duration = Duration::from_secs(300);
 
-/// Removes its lockfile on drop, releasing a skill's refresh lock on every exit path
-/// (including panic unwind) so a failed refresh cannot deadlock later ones.
-struct SkillRefreshLock(PathBuf);
+/// Releases a skill's refresh lock on drop (every exit path, including panic unwind) so a
+/// failed refresh cannot deadlock later ones.
+///
+/// The release is ownership-safe: it removes the lockfile only if it still carries THIS
+/// guard's exact `<pid>:<seq>` token. If a recoverer superseded us (different token) or the
+/// file is already gone, it leaves the file untouched -- so even a mistaken steal can never
+/// delete the new owner's lock and let a third entrant into the swap critical section.
+struct SkillRefreshLock {
+    path: PathBuf,
+    token: String,
+}
 
 impl Drop for SkillRefreshLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        match fs::read_to_string(&self.path) {
+            Ok(contents) if contents.trim() == self.token => {
+                let _ = fs::remove_file(&self.path);
+            }
+            _ => {} // gone or superseded: not ours to remove
+        }
     }
 }
 
@@ -98,7 +112,9 @@ fn acquire_skill_refresh_lock(
     try_take_lock(&lock_path)
 }
 
-/// Atomically creates the lockfile, returning `Ok(None)` if a holder already exists.
+/// Atomically creates the lockfile, stamping a unique `<pid>:<seq>` owner token, and returns
+/// `Ok(None)` if a holder already exists. The token drives both stale-owner recovery (its
+/// PID) and ownership-safe release (the whole token; see [`SkillRefreshLock`]).
 fn try_take_lock(lock_path: &Path) -> Result<Option<SkillRefreshLock>, String> {
     match fs::OpenOptions::new()
         .write(true)
@@ -106,27 +122,44 @@ fn try_take_lock(lock_path: &Path) -> Result<Option<SkillRefreshLock>, String> {
         .open(lock_path)
     {
         Ok(mut file) => {
-            // Best-effort PID stamp for stale-owner recovery; the TTL backstop covers a lost
-            // write.
-            let _ = file.write_all(std::process::id().to_string().as_bytes());
-            Ok(Some(SkillRefreshLock(lock_path.to_path_buf())))
+            let token = format!(
+                "{}:{}",
+                std::process::id(),
+                REFRESH_SEQ.fetch_add(1, Ordering::Relaxed)
+            );
+            // A lost write leaves an empty token: liveness becomes indeterminate and the TTL
+            // backstop eventually recovers it -- never a destructive early removal.
+            let _ = file.write_all(token.as_bytes());
+            Ok(Some(SkillRefreshLock {
+                path: lock_path.to_path_buf(),
+                token,
+            }))
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(e) => Err(format!("Failed to lock '{}': {e}", lock_path.display())),
     }
 }
 
-/// A lock is stale (safe to steal) when its recorded holder PID is not alive, or -- as a
-/// backstop for PID reuse and pre-stamp locks -- when it is older than [`STALE_LOCK_TTL`].
+/// A lock is stale (safe to steal) only when its holder is provably gone:
+///   * the recorded PID is readable and confirmed NOT alive (unix `kill(pid, 0)` -> `ESRCH`),
+///     or
+///   * liveness is indeterminate (non-unix, or an empty/unreadable/malformed token) AND the
+///     lock is older than [`STALE_LOCK_TTL`].
+///
+/// Liveness is authoritative: a readable, live PID is NEVER stolen regardless of age, so a
+/// slow-but-active holder cannot be stolen out from under its own copy/swap.
 fn skill_refresh_lock_is_stale(lock_path: &Path) -> bool {
-    if let Ok(contents) = fs::read_to_string(lock_path) {
-        if let Ok(pid) = contents.trim().parse::<u32>() {
-            if !holder_pid_is_alive(pid) {
-                return true;
-            }
-        }
+    match read_lock_pid(lock_path).and_then(pid_liveness) {
+        Some(alive) => !alive,
+        None => lock_file_age(lock_path).is_some_and(|age| age >= STALE_LOCK_TTL),
     }
-    lock_file_age(lock_path).is_some_and(|age| age >= STALE_LOCK_TTL)
+}
+
+/// Parses the holder PID (the leading `<pid>` of the `<pid>:<seq>` token). `None` when the
+/// token is missing/empty/malformed, i.e. liveness cannot be determined from it.
+fn read_lock_pid(lock_path: &Path) -> Option<u32> {
+    let contents = fs::read_to_string(lock_path).ok()?;
+    contents.trim().split(':').next()?.parse::<u32>().ok()
 }
 
 fn lock_file_age(lock_path: &Path) -> Option<Duration> {
@@ -134,21 +167,22 @@ fn lock_file_age(lock_path: &Path) -> Option<Duration> {
     SystemTime::now().duration_since(modified).ok()
 }
 
-/// `kill(pid, 0)` probes existence without delivering a signal: success or `EPERM` means the
-/// process is alive, `ESRCH` means it is gone.
+/// Probes whether `pid` is alive via `kill(pid, 0)` (delivers no signal): `Some(true)` when
+/// reachable or `EPERM` (alive, not ours), `Some(false)` on `ESRCH` (gone). `None` means
+/// liveness is indeterminate on this platform and the caller must fall back to the TTL.
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn holder_pid_is_alive(pid: u32) -> bool {
+fn pid_liveness(pid: u32) -> Option<bool> {
     if pid == 0 {
-        return true; // kill(0, ...) targets our own process group; never treat as stale
+        return Some(true); // kill(0, ...) targets our own process group; treat as alive
     }
     let reachable = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-    reachable || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    Some(reachable || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
 #[cfg(not(unix))]
-fn holder_pid_is_alive(_pid: u32) -> bool {
-    true // no cheap liveness probe here; the TTL backstop still recovers abandoned locks
+fn pid_liveness(_pid: u32) -> Option<bool> {
+    None // no cheap liveness probe here; fall back to the TTL backstop
 }
 
 /// Atomically replaces `managed_dir` with `staging`. Tolerates `managed_dir` already being
@@ -172,4 +206,42 @@ fn swap_managed_skill_dir(staging: &Path, managed_dir: &Path) -> Result<(), Stri
             managed_dir.display()
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #4256: dropping a guard whose token no longer matches the on-disk lock (it was
+    /// stolen/superseded) must NOT delete that lock -- otherwise a third entrant could
+    /// acquire and race the delete+rename critical section.
+    #[test]
+    fn superseded_guard_does_not_delete_new_owners_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock_path = temp.path().join("demo.lock");
+
+        // Guard stamped with token A, but the on-disk lock now carries a recoverer's token B.
+        let guard = SkillRefreshLock {
+            path: lock_path.clone(),
+            token: "111:1".to_string(),
+        };
+        fs::write(&lock_path, "222:2").unwrap();
+        drop(guard);
+        assert_eq!(
+            fs::read_to_string(&lock_path).unwrap(),
+            "222:2",
+            "a superseded guard must leave the new owner's lock intact"
+        );
+
+        // Sanity: a guard whose token still matches DOES release its own lock on drop.
+        let guard = SkillRefreshLock {
+            path: lock_path.clone(),
+            token: "222:2".to_string(),
+        };
+        drop(guard);
+        assert!(
+            !lock_path.exists(),
+            "a matching guard must release its own lock"
+        );
+    }
 }
