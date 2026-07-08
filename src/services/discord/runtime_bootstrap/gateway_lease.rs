@@ -49,26 +49,46 @@ fn gateway_preference() -> Option<GatewayPreference> {
     )
 }
 
-/// Does `nodes` (a `list_worker_nodes` snapshot) contain `instance_id` as online?
-fn node_list_reports_online(nodes: &[serde_json::Value], instance_id: &str) -> bool {
+/// May we hand the gateway over to the preferred node?
+///
+/// Being `online` in `worker_nodes` is **not** sufficient. A node whose dcserver
+/// is up and heartbeating may have no token for this provider, may have failed
+/// before gateway startup, or may simply not be contending for the lease. Yielding
+/// to such a node hands the gateway to nobody: we release, self-fence, restart,
+/// re-acquire, and yield again — a gateway outage loop.
+///
+/// So the preferred node must also *advertise* that it wants this gateway, via the
+/// `discord_gateway.waiting_providers` capability that `register_gateway_waiter`
+/// publishes on every heartbeat. That signal only exists while a `run_bot` on that
+/// node is actually waiting for, or holding, the lease for this provider.
+fn should_yield_to_preferred(
+    nodes: &[serde_json::Value],
+    preferred_instance_id: &str,
+    provider: &str,
+) -> bool {
     nodes.iter().any(|node| {
-        node.get("instance_id").and_then(|v| v.as_str()) == Some(instance_id)
+        node.get("instance_id").and_then(|v| v.as_str()) == Some(preferred_instance_id)
             && node
                 .get("status")
                 .and_then(|v| v.as_str())
                 .is_some_and(|status| status.eq_ignore_ascii_case("online"))
+            && crate::services::cluster::node_registry::node_awaits_gateway(node, provider)
     })
 }
 
-/// Is the preferred gateway node currently heartbeating?
+/// Is the preferred node online *and* actually contending for this gateway?
 ///
 /// A DB error answers `false`. That is deliberate: this gates *yielding*, and
 /// yielding on a DB blip would take a healthy gateway down for a node we cannot
 /// actually see. The same reasoning as the keepalive's `Err` arm.
-async fn preferred_gateway_node_online(pool: &sqlx::PgPool, preferred_instance_id: &str) -> bool {
+async fn preferred_gateway_is_waiting(
+    pool: &sqlx::PgPool,
+    preferred_instance_id: &str,
+    provider: &ProviderKind,
+) -> bool {
     let lease_ttl_secs = crate::config::load_graceful().cluster.lease_ttl_secs.max(1);
     match crate::services::cluster::node_registry::list_worker_nodes(pool, lease_ttl_secs).await {
-        Ok(nodes) => node_list_reports_online(&nodes, preferred_instance_id),
+        Ok(nodes) => should_yield_to_preferred(&nodes, preferred_instance_id, provider.as_str()),
         Err(error) => {
             tracing::warn!(
                 "GATEWAY-LEASE: could not read worker_nodes to check preferred gateway: {error}"
@@ -86,14 +106,15 @@ async fn preferred_gateway_node_online(pool: &sqlx::PgPool, preferred_instance_i
 async fn yield_to_preferred_gateway(
     pool: &sqlx::PgPool,
     preference: &GatewayPreference,
+    provider: &ProviderKind,
     shared: &Arc<SharedData>,
 ) {
-    if !preferred_gateway_node_online(pool, &preference.preferred_instance_id).await {
+    if !preferred_gateway_is_waiting(pool, &preference.preferred_instance_id, provider).await {
         return;
     }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] ⏸ GATEWAY-LEASE: yielding to preferred node {} for up to {}s",
+        "  [{ts}] ⏸ GATEWAY-LEASE: preferred node {} is waiting for this gateway — standing by for up to {}s",
         preference.preferred_instance_id,
         preference.yield_grace.as_secs()
     );
@@ -108,54 +129,92 @@ async fn yield_to_preferred_gateway(
             return;
         }
         tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
-        if !preferred_gateway_node_online(pool, &preference.preferred_instance_id).await {
+        if !preferred_gateway_is_waiting(pool, &preference.preferred_instance_id, provider).await {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ▶ GATEWAY-LEASE: preferred node {} went offline — acquiring",
+                "  [{ts}] ▶ GATEWAY-LEASE: preferred node {} is no longer waiting for this gateway — acquiring",
                 preference.preferred_instance_id
             );
             return;
         }
     }
+    // The preferred node claims to want the lease but has not taken it. Take it
+    // rather than leave Discord unserved; the keepalive yield hands it over the
+    // moment the preferred node is genuinely ready.
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
-        "  [{ts}] ▶ GATEWAY-LEASE: preferred node {} online but did not take the lease within {}s — acquiring anyway",
+        "  [{ts}] ▶ GATEWAY-LEASE: preferred node {} still waiting after {}s — acquiring anyway",
         preference.preferred_instance_id,
         preference.yield_grace.as_secs()
     );
 }
 
-/// The preferred node retries instead of giving up: a non-preferred holder only
-/// discovers it must yield on its next keepalive tick, so the lease can be busy
-/// for a few seconds after this node boots.
+/// The preferred node is an **unbounded** waiter.
+///
+/// It must not give up: a non-preferred holder only learns it has to yield on its
+/// next keepalive tick, and it yields *because* this node advertises that it is
+/// waiting. If this loop bailed after a grace period and stopped advertising, the
+/// holder would keep the gateway (correct) — but if it bailed while still
+/// advertising, the holder would yield to a node that is no longer acquiring, and
+/// the gateway would be lost. Waiting forever keeps the two sides consistent.
+///
+/// The waiter signal is registered before the first attempt and cleared only on a
+/// DB error or shutdown, so a peer never yields to a node that is not acquiring.
 async fn acquire_as_preferred_gateway(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,
-    grace: Duration,
 ) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
-    let deadline = tokio::time::Instant::now() + grace;
+    crate::services::cluster::node_registry::register_gateway_waiter(provider.as_str());
+    // Publish the intent immediately rather than waiting for the next heartbeat,
+    // so a peer holding the lease can start yielding right away.
+    if let Err(error) =
+        crate::services::cluster::node_registry::refresh_worker_node_runtime_capabilities(
+            pool,
+            &crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
+        )
+        .await
+    {
+        tracing::warn!("GATEWAY-LEASE: could not publish gateway waiter capability: {error}");
+    }
+
+    let mut attempts: u64 = 0;
     loop {
         match try_acquire_discord_gateway_lease(pool, token_hash, provider).await {
+            // Keep the waiter signal registered: we now hold the gateway, and a
+            // peer that sees it will not try to take it from us anyway.
             Ok(Some(lease)) => return Ok(Some(lease)),
             Ok(None) => {
-                if tokio::time::Instant::now() >= deadline
-                    || shared
-                        .restart
-                        .shutting_down
-                        .load(std::sync::atomic::Ordering::SeqCst)
+                if shared
+                    .restart
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
                 {
+                    crate::services::cluster::node_registry::deregister_gateway_waiter(
+                        provider.as_str(),
+                    );
                     return Ok(None);
                 }
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⏳ GATEWAY-LEASE: {} is the preferred gateway but the lease is held — waiting for the holder to yield",
-                    provider.display_name()
-                );
+                // ~1 log/minute at a 5s poll: enough to see a stuck hand-off,
+                // quiet enough to leave running.
+                if attempts % 12 == 0 {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⏳ GATEWAY-LEASE: {} is the preferred gateway but the lease is held — waiting for the holder to yield",
+                        provider.display_name()
+                    );
+                }
+                attempts += 1;
                 tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // We cannot acquire and must not keep peers yielding to us.
+                crate::services::cluster::node_registry::deregister_gateway_waiter(
+                    provider.as_str(),
+                );
+                return Err(error);
+            }
         }
     }
 }
@@ -220,17 +279,10 @@ pub(super) async fn run_bot_acquire_gateway_lease(
             let preference = gateway_preference();
             let acquired = match preference.as_ref() {
                 Some(pref) if pref.self_is_preferred() => {
-                    acquire_as_preferred_gateway(
-                        pool,
-                        token_hash,
-                        provider,
-                        shared,
-                        pref.yield_grace,
-                    )
-                    .await
+                    acquire_as_preferred_gateway(pool, token_hash, provider, shared).await
                 }
                 Some(pref) => {
-                    yield_to_preferred_gateway(pool, pref, shared).await;
+                    yield_to_preferred_gateway(pool, pref, provider, shared).await;
                     try_acquire_discord_gateway_lease(pool, token_hash, provider).await
                 }
                 None => try_acquire_discord_gateway_lease(pool, token_hash, provider).await,
@@ -406,15 +458,21 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
             if let Some(pref) = preference.as_ref().filter(|p| !p.self_is_preferred()) {
                 if current_lease.is_some() {
                     if let Some(pool) = shared_for_lease.pg_pool.as_ref() {
-                        if preferred_gateway_node_online(pool, &pref.preferred_instance_id).await {
+                        if preferred_gateway_is_waiting(
+                            pool,
+                            &pref.preferred_instance_id,
+                            &provider_for_lease,
+                        )
+                        .await
+                        {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
                                 "  [{ts}] 🤝 GATEWAY-LEASE: {} yielding gateway to preferred node {} — self-fencing",
                                 provider_for_lease.display_name(),
                                 pref.preferred_instance_id
                             );
-                            // Release first: the preferred node is retrying the
-                            // acquire and can only win once the lock is free.
+                            // Release first: the preferred node is an unbounded
+                            // waiter and can only win once the lock is free.
                             if let Some(lease) = current_lease.take() {
                                 let _ = lease.unlock().await;
                             }
@@ -543,32 +601,96 @@ mod tests {
         );
     }
 
-    #[test]
-    fn online_check_matches_only_the_named_node() {
-        let nodes = vec![
-            json!({"instance_id": "mac-mini-release", "status": "online"}),
-            json!({"instance_id": "mac-book-release", "status": "ONLINE"}),
-        ];
-        assert!(node_list_reports_online(&nodes, "mac-book-release"));
-        assert!(node_list_reports_online(&nodes, "mac-mini-release"));
-        assert!(!node_list_reports_online(&nodes, "ghost-release"));
+    fn waiting_node(instance_id: &str, status: &str, waiting: &[&str]) -> serde_json::Value {
+        json!({
+            "instance_id": instance_id,
+            "status": status,
+            "capabilities": { "discord_gateway": { "waiting_providers": waiting } },
+        })
     }
 
     #[test]
-    fn online_check_rejects_stale_or_malformed_nodes() {
-        // A stale peer must not hold the gateway hostage: `offline` means we
-        // acquire immediately rather than burn the yield grace waiting.
+    fn yields_only_to_a_preferred_node_that_wants_this_gateway() {
         let nodes = vec![
-            json!({"instance_id": "mac-book-release", "status": "offline"}),
-            json!({"instance_id": "other", "status": "online"}),
+            waiting_node("mac-mini-release", "online", &[]),
+            waiting_node("mac-book-release", "ONLINE", &["claude", "codex"]),
         ];
-        assert!(!node_list_reports_online(&nodes, "mac-book-release"));
+        assert!(should_yield_to_preferred(
+            &nodes,
+            "mac-book-release",
+            "claude"
+        ));
+        assert!(should_yield_to_preferred(
+            &nodes,
+            "mac-book-release",
+            "CODEX"
+        ));
+        // Same node, a provider it is not waiting for.
+        assert!(!should_yield_to_preferred(
+            &nodes,
+            "mac-book-release",
+            "gemini"
+        ));
+        assert!(!should_yield_to_preferred(
+            &nodes,
+            "ghost-release",
+            "claude"
+        ));
+    }
+
+    /// #4351 review (cdx, REJECT round 1). The preferred node's dcserver can be
+    /// up and heartbeating while its bot never starts — no token for this
+    /// provider, a startup failure, or an acquire that gave up. Yielding on
+    /// `status == "online"` alone handed the gateway to nobody: the holder
+    /// released, self-fenced, restarted, re-acquired, and yielded again — an
+    /// outage loop. Only a live `waiting_providers` advertisement may trigger a
+    /// yield.
+    #[test]
+    fn never_yields_to_a_preferred_node_that_is_merely_online() {
+        let no_capability = vec![json!({"instance_id": "mac-book-release", "status": "online"})];
+        assert!(!should_yield_to_preferred(
+            &no_capability,
+            "mac-book-release",
+            "claude"
+        ));
+
+        let up_but_not_contending = vec![waiting_node("mac-book-release", "online", &[])];
+        assert!(!should_yield_to_preferred(
+            &up_but_not_contending,
+            "mac-book-release",
+            "claude"
+        ));
+
+        // Bot for the *other* provider is waiting; ours is not.
+        let other_provider_only = vec![waiting_node("mac-book-release", "online", &["codex"])];
+        assert!(!should_yield_to_preferred(
+            &other_provider_only,
+            "mac-book-release",
+            "claude"
+        ));
+    }
+
+    #[test]
+    fn never_yields_to_an_offline_or_malformed_preferred_node() {
+        // A stale peer must not hold the gateway hostage.
+        let offline = vec![waiting_node("mac-book-release", "offline", &["claude"])];
+        assert!(!should_yield_to_preferred(
+            &offline,
+            "mac-book-release",
+            "claude"
+        ));
 
         let malformed = vec![
             json!({"instance_id": "mac-book-release"}),
             json!({"status": "online"}),
             json!("not-an-object"),
+            json!({"instance_id": "mac-book-release", "status": "online",
+                   "capabilities": {"discord_gateway": {"waiting_providers": "claude"}}}),
         ];
-        assert!(!node_list_reports_online(&malformed, "mac-book-release"));
+        assert!(!should_yield_to_preferred(
+            &malformed,
+            "mac-book-release",
+            "claude"
+        ));
     }
 }
