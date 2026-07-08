@@ -135,7 +135,7 @@ pub(crate) use meeting_orchestrator as meeting;
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
 // here in mod.rs and `catch_up_missed_messages` in runtime_bootstrap recovery).
 pub(in crate::services::discord) use catch_up::{
-    CatchUpRetryState, catch_up_missed_messages, catch_up_missed_messages_inner,
+    CatchUpRetryState, catch_up_missed_messages, catch_up_missed_messages_for_retry,
     should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
 };
 pub(in crate::services::discord) use mailbox_finish::{
@@ -3480,7 +3480,7 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
             channel_id,
             queue_len_after
         );
-        catch_up_missed_messages_inner(&http, &shared, &provider, &retry_checkpoints).await;
+        catch_up_missed_messages_for_retry(&http, &shared, &provider, &retry_checkpoints).await;
         schedule_deferred_idle_queue_kickoff(
             shared,
             provider,
