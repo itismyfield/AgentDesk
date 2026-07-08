@@ -2,6 +2,163 @@ use super::*;
 
 const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
+/// How often a yielding node re-checks whether the preferred gateway node has
+/// taken the lease, and how often the preferred node retries acquiring it.
+const GATEWAY_PREFERENCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// #4351: resolved view of `cluster.gateway_preferred_instance_id` for this node.
+struct GatewayPreference {
+    preferred_instance_id: String,
+    self_instance_id: String,
+    yield_grace: Duration,
+}
+
+impl GatewayPreference {
+    fn self_is_preferred(&self) -> bool {
+        self.preferred_instance_id == self.self_instance_id
+    }
+}
+
+/// `None` when clustering is off or no preference is configured — in that case
+/// the lease stays pure first-come, exactly as before #4351.
+fn resolve_gateway_preference(
+    cluster: &crate::config::ClusterConfig,
+    self_instance_id: String,
+) -> Option<GatewayPreference> {
+    if !cluster.enabled {
+        return None;
+    }
+    let preferred_instance_id = cluster
+        .gateway_preferred_instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    Some(GatewayPreference {
+        preferred_instance_id,
+        self_instance_id,
+        yield_grace: Duration::from_secs(cluster.gateway_yield_grace_secs),
+    })
+}
+
+fn gateway_preference() -> Option<GatewayPreference> {
+    let config = crate::config::load_graceful();
+    resolve_gateway_preference(
+        &config.cluster,
+        crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
+    )
+}
+
+/// Does `nodes` (a `list_worker_nodes` snapshot) contain `instance_id` as online?
+fn node_list_reports_online(nodes: &[serde_json::Value], instance_id: &str) -> bool {
+    nodes.iter().any(|node| {
+        node.get("instance_id").and_then(|v| v.as_str()) == Some(instance_id)
+            && node
+                .get("status")
+                .and_then(|v| v.as_str())
+                .is_some_and(|status| status.eq_ignore_ascii_case("online"))
+    })
+}
+
+/// Is the preferred gateway node currently heartbeating?
+///
+/// A DB error answers `false`. That is deliberate: this gates *yielding*, and
+/// yielding on a DB blip would take a healthy gateway down for a node we cannot
+/// actually see. The same reasoning as the keepalive's `Err` arm.
+async fn preferred_gateway_node_online(pool: &sqlx::PgPool, preferred_instance_id: &str) -> bool {
+    let lease_ttl_secs = crate::config::load_graceful().cluster.lease_ttl_secs.max(1);
+    match crate::services::cluster::node_registry::list_worker_nodes(pool, lease_ttl_secs).await {
+        Ok(nodes) => node_list_reports_online(&nodes, preferred_instance_id),
+        Err(error) => {
+            tracing::warn!(
+                "GATEWAY-LEASE: could not read worker_nodes to check preferred gateway: {error}"
+            );
+            false
+        }
+    }
+}
+
+/// A non-preferred node waits here before it even tries to acquire, giving the
+/// preferred node a head start. Returns as soon as the preferred node goes
+/// offline (nothing to wait for — take the lease) or the grace expires (the
+/// preferred node is up but not taking it; take the lease rather than leave
+/// Discord unserved — the keepalive yield will hand it over later).
+async fn yield_to_preferred_gateway(
+    pool: &sqlx::PgPool,
+    preference: &GatewayPreference,
+    shared: &Arc<SharedData>,
+) {
+    if !preferred_gateway_node_online(pool, &preference.preferred_instance_id).await {
+        return;
+    }
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ⏸ GATEWAY-LEASE: yielding to preferred node {} for up to {}s",
+        preference.preferred_instance_id,
+        preference.yield_grace.as_secs()
+    );
+
+    let deadline = tokio::time::Instant::now() + preference.yield_grace;
+    while tokio::time::Instant::now() < deadline {
+        if shared
+            .restart
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
+        if !preferred_gateway_node_online(pool, &preference.preferred_instance_id).await {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ▶ GATEWAY-LEASE: preferred node {} went offline — acquiring",
+                preference.preferred_instance_id
+            );
+            return;
+        }
+    }
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ▶ GATEWAY-LEASE: preferred node {} online but did not take the lease within {}s — acquiring anyway",
+        preference.preferred_instance_id,
+        preference.yield_grace.as_secs()
+    );
+}
+
+/// The preferred node retries instead of giving up: a non-preferred holder only
+/// discovers it must yield on its next keepalive tick, so the lease can be busy
+/// for a few seconds after this node boots.
+async fn acquire_as_preferred_gateway(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+    provider: &ProviderKind,
+    shared: &Arc<SharedData>,
+    grace: Duration,
+) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        match try_acquire_discord_gateway_lease(pool, token_hash, provider).await {
+            Ok(Some(lease)) => return Ok(Some(lease)),
+            Ok(None) => {
+                if tokio::time::Instant::now() >= deadline
+                    || shared
+                        .restart
+                        .shutting_down
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Ok(None);
+                }
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⏳ GATEWAY-LEASE: {} is the preferred gateway but the lease is held — waiting for the holder to yield",
+                    provider.display_name()
+                );
+                tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 fn discord_gateway_lock_id(token_hash: &str) -> i64 {
     // `discord_token_hash()` returns "discord_<16hex>". Strip the literal prefix
@@ -58,49 +215,131 @@ pub(super) async fn run_bot_acquire_gateway_lease(
     api_port: u16,
 ) -> GatewayLeaseOutcome {
     match shared.pg_pool.as_ref() {
-        Some(pool) => match try_acquire_discord_gateway_lease(pool, token_hash, provider).await {
-            Ok(Some(lease)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
-                    provider.display_name()
-                );
-                GatewayLeaseOutcome::Proceed(Some(lease))
+        Some(pool) => {
+            // #4351: honor the configured gateway owner before racing for the lock.
+            let preference = gateway_preference();
+            let acquired = match preference.as_ref() {
+                Some(pref) if pref.self_is_preferred() => {
+                    acquire_as_preferred_gateway(
+                        pool,
+                        token_hash,
+                        provider,
+                        shared,
+                        pref.yield_grace,
+                    )
+                    .await
+                }
+                Some(pref) => {
+                    yield_to_preferred_gateway(pool, pref, shared).await;
+                    try_acquire_discord_gateway_lease(pool, token_hash, provider).await
+                }
+                None => try_acquire_discord_gateway_lease(pool, token_hash, provider).await,
+            };
+            match acquired {
+                Ok(Some(lease)) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
+                        provider.display_name()
+                    );
+                    GatewayLeaseOutcome::Proceed(Some(lease))
+                }
+                Ok(None) => {
+                    run_startup_diagnostic_after_reconcile_barrier(
+                        startup_reconcile_remaining.clone(),
+                        startup_doctor_started.clone(),
+                        health_registry.clone(),
+                        api_port,
+                    )
+                    .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
+                        provider.display_name()
+                    );
+                    GatewayLeaseOutcome::Skip
+                }
+                Err(error) => {
+                    run_startup_diagnostic_after_reconcile_barrier(
+                        startup_reconcile_remaining.clone(),
+                        startup_doctor_started.clone(),
+                        health_registry.clone(),
+                        api_port,
+                    )
+                    .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {}",
+                        provider.display_name(),
+                        error
+                    );
+                    GatewayLeaseOutcome::Skip
+                }
             }
-            Ok(None) => {
-                run_startup_diagnostic_after_reconcile_barrier(
-                    startup_reconcile_remaining.clone(),
-                    startup_doctor_started.clone(),
-                    health_registry.clone(),
-                    api_port,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
-                    provider.display_name()
-                );
-                GatewayLeaseOutcome::Skip
-            }
-            Err(error) => {
-                run_startup_diagnostic_after_reconcile_barrier(
-                    startup_reconcile_remaining.clone(),
-                    startup_doctor_started.clone(),
-                    health_registry.clone(),
-                    api_port,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {}",
-                    provider.display_name(),
-                    error
-                );
-                GatewayLeaseOutcome::Skip
-            }
-        },
+        }
         None => GatewayLeaseOutcome::Proceed(None),
     }
+}
+
+/// Stand the gateway down: stop serving Discord, cancel tmux watchers, persist
+/// the pending queues and last-message checkpoints, then shut every shard.
+///
+/// Two callers: the split-brain guard (another instance took the lock out from
+/// under us) and the #4351 yield (the preferred gateway node came online and we
+/// are handing it back). `restart_pending` is set so launchd brings the process
+/// back — it re-enters `run_bot`, finds the lease held, and settles into standby.
+///
+/// Does NOT release the advisory lock — the split-brain caller no longer holds
+/// one, and the yield caller unlocks first so the preferred node can take it.
+async fn self_fence_gateway(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    shard_manager: &Arc<serenity::gateway::ShardManager>,
+) {
+    shared
+        .bot_connected
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    shared
+        .restart
+        .shutting_down
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    shared
+        .restart
+        .restart_pending
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    for entry in shared.tmux_watchers.iter() {
+        entry
+            .value()
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    let drain = mailbox_restart_drain_all(shared, provider).await;
+    let queue_count = drain.queued_count;
+    if !drain.persistence_errors.is_empty() {
+        tracing::error!(
+            failures = drain.persistence_errors.len(),
+            "gateway lease self-fence observed pending-queue persistence failure(s)"
+        );
+    }
+    if queue_count > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 📋 GATEWAY-LEASE: persisted {queue_count} pending queue item(s) before self-fence"
+        );
+    }
+
+    let ids: std::collections::HashMap<u64, u64> = shared
+        .last_message_ids
+        .iter()
+        .map(|entry| (entry.key().get(), *entry.value()))
+        .collect();
+    if !ids.is_empty() {
+        runtime_store::save_all_last_message_ids(provider.as_str(), &ids);
+    }
+
+    shard_manager.shutdown_all().await;
 }
 
 /// Spawn the gateway singleton-lease keepalive loop.
@@ -138,6 +377,10 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
     let shared_for_lease = shared.clone();
     let provider_for_lease = provider.clone();
     let mut current_lease = Some(lease);
+    // Resolved once: `resolve_self_instance_id_without_config` is stable for the
+    // life of the process, and a hot config reload that changed the preferred
+    // node mid-flight would race the yield against the acquire.
+    let preference = gateway_preference();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL);
         interval.tick().await;
@@ -153,6 +396,38 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                     let _ = lease.unlock().await;
                 }
                 return;
+            }
+
+            // #4351: we are holding the gateway but we are not the node that is
+            // supposed to. Hand it back as soon as the preferred node is up.
+            // This is what makes the preference survive deploy/boot ordering:
+            // `deploy-release.sh` restarts the local node first, so a
+            // non-preferred node routinely wins the initial race.
+            if let Some(pref) = preference.as_ref().filter(|p| !p.self_is_preferred()) {
+                if current_lease.is_some() {
+                    if let Some(pool) = shared_for_lease.pg_pool.as_ref() {
+                        if preferred_gateway_node_online(pool, &pref.preferred_instance_id).await {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] 🤝 GATEWAY-LEASE: {} yielding gateway to preferred node {} — self-fencing",
+                                provider_for_lease.display_name(),
+                                pref.preferred_instance_id
+                            );
+                            // Release first: the preferred node is retrying the
+                            // acquire and can only win once the lock is free.
+                            if let Some(lease) = current_lease.take() {
+                                let _ = lease.unlock().await;
+                            }
+                            self_fence_gateway(
+                                &shared_for_lease,
+                                &provider_for_lease,
+                                &shard_manager,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
             }
 
             // Keepalive the held lease. On error the lock connection died (the
@@ -205,55 +480,95 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         "  [{ts}] ⛔ GATEWAY-LEASE: {} singleton lease taken by another instance — self-fencing",
                         provider_for_lease.display_name()
                     );
-
-                    shared_for_lease
-                        .bot_connected
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
-                    shared_for_lease
-                        .restart
-                        .shutting_down
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    shared_for_lease
-                        .restart
-                        .restart_pending
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-
-                    for entry in shared_for_lease.tmux_watchers.iter() {
-                        entry
-                            .value()
-                            .cancel
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-
-                    let drain =
-                        mailbox_restart_drain_all(&shared_for_lease, &provider_for_lease).await;
-                    let queue_count = drain.queued_count;
-                    if !drain.persistence_errors.is_empty() {
-                        tracing::error!(
-                            failures = drain.persistence_errors.len(),
-                            "gateway lease self-fence observed pending-queue persistence failure(s)"
-                        );
-                    }
-                    if queue_count > 0 {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 📋 GATEWAY-LEASE: persisted {queue_count} pending queue item(s) before self-fence"
-                        );
-                    }
-
-                    let ids: std::collections::HashMap<u64, u64> = shared_for_lease
-                        .last_message_ids
-                        .iter()
-                        .map(|entry| (entry.key().get(), *entry.value()))
-                        .collect();
-                    if !ids.is_empty() {
-                        runtime_store::save_all_last_message_ids(provider_for_lease.as_str(), &ids);
-                    }
-
-                    shard_manager.shutdown_all().await;
+                    self_fence_gateway(&shared_for_lease, &provider_for_lease, &shard_manager)
+                        .await;
                     return;
                 }
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn cluster(enabled: bool, preferred: Option<&str>) -> crate::config::ClusterConfig {
+        crate::config::ClusterConfig {
+            enabled,
+            gateway_preferred_instance_id: preferred.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_preference_configured_keeps_first_come_behavior() {
+        assert!(resolve_gateway_preference(&cluster(true, None), "a".into()).is_none());
+        // Blank / whitespace is treated as unset, not as an instance named "".
+        assert!(resolve_gateway_preference(&cluster(true, Some("   ")), "a".into()).is_none());
+    }
+
+    #[test]
+    fn preference_is_ignored_when_clustering_is_off() {
+        // A single-node deploy must never wait for a peer that cannot exist.
+        assert!(
+            resolve_gateway_preference(&cluster(false, Some("mac-book-release")), "a".into())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn preferred_node_recognizes_itself() {
+        let pref = resolve_gateway_preference(
+            &cluster(true, Some("  mac-book-release  ")),
+            "mac-book-release".into(),
+        )
+        .expect("preference");
+        assert_eq!(pref.preferred_instance_id, "mac-book-release");
+        assert!(pref.self_is_preferred());
+    }
+
+    #[test]
+    fn non_preferred_node_knows_it_must_yield() {
+        let pref = resolve_gateway_preference(
+            &cluster(true, Some("mac-book-release")),
+            "mac-mini-release".into(),
+        )
+        .expect("preference");
+        assert!(!pref.self_is_preferred());
+        assert_eq!(
+            pref.yield_grace,
+            Duration::from_secs(crate::config::ClusterConfig::default().gateway_yield_grace_secs)
+        );
+    }
+
+    #[test]
+    fn online_check_matches_only_the_named_node() {
+        let nodes = vec![
+            json!({"instance_id": "mac-mini-release", "status": "online"}),
+            json!({"instance_id": "mac-book-release", "status": "ONLINE"}),
+        ];
+        assert!(node_list_reports_online(&nodes, "mac-book-release"));
+        assert!(node_list_reports_online(&nodes, "mac-mini-release"));
+        assert!(!node_list_reports_online(&nodes, "ghost-release"));
+    }
+
+    #[test]
+    fn online_check_rejects_stale_or_malformed_nodes() {
+        // A stale peer must not hold the gateway hostage: `offline` means we
+        // acquire immediately rather than burn the yield grace waiting.
+        let nodes = vec![
+            json!({"instance_id": "mac-book-release", "status": "offline"}),
+            json!({"instance_id": "other", "status": "online"}),
+        ];
+        assert!(!node_list_reports_online(&nodes, "mac-book-release"));
+
+        let malformed = vec![
+            json!({"instance_id": "mac-book-release"}),
+            json!({"status": "online"}),
+            json!("not-an-object"),
+        ];
+        assert!(!node_list_reports_online(&malformed, "mac-book-release"));
+    }
 }

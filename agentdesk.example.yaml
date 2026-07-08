@@ -26,6 +26,13 @@ cluster:
     mode: "observe"
     forward_pre_claim_timeout_secs: 12
     stale_claim_recovery_secs: 60
+  # #4351. The gateway node is the node every conversational tmux session runs
+  # on. Left unset, the Discord gateway lease is pure first-come, so restart
+  # ordering silently decides where sessions live. Set it to pin the gateway to
+  # one instance: a non-preferred node yields the lease when this node is
+  # online, and takes it when this node is offline (failover is unchanged).
+  # gateway_preferred_instance_id: "mac-book-release"
+  # gateway_yield_grace_secs: 90
 
 discord:
   guild_id: "YOUR_GUILD_ID"

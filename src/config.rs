@@ -953,6 +953,29 @@ pub struct ClusterConfig {
     pub lease_ttl_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base_url: Option<String>,
+    /// #4351: instance that should own the Discord gateway singleton lease.
+    ///
+    /// The gateway node is, in practice, the node every conversational tmux
+    /// session runs on — tmux is host-local and the queue/skill/attachment/voice
+    /// paths all live in the gateway process. Without this, the lease is pure
+    /// first-come (a PG advisory lock), so `deploy-release.sh` deciding to
+    /// restart the local node before its peers silently decides where sessions
+    /// run.
+    ///
+    /// When set, a non-preferred node yields: it waits out
+    /// `gateway_yield_grace_secs` before acquiring while the preferred node is
+    /// online, and releases the lease (self-fencing) if the preferred node
+    /// appears while it holds it. When the preferred node is offline, any node
+    /// still takes the lease — failover is unchanged. `None` keeps the
+    /// pre-#4351 first-come behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_preferred_instance_id: Option<String>,
+    /// How long a non-preferred node waits for the preferred node to claim the
+    /// gateway lease before taking it itself. Only consulted while the preferred
+    /// node is `online` in `worker_nodes`; an offline preferred node is not
+    /// waited for at all.
+    #[serde(default = "default_gateway_yield_grace_secs")]
+    pub gateway_yield_grace_secs: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -998,6 +1021,8 @@ impl Default for ClusterConfig {
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             lease_ttl_secs: default_cluster_lease_ttl_secs(),
             api_base_url: None,
+            gateway_preferred_instance_id: None,
+            gateway_yield_grace_secs: default_gateway_yield_grace_secs(),
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
             nodes: BTreeMap::new(),
@@ -2177,6 +2202,13 @@ fn default_cluster_heartbeat_interval_secs() -> u64 {
 }
 fn default_cluster_lease_ttl_secs() -> u64 {
     30
+}
+/// #4351. Long enough to cover `deploy-release.sh` restarting the local node
+/// and then SSH-deploying a peer (the peer's dcserver takes tens of seconds to
+/// come up), short enough that a genuinely dead preferred node only delays the
+/// gateway by this much on a cold start.
+fn default_gateway_yield_grace_secs() -> u64 {
+    90
 }
 fn default_session_bound_relay_enabled() -> bool {
     // Epic #2285 / E5 (#2412): flipped to `true` once the production tmux
