@@ -315,7 +315,11 @@ _health_json_top_level_field_raw() {
   # (a depth-1 string immediately followed by `:`) and, on a name match,
   # captures the following value up to the next depth-1 `,` / `}` / `]`. JSON
   # string state is tracked throughout so punctuation inside string values never
-  # confuses key detection, depth accounting, or the value boundary.
+  # confuses key detection, depth accounting, or the value boundary. The
+  # returned token is whitespace-TRIMMED (both ends) so insignificant JSON
+  # whitespace before the delimiter — e.g. `"degraded_reasons":[...] }` — never
+  # trails into the value; the downstream array/scalar cleanups can then rely on
+  # the value ending exactly at `]`/`"`, matching jq (#4348 R2 whitespace fix).
   local key="$1"
   local compact="$2"
   local n=${#compact}
@@ -344,14 +348,14 @@ _health_json_top_level_field_raw() {
         '{'|'[') depth=$((depth + 1)); value+="$ch" ;;
         '}'|']')
           if [ "$depth" -le "$cap_base" ]; then
-            printf '%s' "$value"
+            printf '%s' "$(_trim_whitespace "$value")"
             return 0
           fi
           depth=$((depth - 1)); value+="$ch"
           ;;
         ',')
           if [ "$depth" -eq "$cap_base" ]; then
-            printf '%s' "$value"
+            printf '%s' "$(_trim_whitespace "$value")"
             return 0
           fi
           value+="$ch"

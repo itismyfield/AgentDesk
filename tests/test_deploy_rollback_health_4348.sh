@@ -82,6 +82,17 @@ NESTED_ONLY_DEGRADED_REASONS_BODY='{"ok":false,"status":"degraded","version":"x"
 # must STILL be accepted by the reconcile gate — the fix must not break the
 # legitimate reconcile-in-progress path.
 TOP_LEVEL_RECONCILE_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:codex:reconcile_in_progress"]}'
+# R2 whitespace regression: a VALID top-level degraded_reasons array with
+# insignificant whitespace after `]` (space before the closing `}`). jq ignores
+# it and ACCEPTS via the reconcile path; the jq-less raw extractor must trim the
+# trailing space so the array cleanup still ends the value at `]` (was returning
+# a malformed CSV → reconcile REJECT → jq/jq-less parity break).
+WS_RECONCILE_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:codex:reconcile_in_progress"] }'
+# Scalar whitespace tolerance: spaces around every top-level value AND before
+# delimiters, plus a nested latest_startup_doctor object with inner spacing.
+# Every scalar read (status / db / dashboard / server_up / startup_status /
+# latest_startup_doctor.skipped_reason) must parse correctly in both modes.
+WS_SCALAR_NO_PROVIDER_BODY='{ "ok": false , "status": "unhealthy" , "db": true , "dashboard": true , "server_up": true , "fully_recovered": false , "startup_status": "doctor_skipped" , "latest_startup_doctor": { "available": true , "skipped_reason": "no_provider_runtimes_registered" } }'
 
 run_gate_cases() {
   local mode="$1"
@@ -158,6 +169,23 @@ run_gate_cases() {
     _health_json_reconcile_only "$TOP_LEVEL_RECONCILE_BODY"
   assert_rc "[$mode] top-level reconcile degraded_reasons → READY" 0 \
     health_json_is_ready "$TOP_LEVEL_RECONCILE_BODY" 1 1
+
+  # R2 whitespace regression — a valid top-level degraded_reasons array with a
+  # space after `]` must still be accepted via the reconcile path in BOTH modes
+  # (the raw extractor now trims the token, so the array cleanup ends at `]`).
+  assert_rc "[$mode] degraded_reasons array + trailing ws → reconcile_only matches" 0 \
+    _health_json_reconcile_only "$WS_RECONCILE_BODY"
+  assert_rc "[$mode] degraded_reasons array + trailing ws → READY" 0 \
+    health_json_is_ready "$WS_RECONCILE_BODY" 1 1
+
+  # Scalar whitespace tolerance — surrounding spaces on every top-level value
+  # must not break scalar reads; the whole no-provider rescue predicate (which
+  # exercises status/db/dashboard/server_up/startup_status/skipped_reason) must
+  # still match, and the direct status read must parse cleanly.
+  assert_eq "[$mode] status read tolerates surrounding whitespace" \
+    "unhealthy" "$(_health_json_status "$WS_SCALAR_NO_PROVIDER_BODY")"
+  assert_rc "[$mode] whitespace-padded no-provider body → predicate matches" 0 \
+    _health_json_unhealthy_only_no_provider_runtimes "$WS_SCALAR_NO_PROVIDER_BODY"
 }
 
 # jq path (jq is present in this environment).
