@@ -41,12 +41,46 @@ fn resolve_gateway_preference(
     })
 }
 
-fn gateway_preference() -> Option<GatewayPreference> {
+/// Which instance are we, as far as the gateway preference is concerned?
+///
+/// #4356: **not** `resolve_self_instance_id_without_config()`. That falls back to
+/// `hostname-pid` whenever the `SELF_INSTANCE_ID` cell is still empty, and gateway
+/// acquisition runs *before* `cluster::bootstrap` fills it:
+///
+/// ```text
+/// 19:15:25.925  GATEWAY-LEASE: Claude launch skipped — singleton lease held elsewhere
+/// 19:15:26.543  [cluster] runtime bootstrapped instance_id="mac-book-release"
+/// ```
+///
+/// The preferred node therefore never recognized itself, never registered as a
+/// waiter, and the holder never saw a reason to yield.
+///
+/// `cluster.instance_id` is the same value bootstrap publishes, and we already hold
+/// the config here, so reading it directly removes the race rather than timing
+/// around it. Only an unset (`auto`) id needs to wait for bootstrap to derive one.
+async fn resolve_self_instance_id_for_preference(cluster: &crate::config::ClusterConfig) -> String {
+    if let Some(configured) = cluster
+        .instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return configured.to_string();
+    }
+    crate::services::cluster::node_registry::wait_for_self_instance_id(Duration::from_secs(10))
+        .await
+}
+
+async fn gateway_preference() -> Option<GatewayPreference> {
     let config = crate::config::load_graceful();
-    resolve_gateway_preference(
-        &config.cluster,
-        crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
-    )
+    // Cheap exits first: no clustering, or no preference configured. Neither needs
+    // a self-id, and the `auto`-id path would otherwise block on bootstrap for
+    // every node that never opted into a preference.
+    if !config.cluster.enabled || config.cluster.gateway_preferred_instance_id.is_none() {
+        return None;
+    }
+    let self_instance_id = resolve_self_instance_id_for_preference(&config.cluster).await;
+    resolve_gateway_preference(&config.cluster, self_instance_id)
 }
 
 /// May we hand the gateway over to the preferred node?
@@ -276,7 +310,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
     match shared.pg_pool.as_ref() {
         Some(pool) => {
             // #4351: honor the configured gateway owner before racing for the lock.
-            let preference = gateway_preference();
+            let preference = gateway_preference().await;
             let acquired = match preference.as_ref() {
                 Some(pref) if pref.self_is_preferred() => {
                     acquire_as_preferred_gateway(pool, token_hash, provider, shared).await
@@ -429,11 +463,12 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
     let shared_for_lease = shared.clone();
     let provider_for_lease = provider.clone();
     let mut current_lease = Some(lease);
-    // Resolved once: `resolve_self_instance_id_without_config` is stable for the
-    // life of the process, and a hot config reload that changed the preferred
-    // node mid-flight would race the yield against the acquire.
-    let preference = gateway_preference();
     tokio::spawn(async move {
+        // Resolved once, inside the task because it may await bootstrap (#4356):
+        // the self-id is stable for the life of the process, and a hot config
+        // reload that changed the preferred node mid-flight would race the yield
+        // against the acquire.
+        let preference = gateway_preference().await;
         let mut interval = tokio::time::interval(DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL);
         interval.tick().await;
         loop {
@@ -548,149 +583,5 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn cluster(enabled: bool, preferred: Option<&str>) -> crate::config::ClusterConfig {
-        crate::config::ClusterConfig {
-            enabled,
-            gateway_preferred_instance_id: preferred.map(str::to_string),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn no_preference_configured_keeps_first_come_behavior() {
-        assert!(resolve_gateway_preference(&cluster(true, None), "a".into()).is_none());
-        // Blank / whitespace is treated as unset, not as an instance named "".
-        assert!(resolve_gateway_preference(&cluster(true, Some("   ")), "a".into()).is_none());
-    }
-
-    #[test]
-    fn preference_is_ignored_when_clustering_is_off() {
-        // A single-node deploy must never wait for a peer that cannot exist.
-        assert!(
-            resolve_gateway_preference(&cluster(false, Some("mac-book-release")), "a".into())
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn preferred_node_recognizes_itself() {
-        let pref = resolve_gateway_preference(
-            &cluster(true, Some("  mac-book-release  ")),
-            "mac-book-release".into(),
-        )
-        .expect("preference");
-        assert_eq!(pref.preferred_instance_id, "mac-book-release");
-        assert!(pref.self_is_preferred());
-    }
-
-    #[test]
-    fn non_preferred_node_knows_it_must_yield() {
-        let pref = resolve_gateway_preference(
-            &cluster(true, Some("mac-book-release")),
-            "mac-mini-release".into(),
-        )
-        .expect("preference");
-        assert!(!pref.self_is_preferred());
-        assert_eq!(
-            pref.yield_grace,
-            Duration::from_secs(crate::config::ClusterConfig::default().gateway_yield_grace_secs)
-        );
-    }
-
-    fn waiting_node(instance_id: &str, status: &str, waiting: &[&str]) -> serde_json::Value {
-        json!({
-            "instance_id": instance_id,
-            "status": status,
-            "capabilities": { "discord_gateway": { "waiting_providers": waiting } },
-        })
-    }
-
-    #[test]
-    fn yields_only_to_a_preferred_node_that_wants_this_gateway() {
-        let nodes = vec![
-            waiting_node("mac-mini-release", "online", &[]),
-            waiting_node("mac-book-release", "ONLINE", &["claude", "codex"]),
-        ];
-        assert!(should_yield_to_preferred(
-            &nodes,
-            "mac-book-release",
-            "claude"
-        ));
-        assert!(should_yield_to_preferred(
-            &nodes,
-            "mac-book-release",
-            "CODEX"
-        ));
-        // Same node, a provider it is not waiting for.
-        assert!(!should_yield_to_preferred(
-            &nodes,
-            "mac-book-release",
-            "gemini"
-        ));
-        assert!(!should_yield_to_preferred(
-            &nodes,
-            "ghost-release",
-            "claude"
-        ));
-    }
-
-    /// #4351 review (cdx, REJECT round 1). The preferred node's dcserver can be
-    /// up and heartbeating while its bot never starts — no token for this
-    /// provider, a startup failure, or an acquire that gave up. Yielding on
-    /// `status == "online"` alone handed the gateway to nobody: the holder
-    /// released, self-fenced, restarted, re-acquired, and yielded again — an
-    /// outage loop. Only a live `waiting_providers` advertisement may trigger a
-    /// yield.
-    #[test]
-    fn never_yields_to_a_preferred_node_that_is_merely_online() {
-        let no_capability = vec![json!({"instance_id": "mac-book-release", "status": "online"})];
-        assert!(!should_yield_to_preferred(
-            &no_capability,
-            "mac-book-release",
-            "claude"
-        ));
-
-        let up_but_not_contending = vec![waiting_node("mac-book-release", "online", &[])];
-        assert!(!should_yield_to_preferred(
-            &up_but_not_contending,
-            "mac-book-release",
-            "claude"
-        ));
-
-        // Bot for the *other* provider is waiting; ours is not.
-        let other_provider_only = vec![waiting_node("mac-book-release", "online", &["codex"])];
-        assert!(!should_yield_to_preferred(
-            &other_provider_only,
-            "mac-book-release",
-            "claude"
-        ));
-    }
-
-    #[test]
-    fn never_yields_to_an_offline_or_malformed_preferred_node() {
-        // A stale peer must not hold the gateway hostage.
-        let offline = vec![waiting_node("mac-book-release", "offline", &["claude"])];
-        assert!(!should_yield_to_preferred(
-            &offline,
-            "mac-book-release",
-            "claude"
-        ));
-
-        let malformed = vec![
-            json!({"instance_id": "mac-book-release"}),
-            json!({"status": "online"}),
-            json!("not-an-object"),
-            json!({"instance_id": "mac-book-release", "status": "online",
-                   "capabilities": {"discord_gateway": {"waiting_providers": "claude"}}}),
-        ];
-        assert!(!should_yield_to_preferred(
-            &malformed,
-            "mac-book-release",
-            "claude"
-        ));
-    }
-}
+#[path = "gateway_lease_tests.rs"]
+mod tests;
