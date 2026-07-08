@@ -207,14 +207,18 @@ pub(super) fn put_back_session_retry_context(
 }
 
 /// #4307 PR-B: one-shot take of the voluntary tool_feedback reminder stashed at
-/// the previous turn's end. Mirrors `take_session_retry_context`; the take
-/// deletes the stash so the reminder is injected into exactly one turn.
+/// the previous turn's end (provider-scoped key — see
+/// `recovery_text::voluntary_feedback_reminder_key`). Mirrors
+/// `take_session_retry_context`; the take deletes the stash so the reminder is
+/// injected into exactly one turn.
 pub(super) fn take_voluntary_feedback_reminder(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<String> {
     super::super::turn_bridge::recovery_text::take_voluntary_feedback_reminder(
         shared.pg_pool.as_ref(),
+        provider,
         channel_id.get(),
     )
 }
@@ -229,10 +233,11 @@ pub(super) fn take_voluntary_feedback_reminder(
 /// session-retry take) to keep that frozen giant file from re-inflating.
 pub(super) fn take_and_merge_feedback_reminder(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: ChannelId,
     reply_context: Option<String>,
 ) -> (Option<String>, Option<String>) {
-    let feedback_reminder = take_voluntary_feedback_reminder(shared, channel_id);
+    let feedback_reminder = take_voluntary_feedback_reminder(shared, provider, channel_id);
     let reply_context = super::response_format::merge_reply_contexts(
         reply_context,
         feedback_reminder
@@ -244,9 +249,11 @@ pub(super) fn take_and_merge_feedback_reminder(
 
 /// #4307 PR-B: put the taken reminder back when a turn consumed it but failed to
 /// establish (TUI-busy enqueue refusal), so it is not lost. Mirrors
-/// `put_back_session_retry_context`.
+/// `put_back_session_retry_context`. The provider must match the take above so
+/// the put-back lands under the same provider-scoped key.
 pub(super) fn put_back_voluntary_feedback_reminder(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: ChannelId,
     reminder: Option<&str>,
     reason: Option<&str>,
@@ -257,12 +264,14 @@ pub(super) fn put_back_voluntary_feedback_reminder(
     if let Err(error) =
         super::super::turn_bridge::recovery_text::restore_voluntary_feedback_reminder_after_take(
             shared.pg_pool.as_ref(),
+            provider,
             channel_id.get(),
             reminder,
         )
     {
         tracing::warn!(
             channel_id = channel_id.get(),
+            provider = provider.as_str(),
             reason = reason.unwrap_or("unknown"),
             error = %error,
             "failed to put back voluntary tool_feedback reminder after TUI-busy enqueue refusal"

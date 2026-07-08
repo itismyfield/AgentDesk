@@ -374,20 +374,24 @@ pub(super) async fn run_completion_postlude(
     if let Some(analysis) = recall_feedback_analysis.as_ref()
         && let Some(reminder) = build_voluntary_feedback_reminder(analysis)
     {
-        // #4307 PR-B: stash the reminder so the NEXT turn's intake takes it and
-        // injects it into the model context (turn N+1). The transcript event
-        // below only records it in the session_transcripts DB — the stash is the
-        // channel that reaches the next prompt. Borrow before the move into
-        // `reminder_transcript_event`.
+        // #4307 PR-B: stash the reminder (provider-scoped key) so the NEXT turn's
+        // intake takes it and injects it into the model context (turn N+1). The
+        // transcript event below only records it in the session_transcripts DB —
+        // the stash is the channel that reaches the next prompt. Borrow before
+        // the move into `reminder_transcript_event`. A stash failure only loses
+        // the next-turn nudge (the transcript record still lands), so warn+skip.
         if let Err(error) = super::recovery_text::store_voluntary_feedback_reminder(
             shared_owned.pg_pool.as_ref(),
+            &provider,
             channel_id.get(),
             &reminder,
         ) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                "  [{ts}] ⚠ failed to stash voluntary tool_feedback reminder for channel {}: {error}",
-                channel_id.get()
+                channel_id = channel_id.get(),
+                turn_id = turn_id.as_str(),
+                provider = provider.as_str(),
+                error = %error,
+                "failed to stash voluntary tool_feedback reminder for next-turn injection"
             );
         }
         push_transcript_event(&mut transcript_events, reminder_transcript_event(reminder));

@@ -1641,7 +1641,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     // #4307 PR-B: fold the voluntary tool_feedback reminder stashed last turn
     // into `reply_context`; the owned reminder is kept for the refusal put-back.
     let (feedback_reminder, reply_context) =
-        take_and_merge_feedback_reminder(shared, channel_id, reply_context);
+        take_and_merge_feedback_reminder(shared, &provider, channel_id, reply_context);
 
     // #3813 Phase 1a: the intake placeholder POST returned a live id.
     intake_latency.mark_placeholder_posted();
@@ -2343,6 +2343,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             apply_tui_busy_enqueue_refusal(
                 shared,
                 http,
+                &provider,
                 channel_id,
                 placeholder_msg_id,
                 session_retry_context.as_ref(),
@@ -2942,7 +2943,7 @@ mod feedback_reminder_take_order_tests {
     fn reminder_take_call() -> String {
         format!(
             "{}{}",
-            "take_and_merge_feedback_reminder(", "shared, channel_id, reply_context);"
+            "take_and_merge_feedback_reminder(", "shared, &provider, channel_id, reply_context);"
         )
     }
 

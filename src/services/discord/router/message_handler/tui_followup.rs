@@ -939,6 +939,7 @@ mod readiness_wait_status_tests {
 pub(super) async fn apply_tui_busy_enqueue_refusal(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
+    provider: &crate::services::provider::ProviderKind,
     channel_id: ChannelId,
     placeholder_msg_id: MessageId,
     session_retry_context: Option<
@@ -956,9 +957,12 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
     // #4307 PR-B: the refusal branch drops the message, so the reminder taken at
     // intake (like the session-retry context) must be put back or it is lost —
     // the successful-requeue branch instead carries it forward inside the
-    // enqueued follow-up's `reply_context`.
+    // enqueued follow-up's `reply_context`. `provider` is the intake turn's
+    // provider (the same one the take used), keeping the provider-scoped key
+    // symmetric across take and put-back.
     put_back_voluntary_feedback_reminder(
         shared,
+        provider,
         channel_id,
         feedback_reminder,
         refusal_reason.map(|reason| reason.as_str()),
