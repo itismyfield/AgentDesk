@@ -16,6 +16,14 @@ use serenity::{ChannelId, MessageId};
 
 use super::{SharedData, queue_reactions};
 
+// #4278: orphan-`⏳` defense sweep (production orchestration + enumeration +
+// persisted-identity removal + pure verdict). A descendant module so it can
+// reach the reconciler's private target store / persistence helpers while
+// keeping this file's core lifecycle unchanged; `placeholder_sweeper`'s
+// periodic loop calls the re-exported production entry.
+mod orphan_sweep;
+pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
+
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 const PERSISTED_STATE_VERSION: u32 = 1;

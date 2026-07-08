@@ -1679,7 +1679,10 @@
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
     lines).
-  - `src/services/discord/placeholder_sweeper.rs` (1014 lines; -6 from #4047
+  - `src/services/discord/placeholder_sweeper.rs` (1020 lines; #4278 kept the
+    periodic loop at a thin call — the orphan-`⏳` sweep orchestration
+    (pass-local marker cache + TOCTOU re-verification probes) lives in
+    `turn_view_reconciler/orphan_sweep.rs`; -6 from #4047
     S2-b deleting the TimedOut-completion-gate status-panel reconcile call —
     the suppression path it backfilled no longer exists; +10 from #3859
     draining the new `abandon_request_store` each sweep pass (finalizing
