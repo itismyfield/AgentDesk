@@ -244,7 +244,10 @@ pub(super) fn watcher_fallback_edit_failure_can_delete_original_placeholder(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_watcher_streaming_edit_text, watcher_streaming_rollover_should_skip};
+    use super::{
+        build_watcher_streaming_edit_text, first_user_prompt_text,
+        watcher_streaming_rollover_should_skip,
+    };
     use crate::services::provider::ProviderKind;
 
     #[test]
@@ -322,6 +325,72 @@ mod tests {
         assert!(!rendered.contains("</subagent_notification>"));
         assert!(!rendered.contains("agent_path"));
         assert!(!rendered.contains("/tmp/adk-issue-3818-subagent-xml"));
+    }
+
+    // #4336: `first_user_prompt_text` was a `for` loop whose body exited on the
+    // first non-empty line in every branch (clippy `never_loop`). It is now a
+    // `.find(..)?` chain. These tests pin the pre-existing, behavior-INVARIANT
+    // contract so the rewrite cannot silently drift into a skip-and-scan.
+    const USER_COMPACT_LINE: &str =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"/compact\"}}";
+
+    #[test]
+    fn first_user_prompt_text_extracts_user_head_line_4336() {
+        // The first non-empty line is a valid `user` row → its prompt is returned.
+        assert_eq!(
+            first_user_prompt_text(&format!("{USER_COMPACT_LINE}\n")).as_deref(),
+            Some("/compact"),
+        );
+    }
+
+    #[test]
+    fn first_user_prompt_text_none_when_head_line_not_user_4336() {
+        // A non-`user` head line yields None (the turn-lifecycle guard reads no
+        // prompt), never falling through to later lines.
+        let assistant_head =
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}\n";
+        assert_eq!(first_user_prompt_text(assistant_head), None);
+    }
+
+    #[test]
+    fn first_user_prompt_text_none_on_empty_tail_4336() {
+        // Empty / whitespace-only tail has no non-empty line → None.
+        assert_eq!(first_user_prompt_text(""), None);
+        assert_eq!(first_user_prompt_text("   \n\t\n  "), None);
+    }
+
+    #[test]
+    fn first_user_prompt_text_never_inspects_second_line_4336() {
+        // (a) A non-`user` head line returns None even though line 2 is a valid
+        //     user prompt — proving the scan stops at the first non-empty line.
+        let non_user_then_user = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"noise\"}}}}\n{USER_COMPACT_LINE}\n",
+        );
+        assert_eq!(first_user_prompt_text(&non_user_then_user), None);
+
+        // (b) A malformed head line returns None even though line 2 is a valid
+        //     user prompt — the `.ok()?` on the FIRST line exits the function.
+        let garbage_then_user = format!("not-json\n{USER_COMPACT_LINE}\n");
+        assert_eq!(first_user_prompt_text(&garbage_then_user), None);
+
+        // (c) A valid `user` head line returns Some even when line 2 is
+        //     un-parseable garbage — proving line 2 is never touched.
+        let user_then_garbage = concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"first-only\"}}\n",
+            "}{ not json at all\n",
+        );
+        assert_eq!(
+            first_user_prompt_text(user_then_garbage).as_deref(),
+            Some("first-only"),
+        );
+    }
+
+    #[test]
+    fn first_user_prompt_text_skips_leading_blank_lines_4336() {
+        // Leading blank/whitespace lines are filtered; the first NON-empty line is
+        // the one classified (preserves the original `.filter(!empty)`).
+        let tail = format!("\n   \n{USER_COMPACT_LINE}\n");
+        assert_eq!(first_user_prompt_text(&tail).as_deref(), Some("/compact"));
     }
 }
 
@@ -547,18 +616,23 @@ pub(super) fn local_cmd_no_output(
 }
 
 fn first_user_prompt_text(unprocessed_tail: &str) -> Option<String> {
-    for line in unprocessed_tail
+    // #4336: only the FIRST non-empty line is ever examined. The leftover tail
+    // handed here (after a `SoftUserBoundary` terminal) leads with the boundary's
+    // own `user` JSONL row, so the decision hinges on that head line alone. The
+    // prior `for` loop return/`?`-exited on EVERY branch of its first iteration —
+    // never reaching a second line — which clippy flags as `never_loop` (a
+    // deny-by-default correctness lint). The `.find(..)?` chain preserves that
+    // exact semantics with no loop: empty/whitespace-only tail → None; a malformed
+    // or non-`user` first line → None; the second line is never inspected.
+    let line = unprocessed_tail
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        if value.get("type").and_then(serde_json::Value::as_str) != Some("user") {
-            return None;
-        }
-        return user_message_prompt_text(value.get("message")?);
+        .find(|line| !line.is_empty())?;
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("user") {
+        return None;
     }
-    None
+    user_message_prompt_text(value.get("message")?)
 }
 
 fn user_message_prompt_text(message: &serde_json::Value) -> Option<String> {
