@@ -549,7 +549,7 @@
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
 | `services::discord::prompt_builder::layer_rendering` | `src/services/discord/prompt_builder/layer_rendering.rs` | 387 | 264 | 123 |  |
 | `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 334 | 334 | 0 |  |
-| `services::discord::prompt_builder::memory_guidance` | `src/services/discord/prompt_builder/memory_guidance.rs` | 71 | 71 | 0 |  |
+| `services::discord::prompt_builder::memory_guidance` | `src/services/discord/prompt_builder/memory_guidance.rs` | 72 | 72 | 0 |  |
 | `services::discord::prompt_builder::section_dedupe` | `src/services/discord/prompt_builder/section_dedupe.rs` | 159 | 105 | 54 |  |
 | `services::discord::queue_dispatch` | `src/services/discord/queue_dispatch.rs` | 50 | 50 | 0 |  |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 1918 | 715 | 1203 |  |

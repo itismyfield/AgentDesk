@@ -745,3 +745,92 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
     }
     assert!(review_words * 2 < full_words);
 }
+
+#[test]
+fn full_memento_prompt_carries_tool_feedback_contract() {
+    // #4306: the Proactive Memory Guidance memento branch must carry the
+    // always-on `tool_feedback` contract that was dropped during the da7ccb39
+    // provider-prompt slim-down. It is gated to the Full profile with the
+    // memento backend and the MCP available.
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    let prompt = build_system_prompt(
+        "ctx",
+        &[],
+        "/tmp/agentdesk",
+        ChannelId::new(1),
+        "tok",
+        None,
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        None,
+        None,
+        Some(&settings),
+        true,
+    );
+
+    assert!(
+        prompt.contains("[Proactive Memory Guidance]"),
+        "Full+memento prompt must include the proactive memory guidance block, got: {prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "feedback contract: in the same turn you use `recall`/`context` results, \
+             call `mcp__memento__tool_feedback` once"
+        ),
+        "Full+memento prompt must carry the tool_feedback contract, got: {prompt}"
+    );
+    // Required params surfaced verbatim per the current memento schema.
+    assert!(prompt.contains("`search_event_id`=`_meta.searchEventId`"));
+    assert!(prompt.contains("`relevant`"));
+    assert!(prompt.contains("`sufficient`"));
+    // Deferred-tool loading instruction.
+    assert!(prompt.contains("ToolSearch `select:mcp__memento__tool_feedback`"));
+}
+
+#[test]
+fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
+    // #4306: the tool_feedback contract lives inside the Full-only Proactive
+    // Memory Guidance block. ReviewLite/Lite must show zero output change — the
+    // whole block (and thus the contract) stays absent even with the memento
+    // backend selected and the MCP available.
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+
+    for profile in [DispatchProfile::ReviewLite, DispatchProfile::Lite] {
+        let dispatch_type = match profile {
+            DispatchProfile::ReviewLite => Some("review"),
+            _ => None,
+        };
+        let prompt = build_system_prompt(
+            "ctx",
+            &[],
+            "/tmp/agentdesk",
+            ChannelId::new(1),
+            "tok",
+            None,
+            false,
+            profile,
+            dispatch_type,
+            None,
+            None,
+            None,
+            Some(&settings),
+            true,
+        );
+        assert!(
+            !prompt.contains("[Proactive Memory Guidance]"),
+            "{profile:?} prompt must not include the proactive memory guidance block, got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("mcp__memento__tool_feedback"),
+            "{profile:?} prompt must not carry the tool_feedback contract, got: {prompt}"
+        );
+    }
+}
