@@ -3,8 +3,11 @@
 Covers the counting contract: (a) production call count, (b) test-file
 exclusion, (c) `#[cfg(test)]` module exclusion (incl. a test block sitting
 BEFORE a later production call, mirroring turn_bridge/mod.rs), (d) guarded /
-suffixed variants not counted, (e) comment/string exclusion — plus the
-FAIL/NOTE/OK exit branches and the live-repo baseline agreement.
+suffixed variants not counted, (e) comment/string exclusion — incl. the
+codex r1 cross-line cases: an unbalanced `{` in a multi-line raw string inside
+a cfg(test) module must not hide later production calls, and fake calls inside
+multi-line raw strings / block comments must not count — plus the FAIL/NOTE/OK
+exit branches and the live-repo baseline agreement.
 """
 
 from __future__ import annotations
@@ -122,6 +125,62 @@ class CountingTests(unittest.TestCase):
         total, locs = self._count(build)
         self.assertEqual(total, 1, locs)
         self.assertIn("inside.rs", locs[0])
+
+    def test_unbalanced_brace_in_cfg_test_raw_string_does_not_hide_later_calls(self):
+        # codex r1 repro: an unbalanced `{` inside a MULTI-LINE raw string in a
+        # cfg(test) module must not poison the brace depth — with a single-line
+        # stripper, skip mode outlived the module and hid the production call.
+        body = (
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            '    const TEMPLATE: &str = r#"\n'
+            '        { "channel_id": 1,\n'
+            '    "#;\n'
+            "    fn t() { save_inflight_state(&x).unwrap(); }\n"
+            "}\n"
+            "\n"
+            "fn production() {\n"
+            "    let _ = save_inflight_state(&y);\n"
+            "}\n"
+        )
+        total, locs = self._count(
+            lambda r: _write(r, "src/services/discord/repro.rs", body)
+        )
+        self.assertEqual(total, 1, locs)
+        self.assertTrue(locs[0].endswith(":10"), locs)
+
+    def test_fake_call_inside_multiline_raw_string_not_counted(self):
+        # A `save_inflight_state(` spelled inside a production-side multi-line
+        # raw string is prose, not a call site.
+        body = (
+            "fn production() {\n"
+            '    let doc: &str = r#"\n'
+            "        example: save_inflight_state(&x) must NOT count\n"
+            '    "#;\n'
+            "    let _ = save_inflight_state(&y);\n"
+            "}\n"
+        )
+        total, locs = self._count(
+            lambda r: _write(r, "src/services/discord/raw.rs", body)
+        )
+        self.assertEqual(total, 1, locs)
+        self.assertTrue(locs[0].endswith(":5"), locs)
+
+    def test_fake_call_inside_block_comment_not_counted(self):
+        # Multi-line /* … */ comments are stripped cross-line too.
+        body = (
+            "/*\n"
+            " * save_inflight_state(&x) in a block comment must NOT count\n"
+            " */\n"
+            "fn production() {\n"
+            "    let _ = save_inflight_state(&y);\n"
+            "}\n"
+        )
+        total, locs = self._count(
+            lambda r: _write(r, "src/services/discord/blockc.rs", body)
+        )
+        self.assertEqual(total, 1, locs)
+        self.assertTrue(locs[0].endswith(":5"), locs)
 
     def test_guard_variant_only_file_counts_zero(self):
         # (d) a file with only the guarded/suffixed variants -> 0.

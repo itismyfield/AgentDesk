@@ -27,6 +27,16 @@ modules/items (balanced-brace tracked). Suffixed variants
 `save_inflight_state` directly. The `fn save_inflight_state(` definition itself is
 skipped.
 
+String/comment handling: a cross-line lexer (`StripState` / `strip_line`,
+ported verbatim from `scripts/check_log_key_drift.py`, #4218 — kept as a copy
+so both guards stay dependency-free single-file scripts) blanks string literals
+(normal strings with escapes, `b"…"`, and `r"…"` / `r#"…"#` raw strings — all
+of which may span lines), char literals, `//` line comments, and nested
+`/* … */` block comments BEFORE the cfg(test) brace tracking and call matching
+run. Without the cross-line state, an unbalanced `{` inside a multi-line raw
+string in a cfg(test) module would poison the brace depth, keep skip mode alive
+past the module, and hide every later production call (codex r1).
+
 To intentionally remove a blind write, convert the site then lower BASELINE to
 the new count. Raising BASELINE is a deliberate, reviewable diff edit that should
 carry justification — it is not the normal path.
@@ -64,28 +74,112 @@ DEFN_RE = re.compile(r"\bfn\s+save_inflight_state\(")
 # `#[cfg(test)]`, `#[cfg(all(test, ...))]`, `#[cfg(any(test, ...))]`.
 CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
 
-# String / char literals whose `{ } ; //` must not corrupt brace tracking or
-# comment stripping. Best-effort single-line (matches rustfmt-normalized source).
-STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
-CHAR_RE = re.compile(r"'(?:[^'\\]|\\.)'")
+# --- Cross-line string/comment stripper, ported verbatim from
+# scripts/check_log_key_drift.py (#4218). Copied rather than imported so both
+# guards remain dependency-free single-file scripts; if a bug is found here,
+# fix it in both. Blanked output keeps `{` / `}` / `;` counts honest for the
+# cfg(test) brace tracking below (codex r1: a single-line stripper let an
+# unbalanced `{` in a multi-line raw string poison the brace depth). ---
+
+# Char literal (so `'"'` / `'{'` cannot desync the scanners). Lifetimes (`'a`)
+# do not match and fall through harmlessly.
+_CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")
+
+# Raw / byte string openers: r"…", r#"…"#, br"…"; b"…" is handled separately.
+_RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
 
 
-def strip_code(line: str) -> str:
-    """Return the code-only portion of a line: string / char literals blanked,
-    trailing `//` comment removed. Full-line `//` / `///` / `//!` comments
-    collapse to leading whitespace. Keeps `{`/`}`/`;` counts honest."""
-    line = STRING_RE.sub('""', line)
-    line = CHAR_RE.sub("''", line)
-    idx = line.find("//")
-    if idx != -1:
-        line = line[:idx]
-    return line
+class StripState:
+    """Cross-line lexer state: strings and block comments span lines."""
+
+    __slots__ = ("in_string", "raw_hashes", "block_depth")
+
+    def __init__(self) -> None:
+        self.in_string = False  # inside a normal "…" / b"…" string
+        self.raw_hashes: int | None = None  # inside r"…" / r#"…"# (hash count)
+        self.block_depth = 0  # nested /* … */ depth
+
+
+def strip_line(line: str, state: StripState) -> str:
+    """Blank out string-literal/comment content, preserving column positions.
+
+    Quote and comment delimiters themselves are blanked too — only real code
+    survives. `state` carries over between lines so multi-line strings
+    (including `\\`-newline continuations) and block comments stay stripped.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if state.block_depth > 0:
+            if line.startswith("/*", i):
+                state.block_depth += 1
+                out.append("  ")
+                i += 2
+            elif line.startswith("*/", i):
+                state.block_depth -= 1
+                out.append("  ")
+                i += 2
+            else:
+                out.append(" ")
+                i += 1
+            continue
+        if state.raw_hashes is not None:
+            closer = '"' + "#" * state.raw_hashes
+            if line.startswith(closer, i):
+                state.raw_hashes = None
+                out.append(" " * len(closer))
+                i += len(closer)
+            else:
+                out.append(" ")
+                i += 1
+            continue
+        if state.in_string:
+            if line[i] == "\\" and i + 1 < n:
+                out.append("  ")
+                i += 2
+            else:
+                if line[i] == '"':
+                    state.in_string = False
+                out.append(" ")
+                i += 1
+            continue
+        # --- normal code ---
+        if line.startswith("//", i):
+            break  # line comment: drop the rest of the line
+        if line.startswith("/*", i):
+            state.block_depth = 1
+            out.append("  ")
+            i += 2
+            continue
+        raw = _RAW_STRING_OPEN.match(line, i)
+        if raw:
+            state.raw_hashes = len(raw.group(1))
+            out.append(" " * (raw.end() - i))
+            i = raw.end()
+            continue
+        if line[i] == '"' or line.startswith('b"', i):
+            skip = 2 if line[i] == "b" else 1
+            state.in_string = True
+            out.append(" " * skip)
+            i += skip
+            continue
+        if line[i] == "'":
+            m = _CHAR_LITERAL.match(line, i)
+            if m:
+                out.append(" " * (m.end() - i))
+                i = m.end()
+                continue
+        out.append(line[i])
+        i += 1
+    return "".join(out)
 
 
 def count_blind_saves(repo_root: Path) -> tuple[int, list[str]]:
     """Count production blind `save_inflight_state(` call sites under
     src/services/discord. Excludes test files, `#[cfg(test)]` modules/items
-    (balanced-brace tracked), comments/strings, and the fn definition."""
+    (balanced-brace tracked), comments/strings (cross-line stripped), and the
+    fn definition."""
     total = 0
     locations: list[str] = []
     scan_root = repo_root / SCAN_ROOT
@@ -97,13 +191,14 @@ def count_blind_saves(repo_root: Path) -> tuple[int, list[str]]:
         if name == "tests.rs" or name.endswith("_tests.rs"):
             continue
 
+        strip_state = StripState()
         brace_depth = 0
         mode = "normal"  # normal | armed (saw cfg(test) attr) | skip (in test block)
         skip_start_depth = 0
         for lineno, raw in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
-            code = strip_code(raw)
+            code = strip_line(raw, strip_state)
             countable = mode == "normal"
 
             if mode == "normal" and CFG_TEST_RE.search(code):
