@@ -420,14 +420,13 @@ impl VoiceBargeInRuntime {
             );
             return;
         };
-        let Some(call_lock) = manager.get(guild_id) else {
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                guild_id = guild_id.get(),
-                path = %path.display(),
-                context,
-                "voice progress playback skipped: no active songbird call"
-            );
+        // #4236: gate on a *connected* driver, not just a present call handle,
+        // so a zombie Call cannot silently swallow a progress/chime track.
+        let Some(call_lock) = crate::services::discord::voice_lifecycle::connected_voice_call(
+            &manager, guild_id, channel_id, "progress",
+        )
+        .await
+        else {
             return;
         };
 

@@ -165,13 +165,18 @@ impl VoiceBargeInRuntime {
             );
             return;
         };
-        let Some(call_lock) = manager.get(guild_id) else {
+        // #4236: gate on a *connected* driver, not just a present call handle.
+        // A zombie Call (present but no UDP socket) would otherwise accept the
+        // track and hang silently; the gate skips-and-logs instead.
+        let Some(call_lock) = crate::services::discord::voice_lifecycle::connected_voice_call(
+            &manager,
+            guild_id,
+            channel_id,
+            "final_result",
+        )
+        .await
+        else {
             crate::voice::metrics::discard(channel_id.get());
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                guild_id = guild_id.get(),
-                "voice final TTS playback skipped: no active songbird call"
-            );
             return;
         };
 

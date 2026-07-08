@@ -290,6 +290,18 @@
   latch never needs cross-node coordination; a worker restart simply re-arms the
   channel (re-injecting at most one redundant `/compact` is harmless and idle-gated).
 
+- #4234/#4235/#4236 voice connection lifecycle registries:
+  `src/services/discord/voice_lifecycle.rs`. Three process-static singletons —
+  `lifecycle_router()` (`DashMap<provider, UnboundedSender<ReconnectRequest>>`),
+  `rejoin_inflight()` (`DashSet<(provider, guild)>`), and the pre-existing
+  `voice_occupancy()` in `commands/voice.rs` — are all **worker-local**. A guild's
+  songbird voice connection is pinned to whichever node's bot token holds it
+  (Discord allows one voice connection per bot-token per guild), so the rejoin
+  supervisor, its in-flight guard, and the occupancy desired-state map never need
+  cross-node coordination: a node only supervises the connections it itself owns.
+  The `reconnect-degraded` alert dedup reuses the existing per-process
+  `voice_notify_dedup` set, so it is likewise once-per-node, not cluster-global.
+
 ## Required Invariants
 
 ### `singleton_on_leader`

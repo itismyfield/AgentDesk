@@ -862,6 +862,7 @@ src/
 │   │   ├── voice_barge_in.rs
 │   │   ├── voice_config_cache.rs
 │   │   ├── voice_id_sequences.rs
+│   │   ├── voice_lifecycle.rs
 │   │   ├── voice_routing.rs
 │   │   └── voice_sensitivity.rs
 │   ├── dispatches/

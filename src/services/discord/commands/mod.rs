@@ -73,7 +73,8 @@ pub(in crate::services::discord) use text_commands::handle_text_command;
 pub(in crate::services::discord) use tui_passthrough::is_local_only_slash_command_kind; // #3305
 pub(super) use tui_passthrough::{cmd_compact, cmd_context, cmd_cost, cmd_effort};
 pub(in crate::services::discord) use voice::{
-    auto_join_voice_channels, handle_vc_text_command, register_songbird,
+    auto_join_voice_channels, handle_vc_text_command, join_voice_channel, notify_voice_alert,
+    register_songbird, voice_occupancy,
 };
 pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
 

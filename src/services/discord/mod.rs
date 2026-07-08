@@ -123,6 +123,7 @@ mod voice_background_driver;
 mod voice_barge_in;
 mod voice_config_cache;
 mod voice_id_sequences;
+mod voice_lifecycle;
 mod voice_routing;
 mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]

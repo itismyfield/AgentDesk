@@ -108,6 +108,16 @@ pub(super) async fn run_bot_spawn_voice_auto_join(
             .auto_join_channel_ids_with_lobby()
             .is_empty()
     {
+        // #4235: bring up the per-provider rejoin supervisor before auto-join so
+        // a DriverDisconnect fired during the very first join already has a
+        // registered router sender to route to.
+        super::super::voice_lifecycle::spawn_voice_rejoin_supervisor(
+            ctx.clone(),
+            voice_receiver_for_setup.clone(),
+            shared_clone.voice_barge_in.clone(),
+            provider_for_setup.clone(),
+            shared_clone.restart.shutting_down.clone(),
+        );
         let ctx_for_voice = ctx.clone();
         let receiver_for_voice = voice_receiver_for_setup.clone();
         let config_for_voice = voice_config_for_setup.clone();
@@ -136,5 +146,17 @@ pub(super) async fn run_bot_spawn_voice_auto_join(
             )
             .await;
         });
+    } else {
+        // #4234: the dormant path was previously silent, so a release node with
+        // voice unconfigured produced zero auto-join log lines — leaving the
+        // "why is there no auto-join?" question unanswerable from logs alone.
+        // One INFO line makes the dormant state observable.
+        tracing::info!(
+            enabled = voice_config_for_setup.enabled,
+            target_count = voice_config_for_setup
+                .auto_join_channel_ids_with_lobby()
+                .len(),
+            "voice auto-join not scheduled: voice disabled or no auto-join targets"
+        );
     }
 }

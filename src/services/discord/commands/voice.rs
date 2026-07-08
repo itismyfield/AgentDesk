@@ -86,6 +86,7 @@ async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
     join_voice_channel(
         ctx.serenity_context(),
         ctx.data().voice_receiver.clone(),
+        ctx.data().provider.as_str(),
         guild_id,
         channel_id,
         control_channel_id,
@@ -274,6 +275,7 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
             join_voice_channel(
                 ctx,
                 data.voice_receiver.clone(),
+                data.provider.as_str(),
                 guild_id,
                 channel_id,
                 control_channel_id,
@@ -705,6 +707,7 @@ async fn try_join_for_provider(
     match join_voice_channel(
         ctx,
         receiver.clone(),
+        self_provider,
         guild_id,
         channel_id,
         control_channel_id,
@@ -719,11 +722,12 @@ async fn try_join_for_provider(
                 fallback = matches!(mode, JoinMode::Takeover { .. }),
                 "voice auto-join Ok: songbird connected, receiver registered"
             );
-            barge_in.register_voice_context(control_channel_id, guild_id);
-            barge_in.register_voice_context(channel_id, guild_id);
-            voice_occupancy().insert(
-                (self_provider.to_string(), guild_id.get()),
-                channel_id.get(),
+            super::super::voice_lifecycle::record_join_success(
+                barge_in,
+                self_provider,
+                guild_id,
+                channel_id,
+                control_channel_id,
             );
         }
         Err(error) => {
@@ -744,9 +748,10 @@ async fn try_join_for_provider(
     }
 }
 
-async fn join_voice_channel(
+pub(in crate::services::discord) async fn join_voice_channel(
     ctx: &serenity::Context,
     receiver: crate::voice::VoiceReceiver,
+    provider: &str,
     guild_id: GuildId,
     channel_id: ChannelId,
     control_channel_id: ChannelId,
@@ -828,6 +833,21 @@ async fn join_voice_channel(
         receiver_handler.clone(),
     );
     handler.add_global_event(Event::Core(CoreEvent::VoiceTick), receiver_handler);
+
+    // #4235: subscribe the driver lifecycle handler on every join (manual /vc
+    // join and auto-join alike). `remove_all_global_events()` above already
+    // cleared any prior lifecycle handler, so no duplicate registration builds
+    // up across rejoins. The handler resolves its supervisor sender from
+    // `lifecycle_router()` at fire time — if none is registered it logs only.
+    let lifecycle = super::super::voice_lifecycle::VoiceLifecycleHandler::new(
+        provider,
+        guild_id,
+        channel_id,
+        control_channel_id,
+    );
+    handler.add_global_event(Event::Core(CoreEvent::DriverConnect), lifecycle.clone());
+    handler.add_global_event(Event::Core(CoreEvent::DriverReconnect), lifecycle.clone());
+    handler.add_global_event(Event::Core(CoreEvent::DriverDisconnect), lifecycle);
     Ok(())
 }
 
@@ -918,7 +938,8 @@ pub(in crate::services::discord) fn register_songbird(
 /// Discord allows one bot-token to hold one voice connection per guild, so the
 /// key has provider in it (different bots can coexist in the same guild on
 /// different channels).
-fn voice_occupancy() -> &'static dashmap::DashMap<(String, u64), u64> {
+pub(in crate::services::discord) fn voice_occupancy()
+-> &'static dashmap::DashMap<(String, u64), u64> {
     static REGISTRY: std::sync::OnceLock<dashmap::DashMap<(String, u64), u64>> =
         std::sync::OnceLock::new();
     REGISTRY.get_or_init(dashmap::DashMap::new)
@@ -936,7 +957,11 @@ fn voice_notify_should_send(channel_id: ChannelId, kind: &'static str) -> bool {
     voice_notify_dedup().insert((channel_id.get(), kind))
 }
 
-async fn notify_voice_alert(channel_id: ChannelId, content: String, kind: &'static str) {
+pub(in crate::services::discord) async fn notify_voice_alert(
+    channel_id: ChannelId,
+    content: String,
+    kind: &'static str,
+) {
     if !voice_notify_should_send(channel_id, kind) {
         return;
     }
