@@ -551,7 +551,7 @@ run_triage() {
   fi
 
   local repo event_path workflow_name workflow_id current_run_id head_branch current_run_url head_sha current_run_conclusion previous_runs_json previous_run_id previous_run_conclusion identifier
-  local streak_idx streak_ok _rid
+  local streak_idx streak_ok infra_streak_possible _rid
   local -a prior_run_ids=()
   repo="${GITHUB_REPOSITORY:-}"
   event_path="${GITHUB_EVENT_PATH:-}"
@@ -634,15 +634,34 @@ run_triage() {
     # and the anti-flake skip stands. Gather the remaining (STREAK-2) older prior
     # runs' infra sets on demand, then promote an infra identifier only when it is
     # present in the current run AND every one of the STREAK-1 prior runs.
-    if (( SIGTERM_ESCALATION_STREAK >= 2 )) && (( ${#prior_run_ids[@]} >= SIGTERM_ESCALATION_STREAK - 1 )); then
+    #
+    # Cost guard (codex r1): the older-run lookback costs extra API calls
+    # (/actions/runs/<older>/jobs + per-job logs), so it must not fire on history
+    # length alone — an ordinary real-failure run has no infra candidates and must
+    # never touch older runs. Enter the lookback only when a streak is still
+    # possible: (a) the current run recorded at least one `infra::job::…`
+    # candidate AND (b) at least one of those candidates was also a pure infra
+    # termination in the previous run. Otherwise every candidate is already dead
+    # at streak length 2 and older history cannot change the outcome.
+    touch "$TMP_DIR/infra-ids-${current_run_id}.txt"
+    touch "$TMP_DIR/infra-ids-${previous_run_id}.txt"
+    infra_streak_possible=0
+    while IFS= read -r identifier; do
+      [[ -n "$identifier" ]] || continue
+      if file_has_exact_line "$TMP_DIR/infra-ids-${previous_run_id}.txt" "$identifier"; then
+        infra_streak_possible=1
+        break
+      fi
+    done <"$TMP_DIR/infra-ids-${current_run_id}.txt"
+
+    if [[ "$infra_streak_possible" == "1" ]] && (( SIGTERM_ESCALATION_STREAK >= 2 )) && (( ${#prior_run_ids[@]} >= SIGTERM_ESCALATION_STREAK - 1 )); then
       for (( streak_idx = 1; streak_idx <= SIGTERM_ESCALATION_STREAK - 2; streak_idx++ )); do
         collect_infra_identifiers_only "$repo" "${prior_run_ids[streak_idx]}"
       done
 
       # Guarantee every track file exists so grep/read never trip under `set -e`
       # when a run contributed zero infra terminations.
-      touch "$TMP_DIR/infra-ids-${current_run_id}.txt"
-      for (( streak_idx = 0; streak_idx <= SIGTERM_ESCALATION_STREAK - 2; streak_idx++ )); do
+      for (( streak_idx = 1; streak_idx <= SIGTERM_ESCALATION_STREAK - 2; streak_idx++ )); do
         touch "$TMP_DIR/infra-ids-${prior_run_ids[streak_idx]}.txt"
       done
 
@@ -1441,6 +1460,55 @@ EOF
   fi
 }
 
+scenario_no_infra_candidates_skips_older_run_lookback() {
+  # #4245 cost guard (codex r1): the older-run infra lookback costs extra API
+  # calls, so it must NOT fire on history length alone. Here a full 3-run failure
+  # window exists (200/199/198), but current + previous are ordinary real test
+  # failures with zero infra-termination candidates — so the triage must promote
+  # the real failure normally and must NEVER query run 198's jobs/logs. The mock
+  # gh records every invocation in gh.log; additionally previous2-jobs.json is
+  # deliberately absent, so a regression that queries run 198 also hard-fails.
+  local scenario_dir="$TMP_DIR/selftest-no-infra-lookback"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"},{"id":198,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":951,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/951"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":952,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/952"}]}
+EOF
+  cat >"$scenario_dir/log-200-951.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  cat >"$scenario_dir/log-199-952.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  # Normal 2-consecutive real-failure promotion is unaffected by the cost guard.
+  assert_contains "issue create --repo test/repo --title [ci-red] server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state 실패 (main)" "$scenario_dir/issue-create.txt"
+
+  # The older run (198) must never be queried — neither its jobs listing nor logs.
+  if grep -F -q -- "/repos/test/repo/actions/runs/198/jobs" "$scenario_dir/gh.log"; then
+    echo "assertion failed: no-infra-candidate run must not query older run 198 jobs (cost guard)" >&2
+    exit 1
+  fi
+  if grep -E -q -- 'run view 198( |$)' "$scenario_dir/gh.log"; then
+    echo "assertion failed: no-infra-candidate run must not fetch older run 198 logs (cost guard)" >&2
+    exit 1
+  fi
+}
+
 scenario_sigterm_noise_with_real_test_failure_still_creates_issue() {
   # #3991 regression guard: a real `test … FAILED` assertion must still be
   # promoted to a ci-red issue even when the same job log ALSO contains SIGTERM /
@@ -1557,6 +1625,7 @@ run_self_test() {
   scenario_sigterm_job_failure_is_skipped_as_flaky
   scenario_persistent_sigterm_escalates
   scenario_sigterm_streak_broken_by_non_infra_run_stays_skipped
+  scenario_no_infra_candidates_skips_older_run_lookback
   scenario_sigterm_noise_with_real_test_failure_still_creates_issue
   scenario_compile_error_with_sigterm_noise_still_creates_issue
   echo "self-test passed"
