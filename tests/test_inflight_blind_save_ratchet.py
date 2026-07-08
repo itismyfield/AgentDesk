@@ -182,6 +182,22 @@ class CountingTests(unittest.TestCase):
         self.assertEqual(total, 1, locs)
         self.assertTrue(locs[0].endswith(":5"), locs)
 
+    def test_interleaved_comment_before_paren_still_counted(self):
+        # codex r2: `save_inflight_state /* blind */ (&s)` — the stripper blanks
+        # the comment to spaces, so the call regex must tolerate whitespace
+        # before `(`. Suffixed variants must still be rejected.
+        body = (
+            "fn production() {\n"
+            "    let _ = save_inflight_state /* blind */ (&state);\n"
+            "    save_inflight_state_if_identity_unchanged /* g */ (&s, \"c\");\n"
+            "}\n"
+        )
+        total, locs = self._count(
+            lambda r: _write(r, "src/services/discord/interleaved.rs", body)
+        )
+        self.assertEqual(total, 1, locs)
+        self.assertTrue(locs[0].endswith(":2"), locs)
+
     def test_guard_variant_only_file_counts_zero(self):
         # (d) a file with only the guarded/suffixed variants -> 0.
         body = (

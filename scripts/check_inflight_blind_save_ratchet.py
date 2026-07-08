@@ -66,11 +66,14 @@ BASELINE = 29
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 
-# `save_inflight_state` followed directly by `(` — a blind write. The left
-# `\b` rejects longer identifiers ending in the name; requiring `(` right after
-# rejects every suffixed variant (`_if_identity_unchanged`, `_in_root`, ...).
-CALL_RE = re.compile(r"\bsave_inflight_state\(")
-DEFN_RE = re.compile(r"\bfn\s+save_inflight_state\(")
+# `save_inflight_state` followed by `(` — a blind write. The left `\b` rejects
+# longer identifiers ending in the name; `\s*` tolerates whitespace left behind
+# by the stripper blanking an interleaved comment (`save_inflight_state /* x */ (`,
+# a form rustfmt preserves — codex r2). Suffixed variants
+# (`_if_identity_unchanged`, `_in_root`, ...) are still rejected because `_`
+# is not whitespace.
+CALL_RE = re.compile(r"\bsave_inflight_state\s*\(")
+DEFN_RE = re.compile(r"\bfn\s+save_inflight_state\s*\(")
 # `#[cfg(test)]`, `#[cfg(all(test, ...))]`, `#[cfg(any(test, ...))]`.
 CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
 
