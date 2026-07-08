@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-07-08 (against #4229 S3 streaming-status-tick extraction — freeze counts re-synced to the regenerated module inventory).
+> Last refreshed: 2026-07-08 (against #4218 log field-key unification — tmux watcher path touched by tracing key rename only, `channel =` -> `channel_id =`; line counts and freeze entries unchanged).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the

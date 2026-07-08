@@ -11,14 +11,32 @@ Discord service tree for the forbidden log-field keys and fails (non-zero exit,
 
 The scope is deliberately narrow — ONLY tracing-macro FIELD keys are policed,
 never struct fields, DB columns, SQL text, format-string interpolations
-(`"… channel={} …"`), `let` bindings, or plain reassignments. Detection matches
-the two shapes a tracing field key actually takes:
+(`"… channel={} …"`), `let` bindings, or plain reassignments.
 
-  * canonical rustfmt multi-line form — ``<key> = <value>,`` on its own line, and
-  * the sigil form — ``<key> = %expr`` / ``<key> = ?expr`` (Display / Debug),
+Detection (on string/comment-stripped code):
+  A forbidden key counts as a tracing field when `<key> = <value>` appears with
+  the key preceded (ignoring whitespace) by start-of-line, `(`, or `,` — the
+  positions a tracing-macro field key can occupy, which covers both the rustfmt
+  multi-line form and single-line calls like
+  `tracing::info!(channel = id, "msg");` — AND the value is either a sigil
+  capture (`%expr` / `?expr`, tracing-only syntax) or terminated by a `,` at
+  bracket-depth 0 before any depth-0 `;` on the line (the tracing field
+  separator). `let` bindings (`let channel = …`) fail the preceder rule;
+  reassignment statements (`session_id = None;`) fail the terminator rule.
 
-both of which are unambiguous tracing syntax. Statements (`;`-terminated),
-`let`/`x.field` bindings, and string-literal interpolations do not match either.
+String/comment handling: a lightweight cross-line scanner blanks out string
+literals (normal strings with escapes, `b"…"`, and `r"…"` / `r#"…"#` raw
+strings — all of which may span lines), char literals (so `'"'` cannot desync
+quote tracking), `//` line comments, and nested `/* … */` block comments
+before matching. This kills false positives from prose such as
+`"… channel = foo, …"` inside log messages, SQL text, or doc examples.
+
+Known limits (accepted; this is a grep-grade guard, not a Rust parser): a
+field whose VALUE expression spans lines with the terminating `,` on a later
+line is not detected, and macro-generated code is out of scope. rustfmt
+(enforced by fmt-check in CI) keeps real field lines in the shapes covered
+above. Covered and excluded shapes are pinned by `tests/test_log_key_drift.py`
+(run in CI next to this guard).
 
 `session_id` carries a small, documented allowlist: a few log sites record a
 genuinely different identifier than the relay's `adk_session_key` — the Discord
@@ -41,19 +59,18 @@ SCAN_ROOT = Path("src/services/discord")
 CHANNEL_KEYS = ("channel", "chan", "discord_channel_id")
 SESSION_KEY = "session_id"
 
-# Multi-line tracing field form: `<key> = <value>,` on its own line.
-#   - `^\s*<key>` anchors the key at line start → excludes `let <key> =`,
-#     `x.<key> =`, and `"… <key>=…"` string interpolations.
-#   - `[^=]` after `=` excludes the `==` comparison operator.
-#   - trailing `,` is the tracing field separator → excludes `;`-terminated
-#     statements (e.g. `session_id = None;`) and struct-init `:` fields.
 _KEY_ALT = "|".join(re.escape(k) for k in (*CHANNEL_KEYS, SESSION_KEY))
-MULTILINE_FIELD = re.compile(rf"^\s*(?P<key>{_KEY_ALT})\s*=\s*(?P<val>[^=].*),\s*$")
+# `<key> = <not-=>` anywhere in stripped code (`[^=]` rejects `==`). The
+# position/termination rules live in `_field_violation` — this regex alone is
+# deliberately loose.
+KEY_ASSIGN = re.compile(rf"\b(?P<key>{_KEY_ALT})\s*=\s*(?P<rest>[^=].*)$")
 
-# Sigil form: `<key> = %expr` / `<key> = ?expr` — Display/Debug capture. `\b`
-# keeps `channel` from matching inside `channel_id`. `= %` / `= ?` is tracing-only
-# syntax (a bare `%`/`?` cannot open a normal Rust r-value expression).
-SIGIL_FIELD = re.compile(rf"\b(?P<key>{_KEY_ALT})\s*=\s*(?P<val>[%?]\S.*?)\s*,?\s*$")
+# Char literal (so `'"'` / `'\"'` cannot desync the quote scanner). Lifetimes
+# (`'a`) do not match and fall through harmlessly.
+_CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")
+
+# Raw / byte string openers: r"…", r#"…"#, br"…", b"…" is handled separately.
+_RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
 
 # `session_id` sites that log a genuinely different identifier than the relay
 # `adk_session_key`. Exempt by (path suffix, value expression after `=`).
@@ -65,6 +82,133 @@ SESSION_ID_ALLOWLIST: set[tuple[str, str]] = {
     # UserPromptSubmit hook — the provider's own session, not adk_session_key.
     ("services/discord/tui_prompt_relay.rs", "%event.session_id"),
 }
+
+
+class StripState:
+    """Cross-line lexer state: strings and block comments span lines."""
+
+    __slots__ = ("in_string", "raw_hashes", "block_depth")
+
+    def __init__(self) -> None:
+        self.in_string = False  # inside a normal "…" / b"…" string
+        self.raw_hashes: int | None = None  # inside r"…" / r#"…"# (hash count)
+        self.block_depth = 0  # nested /* … */ depth
+
+
+def strip_line(line: str, state: StripState) -> str:
+    """Blank out string-literal/comment content, preserving column positions.
+
+    Quote and comment delimiters themselves are blanked too — only real code
+    survives. `state` carries over between lines so multi-line strings
+    (including `\\`-newline continuations) and block comments stay stripped.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if state.block_depth > 0:
+            if line.startswith("/*", i):
+                state.block_depth += 1
+                out.append("  ")
+                i += 2
+            elif line.startswith("*/", i):
+                state.block_depth -= 1
+                out.append("  ")
+                i += 2
+            else:
+                out.append(" ")
+                i += 1
+            continue
+        if state.raw_hashes is not None:
+            closer = '"' + "#" * state.raw_hashes
+            if line.startswith(closer, i):
+                state.raw_hashes = None
+                out.append(" " * len(closer))
+                i += len(closer)
+            else:
+                out.append(" ")
+                i += 1
+            continue
+        if state.in_string:
+            if line[i] == "\\" and i + 1 < n:
+                out.append("  ")
+                i += 2
+            else:
+                if line[i] == '"':
+                    state.in_string = False
+                out.append(" ")
+                i += 1
+            continue
+        # --- normal code ---
+        if line.startswith("//", i):
+            break  # line comment: drop the rest of the line
+        if line.startswith("/*", i):
+            state.block_depth = 1
+            out.append("  ")
+            i += 2
+            continue
+        raw = _RAW_STRING_OPEN.match(line, i)
+        if raw:
+            state.raw_hashes = len(raw.group(1))
+            out.append(" " * (raw.end() - i))
+            i = raw.end()
+            continue
+        if line[i] == '"' or line.startswith('b"', i):
+            skip = 2 if line[i] == "b" else 1
+            state.in_string = True
+            out.append(" " * skip)
+            i += skip
+            continue
+        if line[i] == "'":
+            m = _CHAR_LITERAL.match(line, i)
+            if m:
+                out.append(" " * (m.end() - i))
+                i = m.end()
+                continue
+        out.append(line[i])
+        i += 1
+    return "".join(out)
+
+
+def _field_violation(code: str, match: re.Match[str]) -> str | None:
+    """Return the field's value expression if this match is a tracing field.
+
+    Preceder rule: the key must sit at line start or right after `(` / `,`
+    (ignoring whitespace) — the only places a tracing field key can appear.
+    This excludes `let <key> = …`, `x.<key> = …`, `=> <key> = …`, etc.
+
+    Terminator rule: sigil values (`%`/`?`) are tracing-only syntax and count
+    immediately; otherwise the value must be closed by a `,` at bracket-depth 0
+    before any depth-0 `;` (fields separate with `,`; statements end with `;`).
+    Hitting an unmatched closer (`)`, `]`, `}`) first means the enclosing call
+    ended without a field separator — a trailing macro arg or plain expression,
+    not something this guard can distinguish from a statement, so it is skipped
+    (rustfmt puts a `,` after every real field, including the last one before
+    the message literal).
+    """
+    before = code[: match.start()].rstrip()
+    if before and before[-1] not in "(,":
+        return None
+
+    rest = match.group("rest")
+    stripped = rest.lstrip()
+    if stripped.startswith("%") or stripped.startswith("?"):
+        end = stripped.find(",")
+        return (stripped[:end] if end != -1 else stripped).strip()
+
+    depth = 0
+    for pos, ch in enumerate(rest):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return None  # enclosing call closed without a field separator
+            depth -= 1
+        elif depth == 0 and ch == ";":
+            return None  # plain (re)assignment statement
+        elif depth == 0 and ch == ",":
+            return rest[:pos].strip()
+    return None  # no same-line terminator — statement or multi-line value
 
 
 def _canonical_hint(key: str) -> str:
@@ -82,27 +226,27 @@ def scan(repo_root: Path) -> list[tuple[str, int, str, str]]:
         if "target" in rel.parts:
             continue
         rel_str = rel.as_posix()
+        state = StripState()
         for lineno, raw in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
-            if raw.lstrip().startswith("//"):
-                continue
-            # Drop trailing line comments so prose can mention old keys freely.
-            code = raw.split("//", 1)[0]
-
-            match = MULTILINE_FIELD.match(code) or SIGIL_FIELD.search(code)
-            if not match:
-                continue
-            key = match.group("key")
-            value = match.group("val").strip().rstrip(",").strip()
-
-            if key == SESSION_KEY:
-                if any(
+            code = strip_line(raw, state)
+            search_from = 0
+            while True:
+                match = KEY_ASSIGN.search(code, search_from)
+                if not match:
+                    break
+                search_from = match.start() + 1
+                value = _field_violation(code, match)
+                if value is None:
+                    continue
+                key = match.group("key")
+                if key == SESSION_KEY and any(
                     rel_str.endswith(suffix) and value == allowed_val
                     for suffix, allowed_val in SESSION_ID_ALLOWLIST
                 ):
                     continue
-            violations.append((rel_str, lineno, key, raw.strip()))
+                violations.append((rel_str, lineno, key, raw.strip()))
     return violations
 
 

@@ -528,3 +528,5 @@ changing runtime behavior.
 > Last refreshed: 2026-07-05 (#4130 — delivery_record.rs gains a cfg(test)-only shadow_test_seam override; no production callsite/coverage change.)
 
 > Last refreshed: 2026-07-06 (#4115 r5 — classify_transport_failure's permanent-failure WARN routes the error text through strip_watcher_send_failure_class_marker so structured class markers stay out of operator logs; log hygiene only, no delivery verb / API / callsite coverage change.)
+
+> Last refreshed: 2026-07-08 (#4218 — tracing log field key rename only across outbound (`channel =` -> `channel_id =` / shorthand); no delivery verb / API / callsite coverage change.)
