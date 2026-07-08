@@ -314,10 +314,83 @@ _health_json_reconcile_only() {
   return 0
 }
 
+_health_json_unhealthy_only_no_provider_runtimes() {
+  # #4348 DEPLOY/RESTART readiness rescue — NOT a runtime /health change.
+  # Returns 0 when the node is serving correctly (server_up + db + dashboard all
+  # true) but /api/health reports status=unhealthy SOLELY because no provider
+  # runtimes are registered (leader-only / no-agent-session topology). In that
+  # state the runtime is structurally unhealthy forever — providers.is_empty()
+  # emits `no_providers_registered` and the startup doctor is skipped with
+  # skipped_reason=no_provider_runtimes_registered — yet the server is fully
+  # serving. The runtime /health endpoint intentionally keeps reporting
+  # unhealthy for monitoring; only the deploy/rollback readiness gate opts in to
+  # this rescue, and only for this EXACT cause (server_up=false / db_unavailable
+  # / any other unhealthy reason must still fail the gate).
+  local health_json="$1"
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e '
+      (.server_up == true)
+      and (.db == true)
+      and (.dashboard == true)
+      and (.status == "unhealthy")
+      and (.startup_status == "doctor_skipped")
+      and (.latest_startup_doctor.skipped_reason == "no_provider_runtimes_registered")
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  # jq-less fallback. Every predicate must hold. `skipped_reason` only appears in
+  # the PUBLIC /api/health body nested under latest_startup_doctor, so matching
+  # its exact value on the compacted body is safe here.
+  _health_json_field_is_true "$health_json" "server_up" || return 1
+  _health_json_field_is_true "$health_json" "db" || return 1
+  _health_json_field_is_true "$health_json" "dashboard" || return 1
+  [ "$(_health_json_status "$health_json")" = "unhealthy" ] || return 1
+  local compact
+  compact=$(_health_json_compact "$health_json")
+  printf '%s' "$compact" \
+    | grep -Eq '"startup_status"[[:space:]]*:[[:space:]]*"doctor_skipped"' || return 1
+  printf '%s' "$compact" \
+    | grep -Eq '"skipped_reason"[[:space:]]*:[[:space:]]*"no_provider_runtimes_registered"'
+}
+
+_migration_seq_from_name() {
+  # "0079_relay_dead_letter.sql" -> "79". Strips leading zeros so the result is a
+  # base-10 integer (avoids octal interpretation in `-gt` tests). Returns
+  # non-zero when the name has no leading numeric prefix. See #4348.
+  local name="$1" num
+  [ -n "$name" ] || return 1
+  num=$(printf '%s' "$name" | sed -E 's/^0*([0-9]+).*/\1/')
+  case "$num" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$num"
+}
+
+_migration_advanced() {
+  # #4348: TRUE (return 0) when the new deploy's latest migration is strictly
+  # AHEAD of the rollback target's latest migration — i.e. rolling back would
+  # strand the old binary behind an already-applied migration and brick it.
+  # Fails CLOSED: if EITHER name cannot be resolved to a sequence number, treat
+  # it as advanced (unsafe to roll back) rather than gamble the node. Returns 1
+  # (safe to roll back) only when both resolve AND new <= old.
+  local new_name="$1" old_name="$2" new_seq old_seq
+  new_seq=$(_migration_seq_from_name "$new_name") || return 0
+  old_seq=$(_migration_seq_from_name "$old_name") || return 0
+  [ "$new_seq" -gt "$old_seq" ] && return 0
+  return 1
+}
+
 health_json_is_ready() {
   local health_json="$1"
   local require_dashboard="${2:-0}"
   local allow_reconcile_degraded="${3:-1}"
+  # #4348: when 1, treat a serving node that is unhealthy SOLELY because no
+  # provider runtimes are registered as DEPLOY-READY. Default 0 keeps every
+  # existing (non-deploy) caller's semantics unchanged.
+  local allow_no_provider_runtimes="${4:-0}"
   local status=""
 
   [ -n "$health_json" ] || return 1
@@ -331,7 +404,16 @@ health_json_is_ready() {
 
   if _health_json_field_exists "$health_json" "server_up"; then
     _health_json_field_is_true "$health_json" "server_up" || return 1
-    [ "$status" = "unhealthy" ] && return 1
+    if [ "$status" = "unhealthy" ]; then
+      # #4348: rescue a serving leader-only / no-session node whose only
+      # unhealthy cause is no_provider_runtimes_registered. server_up is already
+      # confirmed true above, so db_unavailable can never take this branch.
+      if [ "$allow_no_provider_runtimes" = "1" ] \
+        && _health_json_unhealthy_only_no_provider_runtimes "$health_json"; then
+        return 0
+      fi
+      return 1
+    fi
     [ "$status" = "healthy" ] && return 0
     if [ "$allow_reconcile_degraded" = "1" ] \
       && _health_json_field_exists "$health_json" "fully_recovered" \
@@ -362,6 +444,9 @@ wait_for_http_service_health() {
   local delay_secs="$4"
   local require_dashboard="${5:-0}"
   local allow_reconcile_degraded="${6:-1}"
+  # #4348: opt-in — accept a serving node that is unhealthy solely because no
+  # provider runtimes are registered. Default 0 preserves existing callers.
+  local allow_no_provider_runtimes="${7:-0}"
 
   # shellcheck disable=SC2034 # Read by callers after the function returns.
   WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON=""
@@ -372,7 +457,7 @@ wait_for_http_service_health() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON="$health_json"
 
-    if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded"; then
+    if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded" "$allow_no_provider_runtimes"; then
       return 0
     fi
 
