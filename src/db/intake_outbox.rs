@@ -38,6 +38,9 @@ pub(crate) struct IntakeOutboxRow {
     pub defer_watcher_resume: bool,
     pub wait_for_completion: bool,
     pub agent_id: String,
+    /// Provider of the bot that forwarded this row (#4349). Carried through
+    /// `force_fail_and_retry_as_new` so a retry stays on the same bot.
+    pub provider: String,
     pub status: String,
     // reason: intake-outbox row column consumed by select claim/retry routes,
     // not every compile target. See #3034.
@@ -73,6 +76,10 @@ pub(crate) struct InsertPendingPayload {
     pub defer_watcher_resume: bool,
     pub wait_for_completion: bool,
     pub agent_id: String,
+    /// Provider of the bot that forwarded this row (#4349). Claim
+    /// eligibility is scoped on this, not on `agents.provider`, because a
+    /// cc/cdx paired agent has one `agents.provider` but two bots.
+    pub provider: String,
 }
 
 /// INSERT a fresh `pending` row into `intake_outbox` for the given
@@ -100,15 +107,15 @@ pub(crate) async fn insert_pending(
             channel_id, user_msg_id, request_owner_id, request_owner_name,
             user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
-            wait_for_completion, agent_id,
+            wait_for_completion, agent_id, provider,
             status, attempt_no, parent_outbox_id
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
             $13, $14, $15,
-            $16, $17,
-            'pending', $18, $19
+            $16, $17, $18,
+            'pending', $19, $20
         )
         RETURNING id
         "#,
@@ -130,6 +137,7 @@ pub(crate) async fn insert_pending(
     .bind(payload.defer_watcher_resume)
     .bind(payload.wait_for_completion)
     .bind(&payload.agent_id)
+    .bind(&payload.provider)
     .bind(attempt_no)
     .bind(parent_outbox_id)
     .fetch_one(pool)
@@ -197,10 +205,10 @@ pub(crate) async fn family_max_attempt(
 }
 
 /// Worker-side claim. Atomically promotes a single `pending` row owned
-/// by `target_instance_id` whose `agent_id` belongs to a `provider`-
-/// matching agent into `claimed`, and stamps `claim_owner` +
-/// `claimed_at`. Uses `FOR UPDATE SKIP LOCKED` so concurrent worker
-/// pollers do not stall each other.
+/// by `target_instance_id` and forwarded by a `provider`-matching bot
+/// into `claimed`, and stamps `claim_owner` + `claimed_at`. Uses
+/// `FOR UPDATE SKIP LOCKED` so concurrent worker pollers do not stall
+/// each other.
 ///
 /// **Provider filter (codex Phase 5 P0 #1):** a single AgentDesk
 /// process can host multiple bot tokens (claude, codex, etc.), each
@@ -208,9 +216,14 @@ pub(crate) async fn family_max_attempt(
 /// `SharedData`. Without this filter, every bot's worker would share
 /// the same `target_instance_id` and could claim a row destined for
 /// another provider's runtime — running it with the wrong token,
-/// settings, mailboxes, and placeholder controller. The JOIN on
-/// `agents.provider` makes claim eligibility provider-scoped so each
-/// worker only handles rows that belong to its own bot.
+/// settings, mailboxes, and placeholder controller.
+///
+/// **#4349:** this filter used to JOIN `agents` and compare
+/// `agents.provider`, which is a single column per agent. An agent that
+/// owns both a `discord_channel_cc` (claude) and a `discord_channel_cdx`
+/// (codex) has one `agents.provider` but two bots, so the wrong runtime
+/// claimed the row. `intake_outbox.provider` records the bot that
+/// actually forwarded it, making claim eligibility exact.
 ///
 /// Returns `Ok(Some(row))` on a successful claim; `Ok(None)` when the
 /// queue has no eligible row for this `(target_instance_id, provider)`
@@ -225,10 +238,9 @@ pub(crate) async fn claim_pending_for_target(
 
     let candidate: Option<i64> = sqlx::query_scalar(
         "SELECT io.id FROM intake_outbox io
-         INNER JOIN agents a ON a.id = io.agent_id
          WHERE io.target_instance_id = $1
            AND io.status = 'pending'
-           AND a.provider = $2
+           AND io.provider = $2
          ORDER BY io.created_at ASC
          LIMIT 1
          FOR UPDATE OF io SKIP LOCKED",
@@ -531,15 +543,15 @@ pub(crate) async fn force_fail_and_retry_as_new(
             channel_id, user_msg_id, request_owner_id, request_owner_name,
             user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
-            wait_for_completion, agent_id,
+            wait_for_completion, agent_id, provider,
             status, attempt_no, parent_outbox_id
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
             $13, $14, $15,
-            $16, $17,
-            'pending', $18, $19
+            $16, $17, $18,
+            'pending', $19, $20
         )
         RETURNING id
         "#,
@@ -561,6 +573,7 @@ pub(crate) async fn force_fail_and_retry_as_new(
     .bind(row.defer_watcher_resume)
     .bind(row.wait_for_completion)
     .bind(&row.agent_id)
+    .bind(&row.provider)
     .bind(next_attempt)
     .bind(stuck_id)
     .fetch_one(&mut *tx)
@@ -947,6 +960,7 @@ mod helper_tests {
         InsertPendingPayload {
             target_instance_id: "worker-1".to_string(),
             forwarded_by_instance_id: "leader-1".to_string(),
+            provider: "claude".to_string(),
             required_labels: json!(["unreal"]),
             channel_id: channel.to_string(),
             user_msg_id: msg.to_string(),
@@ -1674,13 +1688,16 @@ mod helper_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn claim_pending_for_target_filters_by_provider_join() {
+    async fn claim_pending_for_target_filters_by_row_provider() {
         // Codex Phase 5 P0 #1: a single AgentDesk process can host
         // claude AND codex bots; both call `run_intake_worker_loop`
-        // with the same `target_instance_id`. The provider JOIN
-        // ensures a claude bot's worker only claims rows whose
-        // `agents.provider = 'claude'` and never picks up a codex
-        // row (which would run with the wrong Http/SharedData/token).
+        // with the same `target_instance_id`. The provider filter
+        // ensures a claude bot's worker only claims rows forwarded by
+        // the claude bot and never picks up a codex row (which would
+        // run with the wrong Http/SharedData/token).
+        //
+        // #4349: the filter reads `intake_outbox.provider`, not
+        // `agents.provider`.
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
@@ -1697,12 +1714,14 @@ mod helper_tests {
         // Insert a row for each provider — both targeted at worker-1.
         let mut claude_payload = payload("ch-claude", "msg-claude");
         claude_payload.agent_id = "agent-claude".to_string();
+        claude_payload.provider = "claude".to_string();
         insert_pending(&pool, &claude_payload, 1, None)
             .await
             .expect("insert claude row");
 
         let mut codex_payload = payload("ch-codex", "msg-codex");
         codex_payload.agent_id = "agent-codex".to_string();
+        codex_payload.provider = "codex".to_string();
         insert_pending(&pool, &codex_payload, 1, None)
             .await
             .expect("insert codex row");
@@ -1730,6 +1749,109 @@ mod helper_tests {
             .expect("codex claim ok")
             .expect("must claim something");
         assert_eq!(codex_claimed.agent_id, "agent-codex");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claim_scopes_on_row_provider_not_agent_provider_for_paired_agent() {
+        // #4349 regression. A cc/cdx paired agent has ONE `agents.provider`
+        // but TWO bots. `project-agentdesk` is stored with provider='codex'
+        // while its `discord_channel_cc` is served by the claude bot.
+        //
+        // Claiming on `agents.provider` handed the claude bot's row to the
+        // codex worker, which then ran the turn with the codex token — a
+        // Codex reply in a Claude channel. Claim must key on the provider
+        // that actually forwarded the row.
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, discord_channel_cc)
+             VALUES ('agent-paired', 'Paired', 'codex', 'ch-cdx', 'ch-cc')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed paired agent");
+
+        // The claude bot forwards a message from the agent's cc channel.
+        let mut cc_row = payload("ch-cc", "msg-cc");
+        cc_row.agent_id = "agent-paired".to_string();
+        cc_row.provider = "claude".to_string();
+        insert_pending(&pool, &cc_row, 1, None)
+            .await
+            .expect("insert cc row");
+
+        // The codex worker shares `target_instance_id`. It must NOT claim
+        // this row even though `agents.provider = 'codex'` matches it.
+        let stolen = claim_pending_for_target(&pool, "worker-1", "codex", "owner-codex")
+            .await
+            .expect("codex claim ok");
+        assert!(
+            stolen.is_none(),
+            "codex worker must not claim a row forwarded by the claude bot"
+        );
+
+        // The claude worker claims it, despite `agents.provider = 'codex'`.
+        let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-claude")
+            .await
+            .expect("claude claim ok")
+            .expect("claude worker must claim its own row");
+        assert_eq!(claimed.channel_id, "ch-cc");
+        assert_eq!(claimed.provider, "claude");
+        assert_eq!(claimed.agent_id, "agent-paired");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_fail_and_retry_as_new_preserves_row_provider() {
+        // #4349: a retry must stay on the bot that forwarded the original.
+        // Rebuilding the row from `agents.provider` would silently move the
+        // retry to the other bot on a paired agent.
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, discord_channel_cc)
+             VALUES ('agent-paired', 'Paired', 'codex', 'ch-cdx2', 'ch-cc2')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed paired agent");
+
+        let mut cc_row = payload("ch-cc2", "msg-retry");
+        cc_row.agent_id = "agent-paired".to_string();
+        cc_row.provider = "claude".to_string();
+        insert_pending(&pool, &cc_row, 1, None).await.expect("seed");
+
+        let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
+            .await
+            .expect("claim")
+            .expect("row");
+        mark_accepted(&pool, claimed.id, "owner-1")
+            .await
+            .expect("accept");
+        mark_spawned(&pool, claimed.id, "owner-1")
+            .await
+            .expect("spawn");
+
+        let new_id = force_fail_and_retry_as_new(&pool, claimed.id, "operator: hung")
+            .await
+            .expect("force-fail");
+
+        let retry_provider: String =
+            sqlx::query_scalar("SELECT provider FROM intake_outbox WHERE id = $1")
+                .bind(new_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read retry provider");
+        assert_eq!(
+            retry_provider, "claude",
+            "retry must stay on the forwarding bot, not fall back to agents.provider"
+        );
 
         pool.close().await;
         pg_db.drop().await;
