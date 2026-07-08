@@ -632,6 +632,7 @@ src/
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── panel_decisions_tests.rs
 │   │   │   ├── placeholder_reclaim.rs
+│   │   │   ├── post_stream_exit.rs
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_session_persistence.rs
 │   │   │   ├── session_bound_ack.rs
