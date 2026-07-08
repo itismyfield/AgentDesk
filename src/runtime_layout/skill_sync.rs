@@ -1158,4 +1158,61 @@ mod skill_cache_freshness_tests {
             .collect();
         assert!(leaked.is_empty(), "staging dir leaked on error: {leaked:?}");
     }
+
+    /// #4256: a lock abandoned by a crashed process (a dead PID) must NOT wedge refresh
+    /// forever. It is recovered on acquire, and initial population of an absent managed dir
+    /// still proceeds — the exact permanent-staleness class #4256 must eliminate.
+    #[test]
+    fn dead_holder_lock_is_recovered_on_first_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("demo");
+        write_file(&source.join("SKILL.md"), "fresh\n");
+
+        // A leftover lock owned by a PID that cannot exist (well above any OS pid_max, still
+        // positive as pid_t so kill() reports ESRCH rather than targeting a process group).
+        let refresh_dir = root.join(".skill-refresh");
+        fs::create_dir_all(&refresh_dir).unwrap();
+        fs::write(refresh_dir.join("demo.lock"), b"999999999\n").unwrap();
+
+        // managed does not exist yet: recovery must not block the initial copy.
+        let managed = ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "fresh\n",
+            "a dead holder's lock must be recovered so first-install populates the cache"
+        );
+    }
+
+    /// #4256: a lock held by a genuinely live process must still cause a skip, never a steal.
+    #[test]
+    fn live_holder_lock_causes_skip() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("demo");
+        write_file(&source.join("SKILL.md"), "v1\n");
+        let managed = ensure_managed_skill_dir(root, "demo", &source).unwrap();
+
+        // Our own (live) PID in a freshly written lock: alive and well within the TTL.
+        let refresh_dir = root.join(".skill-refresh");
+        fs::create_dir_all(&refresh_dir).unwrap();
+        let lock = refresh_dir.join("demo.lock");
+        fs::write(&lock, std::process::id().to_string().as_bytes()).unwrap();
+
+        write_file(&source.join("SKILL.md"), "v2\n");
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v1\n",
+            "a live holder's lock must cause skip, not a steal-and-race"
+        );
+
+        // Releasing the live holder's lock lets the next refresh converge.
+        fs::remove_file(&lock).unwrap();
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v2\n"
+        );
+    }
 }
