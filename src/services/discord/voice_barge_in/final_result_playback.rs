@@ -120,6 +120,14 @@ impl VoiceBargeInRuntime {
             // Voice #10: drop the partial latency record so the next turn
             // doesn't inherit stale stt/agent ms.
             crate::voice::metrics::discard(channel_id.get());
+            // #4238: this path is reached only for a voice-sourced turn, so a
+            // missing TTS runtime means the user spoke and gets no spoken reply
+            // — make the silent early return observable.
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                reason = "no_tts_runtime",
+                "voice final TTS playback skipped: TTS runtime not configured"
+            );
             return;
         };
         let language = self.spoken_result_language().await;
@@ -132,6 +140,13 @@ impl VoiceBargeInRuntime {
         let spoken = spoken_result_only_with_limit(answer, &language, spoken_result_max_chars);
         if spoken.trim().is_empty() {
             crate::voice::metrics::discard(channel_id.get());
+            // #4238: the agent produced an answer but it sanitized to nothing
+            // speakable; surface the reason instead of returning silently.
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                reason = "empty_spoken_text",
+                "voice final TTS playback skipped: answer sanitized to empty spoken text"
+            );
             return;
         }
 
@@ -141,17 +156,22 @@ impl VoiceBargeInRuntime {
             .map(|entry| *entry.value())
         else {
             crate::voice::metrics::discard(channel_id.get());
-            tracing::debug!(
+            // #4238: promote from debug — a voice turn with no registered guild
+            // means the spoken reply is dropped; operators need to see why.
+            tracing::warn!(
                 channel_id = channel_id.get(),
+                reason = "no_voice_guild",
                 "voice final TTS playback skipped: no registered voice guild"
             );
             return;
         };
         let Some(ctx) = shared.http.cached_serenity_ctx.get() else {
             crate::voice::metrics::discard(channel_id.get());
-            tracing::debug!(
+            // #4238: promote from debug for the same reason as above.
+            tracing::warn!(
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
+                reason = "no_serenity_context",
                 "voice final TTS playback skipped: no serenity context"
             );
             return;
@@ -161,6 +181,7 @@ impl VoiceBargeInRuntime {
             tracing::warn!(
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
+                reason = "songbird_manager_missing",
                 "voice final TTS playback skipped: songbird manager missing"
             );
             return;
@@ -177,33 +198,77 @@ impl VoiceBargeInRuntime {
         .await
         else {
             crate::voice::metrics::discard(channel_id.get());
+            // #4238: `connected_voice_call` already warns for the zombie-driver
+            // case (#4236); emit a site-level warn with a uniform `reason` so
+            // the "no call handle at all" case is observable too.
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                guild_id = guild_id.get(),
+                reason = "no_connected_voice_call",
+                "voice final TTS playback skipped: no connected voice call"
+            );
             return;
         };
 
         let runtime = self.clone();
+        let shared = shared.clone();
         let (playback_id, cancellation) = self.start_spoken_result_playback(channel_id);
         let playback_cancellation = cancellation.clone();
         let register_cancellation = cancellation.clone();
         tokio::spawn(async move {
             let runtime_for_track = runtime.clone();
-            let register_track = move |track| {
-                runtime_for_track.reset_after_playback_start_with_owner(
-                    channel_id,
-                    Arc::new(track),
-                    register_cancellation.clone(),
-                    Some(playback_id),
-                );
+            // #4238: track whether any chunk actually reached the channel so the
+            // retry below never replays audio the user already heard.
+            let played_any = Arc::new(AtomicBool::new(false));
+            let register_track = {
+                let played_any = played_any.clone();
+                move |track| {
+                    played_any.store(true, Ordering::Relaxed);
+                    runtime_for_track.reset_after_playback_start_with_owner(
+                        channel_id,
+                        Arc::new(track),
+                        register_cancellation.clone(),
+                        Some(playback_id),
+                    );
+                }
             };
 
-            let result = play_chunked_with_prefetch(
-                call_lock,
-                tts,
-                spoken,
+            let mut result = play_chunked_with_prefetch(
+                call_lock.clone(),
+                tts.clone(),
+                spoken.clone(),
                 DEFAULT_TTS_CHUNK_MAX_CHARS,
-                playback_cancellation,
-                register_track,
+                playback_cancellation.clone(),
+                register_track.clone(),
             )
             .await;
+
+            // #4238: TTS synth/playback failures used to be swallowed with only
+            // a `warn!`. Retry ONCE, but ONLY when the failure happened before
+            // any audio reached the channel — retrying after a partial play
+            // would double up the chunks the user already heard. Cancellation
+            // (user barge-in / teardown) surfaces as `Ok`, so an `Err` here is a
+            // genuine failure; the cancel-flag guard still avoids retrying into
+            // a call that is being torn down.
+            if let Some(first_error) = result.as_ref().err().map(ToString::to_string) {
+                if !played_any.load(Ordering::Relaxed) && !playback_cancellation.is_cancelled() {
+                    tracing::warn!(
+                        error = %first_error,
+                        channel_id = channel_id.get(),
+                        guild_id = guild_id.get(),
+                        "voice final TTS playback failed before any audio; retrying once (#4238)"
+                    );
+                    result = play_chunked_with_prefetch(
+                        call_lock,
+                        tts,
+                        spoken,
+                        DEFAULT_TTS_CHUNK_MAX_CHARS,
+                        playback_cancellation.clone(),
+                        register_track,
+                    )
+                    .await;
+                }
+            }
 
             runtime.clear_playback_if_owner(channel_id, playback_id);
             runtime.clear_spoken_result_playback_if_current(channel_id, playback_id);
@@ -241,8 +306,57 @@ impl VoiceBargeInRuntime {
                         guild_id = guild_id.get(),
                         "voice final TTS chunked playback failed"
                     );
+                    // #4238: the spoken reply is lost (retry already spent, or a
+                    // partial play failed and a replay would double audio). Post
+                    // a one-shot text fallback so the answer is not silently
+                    // dropped. This is the terminal failure arm and runs at most
+                    // once per playback, so it cannot loop. Skip on cancellation
+                    // (deliberate stop / teardown — no failure to report).
+                    if !playback_cancellation.is_cancelled() {
+                        runtime
+                            .post_voice_playback_failure_notice(&shared, channel_id)
+                            .await;
+                    }
                 }
             }
         });
+    }
+
+    /// #4238: post a one-shot text fallback to the routing channel after a
+    /// spoken-result playback fails past its retry. Reuses the exact send path
+    /// the progress-text mirror uses (`serenity_http_or_token_fallback` +
+    /// `rate_limit_wait` + `http::send_channel_message`) so no new send surface
+    /// is introduced. Called only from the terminal `Err` arm above, so it fires
+    /// at most once per failed playback.
+    async fn post_voice_playback_failure_notice(
+        &self,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+    ) {
+        let Some(http) = shared.serenity_http_or_token_fallback() else {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                "voice TTS failure text fallback skipped: no Discord HTTP client"
+            );
+            return;
+        };
+        let language = self.spoken_result_language().await;
+        let content = crate::voice::progress::playback_failure_notice(&language);
+        super::rate_limit_wait(shared, channel_id).await;
+        match super::http::send_channel_message(&http, channel_id, content).await {
+            Ok(_) => {
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    "voice TTS playback failed; posted text fallback notice (#4238)"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    channel_id = channel_id.get(),
+                    "voice TTS failure text fallback send failed"
+                );
+            }
+        }
     }
 }

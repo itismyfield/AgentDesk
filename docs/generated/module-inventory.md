@@ -803,7 +803,7 @@
 | `services::discord::voice_acknowledgement` | `src/services/discord/voice_acknowledgement.rs` | 61 | 61 | 0 |  |
 | `services::discord::voice_background_driver` | `src/services/discord/voice_background_driver.rs` | 234 | 199 | 35 |  |
 | `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 5153 | 2905 | 2248 | giant-file |
-| `services::discord::voice_barge_in::final_result_playback` | `src/services/discord/voice_barge_in/final_result_playback.rs` | 248 | 248 | 0 |  |
+| `services::discord::voice_barge_in::final_result_playback` | `src/services/discord/voice_barge_in/final_result_playback.rs` | 362 | 362 | 0 |  |
 | `services::discord::voice_barge_in::foreground_decision` | `src/services/discord/voice_barge_in/foreground_decision.rs` | 242 | 242 | 0 |  |
 | `services::discord::voice_barge_in::live_cut_playback` | `src/services/discord/voice_barge_in/live_cut_playback.rs` | 160 | 160 | 0 |  |
 | `services::discord::voice_barge_in::progress_playback` | `src/services/discord/voice_barge_in/progress_playback.rs` | 505 | 505 | 0 |  |
@@ -999,8 +999,8 @@
 | `voice::commands` | `src/voice/commands.rs` | 860 | 548 | 312 |  |
 | `voice::config` | `src/voice/config.rs` | 627 | 392 | 235 |  |
 | `voice::flight` | `src/voice/flight.rs` | 252 | 138 | 114 |  |
-| `voice::metrics` | `src/voice/metrics.rs` | 438 | 336 | 102 |  |
-| `voice::progress` | `src/voice/progress.rs` | 448 | 353 | 95 |  |
+| `voice::metrics` | `src/voice/metrics.rs` | 455 | 353 | 102 |  |
+| `voice::progress` | `src/voice/progress.rs` | 472 | 365 | 107 |  |
 | `voice::prompt` | `src/voice/prompt.rs` | 823 | 540 | 283 |  |
 | `voice::receiver` | `src/voice/receiver.rs` | 1592 | 1108 | 484 | giant-file |
 | `voice::runtime_boundary` | `src/voice/runtime_boundary.rs` | 281 | 212 | 69 |  |

@@ -243,6 +243,18 @@ pub(crate) fn idle_notice(language: &str) -> &'static str {
     }
 }
 
+/// #4238: user-facing text fallback when spoken-result TTS playback fails
+/// (after the single retry). Voice failures used to be swallowed with only a
+/// `warn!`, so the caller heard nothing and had no idea the answer was ready.
+/// This points them at the text response instead.
+pub(crate) fn playback_failure_notice(language: &str) -> &'static str {
+    if is_english(language) {
+        "Voice playback failed — check the text response instead."
+    } else {
+        "음성 재생에 실패했어. 텍스트로 확인해줘."
+    }
+}
+
 pub(crate) fn next_idle_notice_delay(current: Duration) -> Duration {
     let next = current.mul_f64(PROGRESS_IDLE_NOTICE_MULTIPLIER);
     next.min(PROGRESS_IDLE_NOTICE_MAX)
@@ -428,6 +440,18 @@ mod tests {
             None
         );
         assert_eq!(parse_verbose_progress_command("진행 상황 알려줘"), None);
+    }
+
+    #[test]
+    fn playback_failure_notice_is_localized() {
+        assert_eq!(
+            playback_failure_notice("ko"),
+            "음성 재생에 실패했어. 텍스트로 확인해줘."
+        );
+        assert_eq!(
+            playback_failure_notice("en"),
+            "Voice playback failed — check the text response instead."
+        );
     }
 
     #[test]

@@ -230,6 +230,13 @@ impl SttOutcome {
             Self::VolumeDetectFailed => "volumedetect_failed",
         }
     }
+
+    /// #4238: genuine STT failures worth an operator `warn!`, as opposed to the
+    /// benign `LowVolumeSkipped` (the silence gate firing on a quiet utterance,
+    /// which is the common expected case and must not spam the log).
+    fn is_failure(self) -> bool {
+        matches!(self, Self::EmptyAfterRetry | Self::VolumeDetectFailed)
+    }
 }
 
 fn stt_outcome_registry() -> &'static Mutex<HashMap<&'static str, u64>> {
@@ -252,6 +259,16 @@ pub fn record_stt_outcome(outcome: SttOutcome) {
             Some("voice"),
             json!({ "outcome": outcome.as_str() }),
         );
+        // #4238: the metric counter alone was invisible to operators watching
+        // logs. Surface genuine STT failures as a structured `warn!` so a
+        // recovery-worthy regression (whisper returning empty, volume pre-pass
+        // failing) is observable, not just silently tallied.
+        if outcome.is_failure() {
+            tracing::warn!(
+                outcome = outcome.as_str(),
+                "voice STT turn failed to yield a usable transcript (#4238)"
+            );
+        }
     }
 }
 
