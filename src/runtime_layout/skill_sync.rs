@@ -1,4 +1,5 @@
 use super::paths::{current_home_dir, expand_user_path};
+use super::skill_refresh::refresh_managed_skill_dir;
 use super::*;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -738,44 +739,6 @@ fn managed_skill_has_extra_files(
     Ok(false)
 }
 
-/// Re-copies the source skill into the managed cache via a hidden staging dir (outside
-/// the discoverable skills root) that atomically replaces the managed dir, so a
-/// mid-copy failure never leaves a half-written cache `discover_skill_dirs` could pick up.
-fn refresh_managed_skill_dir(
-    root: &Path,
-    skill_name: &str,
-    source_skill_dir: &Path,
-    managed_dir: &Path,
-) -> Result<(), String> {
-    let staging = root.join(".skill-refresh").join(skill_name);
-    let _ = fs::remove_dir_all(&staging); // clear any interrupted prior refresh
-    copy_skill_dir_resolving_symlinks(source_skill_dir, &staging)?;
-
-    if managed_dir.exists() {
-        fs::remove_dir_all(managed_dir).map_err(|e| {
-            format!(
-                "Failed to remove stale managed skill dir '{}': {e}",
-                managed_dir.display()
-            )
-        })?;
-    }
-    if let Some(parent) = managed_dir.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
-    }
-    fs::rename(&staging, managed_dir).map_err(|e| {
-        let _ = fs::remove_dir_all(&staging);
-        format!(
-            "Failed to move refreshed skill dir into '{}': {e}",
-            managed_dir.display()
-        )
-    })?;
-    if let Some(parent) = staging.parent() {
-        let _ = fs::remove_dir(parent); // best-effort cleanup of empty staging parent
-    }
-    Ok(())
-}
-
 fn rewrite_text_file_paths(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Ok(());
@@ -933,7 +896,7 @@ fn skill_link_paths(
     }
 }
 
-fn copy_skill_dir_resolving_symlinks(src: &Path, dest: &Path) -> Result<(), String> {
+pub(super) fn copy_skill_dir_resolving_symlinks(src: &Path, dest: &Path) -> Result<(), String> {
     copy_skill_path_resolving_symlinks(src, dest)
 }
 
@@ -1114,5 +1077,85 @@ mod skill_cache_freshness_tests {
             pinned,
             "rewrite-aware freshness check must not re-copy a rewritten skill"
         );
+    }
+
+    /// #4256 concurrency safety: a unique-named staging dir left behind by a crashed prior
+    /// refresh must not corrupt a later one, and a lockfile held by a "concurrent" process
+    /// must make the refresh skip (converge later) instead of racing the swap.
+    #[test]
+    fn refresh_is_concurrency_safe_lock_and_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("demo");
+        write_file(&source.join("SKILL.md"), "v1\n");
+
+        let managed = ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v1\n"
+        );
+
+        // A staging dir left behind by a crashed prior refresh (unique-named) must not
+        // block or corrupt a later refresh: unique staging paths let the new run converge.
+        let leftover = root.join(".skill-refresh").join("demo.999999.0");
+        write_file(&leftover.join("SKILL.md"), "garbage\n");
+        write_file(&source.join("SKILL.md"), "v2\n");
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v2\n"
+        );
+
+        // A held lockfile makes a concurrent refresh SKIP rather than race the holder, so
+        // the source change is not applied while the lock is held.
+        let refresh_dir = root.join(".skill-refresh");
+        fs::create_dir_all(&refresh_dir).unwrap();
+        let lock = refresh_dir.join("demo.lock");
+        fs::write(&lock, b"").unwrap();
+        write_file(&source.join("SKILL.md"), "v3\n");
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v2\n",
+            "a held lock must cause the refresh to skip, not race"
+        );
+
+        // Once the lock is released the next refresh converges to the new content.
+        fs::remove_file(&lock).unwrap();
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "v3\n"
+        );
+    }
+
+    /// #4256: a failure during the swap must not leak the staging dir.
+    #[test]
+    fn refresh_cleans_up_staging_on_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("demo");
+        write_file(&source.join("SKILL.md"), "x\n");
+
+        // Make the managed parent a regular file so the swap fails *after* the staging copy
+        // succeeds, exercising the error cleanup path.
+        let managed_parent = managed_skills_root(root);
+        write_file(&managed_parent, "not a dir\n");
+        let managed_dir = managed_parent.join("demo");
+
+        assert!(
+            refresh_managed_skill_dir(root, "demo", &source, &managed_dir).is_err(),
+            "swap must fail when the managed parent is a file"
+        );
+
+        // No staging dir may leak on the error path.
+        let refresh_dir = root.join(".skill-refresh");
+        let leaked: Vec<_> = fs::read_dir(&refresh_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .collect();
+        assert!(leaked.is_empty(), "staging dir leaked on error: {leaked:?}");
     }
 }

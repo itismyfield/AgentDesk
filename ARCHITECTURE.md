@@ -175,6 +175,7 @@ src/
 │   ├── legacy_migration.rs
 │   ├── mod.rs
 │   ├── paths.rs
+│   ├── skill_refresh.rs
 │   └── skill_sync.rs
 ├── server/
 │   ├── dto/
