@@ -19,10 +19,12 @@ Detection (on string/comment-stripped code):
   positions a tracing-macro field key can occupy, which covers both the rustfmt
   multi-line form and single-line calls like
   `tracing::info!(channel = id, "msg");` — AND the value is either a sigil
-  capture (`%expr` / `?expr`, tracing-only syntax) or terminated by a `,` at
-  bracket-depth 0 before any depth-0 `;` on the line (the tracing field
-  separator). `let` bindings (`let channel = …`) fail the preceder rule;
-  reassignment statements (`session_id = None;`) fail the terminator rule.
+  capture (`%expr` / `?expr`, tracing-only syntax) or terminated at
+  bracket-depth 0, before any depth-0 `;`, by a `,` (field separator) or an
+  unmatched `)` / `]` / `}` (enclosing call closing after a trailing-comma-less
+  LAST field, e.g. `tracing::info!(channel = id);`). `let` bindings
+  (`let channel = …`) fail the preceder rule; reassignment statements
+  (`session_id = None;`) fail the terminator rule.
 
 String/comment handling: a lightweight cross-line scanner blanks out string
 literals (normal strings with escapes, `b"…"`, and `r"…"` / `r#"…"#` raw
@@ -178,13 +180,16 @@ def _field_violation(code: str, match: re.Match[str]) -> str | None:
     This excludes `let <key> = …`, `x.<key> = …`, `=> <key> = …`, etc.
 
     Terminator rule: sigil values (`%`/`?`) are tracing-only syntax and count
-    immediately; otherwise the value must be closed by a `,` at bracket-depth 0
-    before any depth-0 `;` (fields separate with `,`; statements end with `;`).
-    Hitting an unmatched closer (`)`, `]`, `}`) first means the enclosing call
-    ended without a field separator — a trailing macro arg or plain expression,
-    not something this guard can distinguish from a statement, so it is skipped
-    (rustfmt puts a `,` after every real field, including the last one before
-    the message literal).
+    immediately; otherwise the value must be closed — at bracket-depth 0,
+    before any depth-0 `;` — by either a `,` (field separator) or an unmatched
+    closer `)` / `]` / `}` (the enclosing macro/`fields(…)` list ending right
+    after the LAST field, which single-line calls like
+    `tracing::info!(channel = id);` write without a trailing comma; codex r2).
+    Treating the closer as a terminator is safe because the preceder rule has
+    already pinned the key to a call-argument position, and plain Rust has no
+    named arguments — `(key = value)` outside a macro would be an
+    assignment-expression-in-parens, which real code does not write.
+    Statements end with `;` and stay excluded.
     """
     before = code[: match.start()].rstrip()
     if before and before[-1] not in "(,":
@@ -193,16 +198,29 @@ def _field_violation(code: str, match: re.Match[str]) -> str | None:
     rest = match.group("rest")
     stripped = rest.lstrip()
     if stripped.startswith("%") or stripped.startswith("?"):
-        end = stripped.find(",")
-        return (stripped[:end] if end != -1 else stripped).strip()
+        value = _terminated_value(rest)
+        # Sigil syntax is tracing-only: still a violation even if no same-line
+        # terminator is found (e.g. a multi-line sigil value).
+        return value if value is not None else stripped
+    return _terminated_value(rest)
 
+
+def _terminated_value(rest: str) -> str | None:
+    """Return the value slice if `rest` closes like a tracing field on this line.
+
+    Scans with bracket-depth tracking: a depth-0 `,` (field separator) or a
+    depth-0 unmatched closer (`)`, `]`, `}` — the enclosing call ending after
+    the last field) terminates the value; a depth-0 `;` means a statement.
+    Matched pairs inside the value (`Some(x)`, `pair[1]`, `id.get()`) pass
+    through: their closers drop the depth back without hitting -1.
+    """
     depth = 0
     for pos, ch in enumerate(rest):
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
             if depth == 0:
-                return None  # enclosing call closed without a field separator
+                return rest[:pos].strip()  # enclosing call closed: last field
             depth -= 1
         elif depth == 0 and ch == ";":
             return None  # plain (re)assignment statement

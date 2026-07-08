@@ -125,6 +125,50 @@ class InlineMacroDetectionTest(unittest.TestCase):
         )
         self.assertEqual(_keys(violations), ["channel"])
 
+    def test_trailing_comma_less_last_field_flagged(self) -> None:
+        """codex r2: depth-0 `)` terminates the LAST field of a call."""
+        violations = _scan_fixture(
+            """
+            fn probe() {
+                tracing::info!(channel = channel_id);
+            }
+            """
+        )
+        self.assertEqual(_keys(violations), ["channel"])
+
+    def test_instrument_fields_without_trailing_comma_flagged(self) -> None:
+        """codex r2: `fields(channel = id)` closes with `)` — still a field."""
+        violations = _scan_fixture(
+            """
+            #[tracing::instrument(fields(channel = id))]
+            fn probe() {}
+            """
+        )
+        self.assertEqual(_keys(violations), ["channel"])
+
+    def test_last_field_with_method_call_value_flagged(self) -> None:
+        # Matched pairs inside the value must not eat the closing terminator.
+        violations = _scan_fixture(
+            """
+            fn probe() {
+                tracing::info!(channel = channel_id.get());
+            }
+            """
+        )
+        self.assertEqual(_keys(violations), ["channel"])
+
+    def test_sigil_last_field_without_comma_extracts_clean_value(self) -> None:
+        # Allowlist matching depends on the value excluding the `)` closer.
+        violations = _scan_fixture(
+            """
+            fn probe() {
+                tracing::info!(session_id = %event.session_id);
+            }
+            """,
+            rel="src/services/discord/tui_prompt_relay.rs",
+        )
+        self.assertEqual(violations, [])
+
 
 class StringAndCommentExclusionTest(unittest.TestCase):
     """codex r1 gap 2: matches inside string literals/comments must not flag."""
@@ -233,6 +277,30 @@ class StatementAndBindingExclusionTest(unittest.TestCase):
             fn probe() {
                 state.channel = 5;
                 self.session_id = value;
+            }
+            """
+        )
+        self.assertEqual(violations, [])
+
+    def test_tail_expression_with_matched_parens_not_flagged(self) -> None:
+        # codex r2 guard: a matched `(…)` pair inside the value drops depth
+        # back to 0 without terminating — `)` only terminates when UNmatched.
+        violations = _scan_fixture(
+            """
+            fn probe() {
+                session_id = compute(x)
+            }
+            """
+        )
+        self.assertEqual(violations, [])
+
+    def test_closure_body_assignment_not_flagged(self) -> None:
+        # codex r2 guard: `|| key = value)` — the preceder is `|`, not `(`/`,`.
+        violations = _scan_fixture(
+            """
+            fn probe() {
+                spawn(move || session_id = None);
+                run(|| channel = next());
             }
             """
         )
