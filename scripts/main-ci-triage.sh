@@ -23,6 +23,16 @@ OPEN_ISSUES_FILE="$TMP_DIR/open-issues.tsv"
 : >"$CURRENT_META_FILE"
 : >"$OPEN_ISSUES_FILE"
 
+# #4245: A one-off infrastructure-level termination (SIGTERM / signal 15 / exit
+# 143 / runner shutdown) is flaky runner pressure and is skipped (#3991). But the
+# SAME job terminating this way across N *consecutive* main runs is no longer
+# flake — it is a deterministic infra regression (typically OOM) that today stays
+# permanently silent because the 2-consecutive real-failure promotion condition
+# is never met (infra terminations record no identifier). This is the consecutive
+# streak threshold at which a persistent infra termination is escalated to a
+# ci-red issue. 1–2 occurrences remain skipped (anti-flake intent preserved).
+SIGTERM_ESCALATION_STREAK="${SIGTERM_ESCALATION_STREAK:-3}"
+
 usage() {
   cat <<EOF
 Usage: $SELF_NAME [--self-test]
@@ -208,6 +218,36 @@ record_passed_identifier() {
   fi
 }
 
+# #4245: Persistent-infra-termination track. Infra-only skips (see
+# collect_failed_identifiers) are kept out of the real-failure identifier files so
+# a single/double SIGTERM never trips the 2-consecutive promotion. Instead each
+# infra termination is accumulated on a per-run track keyed by run id; the
+# escalation loop in run_triage promotes an `infra::job::…` identifier only when
+# it recurs across SIGTERM_ESCALATION_STREAK consecutive runs. `record_meta=1`
+# additionally records current-run job metadata (job url / log path) so the ci-red
+# issue body can be rendered, mirroring record_failed_identifier's current branch.
+record_infra_identifier() {
+  local run_id="$1"
+  local identifier="$2"
+  local job_name="$3"
+  local job_id="$4"
+  local job_url="$5"
+  local log_path="$6"
+  local record_meta="$7"
+  local ids_file="$TMP_DIR/infra-ids-${run_id}.txt"
+
+  # Pre-create the per-run track file: append_unique_line greps it first, and the
+  # infra files are created lazily (unlike the eagerly `: >`-initialised id files),
+  # so the very first write would otherwise emit a benign `grep: No such file`.
+  [[ -f "$ids_file" ]] || : >"$ids_file"
+  append_unique_line "$ids_file" "$identifier"
+  if [[ "$record_meta" == "1" ]]; then
+    if ! awk -F '\t' -v identifier="$identifier" '$1 == identifier { found = 1 } END { exit found ? 0 : 1 }' "$CURRENT_META_FILE"; then
+      printf '%s\t%s\t%s\t%s\t%s\n' "$identifier" "$job_name" "$job_id" "$job_url" "$log_path" >>"$CURRENT_META_FILE"
+    fi
+  fi
+}
+
 collect_failed_identifiers() {
   local prefix="$1"
   local repo="$2"
@@ -240,10 +280,51 @@ collect_failed_identifiers() {
       # promote it normally so genuine red is never silently dropped (false
       # negative). Only pure infra terminations are suppressed.
       if log_has_infra_termination "$log_path" && ! log_has_real_failure "$log_path"; then
+        # #4245: don't drop the signal entirely — record it on the separate
+        # `infra::job::…` track so a *persistent* streak (SIGTERM_ESCALATION_STREAK
+        # consecutive runs) can still be escalated. A single/double occurrence
+        # accumulates here but is never promoted, preserving the anti-flake intent.
+        if [[ "$prefix" == "current" ]]; then
+          record_infra_identifier "$run_id" "infra::job::$job_name" "$job_name" "$job_id" "$job_url" "$log_path" 1
+        else
+          record_infra_identifier "$run_id" "infra::job::$job_name" "$job_name" "$job_id" "$job_url" "$log_path" 0
+        fi
         continue
       fi
       identifier="job::$job_name"
       record_failed_identifier "$prefix" "$identifier" "$job_name" "$job_id" "$job_url" "$log_path"
+    fi
+  done < <(jq -c '.jobs[] | select(.conclusion == "failure")' <<<"$jobs_json")
+}
+
+# #4245: Lightweight infra-only pass over an older prior run (the runs before
+# `previous`) used purely to measure the persistent-SIGTERM streak. It deliberately
+# does NOT touch the real-failure identifier files — the 2-consecutive real-failure
+# promotion still compares only current vs previous. A run only counts toward the
+# streak when the job is a *pure* infra termination (no `test … FAILED` assertion
+# and no real-failure signal), the identical gate the current/previous collection
+# applies, so a real failure or a green run in the middle breaks the streak.
+collect_infra_identifiers_only() {
+  local repo="$1"
+  local run_id="$2"
+  local jobs_json line job_id job_name job_url log_path
+
+  jobs_json="$(gh api "/repos/$repo/actions/runs/$run_id/jobs?per_page=100")"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    job_id="$(jq -r '.id' <<<"$line")"
+    job_name="$(jq -r '.name' <<<"$line")"
+    job_url="$(jq -r '.html_url // empty' <<<"$line")"
+    log_path="$TMP_DIR/infra-${run_id}-${job_id}-$(sanitize_filename "$job_name").log"
+    fetch_job_log "$repo" "$run_id" "$job_id" "$log_path"
+
+    # A `test … FAILED` assertion means this was a real test failure, not a pure
+    # infra termination — it does not extend the infra streak.
+    if parse_failed_identifiers_from_log "$log_path" | grep -q .; then
+      continue
+    fi
+    if log_has_infra_termination "$log_path" && ! log_has_real_failure "$log_path"; then
+      record_infra_identifier "$run_id" "infra::job::$job_name" "$job_name" "$job_id" "$job_url" "$log_path" 0
     fi
   done < <(jq -c '.jobs[] | select(.conclusion == "failure")' <<<"$jobs_json")
 }
@@ -272,6 +353,13 @@ collect_passed_identifiers() {
     if [[ "$matched" == "0" ]]; then
       record_passed_identifier "$prefix" "job::$job_name"
     fi
+
+    # #4245: A successful job clears any persistent infra-termination streak for
+    # that job. Record the infra identifier on the passed track (unconditionally —
+    # a recovered infra job may pass with per-test `... ok` lines, so `matched`
+    # cannot gate this) so an escalated `infra::job::…` ci-red issue auto-closes
+    # after two consecutive green runs, symmetric to the escalation.
+    record_passed_identifier "$prefix" "infra::job::$job_name"
   done < <(jq -c '.jobs[] | select(.conclusion == "success")' <<<"$jobs_json")
 }
 
@@ -279,7 +367,7 @@ render_log_snippet() {
   local identifier="$1"
   local log_path="$2"
 
-  if [[ "$identifier" == job::* ]]; then
+  if [[ "$identifier" == job::* || "$identifier" == infra::job::* ]]; then
     head -n 40 "$log_path"
     return 0
   fi
@@ -319,19 +407,26 @@ build_issue_body() {
   local head_sha="$3"
   local job_url="$4"
   local log_path="$5"
-  local snippet repro
+  local snippet repro background
 
   snippet="$(render_log_snippet "$identifier" "$log_path")"
-  if [[ "$identifier" == job::* ]]; then
+  if [[ "$identifier" == infra::job::* ]]; then
+    # #4245: persistent infra termination — not a test assertion, so there is no
+    # cargo repro; point the investigation at runner resources instead.
+    repro="_persistent infra-level termination (SIGTERM / signal 15 / exit 143 / OOM / runner shutdown) across ${SIGTERM_ESCALATION_STREAK} consecutive main runs; not a test assertion — investigate runner memory / timeouts_"
+    background="main 의 \`CI Main\` 에서 동일 job 의 인프라 레벨 종료(SIGTERM / exit 143 / OOM / runner shutdown)가 ${SIGTERM_ESCALATION_STREAK}회 연속 관측되어 자동 생성된 ci-red 이슈입니다. 일회성 flake 가 아니라 지속성 인프라 회귀입니다."
+  elif [[ "$identifier" == job::* ]]; then
     repro="_job-level failure; see failing workflow job_"
+    background="main 의 \`CI Main\` 에서 동일 실패가 2회 연속 관측되어 자동 생성된 ci-red 이슈입니다."
   else
     repro="cargo test -p agentdesk $identifier -- --exact --nocapture"
+    background="main 의 \`CI Main\` 에서 동일 실패가 2회 연속 관측되어 자동 생성된 ci-red 이슈입니다."
   fi
 
   cat <<EOF
 ## 배경
 
-main 의 \`CI Main\` 에서 동일 실패가 2회 연속 관측되어 자동 생성된 ci-red 이슈입니다.
+$background
 
 ## 내용
 
@@ -456,6 +551,8 @@ run_triage() {
   fi
 
   local repo event_path workflow_name workflow_id current_run_id head_branch current_run_url head_sha current_run_conclusion previous_runs_json previous_run_id previous_run_conclusion identifier
+  local streak_idx streak_ok infra_streak_possible _rid
+  local -a prior_run_ids=()
   repo="${GITHUB_REPOSITORY:-}"
   event_path="${GITHUB_EVENT_PATH:-}"
 
@@ -495,6 +592,22 @@ run_triage() {
     ' <<<"$previous_runs_json"
   )"
 
+  # #4245: ordered list of prior (non-current, non-cancelled) run ids, newest
+  # first — prior_run_ids[0] is `previous`. Used by the persistent-infra streak
+  # check to look back over SIGTERM_ESCALATION_STREAK-1 runs. Built with a read
+  # loop rather than `mapfile` for bash 3.2 (macOS) portability.
+  while IFS= read -r _rid; do
+    [[ -n "$_rid" ]] || continue
+    prior_run_ids+=("$_rid")
+  done < <(
+    jq -r --arg current_run_id "$current_run_id" '
+      .workflow_runs
+      | map(select((.id | tostring) != $current_run_id))
+      | map(select(.conclusion != "cancelled"))
+      | .[].id // empty
+    ' <<<"$previous_runs_json"
+  )
+
   if [[ -z "$previous_run_id" ]]; then
     echo "skip: no previous CI Main run on main to compare against" >&2
     exit 0
@@ -512,6 +625,60 @@ run_triage() {
         create_or_comment_issue "$repo" "$identifier" "$current_run_url" "$head_sha"
       fi
     done <"$CURRENT_IDS_FILE"
+
+    # #4245: persistent-SIGTERM escalation. current + previous infra sets are
+    # already populated (collect_failed_identifiers above records onto the
+    # `infra::job::…` track when it skips a pure infra termination). We only have a
+    # streak to evaluate when at least SIGTERM_ESCALATION_STREAK-1 prior runs are
+    # known; otherwise history is too short to distinguish flake from regression
+    # and the anti-flake skip stands. Gather the remaining (STREAK-2) older prior
+    # runs' infra sets on demand, then promote an infra identifier only when it is
+    # present in the current run AND every one of the STREAK-1 prior runs.
+    #
+    # Cost guard (codex r1): the older-run lookback costs extra API calls
+    # (/actions/runs/<older>/jobs + per-job logs), so it must not fire on history
+    # length alone — an ordinary real-failure run has no infra candidates and must
+    # never touch older runs. Enter the lookback only when a streak is still
+    # possible: (a) the current run recorded at least one `infra::job::…`
+    # candidate AND (b) at least one of those candidates was also a pure infra
+    # termination in the previous run. Otherwise every candidate is already dead
+    # at streak length 2 and older history cannot change the outcome.
+    touch "$TMP_DIR/infra-ids-${current_run_id}.txt"
+    touch "$TMP_DIR/infra-ids-${previous_run_id}.txt"
+    infra_streak_possible=0
+    while IFS= read -r identifier; do
+      [[ -n "$identifier" ]] || continue
+      if file_has_exact_line "$TMP_DIR/infra-ids-${previous_run_id}.txt" "$identifier"; then
+        infra_streak_possible=1
+        break
+      fi
+    done <"$TMP_DIR/infra-ids-${current_run_id}.txt"
+
+    if [[ "$infra_streak_possible" == "1" ]] && (( SIGTERM_ESCALATION_STREAK >= 2 )) && (( ${#prior_run_ids[@]} >= SIGTERM_ESCALATION_STREAK - 1 )); then
+      for (( streak_idx = 1; streak_idx <= SIGTERM_ESCALATION_STREAK - 2; streak_idx++ )); do
+        collect_infra_identifiers_only "$repo" "${prior_run_ids[streak_idx]}"
+      done
+
+      # Guarantee every track file exists so grep/read never trip under `set -e`
+      # when a run contributed zero infra terminations.
+      for (( streak_idx = 1; streak_idx <= SIGTERM_ESCALATION_STREAK - 2; streak_idx++ )); do
+        touch "$TMP_DIR/infra-ids-${prior_run_ids[streak_idx]}.txt"
+      done
+
+      while IFS= read -r identifier; do
+        [[ -n "$identifier" ]] || continue
+        streak_ok=1
+        for (( streak_idx = 0; streak_idx <= SIGTERM_ESCALATION_STREAK - 2; streak_idx++ )); do
+          if ! file_has_exact_line "$TMP_DIR/infra-ids-${prior_run_ids[streak_idx]}.txt" "$identifier"; then
+            streak_ok=0
+            break
+          fi
+        done
+        if [[ "$streak_ok" == "1" ]]; then
+          create_or_comment_issue "$repo" "$identifier" "$current_run_url" "$head_sha"
+        fi
+      done <"$TMP_DIR/infra-ids-${current_run_id}.txt"
+    fi
   fi
 
   if [[ "$current_run_conclusion" == "success" && "$previous_run_conclusion" == "success" ]]; then
@@ -565,6 +732,10 @@ if [[ "$cmd" == "api" ]]; then
   fi
   if [[ "$endpoint" == "/repos/test/repo/actions/runs/199/jobs?per_page=100" ]]; then
     cat "$scenario_dir/previous-jobs.json"
+    exit 0
+  fi
+  if [[ "$endpoint" == "/repos/test/repo/actions/runs/198/jobs?per_page=100" ]]; then
+    cat "$scenario_dir/previous2-jobs.json"
     exit 0
   fi
 fi
@@ -860,6 +1031,47 @@ EOF
   assert_contains "issue close 9462 --repo test/repo" "$scenario_dir/issue-close.txt"
 }
 
+scenario_recovered_infra_job_closes_issue() {
+  # #4245: symmetric recovery for the escalation. Once an escalated
+  # `infra::job::…` ci-red issue exists, two consecutive green runs of that job
+  # (it stopped terminating) must auto-close it — mirroring the normal-identifier
+  # recovery. The recovered job here succeeds with no per-test `... ok` line, so
+  # the infra recovery record must not depend on a per-test match.
+  local scenario_dir="$TMP_DIR/selftest-infra-recover"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_success_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"success"},{"id":199,"conclusion":"success"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":651,"name":"Full tests (ubuntu-latest)","conclusion":"success","html_url":"https://example.com/jobs/651"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":652,"name":"Full tests (ubuntu-latest)","conclusion":"success","html_url":"https://example.com/jobs/652"}]}
+EOF
+  cat >"$scenario_dir/log-200-651.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+    Finished test profile in 240s
+EOF
+  cat >"$scenario_dir/log-199-652.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+    Finished test profile in 236s
+EOF
+  cat >"$scenario_dir/open-issues.json" <<'EOF'
+[{"number":9471,"title":"[ci-red] infra::job::Full tests (ubuntu-latest) 실패 (main)"}]
+EOF
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  assert_contains "issue comment 9471 --repo test/repo" "$scenario_dir/issue-comment.txt"
+  assert_contains "issue close 9471 --repo test/repo" "$scenario_dir/issue-close.txt"
+}
+
 scenario_cancelled_run_does_not_close_issue() {
   local scenario_dir="$TMP_DIR/selftest-cancelled"
   mkdir -p "$scenario_dir"
@@ -1087,10 +1299,15 @@ EOF
 }
 
 scenario_sigterm_job_failure_is_skipped_as_flaky() {
-  # #3991: A failed job whose log has no `test … FAILED` assertion but shows an
-  # infrastructure-level termination (SIGTERM / signal 15 / exit 143 / runner
-  # cancellation) must be classified as flaky and skipped — even across two
-  # consecutive red runs it must NOT be promoted to a ci-red issue.
+  # #3991 / #4245: A failed job whose log has no `test … FAILED` assertion but
+  # shows an infrastructure-level termination (SIGTERM / signal 15 / exit 143 /
+  # runner cancellation) is flaky runner pressure. A one-off or two-in-a-row
+  # occurrence stays skipped and is NOT promoted to a ci-red issue. Here only two
+  # runs of history exist (200 + 199) — below the default SIGTERM_ESCALATION_STREAK
+  # of 3 — so the persistent-infra escalation cannot fire and the anti-flake skip
+  # stands. The paired scenario_persistent_sigterm_escalates covers the 3-streak
+  # promotion; scenario_sigterm_streak_broken_by_non_infra_run_stays_skipped covers
+  # a broken streak within a sufficient window.
   local scenario_dir="$TMP_DIR/selftest-sigterm-flaky"
   mkdir -p "$scenario_dir"
   install_mock_gh "$scenario_dir"
@@ -1128,6 +1345,166 @@ EOF
 
   if [[ -f "$scenario_dir/issue-create.txt" || -f "$scenario_dir/issue-comment.txt" || -f "$scenario_dir/issue-close.txt" ]]; then
     echo "assertion failed: SIGTERM/infra-termination job failure must be skipped as flaky, not promoted to ci-red" >&2
+    exit 1
+  fi
+}
+
+scenario_persistent_sigterm_escalates() {
+  # #4245: The SAME job terminating at the infrastructure level (SIGTERM / exit
+  # 143 / runner shutdown) across SIGTERM_ESCALATION_STREAK (default 3) consecutive
+  # main runs is no longer flake — it is a deterministic infra regression (e.g.
+  # OOM) and MUST be promoted to a ci-red issue on the `infra::job::…` track. Runs
+  # 200, 199 and 198 all show the identical Full-tests infra termination.
+  local scenario_dir="$TMP_DIR/selftest-sigterm-escalate"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"},{"id":198,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":931,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/931"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":932,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/932"}]}
+EOF
+  cat >"$scenario_dir/previous2-jobs.json" <<'EOF'
+{"jobs":[{"id":933,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/933"}]}
+EOF
+  cat >"$scenario_dir/log-200-931.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+    Building [=======================>   ] 812/845: agentdesk(test)
+/home/runner/work/_temp/abc.sh: line 3: 1234 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  cat >"$scenario_dir/log-199-932.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+    Building [=====================>     ] 790/845: agentdesk(test)
+/home/runner/work/_temp/def.sh: line 3: 5678 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  cat >"$scenario_dir/log-198-933.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+    Building [====================>      ] 770/845: agentdesk(test)
+/home/runner/work/_temp/ghi.sh: line 3: 9012 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  assert_contains "issue create --repo test/repo --title [ci-red] infra::job::Full tests (ubuntu-latest) 실패 (main)" "$scenario_dir/issue-create.txt"
+  assert_contains "--label ci-red" "$scenario_dir/issue-create.txt"
+  assert_contains "--label agent:project-agentdesk" "$scenario_dir/issue-create.txt"
+}
+
+scenario_sigterm_streak_broken_by_non_infra_run_stays_skipped() {
+  # #4245 anti-flake boundary: even with a sufficient history window (3 runs), a
+  # persistent-SIGTERM escalation must fire ONLY on an unbroken streak. Here runs
+  # 200 and 199 are infra terminations, but the oldest run 198 is a real
+  # `test … FAILED` (a different failure mode), so the infra streak is only 2
+  # consecutive — below the default-3 threshold. No ci-red issue may be created.
+  local scenario_dir="$TMP_DIR/selftest-sigterm-streak-broken"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"},{"id":198,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":941,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/941"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":942,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/942"}]}
+EOF
+  cat >"$scenario_dir/previous2-jobs.json" <<'EOF'
+{"jobs":[{"id":943,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/943"}]}
+EOF
+  cat >"$scenario_dir/log-200-941.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+/home/runner/work/_temp/abc.sh: line 3: 1234 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  cat >"$scenario_dir/log-199-942.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+/home/runner/work/_temp/def.sh: line 3: 5678 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  # Oldest run in the window is a genuine test failure, not an infra termination —
+  # this breaks the infra streak so no escalation may fire.
+  cat >"$scenario_dir/log-198-943.txt" <<'EOF'
+running 42 tests
+test pipeline::tests::some_unrelated_regression ... FAILED
+error: test failed, to rerun pass `-p agentdesk --lib`
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  if [[ -f "$scenario_dir/issue-create.txt" || -f "$scenario_dir/issue-comment.txt" || -f "$scenario_dir/issue-close.txt" ]]; then
+    echo "assertion failed: a broken infra streak (2 of 3 runs) must stay skipped, not promoted to ci-red" >&2
+    exit 1
+  fi
+}
+
+scenario_no_infra_candidates_skips_older_run_lookback() {
+  # #4245 cost guard (codex r1): the older-run infra lookback costs extra API
+  # calls, so it must NOT fire on history length alone. Here a full 3-run failure
+  # window exists (200/199/198), but current + previous are ordinary real test
+  # failures with zero infra-termination candidates — so the triage must promote
+  # the real failure normally and must NEVER query run 198's jobs/logs. The mock
+  # gh records every invocation in gh.log; additionally previous2-jobs.json is
+  # deliberately absent, so a regression that queries run 198 also hard-fails.
+  local scenario_dir="$TMP_DIR/selftest-no-infra-lookback"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"},{"id":198,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":951,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/951"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":952,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/952"}]}
+EOF
+  cat >"$scenario_dir/log-200-951.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  cat >"$scenario_dir/log-199-952.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  # Normal 2-consecutive real-failure promotion is unaffected by the cost guard.
+  assert_contains "issue create --repo test/repo --title [ci-red] server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state 실패 (main)" "$scenario_dir/issue-create.txt"
+
+  # The older run (198) must never be queried — neither its jobs listing nor logs.
+  if grep -F -q -- "/repos/test/repo/actions/runs/198/jobs" "$scenario_dir/gh.log"; then
+    echo "assertion failed: no-infra-candidate run must not query older run 198 jobs (cost guard)" >&2
+    exit 1
+  fi
+  if grep -E -q -- 'run view 198( |$)' "$scenario_dir/gh.log"; then
+    echo "assertion failed: no-infra-candidate run must not fetch older run 198 logs (cost guard)" >&2
     exit 1
   fi
 }
@@ -1240,11 +1617,15 @@ run_self_test() {
   scenario_existing_issue_gets_comment_only
   scenario_existing_issue_triggers_immediate_sync
   scenario_two_run_green_closes_issue
+  scenario_recovered_infra_job_closes_issue
   scenario_cancelled_run_does_not_close_issue
   scenario_skipped_lane_does_not_close_issue
   scenario_single_failure_stays_pending
   scenario_three_gate_failures_produce_distinct_identifiers
   scenario_sigterm_job_failure_is_skipped_as_flaky
+  scenario_persistent_sigterm_escalates
+  scenario_sigterm_streak_broken_by_non_infra_run_stays_skipped
+  scenario_no_infra_candidates_skips_older_run_lookback
   scenario_sigterm_noise_with_real_test_failure_still_creates_issue
   scenario_compile_error_with_sigterm_noise_still_creates_issue
   echo "self-test passed"
