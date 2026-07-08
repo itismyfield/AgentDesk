@@ -84,15 +84,6 @@ pub(crate) const SWEEP_HEARTBEAT_INTERVAL_SWEEPS: u64 = 120;
 /// without racing the recovery sweep itself.
 pub(crate) const INITIAL_DELAY_SECS: u64 = 180;
 
-/// #4278: grace window before the orphan-`⏳` defense sweep may remove a
-/// persisted TUI-direct bot-anchor hourglass. A record younger than this is
-/// skipped so a legitimately slow-starting turn (whose inflight row has not
-/// landed yet, or whose completion `⏳`-removal is in flight) is never swept.
-/// Comfortably above `ABORT_MARKER_TTL` (600s) so the #3296 marker + drain get
-/// first claim on every aborted anchor; the orphan sweep only fires when NO
-/// live turn and NO marker remain.
-pub(crate) const ORPHAN_TUI_ANCHOR_MIN_AGE_SECS: u64 = 900;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepDecision {
     Active,
@@ -954,69 +945,6 @@ fn should_log_sweep_report(report: SweepPassReport, sweeps_since_heartbeat: u64)
         || sweeps_since_heartbeat >= SWEEP_HEARTBEAT_INTERVAL_SWEEPS
 }
 
-/// #4278 defense-in-depth: sweep orphaned `⏳` TUI-direct bot-anchor reactions.
-///
-/// Reads the turn-view reconciler's OWN durable per-target state (the `⏳` this
-/// bot added, with its `token_hash` identity) and removes a `⏳` only when the
-/// (provider, channel) has NO live inflight row AND no abort marker covers the
-/// exact anchor, once the record has aged past the grace window. This is the
-/// universal backstop for a `⏳` that neither the normal `⏳ → ✅` completion nor
-/// the #3296 marker + TTL sweep ever cleared (an aborted synthetic turn whose
-/// FOREIGN-pinned marker deferred to the 1-hour hard cap, a lost in-memory
-/// pending-removal across restart, a marker that never landed). Conservative by
-/// construction — an active turn or a valid marker always defers to the primary
-/// reconcilers; removal uses the persisted `@me` that added the `⏳` (#3164).
-async fn sweep_orphan_tui_anchor_reactions(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-) -> usize {
-    // codex r1 #2: pass-local marker cache — ONE `load_all` store read per
-    // sweep pass feeds every candidate's verdict-time marker probe (the prior
-    // per-candidate `load_for_channel` re-read the whole store O(P×M) times).
-    let marker_anchors: HashSet<(u64, u64)> = super::tui_direct_abort_marker::load_all()
-        .into_iter()
-        .filter(|marker| marker.provider.eq_ignore_ascii_case(provider.as_str()))
-        .map(|marker| (marker.channel_id, marker.anchor_message_id))
-        .collect();
-    let has_live_inflight = |channel_id: u64| {
-        super::inflight::load_inflight_state_read_only(provider, channel_id).is_some()
-    };
-    let has_valid_marker = |channel_id: u64, anchor_message_id: u64| {
-        marker_anchors.contains(&(channel_id, anchor_message_id))
-    };
-    // codex r1 #1: removal-instant re-verification, evaluated FRESH inside the
-    // reconciler's target_lock right before the `⏳` removal (never from the
-    // pass cache — correctness beats cost here, and it only runs for actual
-    // removal candidates). Any of the three holds landing after the verdict
-    // aborts the removal: a live inflight row, an abort/deferred-claim marker
-    // covering the exact anchor, or a durable pending-start pinned to the
-    // exact anchor (its deferring worker owns this ⏳'s lifecycle).
-    let holds_before_removal = |channel_id: u64, anchor_message_id: u64| {
-        super::inflight::load_inflight_state_read_only(provider, channel_id).is_some()
-            || super::tui_direct_abort_marker::load_for_channel(provider.as_str(), channel_id)
-                .iter()
-                .any(|marker| marker.anchor_message_id == anchor_message_id)
-            || super::tui_direct_pending_start::load_all()
-                .iter()
-                .any(|record| {
-                    record.provider.eq_ignore_ascii_case(provider.as_str())
-                        && record.channel_id == channel_id
-                        && record.anchor_message_id == anchor_message_id
-                })
-    };
-    super::turn_view_reconciler::sweep_orphan_tui_anchors_with_probes(
-        &shared.turn_view_reconciler,
-        shared,
-        std::time::SystemTime::now(),
-        std::time::Duration::from_secs(ORPHAN_TUI_ANCHOR_MIN_AGE_SECS),
-        &has_live_inflight,
-        &has_valid_marker,
-        &holds_before_removal,
-        "orphan_tui_anchor_sweep",
-    )
-    .await
-}
-
 /// Spawn the long-lived background task that runs the stall sweeper at the
 /// configured interval until the runtime exits. Should be called once per
 /// provider during dcserver bootstrap.
@@ -1049,12 +977,10 @@ pub(super) fn spawn_placeholder_sweeper(
             // owns this reclaim so an aborted anchor always converges (#3282).
             let drained_abort_markers =
                 super::tui_direct_abort_marker::sweep_expired(&shared, &provider).await;
-            // #4278: after the marker sweep has had its claim, remove any
-            // orphaned `⏳` TUI-direct anchor left with no live turn and no
-            // covering marker (an aborted synthetic turn whose FOREIGN-pinned
-            // marker never converged, or a lost pending-removal). Runs AFTER
-            // `sweep_expired` so the marker + drain always reconcile first.
-            let swept_orphan_anchors = sweep_orphan_tui_anchor_reactions(&shared, &provider).await;
+            // #4278 orphan-`⏳` sweep (mechanism: turn_view_reconciler::orphan_sweep).
+            let swept_orphan_anchors =
+                super::turn_view_reconciler::sweep_orphan_tui_anchor_reactions(&shared, &provider)
+                    .await;
             // #3859: finalize placeholders stranded by a failure-path inflight
             // eviction (turn-task Drop / heartbeat-gap sweeper). Each durable
             // abandon-request is edited to its terminal "중단됨" card BY MESSAGE

@@ -20,7 +20,7 @@
 | `src/services/discord/idle_recap.rs` | 1374 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1180 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/placeholder_sweeper.rs` | 1094 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/placeholder_sweeper.rs` | 1020 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine/restore_inflight.rs` | 2303 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1520 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1607 | discord-relay | 2026-10-31 | #3838 |
@@ -36,7 +36,7 @@
 | `src/services/discord/turn_bridge/stream_loop.rs` | 1638 | discord-relay | 2026-08-31 | #4230 |
 | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 1669 | discord-relay | 2026-08-31 | #4230 |
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
-| `src/services/discord/turn_view_reconciler.rs` | 2212 | discord-relay | 2026-08-31 | #4049 |
+| `src/services/discord/turn_view_reconciler.rs` | 2213 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2905 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2052 | discord-relay | 2026-10-31 | #3840 |
 | `src/services/tmux_common.rs` | 1099 | discord-relay | 2026-10-31 | #3924 |
