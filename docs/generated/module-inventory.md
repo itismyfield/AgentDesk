@@ -56,7 +56,7 @@
 | `bootstrap` | `src/bootstrap.rs` | 93 | 93 | 0 |  |
 | `cli` | `src/cli/mod.rs` | 21 | 21 | 0 |  |
 | `cli::args` | `src/cli/args.rs` | 1037 | 969 | 68 |  |
-| `cli::client` | `src/cli/client.rs` | 2627 | 2404 | 223 | giant-file |
+| `cli::client` | `src/cli/client.rs` | 2653 | 2410 | 243 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1633 | 1633 | 0 | giant-file |
 | `cli::direct` | `src/cli/direct.rs` | 1812 | 1812 | 0 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 | 123 | 0 |  |
@@ -71,7 +71,7 @@
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3237 | 3237 | 0 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | 1513 | 0 | giant-file |
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | 1612 | 0 | giant-file |
-| `cli::monitoring` | `src/cli/monitoring.rs` | 124 | 124 | 0 |  |
+| `cli::monitoring` | `src/cli/monitoring.rs` | 127 | 127 | 0 |  |
 | `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 1039 | 1039 | 0 | giant-file |
 | `cli::query` | `src/cli/query.rs` | 462 | 379 | 83 |  |
 | `cli::run` | `src/cli/run.rs` | 700 | 678 | 22 |  |

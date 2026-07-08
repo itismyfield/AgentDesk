@@ -99,6 +99,7 @@ fn request_json(method: &str, path: &str, body: Option<&str>) -> Result<Value, S
             return Err(connection_error_hint(
                 &format!("Request failed: {err}"),
                 &api_base(),
+                "AGENTDESK_API_URL",
             ));
         }
     };
@@ -122,10 +123,15 @@ fn status_error_message(code: u16, body: &str) -> String {
 /// HTTP status response means the server *did* answer, so it stays hint-free.
 /// The tone is advisory ("may not be running"), never a flat assertion that
 /// the server is down.
-pub(crate) fn connection_error_hint(raw: &str, effective_url: &str) -> String {
+///
+/// `env_hint` names the environment variable(s) the *caller's* `api_base()`
+/// actually honors — client.rs resolves `AGENTDESK_API_URL` only, while
+/// monitoring.rs prefers `ADK_API_URL` over `AGENTDESK_API_URL` — so the hint
+/// never steers the operator toward a variable that path would ignore.
+pub(crate) fn connection_error_hint(raw: &str, effective_url: &str, env_hint: &str) -> String {
     format!(
         "{raw}\n  힌트: dcserver가 실행 중이 아닐 수 있습니다 — `agentdesk doctor`로 진단하고, \
-         접속 URL(현재: {effective_url})이 맞는지 AGENTDESK_API_URL 환경변수를 확인하세요."
+         접속 URL(현재: {effective_url})이 맞는지 {env_hint} 환경변수를 확인하세요."
     )
 }
 
@@ -135,9 +141,11 @@ mod connection_hint_tests {
 
     #[test]
     fn transport_error_gets_connection_hint() {
+        // client.rs path — api_base() honors AGENTDESK_API_URL only.
         let msg = connection_error_hint(
             "Request failed: Network Error: Connection refused (os error 61)",
             "http://127.0.0.1:8791",
+            "AGENTDESK_API_URL",
         );
         // Raw error is preserved verbatim …
         assert!(msg.contains("Connection refused"));
@@ -146,6 +154,24 @@ mod connection_hint_tests {
         assert!(msg.contains("AGENTDESK_API_URL"));
         assert!(msg.contains("http://127.0.0.1:8791"));
         // Advisory, not a flat "server is down" assertion.
+        assert!(msg.contains("아닐 수 있습니다"));
+        // The client path must not mention ADK_API_URL — its api_base()
+        // never reads it.
+        assert!(!msg.contains("ADK_API_URL(우선)"));
+    }
+
+    #[test]
+    fn monitoring_env_hint_mentions_both_vars_in_priority_order() {
+        // monitoring.rs path — its api_base() prefers ADK_API_URL over
+        // AGENTDESK_API_URL, and the hint must say so.
+        let msg = connection_error_hint(
+            "monitoring API request failed: Connection refused",
+            "http://127.0.0.1:8791",
+            "ADK_API_URL(우선) 또는 AGENTDESK_API_URL",
+        );
+        assert!(msg.contains("agentdesk doctor"));
+        assert!(msg.contains("ADK_API_URL(우선) 또는 AGENTDESK_API_URL"));
+        assert!(msg.contains("http://127.0.0.1:8791"));
         assert!(msg.contains("아닐 수 있습니다"));
     }
 
