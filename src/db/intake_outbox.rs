@@ -646,6 +646,144 @@ mod migration_tests {
     use serde_json::json;
     use sqlx::Row;
 
+    /// Migration 0079 verbatim. Every statement is idempotent — the DDL is
+    /// `IF [NOT] EXISTS` and each backfill/fail-closed UPDATE is gated on
+    /// `provider = ''` — so replaying it over synthetic pre-#4349 rows exercises
+    /// exactly what a real deploy runs.
+    const MIGRATION_0079: &str =
+        include_str!("../../migrations/postgres/0079_intake_outbox_provider.sql");
+
+    /// Executed as one script over the simple query protocol, exactly how
+    /// `sqlx::migrate` runs it in production. Splitting on `;` would break on
+    /// semicolons inside comments and string literals.
+    async fn replay_migration_0079(pool: &sqlx::PgPool) {
+        sqlx::raw_sql(MIGRATION_0079)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("replay 0079 failed: {e}"));
+    }
+
+    /// A pre-#4349 row: `provider = ''`, which is what the column default leaves
+    /// behind for rows written before the migration ran.
+    async fn seed_legacy_row(
+        pool: &sqlx::PgPool,
+        channel: &str,
+        status: &str,
+        claim_owner: Option<&str>,
+    ) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO intake_outbox (
+                target_instance_id, forwarded_by_instance_id,
+                channel_id, user_msg_id, request_owner_id, user_text, turn_kind,
+                agent_id, provider, status, claim_owner
+             ) VALUES (
+                'worker-1', 'leader-1',
+                $1, $1, '100', 'hi', 'foreground',
+                'agent-paired', '', $2, $3
+             ) RETURNING id",
+        )
+        .bind(channel)
+        .bind(status)
+        .bind(claim_owner)
+        .fetch_one(pool)
+        .await
+        .expect("seed legacy row")
+    }
+
+    async fn row_state(pool: &sqlx::PgPool, id: i64) -> (String, String) {
+        sqlx::query_as("SELECT provider, status FROM intake_outbox WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read row state")
+    }
+
+    /// #4349 review round 1 (REJECT): an earlier draft failed *every* open row to
+    /// `failed_pre_accept`. `accepted`/`spawned` are POST-accept — the turn may
+    /// already have emitted to Discord, and auto-retry is forbidden past
+    /// `accepted` (intake_worker.rs: "a failure is post-accept and is NOT
+    /// auto-retried"). Labelling them pre-accept misclassifies an orphaned turn
+    /// as retryable.
+    ///
+    /// The migration must instead recover `provider` from `claim_owner`
+    /// ("{instance_id}:{provider}") for every row a worker ever held, and
+    /// fail-close only what is genuinely unrecoverable — pre-accept rows to
+    /// `failed_pre_accept`, post-accept rows to `failed_post_accept`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn migration_0079_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, discord_channel_cc)
+             VALUES ('agent-paired', 'Paired', 'codex', 'ch-cdx-mig', 'ch-cc-mig')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed paired agent");
+
+        // Worker-held rows. `claim_owner` names the real forwarding bot, and for
+        // the claude ones it disagrees with `agents.provider` ('codex') — which
+        // is precisely the #4349 bug.
+        let claimed = seed_legacy_row(&pool, "ch-a", "claimed", Some("worker-1:claude")).await;
+        let accepted = seed_legacy_row(&pool, "ch-b", "accepted", Some("worker-1:claude")).await;
+        let spawned = seed_legacy_row(&pool, "ch-c", "spawned", Some("worker-1:codex")).await;
+        let done = seed_legacy_row(&pool, "ch-d", "done", Some("worker-1:claude")).await;
+
+        // `pending` never carries a claim_owner (the sweep nulls it on reset).
+        let pending = seed_legacy_row(&pool, "ch-e", "pending", None).await;
+        // Terminal but never claimed — falls back to the agent's provider.
+        let dead_terminal = seed_legacy_row(&pool, "ch-f", "failed_pre_accept", None).await;
+        // Defensive arm: post-accept with an unusable claim_owner.
+        let orphan_post = seed_legacy_row(&pool, "ch-g", "spawned", Some("malformed")).await;
+
+        replay_migration_0079(&pool).await;
+
+        // Recovered exactly; status untouched.
+        assert_eq!(
+            row_state(&pool, claimed).await,
+            ("claude".to_string(), "claimed".to_string())
+        );
+        assert_eq!(
+            row_state(&pool, accepted).await,
+            ("claude".to_string(), "accepted".to_string())
+        );
+        assert_eq!(
+            row_state(&pool, spawned).await,
+            ("codex".to_string(), "spawned".to_string())
+        );
+        assert_eq!(
+            row_state(&pool, done).await,
+            ("claude".to_string(), "done".to_string())
+        );
+
+        // Unrecoverable + pre-accept → retryable terminal.
+        assert_eq!(
+            row_state(&pool, pending).await,
+            ("".to_string(), "failed_pre_accept".to_string()),
+            "pending is pre-accept; failing it closed must stay retryable"
+        );
+
+        // Terminal, never claimed → the agent's provider is the honest record.
+        assert_eq!(
+            row_state(&pool, dead_terminal).await,
+            ("codex".to_string(), "failed_pre_accept".to_string())
+        );
+
+        // Unrecoverable + post-accept → operator-only, NEVER pre-accept.
+        let (orphan_provider, orphan_status) = row_state(&pool, orphan_post).await;
+        assert_eq!(orphan_provider, "");
+        assert_eq!(
+            orphan_status, "failed_post_accept",
+            "post-accept row must not be misclassified as retryable pre-accept"
+        );
+        // And it lands in exactly the state force_fail_and_retry_as_new accepts.
+        assert!(super::TRANSITION_12_ALLOWED.contains(&orphan_status.as_str()));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     /// The migration must add the new `agents.preferred_intake_node_labels`
     /// column with a default of `'[]'::JSONB`. Existing agent reads must
     /// continue to work — verified by inserting a row without referencing
