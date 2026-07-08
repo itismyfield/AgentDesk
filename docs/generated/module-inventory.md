@@ -79,7 +79,7 @@
 | `compat` | `src/compat/mod.rs` | 39 | 39 | 0 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 | 12 | 0 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 27 | 27 | 0 |  |
-| `config` | `src/config.rs` | 3079 | 2737 | 342 | giant-file |
+| `config` | `src/config.rs` | 3065 | 2723 | 342 | giant-file |
 | `config_live_reload` | `src/config_live_reload.rs` | 966 | 525 | 441 |  |
 | `crate` | `src/main.rs` | 7 | 7 | 0 |  |
 | `credential` | `src/credential.rs` | 212 | 59 | 153 |  |
