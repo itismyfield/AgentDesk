@@ -32,8 +32,22 @@ fn exit_for_cli(result: std::result::Result<(), String>) -> Result<()> {
 fn exit_for_json_cli(result: std::result::Result<(), String>) -> Result<()> {
     match result {
         Ok(()) => Ok(()),
-        Err(_) => std::process::exit(1),
+        Err(error) => {
+            // stdout stays pure so piped JSON consumers see clean output; the
+            // failure is reported as one line of error JSON on stderr instead.
+            eprintln!("{}", json_cli_error_line(&error));
+            std::process::exit(1);
+        }
     }
+}
+
+/// Build the single-line `{"error":"…"}` string emitted to stderr when a
+/// JSON-mode CLI command fails. Pure (the caller then does `process::exit`,
+/// which is not directly testable) and serde-serialized so quotes/newlines in
+/// the message — e.g. the multi-line connection hint — are escaped into one
+/// physical line.
+fn json_cli_error_line(message: &str) -> String {
+    serde_json::json!({ "error": message }).to_string()
 }
 
 pub(crate) fn execute(command: Commands) -> Result<()> {
@@ -659,5 +673,28 @@ fn build_restart_report_context(
                 current_msg_id,
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_json_tests {
+    use super::*;
+
+    #[test]
+    fn json_cli_error_line_is_single_line_json() {
+        assert_eq!(json_cli_error_line("boom"), r#"{"error":"boom"}"#);
+    }
+
+    #[test]
+    fn json_cli_error_line_escapes_newlines_and_quotes() {
+        let raw = "Request failed: refused\n  힌트: \"x\"";
+        let line = json_cli_error_line(raw);
+        // Embedded newline is escaped — the payload stays one physical line.
+        assert_eq!(line.lines().count(), 1);
+        assert!(line.contains("\\n"));
+        assert!(line.contains("\\\""));
+        // Round-trips back to the original message.
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["error"], raw);
     }
 }

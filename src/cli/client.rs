@@ -93,15 +93,79 @@ fn request_json(method: &str, path: &str, body: Option<&str>) -> Result<Value, S
         Ok(resp) => resp,
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            let detail = parse_error_message(&body)
-                .map(|msg| format!("Request failed ({code}): {msg}"))
-                .unwrap_or_else(|| format!("Request failed ({code})"));
-            return Err(detail);
+            return Err(status_error_message(code, &body));
         }
-        Err(ureq::Error::Transport(err)) => return Err(format!("Request failed: {err}")),
+        Err(ureq::Error::Transport(err)) => {
+            return Err(connection_error_hint(
+                &format!("Request failed: {err}"),
+                &api_base(),
+            ));
+        }
     };
 
     resp.into_json().map_err(|e| format!("Parse error: {e}"))
+}
+
+/// Assemble the error message for an HTTP *status* failure — the server
+/// answered with a non-2xx code. Deliberately hint-free: the server is
+/// reachable, so a "dcserver not running" hint would only mislead.
+fn status_error_message(code: u16, body: &str) -> String {
+    parse_error_message(body)
+        .map(|msg| format!("Request failed ({code}): {msg}"))
+        .unwrap_or_else(|| format!("Request failed ({code})"))
+}
+
+/// Append an advisory connection hint to a raw transport-error message.
+///
+/// Pure + `pub(crate)` so `monitoring.rs` reuses the exact same wording and
+/// both can be unit-tested. Only the ureq `Transport` branch calls this — an
+/// HTTP status response means the server *did* answer, so it stays hint-free.
+/// The tone is advisory ("may not be running"), never a flat assertion that
+/// the server is down.
+pub(crate) fn connection_error_hint(raw: &str, effective_url: &str) -> String {
+    format!(
+        "{raw}\n  힌트: dcserver가 실행 중이 아닐 수 있습니다 — `agentdesk doctor`로 진단하고, \
+         접속 URL(현재: {effective_url})이 맞는지 AGENTDESK_API_URL 환경변수를 확인하세요."
+    )
+}
+
+#[cfg(test)]
+mod connection_hint_tests {
+    use super::*;
+
+    #[test]
+    fn transport_error_gets_connection_hint() {
+        let msg = connection_error_hint(
+            "Request failed: Network Error: Connection refused (os error 61)",
+            "http://127.0.0.1:8791",
+        );
+        // Raw error is preserved verbatim …
+        assert!(msg.contains("Connection refused"));
+        // … then the advisory hint is appended.
+        assert!(msg.contains("agentdesk doctor"));
+        assert!(msg.contains("AGENTDESK_API_URL"));
+        assert!(msg.contains("http://127.0.0.1:8791"));
+        // Advisory, not a flat "server is down" assertion.
+        assert!(msg.contains("아닐 수 있습니다"));
+    }
+
+    #[test]
+    fn status_error_keeps_server_detail_without_hint() {
+        let msg = status_error_message(404, r#"{"error":"card not found"}"#);
+        assert!(msg.contains("404"));
+        assert!(msg.contains("card not found"));
+        // Server answered — no connection hint.
+        assert!(!msg.contains("agentdesk doctor"));
+        assert!(!msg.contains("AGENTDESK_API_URL"));
+    }
+
+    #[test]
+    fn status_error_without_body_is_hint_free() {
+        let msg = status_error_message(500, "");
+        assert!(msg.contains("500"));
+        assert!(!msg.contains("agentdesk doctor"));
+        assert!(!msg.contains("AGENTDESK_API_URL"));
+    }
 }
 
 pub(crate) fn get_json(path: &str) -> Result<Value, String> {
