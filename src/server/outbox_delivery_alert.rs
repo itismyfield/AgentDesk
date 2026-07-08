@@ -57,15 +57,20 @@ pub(super) async fn outbox_alert_target_pg(pg_pool: &PgPool) -> Option<String> {
 }
 
 /// A message hit its terminal (non-retryable) outbox failure. Emits a structured
-/// warn (relay-standard `channel_id` / `session_key` keys), an
-/// `outbox_delivery_failed` quality event (0012 enum), and one per-incident
-/// operator card via `kanban_human_alert_channel_id`. Never propagates; a notify
-/// failure only logs.
-pub(super) async fn note_terminal_outbox_delivery_failure(
+/// warn (relay-standard `channel_id` / `session_key` keys) and an
+/// `outbox_delivery_failed` quality event (0012 enum) inline (both non-DB), then
+/// spawns a detached task for the DB work — resolving the
+/// `kanban_human_alert_channel_id` target and enqueueing one per-incident
+/// operator card — so the outbox drain loop never awaits a pool acquire on the
+/// alert path (#4260 dual r1, codex#1). Never propagates; a notify failure only
+/// logs. Returns the join handle of the spawned card task (`None` when the
+/// recursion guard suppressed it) so tests can await deterministically;
+/// production callers drop it.
+pub(super) fn note_terminal_outbox_delivery_failure(
     pg_pool: &PgPool,
     row: &PendingMessageOutboxRow,
     error_text: &str,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     // Recursion guard: the ops card is itself an outbox row; if IT fails
     // terminally we still record the warn + quality event, but never enqueue a
     // card-for-a-card.
@@ -104,35 +109,40 @@ pub(super) async fn note_terminal_outbox_delivery_failure(
     );
 
     if is_alert_source {
-        return;
+        return None;
     }
 
-    let Some(target) = outbox_alert_target_pg(pg_pool).await else {
-        return;
-    };
+    let pool = pg_pool.clone();
+    let outbox_id = row.id;
     let card = format!(
         "🚨 outbox 전송 최종 실패 (복구 필요)\n• row: {}\n• source: `{}`\n• target: `{}`\n• reason: {}\n• content: {}",
         row.id, row.source, row.target, error_text, content_snippet,
     );
-    // Per-incident dedupe: keyed on the unique row id, so each terminal failure
-    // yields exactly one card (a row can only fail terminally once).
-    let session_key = format!("outbox_delivery_failed:{}", row.id);
-    if let Err(error) = crate::services::message_outbox::enqueue_outbox_pg(
-        pg_pool,
-        crate::services::message_outbox::OutboxMessage {
-            target: &target,
-            content: &card,
-            bot: "notify",
-            source: OUTBOX_DELIVERY_ALERT_SOURCE,
-            reason_code: Some("outbox_delivery_failed"),
-            session_key: Some(&session_key),
-        },
-    )
-    .await
-    {
-        tracing::warn!(
-            outbox_id = row.id,
-            "[outbox] failed to enqueue ops alert for terminal delivery failure: {error}"
-        );
-    }
+    Some(tokio::spawn(async move {
+        // Unconfigured deploy (no alert channel) ⇒ guaranteed silent.
+        let Some(target) = outbox_alert_target_pg(&pool).await else {
+            return;
+        };
+        // Per-incident dedupe: keyed on the unique row id, so each terminal
+        // failure yields exactly one card (a row can only fail terminally once).
+        let session_key = format!("outbox_delivery_failed:{outbox_id}");
+        if let Err(error) = crate::services::message_outbox::enqueue_outbox_pg(
+            &pool,
+            crate::services::message_outbox::OutboxMessage {
+                target: &target,
+                content: &card,
+                bot: "notify",
+                source: OUTBOX_DELIVERY_ALERT_SOURCE,
+                reason_code: Some("outbox_delivery_failed"),
+                session_key: Some(&session_key),
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                outbox_id,
+                "[outbox] failed to enqueue ops alert for terminal delivery failure: {error}"
+            );
+        }
+    }))
 }

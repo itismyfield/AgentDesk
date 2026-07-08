@@ -3032,7 +3032,8 @@ pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKin
     match kind {
         QueueExitKind::Cancelled => '🚫',
         QueueExitKind::Expired => '⌛',
-        QueueExitKind::Superseded => '⏏',
+        // #4260 dual r1: `Overflow` inherits the pre-split ⏏ feedback.
+        QueueExitKind::Superseded | QueueExitKind::Overflow => '⏏',
     }
 }
 
@@ -3045,7 +3046,8 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
     match kind {
         QueueExitKind::Cancelled => "🚫 **큐에서 제거됨** — 사용자 취소로 처리되지 않습니다.",
         QueueExitKind::Expired => "⌛ **큐에서 제거됨** — 대기 시간 초과로 처리되지 않습니다.",
-        QueueExitKind::Superseded => {
+        // #4260 dual r1: the pre-split ⏏ text carries over to `Overflow`.
+        QueueExitKind::Superseded | QueueExitKind::Overflow => {
             "⏏ **큐에서 제거됨** — 후속 메시지로 대체되어 처리되지 않습니다."
         }
     }
@@ -3131,6 +3133,7 @@ mod queue_exit_feedback_reconciler_tests {
                 MessageId::new(100_000_000_000_234),
                 QueueExitKind::Superseded,
             ),
+            (MessageId::new(100_000_000_000_235), QueueExitKind::Overflow),
         ];
 
         for (message_id, kind) in cases {
@@ -3239,19 +3242,18 @@ async fn apply_queue_exit_feedback(
     let visible_cards_to_clear =
         queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events).await;
 
-    // #4260: dead-letter every queue-overflow evict (silent-loss vector 2) and,
-    // for evicts that never had a visible placeholder card, enqueue one compact
-    // channel notice. Both run BEFORE the Http guard below: the dead-letter is a
-    // DB write and the notice rides the outbox, so neither needs an Http source.
-    queue_overflow_dlq::record_queue_overflow_dead_letters(shared, channel_id, &queue_exit_events)
-        .await;
+    // #4260 dual r1: dead-letter + notice for capacity-`Overflow` evicts only
+    // (benign Superseded producers pass through untouched). Fire-and-forget —
+    // detached spawns inside — and sited before the Http guard below because
+    // neither call needs an Http source nor may stall feedback on a pool
+    // acquire.
+    queue_overflow_dlq::record_queue_overflow_dead_letters(shared, channel_id, &queue_exit_events);
     queue_overflow_dlq::maybe_notify_orphan_queue_overflow(
         shared,
         channel_id,
         &queue_exit_events,
         &visible_cards_to_clear,
-    )
-    .await;
+    );
 
     // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
     // fallback so cluster-standby workers can still rewrite queue-exit

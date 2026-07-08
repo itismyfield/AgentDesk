@@ -2216,8 +2216,13 @@ mod message_outbox_retry_tests {
             claimed_at: chrono::Utc::now(),
         };
 
-        // A normal (non-alert) source enqueues exactly one ops card.
-        note_terminal_outbox_delivery_failure(&pool, &row(1, "headless_turn"), "500: boom").await;
+        // A normal (non-alert) source enqueues exactly one ops card (the DB
+        // work rides a detached spawn — await the returned handle so the
+        // assertion is deterministic).
+        note_terminal_outbox_delivery_failure(&pool, &row(1, "headless_turn"), "500: boom")
+            .expect("non-alert source must spawn the ops-card task")
+            .await
+            .expect("ops-card task must not panic");
         let alert_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)::bigint FROM message_outbox
                WHERE source = $1 AND target = 'channel:555'",
@@ -2228,13 +2233,17 @@ mod message_outbox_retry_tests {
         .expect("count alert rows");
         assert_eq!(alert_count, 1);
 
-        // The alert card's OWN terminal failure must NOT enqueue another card.
-        note_terminal_outbox_delivery_failure(
-            &pool,
-            &row(2, OUTBOX_DELIVERY_ALERT_SOURCE),
-            "500: boom",
-        )
-        .await;
+        // The alert card's OWN terminal failure must NOT even spawn a card task
+        // (recursion guard short-circuits before the detached DB work).
+        assert!(
+            note_terminal_outbox_delivery_failure(
+                &pool,
+                &row(2, OUTBOX_DELIVERY_ALERT_SOURCE),
+                "500: boom",
+            )
+            .is_none(),
+            "alert-source failures must not spawn a card-for-a-card"
+        );
         let alert_count_after: i64 =
             sqlx::query_scalar("SELECT COUNT(*)::bigint FROM message_outbox WHERE source = $1")
                 .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
@@ -2714,20 +2723,6 @@ where
                         row.claimed_at,
                     )
                     .await;
-                    // #4260 silent-loss vector 3: EVERY terminal outbox failure
-                    // (not just terminal turn delivery) is a silently-lost
-                    // message. Surface it — structured warn + quality event +
-                    // per-incident ops card. The destination channel is NOT
-                    // notified (it may be the very channel whose delivery is
-                    // failing). Best-effort; never blocks the outbox loop.
-                    if failed_update.is_ok() {
-                        outbox_delivery_alert::note_terminal_outbox_delivery_failure(
-                            pg_pool,
-                            row,
-                            &error_text,
-                        )
-                        .await;
-                    }
                     // Release only terminal turn-delivery rows, and only if no newer
                     // session heartbeat proves another turn has since taken the channel.
                     if failed_update.is_ok() && is_terminal_turn_delivery_outbox_source(&row.source)
@@ -2760,6 +2755,20 @@ where
                                 error_text,
                             );
                         }
+                    }
+                    // #4260 vector 3: every terminal failure surfaces — warn +
+                    // quality event inline, ops card on a detached spawn. Sited
+                    // AFTER the session release (dual r1 codex#1) so alerting
+                    // never delays freeing the channel; the destination channel
+                    // is never notified (it may be the failing target itself).
+                    if failed_update.is_ok() {
+                        drop(
+                            outbox_delivery_alert::note_terminal_outbox_delivery_failure(
+                                pg_pool,
+                                row,
+                                &error_text,
+                            ),
+                        );
                     }
                 }
                 MessageOutboxFailureAction::Retry {

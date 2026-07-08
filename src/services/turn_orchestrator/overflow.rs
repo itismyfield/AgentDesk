@@ -1,29 +1,34 @@
-//! #4260: the intervention-queue overflow-eviction primitive, split out of the
-//! giant `turn_orchestrator` root. Draining the oldest entries WITHOUT surfacing
-//! a `QueueExitEvent` silently loses queued user input (silent-loss vector 2);
-//! every head-drain site routes through here so overflow ALWAYS produces
-//! `Superseded` events the sink (`apply_queue_exit_feedback`) can dead-letter +
-//! notify on — never a bare `queue.drain(..)`.
+//! #4260: the intervention-queue capacity-overflow eviction primitive, split
+//! out of the giant `turn_orchestrator` root. Capacity eviction (drop-oldest
+//! when the queue exceeds `MAX_INTERVENTIONS_PER_CHANNEL`) is the genuine
+//! input-loss vector (silent-loss vector 2), so it emits the dedicated
+//! `QueueExitKind::Overflow` — the only kind the sink
+//! (`apply_queue_exit_feedback`) dead-letters + notifies on. Benign producers
+//! (Clear full drain, active-source purge) keep `Superseded` and are never
+//! dead-lettered. Every head-drain site routes through here so a capacity evict
+//! always produces exit events — never a bare `queue.drain(..)`.
 
 use super::{Intervention, MAX_INTERVENTIONS_PER_CHANNEL, QueueExitEvent, QueueExitKind};
 
-/// Drain the oldest `queue.len() - MAX` entries as `Superseded` exit events.
-pub(super) fn drain_overflow_superseded(queue: &mut Vec<Intervention>) -> Vec<QueueExitEvent> {
+/// Drain the oldest `queue.len() - MAX` entries as `Overflow` exit events.
+pub(super) fn drain_head_overflow(queue: &mut Vec<Intervention>) -> Vec<QueueExitEvent> {
     if queue.len() <= MAX_INTERVENTIONS_PER_CHANNEL {
         return Vec::new();
     }
     let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
     queue
         .drain(0..overflow)
-        .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded))
+        .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Overflow))
         .collect()
 }
 
-/// Result of the soft-queue probe. Carries the overflow `QueueExitEvent`s so the
-/// eviction can no longer happen silently — the previous `queue.drain(..)` in
-/// `has_soft_intervention_at` dropped queued user input with no exit event
-/// (silent-loss vector 2, the top-priority defect). Callers on a throwaway CLONE
-/// (diagnostics) may discard the events; a live-queue caller must not.
+/// Result of the soft-queue probe. Carries the overflow `QueueExitEvent`s
+/// instead of draining eventlessly. Defensive refactor (#4260 dual-review r1):
+/// the previous bare `queue.drain(..)` in `has_soft_intervention_at` never
+/// caused a real loss — its only live caller (diagnostics `reports.rs`)
+/// operates on a throwaway CLONE of the queue — but an eventless drain
+/// primitive was one new caller away from becoming one, so the probe now
+/// surfaces the events and lets clone-path callers discard them explicitly.
 pub(crate) struct SoftInterventionProbe {
     pub(crate) has_pending: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,

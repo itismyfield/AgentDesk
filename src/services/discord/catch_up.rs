@@ -1063,6 +1063,10 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
         // #4260: messages dropped as too-old this scan (silent-loss vector 1),
         // accumulated per-channel for one aggregate resend notice after the loop.
         let mut too_old_drops: Vec<CatchUpTooOldDrop> = Vec::new();
+        // #4260 dual r1 codex#3: newest too-old message id — lets a
+        // TooOld-only scan advance the checkpoint past permanently
+        // unprocessable messages (see the advance site below).
+        let mut max_too_old_id: Option<u64> = None;
 
         // Codex P2 on #1301: the 50-message fetch can exceed
         // `MAX_INTERVENTIONS_PER_CHANNEL` (30) on a long restart gap. Without
@@ -1127,13 +1131,15 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                 if outcome == CatchUpClassification::TooOld {
                     // #4260 silent-loss vector 1: TooOld messages were silently
                     // dropped here. Preserve the original in the dead-letter
-                    // table (best-effort — never blocks catch-up) and remember
-                    // it for the per-channel aggregate resend notice. We do NOT
-                    // auto-reprocess: a stale command replayed minutes late is a
-                    // risk, so we only ask the user to resend.
-                    crate::db::relay_dead_letter::insert_best_effort(
+                    // table (fire-and-forget detached task — a slow PG pool
+                    // must never stall the catch-up loop, dual r1 codex#1) and
+                    // remember it for the per-channel aggregate resend notice.
+                    // We do NOT auto-reprocess: a stale command replayed
+                    // minutes late is a risk, so we only ask the user to
+                    // resend.
+                    crate::db::relay_dead_letter::record_detached(
                         shared.pg_pool.as_ref(),
-                        &crate::db::relay_dead_letter::RelayDeadLetterRecord {
+                        crate::db::relay_dead_letter::RelayDeadLetterRecord {
                             kind: crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_string(),
                             channel_id: channel_id.to_string(),
                             author_id: Some(msg.author.id.get().to_string()),
@@ -1144,12 +1150,19 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                                 max_age.as_secs()
                             ),
                         },
-                    )
-                    .await;
+                    );
                     too_old_drops.push(CatchUpTooOldDrop {
                         author_id: msg.author.id.get(),
                         snippet: catch_up_too_old_snippet(&text),
                     });
+                    // #4260 dual r1 codex#3: remember the newest too-old id so
+                    // a TooOld-only scan can still advance the checkpoint —
+                    // these messages can never become processable, so leaving
+                    // the cursor behind them re-fetches, re-DLQs, and (after
+                    // the dedupe TTL) re-notifies the same batch every cycle.
+                    if max_too_old_id.map(|m| mid > m).unwrap_or(true) {
+                        max_too_old_id = Some(mid);
+                    }
                 }
                 stats.record(outcome);
                 continue;
@@ -1269,8 +1282,26 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
             );
         }
 
-        // Only advance checkpoint if we actually recovered messages
-        if let Some(newest) = max_recovered_id {
+        // Advance the checkpoint past what this scan settled. #4260 dual r1
+        // codex#3: a TooOld-only scan must also advance — a too-old message can
+        // never become processable, so pinning the cursor behind it re-fetches,
+        // re-dead-letters, and (after the outbox dedupe TTL) re-notifies the
+        // same batch every cycle. Boundary care: the too-old id is only folded
+        // in when NO retry is pending for this channel (a pending retry means
+        // the loop broke early on a message we still intend to recover — its
+        // cursor must win), and because a too-old message is strictly older
+        // than any recoverable one (snowflake ids are time-ordered), taking the
+        // max with `max_recovered_id` never skips a processable message.
+        let too_old_advance = if shared.catch_up_retry_pending.contains_key(&channel_id) {
+            None
+        } else {
+            max_too_old_id
+        };
+        let checkpoint_advance = match (max_recovered_id, too_old_advance) {
+            (Some(recovered), Some(too_old)) => Some(recovered.max(too_old)),
+            (recovered, too_old) => recovered.or(too_old),
+        };
+        if let Some(newest) = checkpoint_advance {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             if retry_checkpoint.is_some()
                 && !shared.catch_up_retry_pending.contains_key(&channel_id)
@@ -1285,29 +1316,45 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
         }
 
         // #4260: one aggregate "재시작 공백" resend notice per channel per run
-        // for the messages dropped as too-old. Best-effort via the outbox so it
-        // dedupes + retries; a delivery failure never blocks catch-up.
+        // for the messages dropped as too-old. Fire-and-forget spawn (dual r1
+        // codex#1) via the outbox so it dedupes + retries; a delivery failure
+        // never blocks catch-up. Dual r1 codex#3: the dedupe key carries the
+        // batch identity (newest dropped id), so a NEW too-old batch within the
+        // outbox dedupe TTL still notifies, while retry re-scans of the SAME
+        // batch stay suppressed.
         if let Some(notice) = catch_up_too_old_notice(&too_old_drops) {
-            let target = format!("channel:{channel_id}");
-            let session_key = format!("catch_up_too_old:{channel_id}");
-            crate::services::message_outbox::enqueue_outbox_best_effort(
-                shared.pg_pool.as_ref(),
-                crate::services::message_outbox::OutboxMessage {
-                    target: &target,
-                    content: &notice,
-                    bot: "notify",
-                    source: "catch_up_too_old",
-                    reason_code: Some("catch_up.too_old"),
-                    session_key: Some(&session_key),
-                },
-            )
-            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 channel_id = channel_id.get(),
                 too_old = too_old_drops.len(),
                 "  [{ts}] ⚠ catch-up: dropped too-old message(s); aggregate resend notice enqueued"
             );
+            if let Some(pool) = shared.pg_pool.clone() {
+                let target = format!("channel:{channel_id}");
+                let session_key = format!(
+                    "catch_up_too_old:{channel_id}:{}",
+                    max_too_old_id.unwrap_or_default()
+                );
+                tokio::spawn(async move {
+                    if let Err(error) = crate::services::message_outbox::enqueue_outbox_pg(
+                        &pool,
+                        crate::services::message_outbox::OutboxMessage {
+                            target: &target,
+                            content: &notice,
+                            bot: "notify",
+                            source: "catch_up_too_old",
+                            reason_code: Some("catch_up.too_old"),
+                            session_key: Some(&session_key),
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "[dlq] failed to enqueue catch-up too-old notice (best-effort): {error}"
+                        );
+                    }
+                });
+            }
         }
     }
 

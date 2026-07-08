@@ -127,7 +127,7 @@
 | `db::prompt_manifests::repository` | `src/db/prompt_manifests/repository.rs` | 268 | 268 | 0 |  |
 | `db::prompt_manifests::retention` | `src/db/prompt_manifests/retention.rs` | 96 | 96 | 0 |  |
 | `db::prompt_manifests::storage_stats` | `src/db/prompt_manifests/storage_stats.rs` | 122 | 122 | 0 |  |
-| `db::relay_dead_letter` | `src/db/relay_dead_letter.rs` | 160 | 76 | 84 |  |
+| `db::relay_dead_letter` | `src/db/relay_dead_letter.rs` | 234 | 117 | 117 |  |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 304 | 278 | 26 |  |
 | `db::session_observability` | `src/db/session_observability.rs` | 216 | 216 | 0 |  |
 | `db::session_status` | `src/db/session_status.rs` | 78 | 78 | 0 |  |
@@ -203,7 +203,7 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 | 396 | 0 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 144 | 110 | 34 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 806 | 806 | 0 |  |
-| `server` | `src/server/mod.rs` | 3339 | 2821 | 518 | giant-file |
+| `server` | `src/server/mod.rs` | 3348 | 2821 | 527 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 9 | 9 | 0 |  |
 | `server::cluster_session_routing` | `src/server/cluster_session_routing.rs` | 9 | 9 | 0 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 67 | 67 | 0 |  |
@@ -216,7 +216,7 @@
 | `server::issue_specs` | `src/server/issue_specs.rs` | 396 | 284 | 112 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 1149 | 1014 | 135 | giant-file |
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 | 0 | 419 |  |
-| `server::outbox_delivery_alert` | `src/server/outbox_delivery_alert.rs` | 138 | 138 | 0 |  |
+| `server::outbox_delivery_alert` | `src/server/outbox_delivery_alert.rs` | 148 | 148 | 0 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 416 | 239 | 177 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 567 | 332 | 235 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 1328 | 1278 | 50 | giant-file |
@@ -406,13 +406,13 @@
 | `services::codex_tui::rollout_tail::parser` | `src/services/codex_tui/rollout_tail/parser.rs` | 405 | 405 | 0 |  |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 800 | 316 | 484 |  |
 | `services::cswap` | `src/services/cswap.rs` | 887 | 552 | 335 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 5548 | 4165 | 1383 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 5550 | 4166 | 1384 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 981 | 855 | 126 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 928 | 574 | 354 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1083 | 982 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
-| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 2891 | 1612 | 1279 | giant-file |
+| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 2938 | 1659 | 1279 | giant-file |
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 48 | 48 | 0 |  |
 | `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 97 | 97 | 0 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 121 | 121 | 0 |  |
@@ -556,7 +556,7 @@
 | `services::discord::queue_dispatch` | `src/services/discord/queue_dispatch.rs` | 50 | 50 | 0 |  |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 2307 | 751 | 1556 |  |
 | `services::discord::queue_marker` | `src/services/discord/queue_marker.rs` | 622 | 194 | 428 |  |
-| `services::discord::queue_overflow_dlq` | `src/services/discord/queue_overflow_dlq.rs` | 96 | 96 | 0 |  |
+| `services::discord::queue_overflow_dlq` | `src/services/discord/queue_overflow_dlq.rs` | 210 | 127 | 83 |  |
 | `services::discord::queue_reactions` | `src/services/discord/queue_reactions.rs` | 35 | 25 | 10 |  |
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 251 | 251 | 0 |  |
 | `services::discord::reaction_cleanup` | `src/services/discord/reaction_cleanup.rs` | 49 | 24 | 25 |  |
@@ -969,10 +969,10 @@
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 564 | 436 | 128 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7160 | 3284 | 3876 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7199 | 3290 | 3909 | giant-file |
 | `services::turn_orchestrator::active_source_dedup` | `src/services/turn_orchestrator/active_source_dedup.rs` | 129 | 129 | 0 |  |
 | `services::turn_orchestrator::dispatch_reservation` | `src/services/turn_orchestrator/dispatch_reservation.rs` | 743 | 475 | 268 |  |
-| `services::turn_orchestrator::overflow` | `src/services/turn_orchestrator/overflow.rs` | 30 | 30 | 0 |  |
+| `services::turn_orchestrator::overflow` | `src/services/turn_orchestrator/overflow.rs` | 35 | 35 | 0 |  |
 | `services::turn_orchestrator::pending_queue_persistence` | `src/services/turn_orchestrator/pending_queue_persistence.rs` | 930 | 803 | 127 |  |
 | `services::turn_orchestrator::registry_purge` | `src/services/turn_orchestrator/registry_purge.rs` | 819 | 293 | 526 |  |
 | `services::turn_orchestrator::turn_finished_signal` | `src/services/turn_orchestrator/turn_finished_signal.rs` | 72 | 72 | 0 |  |
