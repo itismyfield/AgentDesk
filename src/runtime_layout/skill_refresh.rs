@@ -198,20 +198,34 @@ fn skill_refresh_lock_is_stale(lock_path: &Path) -> bool {
 }
 
 /// Parses the holder PID from a STRICT `<pid>:<seq>` owner token -- both fields non-empty
-/// and integer-parseable, exactly two colon-separated fields -- or the legacy bare `<pid>`
-/// stamp (all digits, no colon). Every other shape (empty, `123:`, `123:garbage`,
-/// `123:456:extra`, trailing junk) returns `None` so liveness stays indeterminate and the
-/// caller falls back to the TTL branch rather than trusting a garbled PID.
+/// and pure ASCII digits, exactly two colon-separated fields -- or the legacy bare `<pid>`
+/// stamp (pure ASCII digits, no colon). Every other shape (empty, sign-prefixed like
+/// `+123`/`-5`, `123:`, `123:garbage`, `123:456:extra`, embedded spaces, trailing junk)
+/// returns `None` so liveness stays indeterminate and the caller falls back to the TTL
+/// branch rather than trusting a garbled PID. The digit check is required because
+/// `str::parse::<u32>` would otherwise accept a leading `+`.
 fn read_lock_pid(lock_path: &Path) -> Option<u32> {
     let contents = fs::read_to_string(lock_path).ok()?;
     let mut fields = contents.trim().split(':');
-    let pid = fields.next()?.parse::<u32>().ok()?;
+    let pid_field = fields.next()?;
+    let pid = parse_lock_digits::<u32>(pid_field)?;
     match fields.next() {
         None => Some(pid), // legacy bare `<pid>`
-        // `<pid>:<seq>`: seq must parse and be the final field (reject extra fields).
-        Some(seq) if seq.parse::<u64>().is_ok() && fields.next().is_none() => Some(pid),
+        // `<pid>:<seq>`: seq must be pure digits and the final field (reject extra fields).
+        Some(seq) if parse_lock_digits::<u64>(seq).is_some() && fields.next().is_none() => {
+            Some(pid)
+        }
         Some(_) => None,
     }
+}
+
+/// Parses a lock-token field only when it is non-empty and composed solely of ASCII digits,
+/// so no sign prefix (`+`/`-`), space, or other junk `str::parse` might tolerate slips through.
+fn parse_lock_digits<T: std::str::FromStr>(field: &str) -> Option<T> {
+    if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    field.parse::<T>().ok()
 }
 
 fn lock_file_age(lock_path: &Path) -> Option<Duration> {
@@ -321,6 +335,11 @@ mod tests {
             "123:456:extra",
             ":5",
             "9a:1",
+            "+123",
+            "+123:456",
+            "123:+456",
+            "-5",
+            "12 3",
         ] {
             fs::write(&p, shape).unwrap();
             assert_eq!(
