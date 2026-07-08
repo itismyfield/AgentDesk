@@ -944,12 +944,23 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
     session_retry_context: Option<
         &crate::services::discord::router::turn_start::FormattedSessionRetryContext,
     >,
+    feedback_reminder: Option<&str>,
     refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
 ) {
     put_back_session_retry_context(
         shared,
         channel_id,
         session_retry_context,
+        refusal_reason.map(|reason| reason.as_str()),
+    );
+    // #4307 PR-B: the refusal branch drops the message, so the reminder taken at
+    // intake (like the session-retry context) must be put back or it is lost —
+    // the successful-requeue branch instead carries it forward inside the
+    // enqueued follow-up's `reply_context`.
+    put_back_voluntary_feedback_reminder(
+        shared,
+        channel_id,
+        feedback_reminder,
         refusal_reason.map(|reason| reason.as_str()),
     );
     let notice = claude_tui_busy_followup_refusal_notice(refusal_reason);

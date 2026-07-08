@@ -1638,6 +1638,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             .as_ref()
             .map(|context| context.formatted_context.clone()),
     );
+    // #4307 PR-B: fold the voluntary tool_feedback reminder stashed last turn
+    // into `reply_context`; the owned reminder is kept for the refusal put-back.
+    let (feedback_reminder, reply_context) =
+        take_and_merge_feedback_reminder(shared, channel_id, reply_context);
 
     // #3813 Phase 1a: the intake placeholder POST returned a live id.
     intake_latency.mark_placeholder_posted();
@@ -2342,6 +2346,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 channel_id,
                 placeholder_msg_id,
                 session_retry_context.as_ref(),
+                feedback_reminder.as_deref(),
                 enqueue_outcome.refusal_reason,
             )
             .await;
@@ -2923,6 +2928,94 @@ mod recovery_context_take_order_tests {
         assert!(
             put_back_pos < notice_pos,
             "TUI-busy enqueue refusal, including dup-guard refusal, must restore recovery context before returning the notice"
+        );
+    }
+}
+
+/// #4307 PR-B: pins the reminder take/inject/put-back wiring with the same
+/// source-order invariants as the session-retry recovery context it rides.
+#[cfg(test)]
+mod feedback_reminder_take_order_tests {
+    // Assembled from fragments so this test's own source (scanned via
+    // `include_str!`) does not match the literal it is looking for — mirroring
+    // `recovery_context_take_call` above.
+    fn reminder_take_call() -> String {
+        format!(
+            "{}{}",
+            "take_and_merge_feedback_reminder(", "shared, channel_id, reply_context);"
+        )
+    }
+
+    #[test]
+    fn intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use() {
+        let root = tempfile::tempdir().expect("create temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let module_src = include_str!("intake_turn.rs");
+
+        let take_call = reminder_take_call();
+        let take_positions: Vec<_> = module_src.match_indices(&take_call).collect();
+        assert_eq!(
+            take_positions.len(),
+            1,
+            "intake turn start must have exactly one destructive feedback-reminder take"
+        );
+        let take_pos = take_positions[0].0;
+
+        let race_loss_return_pos = module_src
+            .find("return race_loss::handle_race_loss_enqueue(")
+            .expect("intake race-loss enqueue return exists");
+        let placeholder_posted_pos = module_src
+            .find("intake_latency.mark_placeholder_posted();")
+            .expect("intake placeholder-post success mark exists");
+        let prompt_use_pos = module_src
+            .find("if let Some(ref reply_ctx) = reply_context")
+            .expect("intake prompt includes reply context");
+
+        assert!(
+            race_loss_return_pos < take_pos,
+            "queued/race-loss intake turns must not destructively take the reminder before returning"
+        );
+        assert!(
+            take_pos < placeholder_posted_pos,
+            "active intake turn must take the reminder immediately after placeholder success"
+        );
+        assert!(
+            take_pos < prompt_use_pos,
+            "active intake turn must take the reminder before injecting it into the prompt"
+        );
+    }
+
+    #[test]
+    fn tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn() {
+        // The refusal branch forwards the taken reminder to the sibling helper,
+        // which puts it back BEFORE rewriting the refusal notice (mirroring the
+        // recovery-context put-back-then-notice ordering).
+        let module_src = include_str!("intake_turn.rs");
+        // The `\n` escape resolves to a real newline, which only the production
+        // call site contains — this test's own copy of the snippet stores it as
+        // the two characters `\n`, so the search does not self-match (same trick
+        // the recovery-context refusal test relies on).
+        assert!(
+            module_src.contains(
+                "session_retry_context.as_ref(),\n                feedback_reminder.as_deref(),"
+            ),
+            "refusal call site must forward the taken reminder for put-back, right after the recovery context"
+        );
+
+        let helper_src = include_str!("tui_followup.rs");
+        let helper_fn_pos = helper_src
+            .find("async fn apply_tui_busy_enqueue_refusal(")
+            .expect("refusal helper exists in tui_followup.rs");
+        let helper_body = &helper_src[helper_fn_pos..];
+        let put_back_pos = helper_body
+            .find("put_back_voluntary_feedback_reminder(")
+            .expect("refusal helper restores the feedback reminder");
+        let notice_pos = helper_body
+            .find("claude_tui_busy_followup_refusal_notice(")
+            .expect("refusal helper renders the notice");
+        assert!(
+            put_back_pos < notice_pos,
+            "TUI-busy enqueue refusal must restore the feedback reminder before returning the notice"
         );
     }
 }

@@ -199,6 +199,21 @@ pub(super) fn format_session_retry_context(raw_context: &str) -> Option<String> 
     }
 }
 
+/// #4307 PR-B: wraps the voluntary tool_feedback reminder stashed at the end of
+/// the previous turn into a labeled context block for the next turn's prompt.
+/// Returns `None` for an empty reminder so the prompt is byte-for-byte unchanged
+/// when nothing was stashed.
+pub(super) fn format_voluntary_feedback_reminder(reminder: &str) -> Option<String> {
+    let reminder = reminder.trim();
+    if reminder.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "[메모리 리마인더 — 이전 턴 recall 후 tool_feedback 미평가]\n\n{reminder}"
+        ))
+    }
+}
+
 pub(super) fn merge_reply_contexts(
     primary: Option<String>,
     secondary: Option<String>,
@@ -356,5 +371,60 @@ mod tests {
             wrap_user_prompt_with_author("Alice", UserId::new(77), "line 1\r\nline 2".to_string());
 
         assert_eq!(prompt, "[User: Alice (ID: 77)]\nline 1\nline 2");
+    }
+
+    /// #4307 PR-B (a): a stashed reminder, run through the SAME assembly helpers
+    /// the intake path uses (`format_voluntary_feedback_reminder` +
+    /// `merge_reply_contexts`), must land in the reply context that feeds the
+    /// next-turn prompt, with its labeled header and the raw reminder body.
+    #[test]
+    fn voluntary_feedback_reminder_is_injected_into_reply_context() {
+        let reminder = "이번 턴 recall 2건 중 tool_feedback 0/2. 평가 후 턴 종료: [se-1, se-2]";
+        let reply_context = merge_reply_contexts(
+            Some("[Reply context] earlier discord quote".to_string()),
+            format_voluntary_feedback_reminder(reminder),
+        )
+        .expect("reply context present when a reminder is stashed");
+
+        assert!(
+            reply_context.contains("[메모리 리마인더"),
+            "the injected block must carry the reminder label"
+        );
+        assert!(
+            reply_context.contains(reminder),
+            "the injected block must carry the raw reminder body"
+        );
+        assert!(
+            reply_context.contains("earlier discord quote"),
+            "the pre-existing reply context must be preserved"
+        );
+        // merge prepends the reminder (secondary) ahead of the prior context.
+        assert!(
+            reply_context.find("[메모리 리마인더").unwrap()
+                < reply_context.find("earlier discord quote").unwrap(),
+            "the reminder must lead the merged reply context"
+        );
+    }
+
+    /// #4307 PR-B (d): with no reminder stashed the reply context is byte-for-byte
+    /// unchanged — `format_voluntary_feedback_reminder` yields `None` for empty
+    /// input and `merge_reply_contexts` returns the primary untouched.
+    #[test]
+    fn absent_voluntary_feedback_reminder_leaves_reply_context_unchanged() {
+        let base = "[Reply context] earlier discord quote".to_string();
+
+        assert_eq!(format_voluntary_feedback_reminder("   "), None);
+        assert_eq!(
+            merge_reply_contexts(
+                Some(base.clone()),
+                format_voluntary_feedback_reminder("   "),
+            ),
+            Some(base.clone()),
+        );
+        // Nothing to inject and no prior context → the prompt gains no chunk.
+        assert_eq!(
+            merge_reply_contexts(None, format_voluntary_feedback_reminder("")),
+            None,
+        );
     }
 }

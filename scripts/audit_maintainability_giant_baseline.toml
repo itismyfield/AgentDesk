@@ -465,7 +465,14 @@
 # new control-flow branch; the compact state is transient (overwritten by
 # dispatch streaming on ready or by the queued-card / delete / refusal-notice
 # paths on the still-busy branch). 2815 -> 2825.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2825
+# #4307 PR-B (reviewable admission): +8 prod LoC to fold the voluntary
+# tool_feedback reminder (stashed at the previous turn's end) into `reply_context`
+# — a two-line call to the sibling `take_and_merge_feedback_reminder`
+# (turn_start.rs, non-baselined; the take/merge logic itself lives there, not
+# here) plus the one-arg widening of the TUI-busy refusal call-site so the taken
+# reminder is put back on refusal. Same take/inject/put-back path as the
+# session-retry recovery context. 2825 -> 2833.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2833
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
