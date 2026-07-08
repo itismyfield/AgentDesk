@@ -516,12 +516,12 @@ pub(crate) async fn force_fail_and_retry_as_new(
     // #4349 review r2: the retry below copies `row.provider` into a fresh
     // `pending` row, and claim is scoped on `intake_outbox.provider`. An empty
     // provider matches no worker, so retrying such a row would silently strand
-    // it in `pending` forever — exactly the failure migration 0079 fails closed
+    // it in `pending` forever — exactly the failure migration 0080 fails closed
     // to avoid. Refuse loudly and BEFORE any state change, so the operator sees
     // it instead of inheriting invisible pending work.
     //
     // Only rows that predate the provider column and whose `claim_owner` was
-    // unusable can reach here; 0079 recovers every other row.
+    // unusable can reach here; 0080 recovers every other row.
     if row.provider.trim().is_empty() {
         return Err(ForceFailError::UnknownProvider { id: stuck_id });
     }
@@ -666,21 +666,21 @@ mod migration_tests {
     use serde_json::json;
     use sqlx::Row;
 
-    /// Migration 0079 verbatim. Every statement is idempotent — the DDL is
+    /// Migration 0080 verbatim. Every statement is idempotent — the DDL is
     /// `IF [NOT] EXISTS` and each backfill/fail-closed UPDATE is gated on
     /// `provider = ''` — so replaying it over synthetic pre-#4349 rows exercises
     /// exactly what a real deploy runs.
-    const MIGRATION_0079: &str =
-        include_str!("../../migrations/postgres/0079_intake_outbox_provider.sql");
+    const MIGRATION_0080: &str =
+        include_str!("../../migrations/postgres/0080_intake_outbox_provider.sql");
 
     /// Executed as one script over the simple query protocol, exactly how
     /// `sqlx::migrate` runs it in production. Splitting on `;` would break on
     /// semicolons inside comments and string literals.
-    async fn replay_migration_0079(pool: &sqlx::PgPool) {
-        sqlx::raw_sql(MIGRATION_0079)
+    async fn replay_migration_0080(pool: &sqlx::PgPool) {
+        sqlx::raw_sql(MIGRATION_0080)
             .execute(pool)
             .await
-            .unwrap_or_else(|e| panic!("replay 0079 failed: {e}"));
+            .unwrap_or_else(|e| panic!("replay 0080 failed: {e}")); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
     }
 
     /// A pre-#4349 row: `provider = ''`, which is what the column default leaves
@@ -707,7 +707,7 @@ mod migration_tests {
         .bind(claim_owner)
         .fetch_one(pool)
         .await
-        .expect("seed legacy row")
+        .expect("seed legacy row") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
     }
 
     async fn row_state(pool: &sqlx::PgPool, id: i64) -> (String, String) {
@@ -715,7 +715,7 @@ mod migration_tests {
             .bind(id)
             .fetch_one(pool)
             .await
-            .expect("read row state")
+            .expect("read row state") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
     }
 
     /// #4349 review round 1 (REJECT): an earlier draft failed *every* open row to
@@ -730,7 +730,7 @@ mod migration_tests {
     /// fail-close only what is genuinely unrecoverable — pre-accept rows to
     /// `failed_pre_accept`, post-accept rows to `failed_post_accept`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn migration_0079_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase() {
+    async fn migration_0080_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
@@ -740,7 +740,7 @@ mod migration_tests {
         )
         .execute(&pool)
         .await
-        .expect("seed paired agent");
+        .expect("seed paired agent"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
 
         // Worker-held rows. `claim_owner` names the real forwarding bot, and for
         // the claude ones it disagrees with `agents.provider` ('codex') — which
@@ -757,7 +757,7 @@ mod migration_tests {
         // Defensive arm: post-accept with an unusable claim_owner.
         let orphan_post = seed_legacy_row(&pool, "ch-g", "spawned", Some("malformed")).await;
 
-        replay_migration_0079(&pool).await;
+        replay_migration_0080(&pool).await;
 
         // Recovered exactly; status untouched.
         assert_eq!(
@@ -807,7 +807,7 @@ mod migration_tests {
             .expect_err("orphan row with no provider must be refused");
         match err {
             super::ForceFailError::UnknownProvider { id } => assert_eq!(id, orphan_post),
-            other => panic!("expected UnknownProvider, got {other:?}"),
+            other => panic!("expected UnknownProvider, got {other:?}"), // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         }
 
         // The refusal is total: no child row, original row untouched.
@@ -816,7 +816,7 @@ mod migration_tests {
         )
         .fetch_one(&pool)
         .await
-        .expect("count family");
+        .expect("count family"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert_eq!(family, 1, "refusal must not insert a retry attempt");
         assert_eq!(
             row_state(&pool, orphan_post).await,
@@ -830,7 +830,7 @@ mod migration_tests {
         )
         .fetch_one(&pool)
         .await
-        .expect("count unclaimable open rows");
+        .expect("count unclaimable open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert_eq!(
             unclaimable, 0,
             "migration must leave no open row that a worker can never claim"
@@ -1967,7 +1967,7 @@ mod helper_tests {
         )
         .execute(&pool)
         .await
-        .expect("seed paired agent");
+        .expect("seed paired agent"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
 
         // The claude bot forwards a message from the agent's cc channel.
         let mut cc_row = payload("ch-cc", "msg-cc");
@@ -1975,13 +1975,13 @@ mod helper_tests {
         cc_row.provider = "claude".to_string();
         insert_pending(&pool, &cc_row, 1, None)
             .await
-            .expect("insert cc row");
+            .expect("insert cc row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
 
         // The codex worker shares `target_instance_id`. It must NOT claim
         // this row even though `agents.provider = 'codex'` matches it.
         let stolen = claim_pending_for_target(&pool, "worker-1", "codex", "owner-codex")
             .await
-            .expect("codex claim ok");
+            .expect("codex claim ok"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert!(
             stolen.is_none(),
             "codex worker must not claim a row forwarded by the claude bot"
@@ -1990,8 +1990,8 @@ mod helper_tests {
         // The claude worker claims it, despite `agents.provider = 'codex'`.
         let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-claude")
             .await
-            .expect("claude claim ok")
-            .expect("claude worker must claim its own row");
+            .expect("claude claim ok") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+            .expect("claude worker must claim its own row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert_eq!(claimed.channel_id, "ch-cc");
         assert_eq!(claimed.provider, "claude");
         assert_eq!(claimed.agent_id, "agent-paired");
@@ -2014,34 +2014,34 @@ mod helper_tests {
         )
         .execute(&pool)
         .await
-        .expect("seed paired agent");
+        .expect("seed paired agent"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
 
         let mut cc_row = payload("ch-cc2", "msg-retry");
         cc_row.agent_id = "agent-paired".to_string();
         cc_row.provider = "claude".to_string();
-        insert_pending(&pool, &cc_row, 1, None).await.expect("seed");
+        insert_pending(&pool, &cc_row, 1, None).await.expect("seed"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
 
         let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
             .await
-            .expect("claim")
-            .expect("row");
+            .expect("claim") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+            .expect("row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         mark_accepted(&pool, claimed.id, "owner-1")
             .await
-            .expect("accept");
+            .expect("accept"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         mark_spawned(&pool, claimed.id, "owner-1")
             .await
-            .expect("spawn");
+            .expect("spawn"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
 
         let new_id = force_fail_and_retry_as_new(&pool, claimed.id, "operator: hung")
             .await
-            .expect("force-fail");
+            .expect("force-fail"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
 
         let retry_provider: String =
             sqlx::query_scalar("SELECT provider FROM intake_outbox WHERE id = $1")
                 .bind(new_id)
                 .fetch_one(&pool)
                 .await
-                .expect("read retry provider");
+                .expect("read retry provider"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert_eq!(
             retry_provider, "claude",
             "retry must stay on the forwarding bot, not fall back to agents.provider"

@@ -410,6 +410,11 @@
       "path": "migrations/postgres/0079_relay_dead_letter.sql",
       "sha256": "b36edaa1a22ee07137a8911d9a9a39b34a70488228501b23bf08f65e3ce75304",
       "version": 79
+    },
+    {
+      "path": "migrations/postgres/0080_intake_outbox_provider.sql",
+      "sha256": "051f5ddd45e12577f7fe0e7c77ee049687b3a7722ca6bef8666662faa46c7f2f",
+      "version": 80
     }
   ],
   "version": 1

@@ -40,7 +40,7 @@ WHERE a.id = io.agent_id
 --    failure path, so a retryable terminal state is correct here.
 UPDATE intake_outbox
 SET status = 'failed_pre_accept',
-    last_error = 'migration 0079: provider unrecoverable for pre-accept row (#4349)'
+    last_error = 'migration 0080: provider unrecoverable for pre-accept row (#4349)'
 WHERE provider = ''
   AND status IN ('pending', 'claimed');
 
@@ -64,7 +64,7 @@ WHERE provider = ''
 UPDATE intake_outbox
 SET status = 'failed_post_accept',
     completed_at = COALESCE(completed_at, NOW()),
-    last_error = 'migration 0079: provider unrecoverable for post-accept row; operator recovery required (#4349)'
+    last_error = 'migration 0080: provider unrecoverable for post-accept row; operator recovery required (#4349)'
 WHERE provider = ''
   AND status IN ('accepted', 'spawned');
 
