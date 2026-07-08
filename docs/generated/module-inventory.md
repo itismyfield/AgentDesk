@@ -111,7 +111,7 @@
 | `db::dispatches::outbox::notify` | `src/db/dispatches/outbox/notify.rs` | 75 | 75 | 0 |  |
 | `db::dispatches::outbox::retry` | `src/db/dispatches/outbox/retry.rs` | 60 | 60 | 0 |  |
 | `db::idempotency` | `src/db/idempotency.rs` | 659 | 302 | 357 |  |
-| `db::intake_outbox` | `src/db/intake_outbox.rs` | 1779 | 630 | 1149 |  |
+| `db::intake_outbox` | `src/db/intake_outbox.rs` | 2095 | 663 | 1432 |  |
 | `db::kanban` | `src/db/kanban.rs` | 1 | 1 | 0 |  |
 | `db::kanban_cards` | `src/db/kanban_cards/mod.rs` | 273 | 273 | 0 |  |
 | `db::kanban_cards::crud` | `src/db/kanban_cards/crud.rs` | 414 | 414 | 0 |  |
@@ -382,9 +382,9 @@
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1129 | 587 | 542 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
-| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 1312 | 632 | 680 |  |
+| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 1326 | 645 | 681 |  |
 | `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
-| `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 417 | 336 | 81 |  |
+| `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 418 | 336 | 82 |  |
 | `services::cluster::intake_worker_capabilities` | `src/services/cluster/intake_worker_capabilities.rs` | 83 | 83 | 0 |  |
 | `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1021 | 751 | 270 |  |
 | `services::cluster::registry_adapter_sink` | `src/services/cluster/registry_adapter_sink.rs` | 344 | 117 | 227 |  |
@@ -603,7 +603,7 @@
 | `services::discord::router::intake_gate::busy_duplicate_notice` | `src/services/discord/router/intake_gate/busy_duplicate_notice.rs` | 55 | 27 | 28 |  |
 | `services::discord::router::intake_gate::component_events` | `src/services/discord/router/intake_gate/component_events.rs` | 41 | 41 | 0 |  |
 | `services::discord::router::intake_gate::gate` | `src/services/discord/router/intake_gate/gate.rs` | 79 | 79 | 0 |  |
-| `services::discord::router::intake_gate::node_override_routing` | `src/services/discord/router/intake_gate/node_override_routing.rs` | 62 | 62 | 0 |  |
+| `services::discord::router::intake_gate::node_override_routing` | `src/services/discord/router/intake_gate/node_override_routing.rs` | 63 | 63 | 0 |  |
 | `services::discord::router::intake_gate::queue_effects` | `src/services/discord/router/intake_gate/queue_effects.rs` | 953 | 745 | 208 |  |
 | `services::discord::router::intake_gate::reaction_remove` | `src/services/discord/router/intake_gate/reaction_remove.rs` | 226 | 226 | 0 |  |
 | `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 630 | 283 | 347 |  |
