@@ -320,6 +320,26 @@ pub(super) fn task_tool_slot_is_terminal(slot: &TaskToolSlot) -> bool {
     task_tool_terminal_marker(slot.status.as_deref()).is_some()
 }
 
+/// #4093: a task slot is "in progress" — the only kind the LIVE Tasks panel now
+/// renders — iff it is NOT terminal (carries no ✓/✗ mark). Terminal slots
+/// (completed / failed) are hidden immediately so finished work no longer masks
+/// active work until it falls out of the 10-slot window.
+///
+/// `status == None` is treated as IN PROGRESS, not "done": a freshly-created
+/// foreground task (e.g. `TaskCreate`) carries no status until its first update,
+/// and a background (bash) slot keeps `status == None` for its whole running
+/// life until the terminal notification sets `completed`/`failed`. Excluding
+/// `None` would hide brand-new and long-running tasks mid-flight, so the filter
+/// keys on terminal-ness alone.
+///
+/// This gates the LIVE panel only. The completion footer deliberately still
+/// renders terminal slots — its ✓/✗ turn-end result summary and the #3391
+/// delivered-terminal eviction both depend on completed rows being emitted — so
+/// it must not use this predicate.
+pub(super) fn task_tool_slot_is_in_progress(slot: &TaskToolSlot) -> bool {
+    !task_tool_slot_is_terminal(slot)
+}
+
 /// #3391: stable slot identity for delivered-terminal eviction. Background
 /// tasks key on their `tool_use_id`, Task-tool slots on their `task_id`, and
 /// any slot lacking both falls back to the never-reused `ordinal`. The ordinal

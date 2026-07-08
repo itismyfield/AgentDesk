@@ -15,8 +15,8 @@ use super::subagent_summary::render_subagent_done_summary;
 use super::task_panel::{
     STUCK_BACKGROUND_TASK_TTL, TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot,
     force_abort_stuck_background_task_slots, render_task_panel_line, render_task_tool_slot,
-    take_slot_ordinal, task_tool_slot_is_unfinished_background, upsert_background_task_tool_slot,
-    upsert_task_tool_slot,
+    take_slot_ordinal, task_tool_slot_is_in_progress, task_tool_slot_is_unfinished_background,
+    upsert_background_task_tool_slot, upsert_task_tool_slot,
 };
 use super::workflow_panel::{
     WorkflowAgentSlot, WorkflowSlot, render_workflow_slot, trim_workflow_slot, trim_workflows,
@@ -591,15 +591,25 @@ pub(super) fn render_status_panel(
     // #3983 item 5a: the compact 🖥️ Recent + host block is removed from the footer
     // (the terminal echo is retired from the status panel entirely).
     if !snapshot.tasks.is_empty() {
+        // #4093: render ONLY in-progress tasks — completed/failed rows are hidden
+        // immediately and statusless foreground dispatches are excluded — so
+        // finished work no longer masks active work until it falls out of the
+        // 10-slot window. Filtering BEFORE `.take` keeps the cap semantics (up to
+        // 10 of the FILTERED in-progress tasks) and preserves newest-first order.
         let lines = snapshot
             .tasks
             .iter()
             .rev()
+            .filter(|slot| task_tool_slot_is_in_progress(slot))
             .take(STATUS_PANEL_TASK_LIMIT)
             .map(render_task_tool_slot)
             .collect::<Vec<_>>();
         let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out); // #3404 cap
-        sections.push(format!("Tasks\n{}", lines.join("\n")));
+        // Omit the Tasks section entirely when nothing is in progress so no
+        // dangling `Tasks` header is rendered over an empty body.
+        if !lines.is_empty() {
+            sections.push(format!("Tasks\n{}", lines.join("\n")));
+        }
     }
 
     if !matches!(provider, ProviderKind::Codex) && !snapshot.subagents.is_empty() {

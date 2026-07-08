@@ -1984,11 +1984,13 @@ fn background_bash_notification_finalizes_only_exact_tool_use_id() {
         ),
     );
 
-    let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    let done_line = done
-        .lines()
-        .find(|line| line.contains("Bash Launch codex for voice S2"))
-        .unwrap_or_else(|| panic!("background Bash task slot missing in: {done}"));
+    // #4093: completed tasks are hidden from the live panel, so verify the ✓ on
+    // the completion footer, which still renders terminal marks.
+    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let done_block = done
+        .block
+        .expect("completed background task should render in the completion footer");
+    let done_line = footer_line_containing(&done_block, "Bash Launch codex for voice S2");
     assert!(
         done_line.contains('✓'),
         "matching notification must mark ✓: {done_line}"
@@ -2023,11 +2025,14 @@ fn background_bash_failed_notification_marks_task_failed() {
         ),
     );
 
-    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    let line = rendered
-        .lines()
-        .find(|line| line.contains("Bash Deploy release runtime"))
-        .unwrap_or_else(|| panic!("background Bash task slot missing in: {rendered}"));
+    // #4093: the live panel now HIDES terminal (failed) tasks, so verify the ✗
+    // finalization on the completion footer — the surface that still renders the
+    // terminal result summary.
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered
+        .block
+        .expect("failed background task should render in the completion footer");
+    let line = footer_line_containing(&block, "Bash Deploy release runtime");
     assert!(
         line.contains('✗'),
         "failed notification must mark ✗: {line}"
@@ -2116,11 +2121,13 @@ fn background_bash_record_reconstruction_ack_does_not_finalize_then_notification
         ),
     );
 
-    let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    let done_line = done
-        .lines()
-        .find(|line| line.contains("Bash Launch codex for SharedData S4"))
-        .unwrap_or_else(|| panic!("background Bash task slot missing in: {done}"));
+    // #4093: completed tasks are hidden from the live panel; verify the flipped
+    // ✓ on the completion footer, which still renders terminal marks.
+    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let done_block = done
+        .block
+        .expect("reconstructed completed task should render in the completion footer");
+    let done_line = footer_line_containing(&done_block, "Bash Launch codex for SharedData S4");
     assert!(
         done_line.contains('✓'),
         "matching reconstructed notification must flip ✓: {done_line}"
@@ -5298,13 +5305,37 @@ fn status_panel_taskupdate_updates_existing_task_by_id() {
         ),
     );
 
+    // #4093: a `completed` task is hidden from the live panel, so the in-place
+    // update (TaskUpdate mutates the existing slot rather than appending a new
+    // one) is verified via state. The single slot carries the merged fields:
+    // the latest name, the TaskCreate summary (TaskUpdate sent none), and the
+    // new terminal status. Scope the guard so it is dropped before the render
+    // below re-locks the same channel entry (the mutex is not reentrant).
+    {
+        let status_entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = status_entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.tasks.len(),
+            1,
+            "TaskUpdate must update the existing slot by id, not append"
+        );
+        let slot = &guard.tasks[0];
+        assert_eq!(slot.task_id.as_deref(), Some("task-1"));
+        assert_eq!(slot.summary.as_deref(), Some("Wire Tasks panel"));
+        assert_eq!(slot.status.as_deref(), Some("completed"));
+    }
+
+    // And the completed task is absent from the live panel per #4093.
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    let task_lines = rendered
-        .lines()
-        .filter(|line| line.starts_with("└ Task"))
-        .collect::<Vec<_>>();
-    assert_eq!(task_lines.len(), 1, "rendered:\n{rendered}");
-    assert!(rendered.contains("TaskUpdate task-1 · Wire Tasks panel · completed"));
+    assert!(
+        !rendered.contains("Wire Tasks panel"),
+        "completed task must not render in the live panel: {rendered}"
+    );
 }
 
 #[test]
@@ -6552,14 +6583,15 @@ fn rehydration_bound_skips_records_before_compact_boundary() {
 
 const LIVE_CAP: usize = super::completion_footer::LIVE_PANEL_TERMINAL_RENDER_CAP;
 
-// #3404 fail-on-base: during a long turn the LIVE panel accumulated EVERY
-// completed Task forever; the running entry and even the section budget got
-// starved. Compaction keeps only the most recent `LIVE_CAP` completions plus all
-// running entries and collapses the rest into a `… (+N completed)` summary. On
-// HEAD (no compaction) all completed lines render and no summary line exists, so
-// this fails.
+// #4093 (supersedes #3404 for the Tasks section): during a long turn the LIVE
+// panel used to accumulate completed Tasks — #3404 capped the display at
+// `LIVE_CAP` completions plus a `… (+N completed)` summary. #4093 goes further:
+// completed Task slots are hidden from the live panel entirely so they can never
+// mask or crowd out in-progress work, while every running entry and the section
+// header stay. (The completion footer still renders the ✓ result summary, and
+// the #3404 compaction primitive still governs the Subagents section.)
 #[test]
-fn live_panel_compacts_completed_tasks_keeping_running_and_header() {
+fn live_panel_hides_completed_tasks_keeping_running_and_header() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_404_001);
     let completed = LIVE_CAP + 4;
@@ -6571,24 +6603,24 @@ fn live_panel_compacts_completed_tasks_keeping_running_and_header() {
     push_background_bash_task(&events, channel_id, "Still running", "toolu_3404_run");
 
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    let rendered_done = panel.matches('✓').count();
     assert_eq!(
-        rendered_done, LIVE_CAP,
-        "live panel must cap rendered completions at {LIVE_CAP}: {panel}"
+        panel.matches('✓').count(),
+        0,
+        "live panel must hide all completed tasks: {panel}"
     );
-    let collapsed = completed - LIVE_CAP;
     assert!(
-        panel.contains(&format!("… (+{collapsed} completed)")),
-        "older completions must collapse into a summary: {panel}"
+        !panel.contains("completed)"),
+        "no compaction summary when completed tasks are hidden: {panel}"
     );
     assert!(panel.contains("Tasks"), "Tasks header survives: {panel}");
     assert!(
         panel.contains("Still running"),
-        "the running entry is never capped: {panel}"
+        "the running entry is always shown: {panel}"
     );
-    // The most recent completion stays visible; the oldest is collapsed away.
-    assert!(panel.contains(&format!("Completed job {:02}", completed - 1)));
-    assert!(!panel.contains("Completed job 00"));
+    assert!(
+        !panel.contains("Completed job"),
+        "no completed task line renders in the live panel: {panel}"
+    );
 }
 
 // #3404 fail-on-base: the bug's headline symptom — a long backlog of completed
@@ -6682,10 +6714,11 @@ fn live_panel_compaction_preserves_state_for_footer_eviction() {
     );
 }
 
-// #3404: a small backlog at or under the cap renders verbatim (no summary line,
-// no behavior change for short turns).
+// #4093 (supersedes #3404 for the Tasks section): even a small backlog of
+// completed tasks (at or under the old compaction cap) is now hidden entirely —
+// no ✓ marks and no `… (+N completed)` summary render in the live panel.
 #[test]
-fn live_panel_no_compaction_under_cap() {
+fn live_panel_hides_completed_tasks_even_under_cap() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_404_004);
     for i in 0..LIVE_CAP {
@@ -6694,10 +6727,14 @@ fn live_panel_no_compaction_under_cap() {
         complete_background_bash_task(&events, channel_id, &id);
     }
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert_eq!(panel.matches('✓').count(), LIVE_CAP);
+    assert_eq!(
+        panel.matches('✓').count(),
+        0,
+        "completed tasks are hidden from the live panel: {panel}"
+    );
     assert!(
         !panel.contains("completed)"),
-        "no summary under cap: {panel}"
+        "no summary when completed tasks are hidden: {panel}"
     );
 }
 

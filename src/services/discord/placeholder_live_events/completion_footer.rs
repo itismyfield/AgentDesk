@@ -522,15 +522,11 @@ pub(in crate::services::discord) fn live_panel_compaction_counts(
     provider: &ProviderKind,
 ) -> (usize, usize) {
     let collapsed = |total: usize| total.saturating_sub(LIVE_PANEL_TERMINAL_RENDER_CAP);
-    let tasks_collapsed = collapsed(
-        snapshot
-            .tasks
-            .iter()
-            .rev()
-            .take(STATUS_PANEL_TASK_LIMIT)
-            .filter(|slot| task_tool_slot_is_terminal(slot))
-            .count(),
-    );
+    // #4093: the live render now hides terminal (completed/failed) task slots
+    // entirely, so no terminal task line ever reaches the live compaction — the
+    // Tasks section can no longer be collapsed. Mirror that here so the
+    // observability count stays honest.
+    let tasks_collapsed = 0;
     let subagents_collapsed = if matches!(provider, ProviderKind::Codex) {
         0
     } else {
