@@ -1011,7 +1011,7 @@ where
     if let PlaceholderSlot::Active { message_id, .. } = slot {
         if let Err(error) = gateway.delete_message(ctx.channel_id, *message_id).await {
             tracing::warn!(
-                channel = ctx.channel_id.get(),
+                channel_id = ctx.channel_id.get(),
                 message_id = message_id.get(),
                 error = %error,
                 "long chunk delivery succeeded but anchor delete failed; proceeding as delivered"
@@ -1103,7 +1103,7 @@ fn classify_transport_failure<L: DeliveryLease + ?Sized>(
     {
         let display_error = strip_watcher_send_failure_class_marker(error);
         tracing::warn!(
-            channel = ctx.channel_id.get(),
+            channel_id = ctx.channel_id.get(),
             owner = ?ctx.owner,
             failure_class = class.as_str(),
             error = %display_error,

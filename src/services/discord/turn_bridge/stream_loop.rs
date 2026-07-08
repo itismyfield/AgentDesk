@@ -1129,7 +1129,7 @@ pub(super) async fn run_stream_loop(
                                 tracing::info!(
                                     target: "agentdesk::codex_rollout_handoff",
                                     provider = %provider.as_str(),
-                                    channel = channel_id.get(),
+                                    channel_id = channel_id.get(),
                                     previous_response_sent_offset = response_sent_offset,
                                     full_response_len = full_response.len(),
                                     done_result_len = result.len(),

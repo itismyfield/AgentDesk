@@ -525,7 +525,7 @@ pub(super) async fn run_post_loop_finalize(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 watcher_owner_channel = watcher_owner_channel_id.get(),
                 tui_gate_timed_out = bridge_early_gate_timed_out,
                 "  [{ts}] ⚠ bridge watcher handoff missing finalizer; bridge is releasing mailbox to avoid stranded queued turns"
@@ -623,7 +623,7 @@ pub(super) async fn run_post_loop_finalize(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 "  [{ts}] ⚠ #2293/#2780: bridge releasing mailbox despite TUI quiescence timeout; follow-up pre-submit gate will requeue if pane is still busy"
             );
         }

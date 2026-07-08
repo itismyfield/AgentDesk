@@ -68,7 +68,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     if recovery_terminal_delivery_already_committed(state) {
         tracing::warn!(
             provider = %provider.as_str(),
-            channel = state.channel_id,
+            channel_id = state.channel_id,
             finalizer_turn_id,
             "inflight reregister skipped: terminal delivery already committed; clearing stale active turn state"
         );

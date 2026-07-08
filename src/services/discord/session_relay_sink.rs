@@ -559,7 +559,7 @@ impl SessionBoundDiscordRelaySink {
         let Some(inflight) = inflight else {
             tracing::debug!(
                 provider = provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 tmux_session = %session_name,
                 frame_user_msg_id = delivery.frame_turn_user_msg_id,
                 "session-bound sink: terminal frame carried a commit fence but inflight is gone; identity gate blocks advance"
@@ -578,7 +578,7 @@ impl SessionBoundDiscordRelaySink {
         if !identity_matches {
             tracing::debug!(
                 provider = provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 tmux_session = %session_name,
                 frame_user_msg_id = delivery.frame_turn_user_msg_id,
                 inflight_user_msg_id = inflight.user_msg_id,
@@ -714,7 +714,7 @@ impl SessionBoundDiscordRelaySink {
                 self.delivered_total.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
                     provider = provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     message = msg_id.get(),
                     tmux_session = %delivery.session_name,
                     turn_id = trace.turn_id().unwrap_or(""),
@@ -787,7 +787,7 @@ impl SessionBoundDiscordRelaySink {
             SessionBoundTerminalDeliveryRouteDecision::Skipped => {
                 tracing::debug!(
                     provider = provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %delivery.session_name,
                     turn_id = trace.turn_id().unwrap_or(""),
                     dispatch_id = trace.dispatch_id().unwrap_or(""),
@@ -929,7 +929,7 @@ impl SessionBoundDiscordRelaySink {
                 self.delivered_total.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
                     provider = provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     message = msg_id.get(),
                     tmux_session = %delivery.session_name,
                     turn_id = trace.turn_id().unwrap_or(""),
@@ -983,7 +983,7 @@ impl SessionBoundDiscordRelaySink {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     tracing::info!(
                         provider = provider.as_str(),
-                        channel = channel_id,
+                        channel_id,
                         message = msg_id.get(),
                         tmux_session = %delivery.session_name,
                         turn_id = trace.turn_id().unwrap_or(""),
@@ -1031,7 +1031,7 @@ impl SessionBoundDiscordRelaySink {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     tracing::warn!(
                         provider = provider.as_str(),
-                        channel = channel_id,
+                        channel_id,
                         message = msg_id.get(),
                         tmux_session = %delivery.session_name,
                         turn_id = trace.turn_id().unwrap_or(""),
@@ -1115,7 +1115,7 @@ impl SessionBoundDiscordRelaySink {
             // #3041 P1-4 (§4-④): lease released by the RAII guard on exit.
             tracing::info!(
                 provider = provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 tmux_session = %delivery.session_name,
                 turn_id = trace.turn_id().unwrap_or(""),
                 dispatch_id = trace.dispatch_id().unwrap_or(""),
@@ -1328,7 +1328,7 @@ async fn run_idle_jsonl_relay_loop(
                 last_inflight_seen_at.remove(&session_name);
                 tracing::debug!(
                     provider = matched.provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %session_name,
                     user_msg_id = inflight.user_msg_id,
                     updated_at = %inflight.updated_at,
@@ -1364,7 +1364,7 @@ async fn run_idle_jsonl_relay_loop(
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 tracing::debug!(
                     provider = matched.provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %session_name,
                     bytes = payload.len(),
                     "idle JSONL relay skipped new-session grace payload"
@@ -1375,7 +1375,7 @@ async fn run_idle_jsonl_relay_loop(
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Clear);
                 tracing::debug!(
                     provider = matched.provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %session_name,
                     bytes = payload.len(),
                     "idle JSONL relay skipped active-turn payload with user/tool-result event"
@@ -1386,7 +1386,7 @@ async fn run_idle_jsonl_relay_loop(
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 tracing::debug!(
                     provider = matched.provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %session_name,
                     bytes = payload.len(),
                     "idle JSONL relay skipped ScheduleWakeup setup payload"
@@ -1409,7 +1409,7 @@ async fn run_idle_jsonl_relay_loop(
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 tracing::debug!(
                     provider = matched.provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %session_name,
                     bytes = payload.len(),
                     "idle JSONL relay skipped non-init active-session payload"
@@ -1426,7 +1426,7 @@ async fn run_idle_jsonl_relay_loop(
             if idle_jsonl_should_retry_without_dedup_shared(shared_for_dedup.as_ref()) {
                 tracing::debug!(
                     provider = matched.provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %session_name,
                     range_start = start,
                     range_end = end,
@@ -1462,7 +1462,7 @@ async fn run_idle_jsonl_relay_loop(
                         consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                         tracing::debug!(
                             provider = matched.provider.as_str(),
-                            channel = channel_id,
+                            channel_id,
                             tmux_session = %session_name,
                             committed_relay_offset = committed,
                             end,
@@ -1487,7 +1487,7 @@ async fn run_idle_jsonl_relay_loop(
                             consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                             tracing::debug!(
                                 provider = matched.provider.as_str(),
-                                channel = channel_id,
+                                channel_id,
                                 tmux_session = %session_name,
                                 committed_relay_offset = committed,
                                 start,
@@ -1509,7 +1509,7 @@ async fn run_idle_jsonl_relay_loop(
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 tracing::debug!(
                     provider = matched.provider.as_str(),
-                    channel = channel_id,
+                    channel_id,
                     tmux_session = %session_name,
                     bytes = payload.len(),
                     "idle JSONL relay forwarded background session output"

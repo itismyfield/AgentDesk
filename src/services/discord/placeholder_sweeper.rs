@@ -595,11 +595,11 @@ async fn run_placeholder_sweep_pass(
                 // SAFETY-NET so triage can hunt the missing hook.
                 tracing::warn!(
                     "[sweeper SAFETY-NET] abandoning inflight age={age_secs}s — \
-                     explicit cleanup signal missed for {provider}/{channel} (msg {msg_id}); \
+                     explicit cleanup signal missed for {provider}/{channel_id} (msg {msg_id}); \
                      investigate (pane_dead/generation/heartbeat hooks)",
                     age_secs = age_secs,
                     provider = provider.as_str(),
-                    channel = state.channel_id,
+                    channel_id = state.channel_id,
                     msg_id = state.current_msg_id,
                 );
                 let text = build_abandoned_placeholder(&state);

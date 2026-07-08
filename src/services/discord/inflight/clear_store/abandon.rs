@@ -61,7 +61,7 @@ fn enqueue_abandon_request_for_row(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 msg_id = state.current_msg_id,
                 error = %error,
                 "abandon-request enqueue failed; PRESERVING inflight row so the placeholder is not stranded (sweeper retries next pass)"
@@ -175,7 +175,7 @@ pub(in crate::services::discord::inflight) fn request_inflight_abandon_if_matche
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected_user_msg_id,
                 error = %error,
                 "inflight abandon-request remove_file failed; treating as IoError so sweeper retries"
@@ -243,7 +243,7 @@ pub(in crate::services::discord::inflight) fn request_inflight_abandon_if_matche
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 error = %error,
                 "inflight zero-owned abandon-request remove_file failed; treating as IoError so sweeper retries"
             );

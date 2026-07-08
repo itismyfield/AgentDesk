@@ -92,7 +92,7 @@ where
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 context,
                 error = %error,
                 "inflight anchor-repost row write failed; leaving on-disk row untouched"

@@ -241,7 +241,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
     } else if cleanup_plan.report_idle_status {
         tracing::debug!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             "watcher deferred idle status because bridge-owned inflight still needs terminal Discord finalization"
         );

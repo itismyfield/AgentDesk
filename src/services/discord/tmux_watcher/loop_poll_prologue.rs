@@ -535,7 +535,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         ) && !post_terminal_payload_allows_external_relay;
     if post_terminal_payload_allows_external_relay {
         tracing::info!(
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             range_start = data_start_offset,
             range_end = current_offset,

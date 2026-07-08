@@ -194,7 +194,7 @@ async fn reconcile_terminal_ui_obligation(
             if clear_obligation_by_key(&obligation.provider, obligation.channel_id) {
                 tracing::warn!(
                     provider = %obligation.provider,
-                    channel = obligation.channel_id,
+                    channel_id = obligation.channel_id,
                     status_message_id = obligation.status_message_id,
                     reason,
                     "cleared stale terminal UI obligation without editing status card"
@@ -211,7 +211,7 @@ async fn reconcile_terminal_ui_obligation(
                 if clear_obligation_by_key(&obligation.provider, obligation.channel_id) {
                     tracing::warn!(
                         provider = %obligation.provider,
-                        channel = obligation.channel_id,
+                        channel_id = obligation.channel_id,
                         status_message_id = obligation.status_message_id,
                         reason,
                         "cleared terminal UI obligation after reconcile context stayed unavailable"
@@ -247,7 +247,7 @@ async fn reconcile_terminal_ui_obligation(
         Err(error) => {
             tracing::warn!(
                 provider = %obligation.provider,
-                channel = obligation.channel_id,
+                channel_id = obligation.channel_id,
                 status_message_id = obligation.status_message_id,
                 action = ?action,
                 error = %error,

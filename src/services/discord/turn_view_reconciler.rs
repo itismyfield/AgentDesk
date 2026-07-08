@@ -448,7 +448,7 @@ impl TurnViewReconciler {
     ) -> bool {
         let Some(desired) = TurnViewState::from_queue_marker_emoji(emoji) else {
             tracing::warn!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 emoji = %emoji,
@@ -512,7 +512,7 @@ impl TurnViewReconciler {
     ) -> TurnViewDelivery {
         if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 emoji = %emoji,
@@ -554,7 +554,7 @@ impl TurnViewReconciler {
     ) -> TurnViewDelivery {
         if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 source,
@@ -574,7 +574,7 @@ impl TurnViewReconciler {
 
         let Some(current) = current else {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 source,
@@ -588,7 +588,7 @@ impl TurnViewReconciler {
             || current.start_attempt != Some(start_attempt)
         {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 source,
@@ -822,7 +822,7 @@ impl TurnViewReconciler {
         let start_attempt = self.start_attempt_for(desired);
         if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 desired = ?desired,
@@ -839,7 +839,7 @@ impl TurnViewReconciler {
             && self.recently_finalized_blocks_queued(target, owner.generation)
         {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 source,
@@ -862,7 +862,7 @@ impl TurnViewReconciler {
                     || current.start_attempt != Some(clear_start_attempt))
             {
                 tracing::debug!(
-                    channel = target.channel_id.get(),
+                    channel_id = target.channel_id.get(),
                     message = target.message_id.get(),
                     target_kind = ?target.kind,
                     source,
@@ -883,7 +883,7 @@ impl TurnViewReconciler {
                 && current.applied.started_or_terminal()
             {
                 tracing::debug!(
-                    channel = target.channel_id.get(),
+                    channel_id = target.channel_id.get(),
                     message = target.message_id.get(),
                     target_kind = ?target.kind,
                     source,
@@ -925,7 +925,7 @@ impl TurnViewReconciler {
                     }
                 } else {
                     tracing::debug!(
-                        channel = target.channel_id.get(),
+                        channel_id = target.channel_id.get(),
                         message = target.message_id.get(),
                         target_kind = ?target.kind,
                         desired = ?desired,
@@ -1045,7 +1045,7 @@ impl TurnViewReconciler {
     ) -> TurnViewDelivery {
         let Some(expected_state) = TurnViewState::from_queue_marker_emoji(emoji) else {
             tracing::warn!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 emoji = %emoji,
@@ -1056,7 +1056,7 @@ impl TurnViewReconciler {
         };
         if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 source,
@@ -1076,7 +1076,7 @@ impl TurnViewReconciler {
 
         let Some(current) = current else {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 emoji = %emoji,
@@ -1097,7 +1097,7 @@ impl TurnViewReconciler {
 
         if current.applied != expected_state {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 emoji = %emoji,
@@ -1115,7 +1115,7 @@ impl TurnViewReconciler {
 
         if current.owner != owner {
             tracing::debug!(
-                channel = target.channel_id.get(),
+                channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
                 source,
@@ -1395,7 +1395,7 @@ impl TurnViewReconciler {
                 version = record.version,
                 provider = %record.provider,
                 kind = %record.kind,
-                channel = record.channel_id,
+                channel_id = record.channel_id,
                 message = record.message_id,
                 source,
                 "turn view persisted reaction state did not match target; deleting"
@@ -1598,7 +1598,7 @@ impl TurnViewReconciler {
             };
             if let Err(error) = result {
                 tracing::warn!(
-                    channel = target.channel_id.get(),
+                    channel_id = target.channel_id.get(),
                     message = target.message_id.get(),
                     target_kind = ?target.kind,
                     identity = identity.label,

@@ -382,7 +382,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         provider = %provider.as_str(),
-                        channel = channel_id.get(),
+                        channel_id = channel_id.get(),
                         "[{ts}] ⚠ recovery (completed_during_downtime) deferred by non-proceeding visible outcome"
                     );
                     continue;
@@ -1021,7 +1021,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     provider = %provider.as_str(),
-                    channel = channel_id.get(),
+                    channel_id = channel_id.get(),
                     "[{ts}] ⚠ recovery (captured_full_response) deferred by non-proceeding visible outcome"
                 );
                 continue;
@@ -1278,7 +1278,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     provider = %provider.as_str(),
-                    channel = channel_id.get(),
+                    channel_id = channel_id.get(),
                     "[{ts}] ⚠ recovery (output_completed) deferred by non-proceeding visible outcome"
                 );
                 continue;
@@ -1743,7 +1743,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 user_msg_id = state.user_msg_id,
                 "  [{ts}] ✓ recovery: clearing delivered inflight before watcher re-register; terminal response already reached Discord"
             );

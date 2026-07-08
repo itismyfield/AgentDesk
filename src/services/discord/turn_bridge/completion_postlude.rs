@@ -248,7 +248,7 @@ pub(super) async fn run_completion_postlude(
     } else if status_panel_terminal_committed && !status_panel_completion_committed {
         tracing::warn!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             "turn bridge withheld final idle status because status-panel completion edit did not commit"
         );
     }
@@ -824,7 +824,7 @@ pub(super) async fn run_completion_postlude(
                 GuardedClearOutcome::IoError => {
                     tracing::warn!(
                         provider = %provider.as_str(),
-                        channel = channel_id.get(),
+                        channel_id = channel_id.get(),
                         this_turn_user_msg_id,
                         "turn bridge epilogue inflight guarded-clear hit IoError; sweeper will retry"
                     );
@@ -859,7 +859,7 @@ pub(super) async fn run_completion_postlude(
                 GuardedClearOutcome::IoError => {
                     tracing::warn!(
                         provider = %provider.as_str(),
-                        channel = channel_id.get(),
+                        channel_id = channel_id.get(),
                         "turn bridge epilogue zero-owned inflight guarded-clear hit IoError; sweeper will retry"
                     );
                 }

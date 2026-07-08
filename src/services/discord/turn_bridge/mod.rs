@@ -1168,7 +1168,7 @@ pub(super) fn spawn_turn_bridge(
                     }
                     Err(error) => {
                         tracing::warn!(
-                            channel = channel_id.get(),
+                            channel_id = channel_id.get(),
                             "[turn_bridge] recovery turn has no anchored placeholder and creating one failed: {error}; continuing — streaming will retry placeholder creation"
                         );
                         // No placeholder yet. Use a synthetic-headless sentinel

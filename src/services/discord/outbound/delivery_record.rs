@@ -1012,7 +1012,7 @@ fn record_delivered_content_fingerprint_for_generation(
         Err(error) => {
             tracing::warn!(
                 provider = provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 error = %error,
                 "delivery content fingerprint path unavailable"
             );
@@ -1028,7 +1028,7 @@ fn record_delivered_content_fingerprint_for_generation(
     ) {
         tracing::warn!(
             provider = provider.as_str(),
-            channel = channel_id,
+            channel_id,
             error = %error,
             "delivery content fingerprint write failed"
         );
@@ -1140,7 +1140,7 @@ fn record_delivered_frontier_shadow(
         Err(error) => {
             tracing::error!(
                 provider = provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 error = %error,
                 "#3089 B1: shadow delivery-record path unavailable (observe-only)"
             );
@@ -1159,7 +1159,7 @@ fn record_delivered_frontier_shadow(
         Ok(false) => {}
         Ok(true) => tracing::error!(
             provider = provider.as_str(),
-            channel = channel_id,
+            channel_id,
             durable_end = range.1,
             in_memory_confirmed_end,
             generation_mtime_ns,
@@ -1167,7 +1167,7 @@ fn record_delivered_frontier_shadow(
         ),
         Err(error) => tracing::error!(
             provider = provider.as_str(),
-            channel = channel_id,
+            channel_id,
             error = %error,
             "#3089 B1: shadow delivery-record write failed (observe-only)"
         ),

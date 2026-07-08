@@ -47,7 +47,7 @@ pub(super) fn log_explicit_inflight_cleanup_outcome(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 user_msg_id = expected_user_msg_id,
                 reason = reason,
                 "[{ts}] 🧹 inflight cleared via explicit completion signal (#2427)"
@@ -56,7 +56,7 @@ pub(super) fn log_explicit_inflight_cleanup_outcome(
         crate::services::discord::inflight::GuardedClearOutcome::Missing => {
             tracing::trace!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 reason = reason,
                 "inflight already absent — explicit signal redundant (#2427)"
             );
@@ -65,7 +65,7 @@ pub(super) fn log_explicit_inflight_cleanup_outcome(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 expected_user_msg_id = expected_user_msg_id,
                 reason = reason,
                 "[{ts}] ⚠ inflight user_msg_id mismatch — stale explicit signal ignored (#2427 Pitfall #1)"
@@ -74,7 +74,7 @@ pub(super) fn log_explicit_inflight_cleanup_outcome(
         crate::services::discord::inflight::GuardedClearOutcome::PlannedRestartSkipped => {
             tracing::debug!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 reason = reason,
                 "skipping explicit inflight cleanup — planned-restart marker present (#2427)"
             );
@@ -82,7 +82,7 @@ pub(super) fn log_explicit_inflight_cleanup_outcome(
         crate::services::discord::inflight::GuardedClearOutcome::RebindOriginSkipped => {
             tracing::debug!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 reason = reason,
                 "skipping explicit inflight cleanup — rebind_origin row (#2427 Pitfall #5)"
             );
@@ -93,7 +93,7 @@ pub(super) fn log_explicit_inflight_cleanup_outcome(
             // catching the failed cleanup. Caller does not clear watcher.
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 reason = reason,
                 "explicit inflight cleanup failed with IO error — sweeper safety-net will retry"
             );
@@ -127,7 +127,7 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_d
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::debug!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             on_disk = ?state.tmux_session_name,
             expected = expected_tmux_session_name,
             "[{ts}] skipping pane-dead explicit cleanup — inflight points at a different tmux session (#2427 A self-auth guard)"
@@ -137,7 +137,7 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_d
     let Some(identity) = expected_identity else {
         tracing::warn!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             expected_tmux_session_name,
             "pane-dead inflight cleanup skipped because watcher attach identity is unavailable (#2450)"
         );
@@ -302,7 +302,7 @@ pub(super) fn watcher_direct_terminal_response_decision(
     if duplicate && !fresh_assistant_text_in_observed_range {
         tracing::warn!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             response_len = response.len(),
             fresh_assistant_text_in_observed_range,

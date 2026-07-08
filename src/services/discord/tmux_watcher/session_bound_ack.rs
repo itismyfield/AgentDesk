@@ -467,7 +467,7 @@ pub(super) fn warn_watcher_completion_chrome_timeout(
 ) {
     tracing::warn!(
         provider = %watcher_provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         data_start_offset,
         current_offset,
@@ -486,7 +486,7 @@ pub(super) fn watcher_relay_emission_timeout_failure_plan(
 ) -> crate::services::discord::replace_outcome_policy::WatcherTerminalRelayPlan {
     tracing::warn!(
         provider = %watcher_provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         data_start_offset,
         current_offset,

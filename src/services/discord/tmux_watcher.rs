@@ -1089,7 +1089,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         ) {
             tracing::info!(
                 provider = %watcher_provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 restored_response_seed_len = restored_response_seed.len(),
                 fresh_response_len = full_response.len(),
@@ -1193,7 +1193,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             if let Some(stale_msg_id) = placeholder_msg_id {
                 tracing::info!(
                     provider = %watcher_provider.as_str(),
-                    channel = channel_id.get(),
+                    channel_id = channel_id.get(),
                     tmux_session = %tmux_session_name,
                     stale_placeholder_msg_id = stale_msg_id.get(),
                     status_panel_msg_id = status_panel_msg_id.map(|id| id.get()).unwrap_or(0),
@@ -1553,7 +1553,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 if !delivered {
                     tracing::warn!(
                         provider = watcher_provider.as_str(),
-                        channel = channel_id.get(),
+                        channel_id = channel_id.get(),
                         tmux_session = %tmux_session_name,
                         ?ack_outcome,
                         "session-bound StreamRelay terminal delivery was not acknowledged"
@@ -1690,7 +1690,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 provider = watcher_provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 start = watcher_resend_range_start,
                 end = watcher_resend_range_end,
@@ -1706,7 +1706,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 provider = watcher_provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 start = watcher_resend_range_start,
                 end = watcher_resend_range_end,
@@ -1780,7 +1780,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         tracing::info!(
             target: "agentdesk::relay_flight_recorder",
             provider = watcher_provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             data_start_offset,
             current_offset,
@@ -2091,7 +2091,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %watcher_provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 data_start_offset = watcher_lease_start,
                 lease_end = watcher_lease_end,
@@ -2101,7 +2101,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else if direct_terminal_response_refused_duplicate {
             tracing::warn!(
                 provider = %watcher_provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 data_start_offset = watcher_lease_start,
                 lease_end = watcher_lease_end,
@@ -3227,7 +3227,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %watcher_provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 "[{ts}] ⚠ watcher: dispatch finalization deferred — TUI quiescence gate timed out (#2161)"
             );

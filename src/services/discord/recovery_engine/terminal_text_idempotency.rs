@@ -222,7 +222,7 @@ impl RecoveryDeliveryContext {
         } else {
             tracing::warn!(
                 provider = %self.provider.as_str(),
-                channel = self.channel_id.get(),
+                channel_id = self.channel_id.get(),
                 anchor_msg_id = anchor.get(),
                 outcome = ?bind,
                 "recovery no-anchor delivery: inflight anchor bind did not persist; skipping durable anchor write"
@@ -237,7 +237,7 @@ impl RecoveryDeliveryContext {
         if range.1 <= range.0 {
             tracing::warn!(
                 provider = %self.provider.as_str(),
-                channel = self.channel_id.get(),
+                channel_id = self.channel_id.get(),
                 range = ?range,
                 "recovery no-anchor delivery: refusing to record empty durable range"
             );
@@ -246,7 +246,7 @@ impl RecoveryDeliveryContext {
         let Some(tmux_session_name) = self.tmux_session_name.as_deref() else {
             tracing::warn!(
                 provider = %self.provider.as_str(),
-                channel = self.channel_id.get(),
+                channel_id = self.channel_id.get(),
                 "recovery no-anchor delivery: no tmux session name; durable anchor unavailable"
             );
             return;
@@ -255,7 +255,7 @@ impl RecoveryDeliveryContext {
         if generation_mtime_ns == 0 {
             tracing::warn!(
                 provider = %self.provider.as_str(),
-                channel = self.channel_id.get(),
+                channel_id = self.channel_id.get(),
                 tmux_session_name,
                 "recovery no-anchor delivery: no current generation marker; durable anchor unavailable"
             );
@@ -275,7 +275,7 @@ impl RecoveryDeliveryContext {
         ) {
             tracing::warn!(
                 provider = %self.provider.as_str(),
-                channel = self.channel_id.get(),
+                channel_id = self.channel_id.get(),
                 record_channel = self.record_channel_id.get(),
                 error = %error,
                 "recovery no-anchor delivery: durable anchor write failed"

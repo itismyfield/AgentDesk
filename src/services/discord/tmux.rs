@@ -1853,7 +1853,7 @@ fn persist_watcher_stream_progress(
     if full_response.len() < response_sent_offset {
         tracing::debug!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             response_sent_offset,
             full_response_len = full_response.len(),

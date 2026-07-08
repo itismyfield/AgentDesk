@@ -47,7 +47,7 @@ pub(super) async fn run_early_tui_completion_gate(
         if inflight_state.relay_ownership_only {
             tracing::info!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 inflight_user_msg_id = inflight_state.user_msg_id,
                 inflight_current_msg_id = inflight_state.current_msg_id,

@@ -266,7 +266,7 @@ fn log_mismatched_inflight_skip(
     }
     tracing::debug!(
         provider = provider.as_str(),
-        channel = channel_id,
+        channel_id,
         tmux_session = %tmux_session_name,
         inflight_tmux_session = %inflight.tmux_session_name.as_deref().unwrap_or("(none)"),
         user_msg_id = inflight.user_msg_id,

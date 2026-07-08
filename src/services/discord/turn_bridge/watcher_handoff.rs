@@ -352,7 +352,7 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 watcher_owner_channel = watcher_owner_channel_id.get(),
                 current_msg_id,
                 response_pending_bytes = response_unsent.len(),
@@ -401,7 +401,7 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 watcher_owner_channel = watcher_owner_channel_id.get(),
                 turn_start_offset,
                 tmux_last_offset = tmux_last_offset.unwrap_or(0),
@@ -444,7 +444,7 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             watcher_owner_channel = watcher_owner_channel_id.get(),
             "  [{ts}] 👁 #3268: TUI still busy on quiescence timeout — bridge handing long-lived turn back to live watcher instead of finalizing (relay continues)"
         );

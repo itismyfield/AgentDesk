@@ -98,7 +98,7 @@ pub(in crate::services::discord) fn bump_recovery_relay_attempts_if_matches_iden
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 error = %error,
                 "inflight relay-attempt bump failed; leaving on-disk row untouched"
             );

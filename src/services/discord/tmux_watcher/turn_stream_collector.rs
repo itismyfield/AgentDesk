@@ -256,7 +256,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         && seed_disposition.restored_seed_undelivered_body_len > 0
     {
         tracing::info!(
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             body_len = seed_disposition.restored_seed_undelivered_body_len,
             tmux_session = %tmux_session_name,
             "watcher: preserving restored stream seed with undelivered body for idle SSH-direct prompt"

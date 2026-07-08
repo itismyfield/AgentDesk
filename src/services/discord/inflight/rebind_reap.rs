@@ -564,7 +564,7 @@ pub(super) fn reap_abandoned_rebind_origin_locked_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = snapshot.channel_id,
+                channel_id = snapshot.channel_id,
                 error = %error,
                 "#3581 rebind reap remove_file failed under lock; treating as Missing"
             );
@@ -652,7 +652,7 @@ pub(super) fn reap_dead_watcher_rebind_origin_locked_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = snapshot.channel_id,
+                channel_id = snapshot.channel_id,
                 error = %error,
                 "#3635 dead-watcher rebind reap remove_file failed under lock; treating as Missing"
             );

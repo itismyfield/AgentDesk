@@ -181,7 +181,7 @@ async fn try_reaction_raw_once_on_channel_detailed(
 ) -> Result<(), ReactionLifecycleError> {
     if !is_real_discord_message_id(message_id) {
         tracing::debug!(
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             message = message_id.get(),
             emoji = %emoji,
             action = action.label(),
@@ -211,7 +211,7 @@ async fn try_reaction_raw_on_channel_detailed(
                 .filter(|parent| *parent != channel_id)
             {
                 tracing::debug!(
-                    channel = channel_id.get(),
+                    channel_id = channel_id.get(),
                     parent_channel = parent_channel_id.get(),
                     message = message_id.get(),
                     emoji = %emoji,
@@ -258,7 +258,7 @@ async fn try_reaction_raw_with_shared_detailed(
         Ok(()) => Ok(()),
         Err(first_error) => {
             tracing::debug!(
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 target_channel = target_channel_id.get(),
                 message = message_id.get(),
                 emoji = %emoji,

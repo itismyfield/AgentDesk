@@ -292,7 +292,7 @@ pub(super) fn empty_sink_preserves_retry(
         return false;
     }
     tracing::warn!(
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         full_response_len = full_response.len(),
         response_sent_offset,
         "turn_bridge reached empty terminal delivery without queued resume retry; preserving inflight for retry"

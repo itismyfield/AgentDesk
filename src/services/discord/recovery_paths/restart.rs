@@ -63,7 +63,7 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox_if_regis
     if !registered {
         tracing::debug!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             stop_source,
             "recovery force-clear: no mailbox registry entry — skipping finish to avoid creating one"
         );
@@ -114,7 +114,7 @@ pub(in crate::services::discord) async fn dispose_recovery_relay_outcome(
             if !inflight::clear_inflight_state(provider, state.channel_id) {
                 tracing::warn!(
                     provider = %provider.as_str(),
-                    channel = state.channel_id,
+                    channel_id = state.channel_id,
                     branch,
                     "recovery: clear_inflight_state returned false (row still on disk) after a \
                      delivered relay — next boot may re-enter this branch (an anchor-repost \
@@ -244,7 +244,7 @@ fn matching_recovery_anchors(
         ) else {
             tracing::debug!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 record_channel = record_channel_id,
                 "  · recovery anchor-repost: no current anchor at candidate record channel"
             );
@@ -256,7 +256,7 @@ fn matching_recovery_anchors(
         if !anchor_panel_channel_matches_turn(anchor.panel_channel_id, state.channel_id) {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 record_channel = record_channel_id,
                 anchor_channel_id = anchor.panel_channel_id,
                 "  ✗ recovery anchor-repost: anchor channel does not match this turn — trying next candidate (stale-owner guard)"
@@ -268,7 +268,7 @@ fn matching_recovery_anchors(
         if !anchor_range_matches_turn(anchor.range, state.turn_start_offset, state.last_offset) {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 record_channel = record_channel_id,
                 anchor_range = ?anchor.range,
                 turn_start_offset = ?state.turn_start_offset,
@@ -438,7 +438,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     ) {
         tracing::info!(
             provider = %provider.as_str(),
-            channel = state.channel_id,
+            channel_id = state.channel_id,
             anchor_reposted = state.anchor_reposted,
             anchor_repost_attempts = state.anchor_repost_attempts,
             budget = inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET,
@@ -472,7 +472,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         if !anchor_probe_should_repost(probe) {
             tracing::info!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 record_channel = record_channel_id,
                 anchor_msg_id = anchor.panel_msg_id,
                 anchor_channel_id = anchor.panel_channel_id,
@@ -494,7 +494,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     // records the replacement anchor after a successful POST.
     tracing::warn!(
         provider = %provider.as_str(),
-        channel = state.channel_id,
+        channel_id = state.channel_id,
         record_channel = record_channel_id,
         anchor_msg_id = anchor.panel_msg_id,
         anchor_channel_id = anchor.panel_channel_id,
@@ -538,7 +538,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     if let Some(refusal) = anchor_repost_pre_send_refusal(bump_outcome) {
         tracing::warn!(
             provider = %provider.as_str(),
-            channel = state.channel_id,
+            channel_id = state.channel_id,
             outcome = ?bump_outcome,
             "  ⚠ recovery anchor-repost: pre-send attempt counter NOT persisted — \
              REFUSING the send-new and PRESERVING the inflight row (the hard bound \
@@ -584,7 +584,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         if !matches!(marked, inflight::GuardedSaveOutcome::Saved) {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 outcome = ?marked,
                 "  ⚠ recovery anchor-repost: durable 'anchor_reposted' marker NOT persisted after \
                  a delivered send — a crash before the row clears could re-post (bounded by the \
@@ -710,7 +710,7 @@ async fn apply_undeliverable_relay_disposition(
                 Err(error) => {
                     tracing::warn!(
                         provider = %provider.as_str(),
-                        channel = state.channel_id,
+                        channel_id = state.channel_id,
                         reason_code,
                         error = %error,
                         "recovery force-clear report write FAILED — clearing anyway; \
@@ -738,7 +738,7 @@ async fn apply_undeliverable_relay_disposition(
             let report_path_display = report_path.as_ref().map(|path| path.display().to_string());
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 user_msg_id = state.user_msg_id,
                 branch,
                 reason_code,
@@ -769,7 +769,7 @@ async fn apply_undeliverable_relay_disposition(
             );
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = state.channel_id,
+                channel_id = state.channel_id,
                 branch,
                 attempts = state.recovery_relay_attempts.saturating_add(1),
                 budget = inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET,

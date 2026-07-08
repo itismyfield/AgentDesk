@@ -168,7 +168,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
     if inflight_skips_tui_completion_observation(inflight.as_ref()) {
         tracing::info!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             inflight_user_msg_id = inflight.as_ref().map(|state| state.user_msg_id).unwrap_or(0),
             inflight_current_msg_id = inflight.as_ref().map(|state| state.current_msg_id).unwrap_or(0),
@@ -209,7 +209,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
     ) {
         tracing::info!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             "TUI completion gate skipped because tmux pane is no longer live"
         );
@@ -239,7 +239,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
     };
     tracing::info!(
         provider = %provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         completion_signal = ?completion_signal,
         fallback_ready,

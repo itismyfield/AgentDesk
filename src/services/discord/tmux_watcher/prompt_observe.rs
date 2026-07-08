@@ -98,7 +98,7 @@ pub(super) fn observe_legacy_wrapper_direct_prompt_from_pane(
         );
     tracing::info!(
         provider = %provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         data_start_offset,
         current_offset,

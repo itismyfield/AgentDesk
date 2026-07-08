@@ -426,7 +426,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate cancel/stop terminal replace (channel {})",
                 channel_id
             );
@@ -531,7 +531,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         if matches!(plt_lease_acquire, BridgeLeaseAcquire::Skip) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate prompt-too-long terminal replace (channel {})",
                 channel_id
             );
@@ -955,7 +955,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                     bridge_skip_holder_owns_inflight = true;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
-                        channel = channel_id.get(),
+                        channel_id = channel_id.get(),
                         "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge silent_turn skipped offset advance, left turn retry-able (channel {})",
                         channel_id
                     );
@@ -1179,7 +1179,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                         if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
-                                channel = channel_id.get(),
+                                channel_id = channel_id.get(),
                                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate terminal replace (channel {})",
                                 channel_id
                             );
@@ -1332,7 +1332,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 crate::services::discord::inflight::GuardedSaveOutcome::IoError => {
                     tracing::warn!(
                         provider = %provider.as_str(),
-                        channel = channel_id.get(),
+                        channel_id = channel_id.get(),
                         "turn bridge failed to mirror committed terminal delivery before cleanup"
                     );
                 }
@@ -1355,7 +1355,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                         tracing::info!(
                             target: "agentdesk::codex_rollout_handoff",
                             provider = %provider.as_str(),
-                            channel = channel_id.get(),
+                            channel_id = channel_id.get(),
                             message_id = frozen_msg_id.get(),
                             "turn_bridge removed streamed rollover prefix after full terminal replay"
                         );
@@ -1365,7 +1365,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                         tracing::warn!(
                             target: "agentdesk::codex_rollout_handoff",
                             provider = %provider.as_str(),
-                            channel = channel_id.get(),
+                            channel_id = channel_id.get(),
                             message_id = frozen_msg_id.get(),
                             error = %error,
                             "turn_bridge failed to remove streamed rollover prefix after full terminal replay"
@@ -1533,7 +1533,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 if terminal_delivery_committed && tui_transport_error_skip_gate {
                     tracing::info!(
                         provider = %provider.as_str(),
-                        channel = channel_id.get(),
+                        channel_id = channel_id.get(),
                         runtime_kind = ?inflight_state.runtime_kind,
                         "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                     );

@@ -540,7 +540,7 @@ fn complete_standby_inflight_state(
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             provider = %provider.as_str(),
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             output_path = output_path,
             placeholder_msg_id = placeholder_msg_id.map(|msg| msg.get()),
             "[{ts}] ⚠ standby_relay skipped inflight cleanup because the on-disk row no longer matches this relay"
@@ -587,7 +587,7 @@ fn complete_standby_inflight_state(
         GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => {
             tracing::debug!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 outcome = outcome_label,
                 "standby_relay completed delegated inflight cleanup"
             );
@@ -596,7 +596,7 @@ fn complete_standby_inflight_state(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 user_msg_id = user_msg_id,
                 "[{ts}] ⚠ standby_relay did not clear inflight because the guarded identity no longer matches"
             );
@@ -604,7 +604,7 @@ fn complete_standby_inflight_state(
         GuardedClearOutcome::PlannedRestartSkipped | GuardedClearOutcome::RebindOriginSkipped => {
             tracing::debug!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 outcome = outcome_label,
                 "standby_relay preserved inflight row after delegated completion"
             );
@@ -612,7 +612,7 @@ fn complete_standby_inflight_state(
         GuardedClearOutcome::IoError => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 "standby_relay failed to clear inflight after delegated completion; sweeper will see mirrored response state"
             );
         }

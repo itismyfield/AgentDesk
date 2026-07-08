@@ -296,7 +296,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected_user_msg_id,
                 error = %error,
                 "inflight guarded-clear remove_file failed; treating as IoError so sweeper retries"
@@ -373,7 +373,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_zero_owned_i
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 error = %error,
                 "inflight zero-owned guarded-clear remove_file failed; treating as IoError so sweeper retries"
             );
@@ -448,7 +448,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_turn_nonce_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected.user_msg_id,
                 error = %error,
                 "inflight identity-guarded clear remove_file failed; treating as IoError so sweeper retries"
@@ -504,7 +504,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected.user_msg_id,
                 expected_finalizer_turn_id,
                 error = %error,
@@ -553,7 +553,7 @@ pub(super) fn clear_rebind_origin_inflight_state_if_matches_identity_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected.user_msg_id,
                 error = %error,
                 "rebind-origin inflight guarded-clear remove_file failed; treating as IoError so sweeper retries"
@@ -606,7 +606,7 @@ pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evi
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected.user_msg_id,
                 error = %error,
                 "lifecycle inflight guarded-clear after death evidence remove_file failed; treating as IoError so sweeper retries"
@@ -679,7 +679,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected.user_msg_id,
                 error = %error,
                 "inflight delivery mirror failed before identity-guarded clear"
@@ -701,7 +701,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 expected_user_msg_id = expected.user_msg_id,
                 error = %error,
                 "inflight identity-guarded delivery clear remove_file failed; treating as IoError so sweeper retries"
@@ -764,7 +764,7 @@ pub(super) fn clear_inflight_state_if_matches_tmux_response_in_root(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel_id,
                 tmux_session_name,
                 error = %error,
                 "inflight tmux-response guarded clear remove_file failed; treating as IoError so sweeper retries"

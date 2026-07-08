@@ -19,7 +19,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     let requeue_refusal_reason = requeue_outcome.refusal_reason.map(|reason| reason.as_str());
     tracing::info!(
         provider = %provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         user_msg_id = inflight_state.user_msg_id,
         requeue_enqueued = requeue_outcome.enqueued,
         requeue_merged = requeue_outcome.merged,

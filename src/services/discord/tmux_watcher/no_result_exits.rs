@@ -212,7 +212,7 @@ pub(super) async fn handle_no_result_exits(
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     provider = watcher_provider.as_str(),
-                    channel = channel_id.get(),
+                    channel_id = channel_id.get(),
                     tmux_session = %tmux_session_name,
                     turn_start_offset = plan.turn_start_offset,
                     current_offset,

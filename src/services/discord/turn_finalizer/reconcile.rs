@@ -55,7 +55,7 @@ async fn run_backstop_finalize(
     {
         tracing::error!(
             panic = %panic_payload_summary(payload.as_ref()),
-            channel = ledger_key.channel_id.get(),
+            channel_id = ledger_key.channel_id.get(),
             user_msg_id = ledger_key.user_msg_id,
             "TurnFinalizer do_finalize panicked on the reconcile/backstop path; contained, the \
              ledger entry is reset Finalizing->Finalized below so it is never stuck and the \
@@ -163,7 +163,7 @@ pub(super) async fn reconcile(
             entry.watcher_backstop_deadline = Some(now + GATE_BACKSTOP);
             entry.watcher_backstop_deadline_pulled = true;
             tracing::warn!(
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 provider = %provider.as_str(),
                 streak = entry.watcher_backstop_terminal_streak,
                 "#3277: watcher-owned turn is provably terminal but no terminal was ever \

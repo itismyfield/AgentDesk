@@ -126,7 +126,7 @@ fn persist_delivery_rewind(
         }
         Err(error) => {
             tracing::warn!(
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 reason = reason.as_str(),
                 error = %error,
                 "turn_bridge failed to persist legitimate delivery rewind; preserving local rewind state"
@@ -192,7 +192,7 @@ pub(super) fn rewind_delivery_on_reclaim(
     *response_sent_offset = bridge_confirmed_response_sent_offset;
     sync_response_delivery_state(full_response, response_sent_offset, inflight_state);
     tracing::warn!(
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         response_sent_offset,
         "turn_bridge rewound response_sent_offset after reclaiming missing watcher"
     );

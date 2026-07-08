@@ -1073,7 +1073,7 @@ async fn handle_terminal(
         Err(payload) => {
             tracing::error!(
                 panic = %panic_payload_summary(payload.as_ref()),
-                channel = ledger_key.channel_id.get(),
+                channel_id = ledger_key.channel_id.get(),
                 user_msg_id = ledger_key.user_msg_id,
                 "TurnFinalizer do_finalize panicked on the terminal path; contained, the \
                  ledger entry is reset Finalizing->Finalized below so it is never stuck (#3866)"

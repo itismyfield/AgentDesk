@@ -88,7 +88,7 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::IoError => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id.get(),
+                channel_id = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 "watcher failed to mirror committed terminal delivery into inflight state"
             );

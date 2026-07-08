@@ -316,7 +316,7 @@ pub(super) fn warn_terminal_partial_no_rewind(
     let error = stripped_send_error(&error);
     tracing::warn!(
         provider = %watcher_provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         failure_class = failure_class.as_str(),
         error = %error,
@@ -335,7 +335,7 @@ pub(super) fn warn_terminal_edit_full_no_rewind(
     let error = stripped_send_error(&error);
     tracing::warn!(
         provider = %watcher_provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         failure_class = failure_class.as_str(),
         error = %error,
@@ -354,7 +354,7 @@ pub(super) fn warn_terminal_placeholderless_full_no_rewind(
     let error = stripped_send_error(&error);
     tracing::warn!(
         provider = %watcher_provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         failure_class = failure_class.as_str(),
         error = %error,
@@ -371,7 +371,7 @@ pub(super) fn warn_terminal_rewind_give_up(
 ) {
     tracing::warn!(
         provider = %watcher_provider.as_str(),
-        channel = channel_id.get(),
+        channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         turn_data_start_offset,
         attempts = terminal_rewind_attempts,

@@ -114,7 +114,7 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     let delivery_confirmed_or_natural_deadline_escape = delivery_confirmed || at_deadline;
     if matches!(signal, CompletionSignal::Done) && !delivery_confirmed {
         tracing::warn!(
-            channel = channel_id.get(),
+            channel_id = channel_id.get(),
             provider = %provider.as_str(),
             tmux_session = %tmux_session_name,
             confirmed_end_offset,
