@@ -328,6 +328,7 @@ mod tests {
             id: 42,
             target_instance_id: "worker-1".to_string(),
             forwarded_by_instance_id: "leader-1".to_string(),
+            provider: "claude".to_string(),
             required_labels: serde_json::json!(["unreal"]),
             channel_id: "1234567890".to_string(),
             user_msg_id: "9876543210".to_string(),

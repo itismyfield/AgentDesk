@@ -43,6 +43,7 @@ pub(super) async fn try_route_intake_for_message(
     let hook_ctx = crate::services::cluster::intake_router_hook::IntakeRouterContext {
         mode,
         leader_instance_id: &leader_instance_id,
+        provider: data.provider.as_str(),
         channel_id: &channel_id_str,
         user_msg_id: &user_msg_id_str,
         request_owner_id: &request_owner_id_str,
