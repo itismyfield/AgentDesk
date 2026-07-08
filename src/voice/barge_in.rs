@@ -157,8 +157,14 @@ impl LiveBargeInMonitor {
             return Ok(None);
         }
 
-        player.stop()?;
+        // #4241: track-stop and task-cancel must be atomic. Capture the stop
+        // result and always fire `cancel()` before propagating, so a failing
+        // `stop()` can never swallow the playback task's cancel signal. The stop
+        // error is still surfaced (not logged-and-continued) to preserve the
+        // existing `?` propagation contract for non-Finished errors.
+        let stop_result = player.stop();
         cancellation.cancel();
+        stop_result?;
         self.triggered = true;
 
         Ok(Some(LiveBargeInCut {
@@ -599,6 +605,7 @@ mod tests {
     struct MockPlayer {
         stops: AtomicUsize,
         already_finished: bool,
+        fails: bool,
     }
 
     impl MockPlayer {
@@ -606,6 +613,17 @@ mod tests {
             Self {
                 stops: AtomicUsize::new(0),
                 already_finished: true,
+                fails: false,
+            }
+        }
+
+        /// `stop()` returns a real (non-Finished) error to exercise the #4241
+        /// atomicity path where the cancel token must still flip.
+        fn failing() -> Self {
+            Self {
+                stops: AtomicUsize::new(0),
+                already_finished: false,
+                fails: true,
             }
         }
     }
@@ -613,7 +631,9 @@ mod tests {
     impl BargeInPlayerStop for MockPlayer {
         fn stop(&self) -> Result<()> {
             self.stops.fetch_add(1, Ordering::SeqCst);
-            if self.already_finished {
+            if self.fails {
+                map_track_stop_result(Err(songbird::tracks::ControlError::Dropped))
+            } else if self.already_finished {
                 map_track_stop_result(Err(songbird::tracks::ControlError::Finished))
             } else {
                 Ok(())
@@ -932,6 +952,44 @@ mod tests {
             player.stops.load(Ordering::SeqCst),
             1,
             "stop() must not be invoked again after the first cut, even on Finished"
+        );
+    }
+
+    /// Regression test for #4241 — track-stop and task-cancel must be atomic.
+    /// When songbird `TrackHandle::stop` returns a real (non-Finished) error,
+    /// `observe_pcm` must STILL flip the cancellation token (so the playback
+    /// task's cancel signal is never lost) while still surfacing the stop error
+    /// to the caller rather than swallowing it.
+    #[test]
+    fn live_monitor_cancels_even_when_stop_fails() {
+        let player = MockPlayer::failing();
+        let cancellation = CancellationToken::new();
+        let mut monitor = LiveBargeInMonitor::new(BargeInSensitivity::Normal);
+        let loud = stereo_pcm(&[16_384, -16_384, 16_384, -16_384]);
+
+        // Frame 1: candidate gauge ticks up but the trigger threshold is not met.
+        assert!(
+            monitor
+                .observe_pcm(&loud, &player, &cancellation)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(player.stops.load(Ordering::SeqCst), 0);
+
+        // Frame 2: trigger fires. `stop()` returns a real error, but the cancel
+        // token MUST already be flipped before the error propagates.
+        let error = monitor
+            .observe_pcm(&loud, &player, &cancellation)
+            .expect_err("stop() error must be surfaced, not swallowed");
+        assert!(
+            cancellation.is_cancelled(),
+            "cancel() must fire even when stop() errors (#4241 atomicity)"
+        );
+        assert_eq!(player.stops.load(Ordering::SeqCst), 1);
+        assert!(
+            format!("{error}").contains("failed to stop songbird playback track"),
+            "stop error must still be surfaced, got: {error}"
         );
     }
 }
