@@ -691,6 +691,8 @@ src/
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   └── completion_postgres.rs
+│   │   │   ├── runtime_handoff_loop/
+│   │   │   │   └── guarded_save.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── pid_exit.rs

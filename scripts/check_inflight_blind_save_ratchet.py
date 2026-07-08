@@ -65,16 +65,17 @@ from pathlib import Path
 #      tui_prompt_relay/codex_idle_rollout)
 #
 # #4259 PR-2a: the 3 converted runtime_handoff_loop sites are the legacy
-# tmux-wrapper `TmuxReady` stamps, whose `output_path`
-# (`session_temp_path(name, "jsonl")`) + `tmux_session_name` are identical to
-# the intake seed, so `save_inflight_state_if_identity_unchanged` is a pure
-# safety-hardening drop-in (declines only on concurrent re-own). The 6 that
-# REMAIN blind (RuntimeReady ProcessBackend/ClaudeEAdapter/ClaudeTui/CodexTui +
-# ProcessReady + the watcher-handoff helper) FIRST-stamp a runtime `output_path`
-# — process temp path / adapter PTY path / transcript_path / rollout_path — that
-# DIVERGES from the intake seed; the identity guard rejects that output-path
-# change (skip) on the normal path, so they need a first-stamp / adoption-aware
-# variant, not the identity-refresh guard. Held for a follow-up PR.
+# tmux-wrapper `TmuxReady` stamps, converted to
+# `save_inflight_state_if_identity_matches_allow_output_restamp` (codex r1):
+# the 4-field turn identity is stable across the stamp (declines only on
+# concurrent re-own), while `output_path` may legitimately restamp to the
+# resolved legacy /tmp session path on a warm follow-up
+# (`resolve_session_temp_path`). The 6 that REMAIN blind (RuntimeReady
+# ProcessBackend/ClaudeEAdapter/ClaudeTui/CodexTui + ProcessReady + the
+# watcher-handoff helper) also (re)write identity-pinned `tmux_session_name`
+# (ClaudeEAdapter clears it to None) — beyond what the output-restamp variant
+# tolerates — so each needs per-flow session-name-stability verification or an
+# adoption-aware variant before converting. Held for a follow-up PR.
 BASELINE = 26
 
 SCAN_ROOT = Path("src") / "services" / "discord"
