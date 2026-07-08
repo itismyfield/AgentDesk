@@ -693,7 +693,7 @@
 | `services::discord::tmux_watcher::controller_heartbeat` | `src/services/discord/tmux_watcher/controller_heartbeat.rs` | 34 | 34 | 0 |  |
 | `services::discord::tmux_watcher::entry` | `src/services/discord/tmux_watcher/entry.rs` | 33 | 33 | 0 |  |
 | `services::discord::tmux_watcher::jsonl_rotation` | `src/services/discord/tmux_watcher/jsonl_rotation.rs` | 78 | 78 | 0 |  |
-| `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 592 | 510 | 82 |  |
+| `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 666 | 515 | 151 |  |
 | `services::discord::tmux_watcher::loop_poll_prologue` | `src/services/discord/tmux_watcher/loop_poll_prologue.rs` | 609 | 609 | 0 |  |
 | `services::discord::tmux_watcher::no_result_exits` | `src/services/discord/tmux_watcher/no_result_exits.rs` | 814 | 814 | 0 |  |
 | `services::discord::tmux_watcher::orphan_status_panel_cleanup` | `src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs` | 238 | 238 | 0 |  |
