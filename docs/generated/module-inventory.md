@@ -638,7 +638,7 @@
 | `services::discord::runtime_bootstrap::shutdown` | `src/services/discord/runtime_bootstrap/shutdown.rs` | 209 | 209 | 0 |  |
 | `services::discord::runtime_bootstrap::spawns` | `src/services/discord/runtime_bootstrap/spawns.rs` | 268 | 268 | 0 |  |
 | `services::discord::runtime_bootstrap::startup_doctor` | `src/services/discord/runtime_bootstrap/startup_doctor.rs` | 156 | 156 | 0 |  |
-| `services::discord::runtime_bootstrap::voice` | `src/services/discord/runtime_bootstrap/voice.rs` | 162 | 162 | 0 |  |
+| `services::discord::runtime_bootstrap::voice` | `src/services/discord/runtime_bootstrap/voice.rs` | 271 | 198 | 73 |  |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 497 | 469 | 28 |  |
 | `services::discord::semantic_boundaries` | `src/services/discord/semantic_boundaries.rs` | 261 | 261 | 0 |  |
 | `services::discord::session_banner` | `src/services/discord/session_banner.rs` | 68 | 68 | 0 |  |
@@ -805,7 +805,7 @@
 | `services::discord::voice_barge_in::tts_pipeline` | `src/services/discord/voice_barge_in/tts_pipeline.rs` | 86 | 86 | 0 |  |
 | `services::discord::voice_config_cache` | `src/services/discord/voice_config_cache.rs` | 79 | 79 | 0 |  |
 | `services::discord::voice_id_sequences` | `src/services/discord/voice_id_sequences.rs` | 69 | 69 | 0 |  |
-| `services::discord::voice_lifecycle` | `src/services/discord/voice_lifecycle.rs` | 980 | 680 | 300 |  |
+| `services::discord::voice_lifecycle` | `src/services/discord/voice_lifecycle.rs` | 988 | 688 | 300 |  |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 163 | 138 | 25 |  |
 | `services::discord::voice_sensitivity` | `src/services/discord/voice_sensitivity.rs` | 113 | 113 | 0 |  |
 | `services::discord::watchers::codex_tui_restore` | `src/services/discord/watchers/codex_tui_restore.rs` | 178 | 146 | 32 |  |

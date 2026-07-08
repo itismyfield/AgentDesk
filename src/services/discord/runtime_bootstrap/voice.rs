@@ -92,10 +92,38 @@ pub(super) fn run_bot_init_voice_workers(
     voice_receiver
 }
 
-/// Auto-join configured voice channels (leader-only). The enable/non-empty
-/// guard lives inside so the call site is unconditional. Async because it
-/// reads `shared_clone.settings` before spawning. Behavior-preserving
-/// extraction; the await point matches the inline block exactly.
+/// Pure bootstrap gating for the voice runtime (#4234 r1), unit-testable
+/// without a serenity context.
+///
+/// The rejoin supervisor must cover BOTH documented join entry paths — config
+/// auto-join AND an operator `/voice join`. A manual join registers the same
+/// `DriverDisconnect` lifecycle handler and occupancy entry (commands/voice.rs)
+/// as auto-join, so gating the supervisor behind a non-empty auto-join list
+/// silently dropped rejoin requests in manual-join-only configs: the lifecycle
+/// router found no sender and logged "not scheduled". The supervisor therefore
+/// starts whenever voice is enabled (both manual-join gates require
+/// `voice.enabled`, so an enabled runtime is exactly the set of runtimes that
+/// can ever join); auto-join additionally requires configured targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VoiceBootstrapPlan {
+    pub(super) start_rejoin_supervisor: bool,
+    pub(super) schedule_auto_join: bool,
+}
+
+pub(super) fn voice_bootstrap_plan(
+    voice_enabled: bool,
+    auto_join_target_count: usize,
+) -> VoiceBootstrapPlan {
+    VoiceBootstrapPlan {
+        start_rejoin_supervisor: voice_enabled,
+        schedule_auto_join: voice_enabled && auto_join_target_count > 0,
+    }
+}
+
+/// Start the rejoin supervisor (whenever voice is enabled) and auto-join
+/// configured voice channels (leader-only). The gating lives inside
+/// (`voice_bootstrap_plan`) so the call site is unconditional. Async because it
+/// reads `shared_clone.settings` before spawning.
 pub(super) async fn run_bot_spawn_voice_auto_join(
     ctx: &serenity::Context,
     voice_config_for_setup: &crate::voice::VoiceConfig,
@@ -103,14 +131,19 @@ pub(super) async fn run_bot_spawn_voice_auto_join(
     shared_clone: &Arc<SharedData>,
     provider_for_setup: &ProviderKind,
 ) {
-    if voice_config_for_setup.enabled
-        && !voice_config_for_setup
+    let plan = voice_bootstrap_plan(
+        voice_config_for_setup.enabled,
+        voice_config_for_setup
             .auto_join_channel_ids_with_lobby()
-            .is_empty()
-    {
-        // #4235: bring up the per-provider rejoin supervisor before auto-join so
+            .len(),
+    );
+    if plan.start_rejoin_supervisor {
+        // #4235: bring up the per-provider rejoin supervisor before any join so
         // a DriverDisconnect fired during the very first join already has a
-        // registered router sender to route to.
+        // registered router sender to route to. #4234 r1: started for every
+        // voice-enabled runtime — not only when auto-join targets exist — so a
+        // manual /voice join in an auto-join-less config gets the same
+        // disconnect→rejoin coverage (see voice_bootstrap_plan).
         super::super::voice_lifecycle::spawn_voice_rejoin_supervisor(
             ctx.clone(),
             voice_receiver_for_setup.clone(),
@@ -118,6 +151,8 @@ pub(super) async fn run_bot_spawn_voice_auto_join(
             provider_for_setup.clone(),
             shared_clone.restart.shutting_down.clone(),
         );
+    }
+    if plan.schedule_auto_join {
         let ctx_for_voice = ctx.clone();
         let receiver_for_voice = voice_receiver_for_setup.clone();
         let config_for_voice = voice_config_for_setup.clone();
@@ -158,5 +193,79 @@ pub(super) async fn run_bot_spawn_voice_auto_join(
                 .len(),
             "voice auto-join not scheduled: voice disabled or no auto-join targets"
         );
+    }
+}
+
+#[cfg(test)]
+mod voice_bootstrap_tests {
+    use super::*;
+    use crate::services::discord::voice_lifecycle;
+
+    // #4234 r1 regression: a manual-join-only config (voice enabled, zero
+    // auto-join targets) previously never started the rejoin supervisor — the
+    // spawn sat inside the auto-join branch — so a DriverDisconnect after an
+    // operator /voice join found no router sender and the rejoin request was
+    // dropped ("not scheduled"). The supervisor gate must be voice enablement
+    // alone, and once the supervisor registers its router sender the request
+    // is routed instead of dropped.
+    #[test]
+    fn manual_join_only_config_starts_rejoin_supervisor_and_routes_rejoin() {
+        // Exact defect condition: enabled, no auto-join targets.
+        let plan = voice_bootstrap_plan(true, 0);
+        assert!(
+            plan.start_rejoin_supervisor,
+            "voice-enabled runtime must start the rejoin supervisor even with zero auto-join targets"
+        );
+        assert!(
+            !plan.schedule_auto_join,
+            "zero auto-join targets -> nothing to auto-join"
+        );
+        // Full gating matrix around the defect case: disabled never starts
+        // anything (no join path exists); enabled + targets starts both.
+        assert_eq!(
+            voice_bootstrap_plan(false, 0),
+            VoiceBootstrapPlan {
+                start_rejoin_supervisor: false,
+                schedule_auto_join: false,
+            }
+        );
+        assert_eq!(
+            voice_bootstrap_plan(false, 3),
+            VoiceBootstrapPlan {
+                start_rejoin_supervisor: false,
+                schedule_auto_join: false,
+            }
+        );
+        assert_eq!(
+            voice_bootstrap_plan(true, 2),
+            VoiceBootstrapPlan {
+                start_rejoin_supervisor: true,
+                schedule_auto_join: true,
+            }
+        );
+
+        // The supervisor's first act (spawn_voice_rejoin_supervisor) is
+        // registering the provider's router sender; replicate that and assert
+        // the previously-dropped rejoin request is now routed — the
+        // channel/guard-level contract the manual-join fix restores.
+        let provider = "test-manual-join-r1-0xC0FFEE";
+        let mut rx = voice_lifecycle::register_lifecycle_router(provider);
+        let routed = voice_lifecycle::dispatch_reconnect(voice_lifecycle::ReconnectRequest {
+            guild_id: serenity::GuildId::new(0xC0FFEE_0000_0E01),
+            channel_id: serenity::ChannelId::new(0xC0FFEE_0000_0E02),
+            control_channel_id: serenity::ChannelId::new(0xC0FFEE_0000_0E03),
+            provider: provider.to_string(),
+        });
+        assert!(
+            routed,
+            "rejoin request must be routed once the supervisor registered its sender"
+        );
+        let received = rx
+            .try_recv()
+            .expect("supervisor receiver should get the rejoin request");
+        assert_eq!(received.guild_id.get(), 0xC0FFEE_0000_0E01);
+        assert_eq!(received.channel_id.get(), 0xC0FFEE_0000_0E02);
+        assert_eq!(received.control_channel_id.get(), 0xC0FFEE_0000_0E03);
+        voice_lifecycle::remove_lifecycle_router_for_tests(provider);
     }
 }

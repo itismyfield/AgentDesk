@@ -62,6 +62,14 @@ pub(in crate::services::discord) fn register_lifecycle_router(
     rx
 }
 
+/// Test-support: unregister a provider's router sender so process-static state
+/// does not leak across unit tests in other modules (mirrors the private
+/// `lifecycle_router().remove` cleanup this module's own tests use).
+#[cfg(test)]
+pub(in crate::services::discord) fn remove_lifecycle_router_for_tests(provider: &str) {
+    lifecycle_router().remove(provider);
+}
+
 /// Try to claim the in-flight slot for `(provider, guild_id)`. Returns `true`
 /// when the caller acquired it (must release via `release_rejoin_inflight`).
 pub(in crate::services::discord) fn try_acquire_rejoin_inflight(
