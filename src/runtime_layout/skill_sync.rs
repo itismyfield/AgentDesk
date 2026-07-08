@@ -556,30 +556,222 @@ pub(super) fn ensure_managed_skill_dir(
     source_skill_dir: &Path,
 ) -> Result<PathBuf, String> {
     let managed_dir = managed_skills_root(root).join(skill_name);
+    // Never copy a skill onto itself; otherwise re-copy whenever the managed cache no
+    // longer reflects the source (#4256: it used to be copy-once, ignoring later edits).
     if !same_canonical_path(&managed_dir, source_skill_dir)
-        && !managed_dir.join("SKILL.md").is_file()
+        && managed_skill_dir_is_stale(skill_name, source_skill_dir, &managed_dir)?
     {
-        copy_skill_dir_resolving_symlinks(source_skill_dir, &managed_dir)?;
+        refresh_managed_skill_dir(root, skill_name, source_skill_dir, &managed_dir)?;
     }
     rewrite_managed_skill_paths(skill_name, &managed_dir)?;
     Ok(managed_dir)
 }
 
-fn rewrite_managed_skill_paths(skill_name: &str, skill_dir: &Path) -> Result<(), String> {
-    let files = match skill_name {
-        "memory-read" | "memory-write" => vec![skill_dir.join("SKILL.md")],
+/// Relative paths whose managed copies are content-rewritten by
+/// [`rewrite_managed_skill_paths`]; shared with the freshness check so the idempotent
+/// rewrite does not make a rewritten cache look perpetually stale.
+fn managed_skill_rewrite_relpaths(skill_name: &str) -> Vec<PathBuf> {
+    match skill_name {
+        "memory-read" | "memory-write" => vec![PathBuf::from("SKILL.md")],
         "memory-merge" => vec![
-            skill_dir.join("SKILL.md"),
-            skill_dir.join("references").join("architecture.md"),
-            skill_dir.join("references").join("classification-guide.md"),
-            skill_dir.join("references").join("phase-details.md"),
-            skill_dir.join("references").join("report-template.md"),
+            PathBuf::from("SKILL.md"),
+            PathBuf::from("references").join("architecture.md"),
+            PathBuf::from("references").join("classification-guide.md"),
+            PathBuf::from("references").join("phase-details.md"),
+            PathBuf::from("references").join("report-template.md"),
         ],
-        _ => return Ok(()),
-    };
+        _ => Vec::new(),
+    }
+}
 
-    for path in files {
-        rewrite_text_file_paths(&path)?;
+fn rewrite_managed_skill_paths(skill_name: &str, skill_dir: &Path) -> Result<(), String> {
+    for relative in managed_skill_rewrite_relpaths(skill_name) {
+        rewrite_text_file_paths(&skill_dir.join(relative))?;
+    }
+    Ok(())
+}
+
+/// Returns `true` when the managed cache must be re-copied: never populated, drifted
+/// from the source, or carrying a file the source dropped (mirrors `rsync -aL --delete`).
+fn managed_skill_dir_is_stale(
+    skill_name: &str,
+    source_skill_dir: &Path,
+    managed_dir: &Path,
+) -> Result<bool, String> {
+    if !managed_dir.join("SKILL.md").is_file() {
+        return Ok(true); // never copied yet
+    }
+    let rewrite_relpaths = managed_skill_rewrite_relpaths(skill_name);
+    let mut source_relpaths = BTreeSet::new();
+    if source_skill_content_differs(
+        source_skill_dir,
+        managed_dir,
+        Path::new(""),
+        &rewrite_relpaths,
+        &mut source_relpaths,
+    )? {
+        return Ok(true);
+    }
+    managed_skill_has_extra_files(managed_dir, Path::new(""), &source_relpaths)
+}
+
+/// Walks the source skill dir (resolving symlinks, skipping the junk entries
+/// [`copy_skill_dir_resolving_symlinks`] skips), reporting whether any source file is
+/// missing from or differs from its managed copy, and recording each source relative
+/// path in `source_relpaths` so the caller can detect stale extra files.
+fn source_skill_content_differs(
+    src: &Path,
+    managed: &Path,
+    relative: &Path,
+    rewrite_relpaths: &[PathBuf],
+    source_relpaths: &mut BTreeSet<PathBuf>,
+) -> Result<bool, String> {
+    if should_skip_skill_entry(src) {
+        return Ok(false);
+    }
+
+    let meta = fs::symlink_metadata(src)
+        .map_err(|e| format!("Failed to stat '{}': {e}", src.display()))?;
+    if meta.file_type().is_symlink() {
+        let resolved = match fs::canonicalize(src) {
+            Ok(resolved) => resolved,
+            // A dangling symlink is skipped by the copy routine, so it is not drift.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to resolve symlink '{}': {error}",
+                    src.display()
+                ));
+            }
+        };
+        return source_skill_content_differs(
+            &resolved,
+            managed,
+            relative,
+            rewrite_relpaths,
+            source_relpaths,
+        );
+    }
+
+    if meta.is_dir() {
+        let entries =
+            fs::read_dir(src).map_err(|e| format!("Failed to read '{}': {e}", src.display()))?;
+        for entry in entries.flatten() {
+            let child = entry.path();
+            let Some(name) = child.file_name() else {
+                continue;
+            };
+            if source_skill_content_differs(
+                &child,
+                &managed.join(name),
+                &relative.join(name),
+                rewrite_relpaths,
+                source_relpaths,
+            )? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    source_relpaths.insert(relative.to_path_buf());
+    if !managed.is_file() {
+        return Ok(true);
+    }
+    let managed_bytes =
+        fs::read(managed).map_err(|e| format!("Failed to read '{}': {e}", managed.display()))?;
+
+    let differs = if rewrite_relpaths.iter().any(|p| p == relative) {
+        // Compare against the expected rewrite so a rewritten cache is not flagged stale.
+        match fs::read_to_string(src) {
+            Ok(source_text) => {
+                let mut expected = source_text;
+                for (from, to) in skill_path_replacements() {
+                    expected = expected.replace(from, to);
+                }
+                expected.as_bytes() != managed_bytes.as_slice()
+            }
+            Err(_) => {
+                let source_bytes = fs::read(src)
+                    .map_err(|e| format!("Failed to read '{}': {e}", src.display()))?;
+                source_bytes != managed_bytes
+            }
+        }
+    } else {
+        let source_bytes =
+            fs::read(src).map_err(|e| format!("Failed to read '{}': {e}", src.display()))?;
+        source_bytes != managed_bytes
+    };
+    Ok(differs)
+}
+
+/// Reports whether the managed cache carries a regular file deleted upstream.
+fn managed_skill_has_extra_files(
+    managed: &Path,
+    relative: &Path,
+    source_relpaths: &BTreeSet<PathBuf>,
+) -> Result<bool, String> {
+    let entries = match fs::read_dir(managed) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(false),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if should_skip_skill_entry(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let child_relative = relative.join(name);
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            if managed_skill_has_extra_files(&path, &child_relative, source_relpaths)? {
+                return Ok(true);
+            }
+        } else if !source_relpaths.contains(&child_relative) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Re-copies the source skill into the managed cache via a hidden staging dir (outside
+/// the discoverable skills root) that atomically replaces the managed dir, so a
+/// mid-copy failure never leaves a half-written cache `discover_skill_dirs` could pick up.
+fn refresh_managed_skill_dir(
+    root: &Path,
+    skill_name: &str,
+    source_skill_dir: &Path,
+    managed_dir: &Path,
+) -> Result<(), String> {
+    let staging = root.join(".skill-refresh").join(skill_name);
+    let _ = fs::remove_dir_all(&staging); // clear any interrupted prior refresh
+    copy_skill_dir_resolving_symlinks(source_skill_dir, &staging)?;
+
+    if managed_dir.exists() {
+        fs::remove_dir_all(managed_dir).map_err(|e| {
+            format!(
+                "Failed to remove stale managed skill dir '{}': {e}",
+                managed_dir.display()
+            )
+        })?;
+    }
+    if let Some(parent) = managed_dir.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
+    }
+    fs::rename(&staging, managed_dir).map_err(|e| {
+        let _ = fs::remove_dir_all(&staging);
+        format!(
+            "Failed to move refreshed skill dir into '{}': {e}",
+            managed_dir.display()
+        )
+    })?;
+    if let Some(parent) = staging.parent() {
+        let _ = fs::remove_dir(parent); // best-effort cleanup of empty staging parent
     }
     Ok(())
 }
@@ -803,4 +995,124 @@ fn should_skip_skill_entry(path: &Path) -> bool {
                 || matches!(name, "__pycache__" | "node_modules" | "target" | "venv")
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod skill_cache_freshness_tests {
+    use super::*;
+    use filetime::FileTime;
+
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    /// Pins a file's mtime far in the past so a subsequent no-op sync can be proven
+    /// to have left the file untouched (no re-copy, no rewrite).
+    fn pin_mtime(path: &Path) -> FileTime {
+        let past = FileTime::from_unix_time(1_000_000, 0);
+        filetime::set_file_mtime(path, past).unwrap();
+        past
+    }
+
+    fn mtime(path: &Path) -> FileTime {
+        FileTime::from_last_modification_time(&fs::metadata(path).unwrap())
+    }
+
+    #[test]
+    fn copies_initially_then_refreshes_on_content_change_and_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("demo");
+        write_file(&source.join("SKILL.md"), "version-1\n");
+        write_file(&source.join("references").join("notes.md"), "alpha\n");
+
+        // (a) first sync performs the initial copy.
+        let managed = ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(managed, managed_skills_root(root).join("demo"));
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "version-1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(managed.join("references").join("notes.md")).unwrap(),
+            "alpha\n"
+        );
+
+        // (b) after the source changes, the next sync re-copies the updated content.
+        write_file(&source.join("SKILL.md"), "version-2\n");
+        write_file(&source.join("references").join("notes.md"), "beta\n");
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "version-2\n"
+        );
+        assert_eq!(
+            fs::read_to_string(managed.join("references").join("notes.md")).unwrap(),
+            "beta\n"
+        );
+
+        // A file deleted upstream is pruned from the managed cache on refresh.
+        fs::remove_file(source.join("references").join("notes.md")).unwrap();
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert!(!managed.join("references").join("notes.md").exists());
+        assert_eq!(
+            fs::read_to_string(managed.join("SKILL.md")).unwrap(),
+            "version-2\n"
+        );
+
+        // No transient staging directory is left behind.
+        assert!(!root.join(".skill-refresh").exists());
+    }
+
+    #[test]
+    fn identical_source_does_not_churn_the_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("demo");
+        write_file(&source.join("SKILL.md"), "stable\n");
+
+        let managed = ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        let skill_md = managed.join("SKILL.md");
+        let pinned = pin_mtime(&skill_md);
+
+        // (c) an unchanged source must not trigger a re-copy or rewrite.
+        ensure_managed_skill_dir(root, "demo", &source).unwrap();
+        assert_eq!(fs::read_to_string(&skill_md).unwrap(), "stable\n");
+        assert_eq!(mtime(&skill_md), pinned, "unchanged source must not churn");
+    }
+
+    #[test]
+    fn rewritten_skill_is_not_perpetually_stale() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("source-skills").join("memory-read");
+        write_file(
+            &source.join("SKILL.md"),
+            "see ~/.adk/release/shared_agent_memory/shared_knowledge.md\n",
+        );
+
+        let managed = ensure_managed_skill_dir(root, "memory-read", &source).unwrap();
+        let skill_md = managed.join("SKILL.md");
+        let rewritten = fs::read_to_string(&skill_md).unwrap();
+        assert!(
+            rewritten.contains(
+                "~/.adk/release/config/memories/shared-agent-knowledge/shared_knowledge.md"
+            ),
+            "managed copy should carry the rewritten path"
+        );
+        assert!(!rewritten.contains("release/shared_agent_memory/shared_knowledge.md"));
+
+        // The managed copy differs from the source only because of the idempotent
+        // path rewrite, so a second sync must recognize it as fresh (no churn).
+        let pinned = pin_mtime(&skill_md);
+        ensure_managed_skill_dir(root, "memory-read", &source).unwrap();
+        assert_eq!(
+            mtime(&skill_md),
+            pinned,
+            "rewrite-aware freshness check must not re-copy a rewritten skill"
+        );
+    }
 }
