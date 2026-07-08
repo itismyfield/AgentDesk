@@ -15,6 +15,53 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_un
     state: &InflightTurnState,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
+    save_inflight_state_identity_gated_in_root(root, state, caller, false)
+}
+
+/// #4259 PR-2a rework (codex r1): identity-guarded save that PINS the 4-field
+/// turn identity (`user_msg_id`, `started_at`, `tmux_session_name`,
+/// `turn_start_offset`) plus the restart/rebind authority and id-0 offsetless
+/// fail-closed gates of [`save_inflight_state_if_identity_unchanged`], but
+/// deliberately ALLOWS the snapshot to RESTAMP `output_path`.
+///
+/// Runtime-handoff stamps legitimately re-point the row at the output the live
+/// runtime actually writes: a warm follow-up reuses a resolved legacy `/tmp`
+/// session path that differs from the intake seed
+/// (`resolve_session_temp_path`; claude.rs/codex.rs/qwen.rs follow-up arms), so
+/// the strict `output_path` equality of the `_if_identity_unchanged` variant
+/// would refuse a legitimate same-turn stamp. Use THIS variant for
+/// runtime-handoff (re)stamp sites; it still refuses rows re-owned by another
+/// turn. The held-back blind sites in `turn_bridge/runtime_handoff_loop.rs`
+/// (RuntimeReady ProcessBackend/ClaudeEAdapter/ClaudeTui/CodexTui,
+/// ProcessReady, and the watcher-handoff helper — see
+/// `scripts/check_inflight_blind_save_ratchet.py`) are expected to convert to
+/// this variant too, once each site's identity-pinned fields (notably
+/// `tmux_session_name`, which some of them first-populate or clear) are
+/// verified stable across the stamp.
+pub(in crate::services::discord) fn save_inflight_state_if_identity_matches_allow_output_restamp(
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    save_inflight_state_if_identity_matches_allow_output_restamp_in_root(&root, state, caller)
+}
+
+pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    save_inflight_state_identity_gated_in_root(root, state, caller, true)
+}
+
+fn save_inflight_state_identity_gated_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+    allow_output_restamp: bool,
+) -> GuardedSaveOutcome {
     let Some(provider) = state.provider_kind() else {
         return GuardedSaveOutcome::IoError;
     };
@@ -62,7 +109,7 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_un
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if on_disk.output_path != state.output_path {
+    if !allow_output_restamp && on_disk.output_path != state.output_path {
         tracing::info!(
             provider = %provider.as_str(),
             channel_id = state.channel_id,

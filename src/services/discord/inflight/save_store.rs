@@ -24,17 +24,21 @@ pub(in crate::services::discord) use self::identity_gate::{
     recovery_anchor_msg_id_if_matches_identity,
     save_existing_inflight_rebind_adoption_if_matches_identity,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
-    save_inflight_delivery_rewind_if_matches_identity, save_inflight_state_if_identity_unchanged,
-    save_inflight_state_if_matches_identity,
+    save_inflight_delivery_rewind_if_matches_identity,
+    save_inflight_state_if_identity_matches_allow_output_restamp,
+    save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
 };
 
-#[cfg(test)]
-use self::identity_gate::save_inflight_state_if_identity_unchanged_in_root;
 #[cfg(test)]
 pub(super) use self::identity_gate::{
     save_existing_inflight_rebind_adoption_if_matches_identity_in_root,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root,
     save_inflight_state_if_matches_identity_in_root,
+};
+#[cfg(test)]
+use self::identity_gate::{
+    save_inflight_state_if_identity_matches_allow_output_restamp_in_root,
+    save_inflight_state_if_identity_unchanged_in_root,
 };
 
 /// Blind whole-blob write of `InflightTurnState`: serializes the ENTIRE row and
@@ -473,6 +477,89 @@ mod tests {
             "legitimate id-0 TUI-direct turns with a turn_start_offset still own the row"
         );
         assert_eq!(persisted.response_sent_offset, state.response_sent_offset);
+    }
+
+    // #4259 PR-2a rework (codex r1): a warm follow-up runtime handoff
+    // legitimately re-points `output_path` at the resolved legacy /tmp session
+    // path — the restamp variant must accept the same-identity restamp and land
+    // the NEW path, where `_if_identity_unchanged` would decline it.
+    #[test]
+    fn output_restamp_save_persists_new_output_path_when_identity_matches() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let mut state = state_with_full_response(44_090, "seeded", "AgentDesk-codex-restamp-4259");
+        save_inflight_state_in_root(temp.path(), &state).expect("seed intake-path row");
+
+        let seeded_output_path = state.output_path.clone();
+        state.output_path = Some("/tmp/legacy/AgentDesk-codex-restamp-4259.jsonl".to_string());
+        state.last_offset = 4096;
+        assert_ne!(
+            state.output_path, seeded_output_path,
+            "fixture must exercise a genuine output_path restamp"
+        );
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged_in_root(
+                temp.path(),
+                &state,
+                "test::output_restamp_strict_variant_declines",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "the strict variant must keep declining output_path drift"
+        );
+        assert_eq!(
+            save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
+                temp.path(),
+                &state,
+                "test::output_restamp_saves",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+
+        let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
+        )
+        .expect("parse persisted inflight");
+        assert_eq!(
+            persisted.output_path.as_deref(),
+            Some("/tmp/legacy/AgentDesk-codex-restamp-4259.jsonl"),
+            "restamped output_path must land"
+        );
+        assert_eq!(persisted.last_offset, 4096);
+    }
+
+    // #4259 PR-2a rework (codex r1): the restamp variant still pins the 4-field
+    // turn identity — a row re-owned by another turn is never clobbered.
+    #[test]
+    fn output_restamp_save_declines_when_another_turn_owns_the_row() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let mut owner =
+            state_with_full_response(44_091, "owner response", "AgentDesk-codex-restamp-own-4259");
+        owner.user_msg_id = 88_001;
+        save_inflight_state_in_root(temp.path(), &owner).expect("seed re-owned row");
+
+        let mut stale =
+            state_with_full_response(44_091, "stale snapshot", "AgentDesk-codex-restamp-own-4259");
+        stale.user_msg_id = 77_010;
+        stale.output_path = Some("/tmp/legacy/AgentDesk-codex-restamp-own-4259.jsonl".to_string());
+        assert_eq!(
+            save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
+                temp.path(),
+                &stale,
+                "test::output_restamp_identity_mismatch_skips",
+            ),
+            GuardedSaveOutcome::IdentityMismatch
+        );
+
+        let persisted_path = inflight_state_path(temp.path(), &provider, owner.channel_id);
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
+        )
+        .expect("parse persisted inflight");
+        assert_eq!(persisted.user_msg_id, 88_001);
+        assert_eq!(persisted.full_response, "owner response");
+        assert_eq!(persisted.output_path, owner.output_path);
     }
 
     #[test]

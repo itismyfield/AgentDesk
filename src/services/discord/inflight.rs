@@ -139,6 +139,7 @@ pub(in crate::services::discord) use self::save_store::{
     recovery_anchor_msg_id_if_matches_identity,
     save_existing_inflight_rebind_adoption_if_matches_identity,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
+    save_inflight_state_if_identity_matches_allow_output_restamp,
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
 };
 // Explicit-root save seams reached only by the parent's / siblings' test modules.

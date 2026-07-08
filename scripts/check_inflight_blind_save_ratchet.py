@@ -52,8 +52,9 @@ from pathlib import Path
 # call sites permitted under src/services/discord. Lower this as sites convert
 # to the identity-guarded variant; never raise it casually.
 #
-# #4259 PR-1 baseline = 29. Track decomposition (convert + lower per PR-2..N):
-#   turn_bridge/runtime_handoff_loop.rs .. 9
+# #4259 PR-1 baseline = 29; PR-2a lowered to 26. Track decomposition
+# (convert + lower per PR-2..N):
+#   turn_bridge/runtime_handoff_loop.rs .. 6  (PR-2a: 3 of 9 converted)
 #   turn_bridge/stream_tick.rs .......... 5
 #   turn_bridge/stream_loop.rs .......... 2
 #   turn_bridge/post_loop_finalize.rs ... 4
@@ -62,7 +63,20 @@ from pathlib import Path
 #     (headless_turn, intake_turn, provider_isolation, watchdog,
 #      session_runtime/worktree, tui_prompt_relay/synthetic_start x2,
 #      tui_prompt_relay/codex_idle_rollout)
-BASELINE = 29
+#
+# #4259 PR-2a: the 3 converted runtime_handoff_loop sites are the legacy
+# tmux-wrapper `TmuxReady` stamps, converted to
+# `save_inflight_state_if_identity_matches_allow_output_restamp` (codex r1):
+# the 4-field turn identity is stable across the stamp (declines only on
+# concurrent re-own), while `output_path` may legitimately restamp to the
+# resolved legacy /tmp session path on a warm follow-up
+# (`resolve_session_temp_path`). The 6 that REMAIN blind (RuntimeReady
+# ProcessBackend/ClaudeEAdapter/ClaudeTui/CodexTui + ProcessReady + the
+# watcher-handoff helper) also (re)write identity-pinned `tmux_session_name`
+# (ClaudeEAdapter clears it to None) — beyond what the output-restamp variant
+# tolerates — so each needs per-flow session-name-stability verification or an
+# adoption-aware variant before converting. Held for a follow-up PR.
+BASELINE = 26
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 
