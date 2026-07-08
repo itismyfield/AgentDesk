@@ -994,7 +994,7 @@
 | `utils::wip_detect` | `src/utils/wip_detect.rs` | 237 | 106 | 131 |  |
 | `voice` | `src/voice/mod.rs` | 21 | 21 | 0 |  |
 | `voice::announce_meta` | `src/voice/announce_meta.rs` | 1979 | 1001 | 978 | giant-file |
-| `voice::barge_in` | `src/voice/barge_in.rs` | 937 | 592 | 345 |  |
+| `voice::barge_in` | `src/voice/barge_in.rs` | 995 | 598 | 397 |  |
 | `voice::cancel_tombstone` | `src/voice/cancel_tombstone.rs` | 274 | 147 | 127 |  |
 | `voice::commands` | `src/voice/commands.rs` | 860 | 548 | 312 |  |
 | `voice::config` | `src/voice/config.rs` | 627 | 392 | 235 |  |
