@@ -340,6 +340,30 @@ pub(super) fn task_tool_slot_is_in_progress(slot: &TaskToolSlot) -> bool {
     !task_tool_slot_is_terminal(slot)
 }
 
+/// #4093: renders the LIVE status panel's `Tasks` section for `tasks`, or `None`
+/// when nothing should render. Only in-progress slots are shown (completed /
+/// failed rows are hidden so they can never mask active work), newest first,
+/// capped at `STATUS_PANEL_TASK_LIMIT` over the FILTERED set, then run through
+/// the #3404 terminal-slot compaction. Returns `None` when no in-progress task
+/// survives so the caller emits no dangling `Tasks` header. Colocated here (not
+/// in `status_panel.rs`) so task-slot rendering concerns live with the task-slot
+/// model; the completion footer keeps its own terminal-aware task rendering.
+pub(super) fn render_live_tasks_section(tasks: &[TaskToolSlot]) -> Option<String> {
+    if tasks.is_empty() {
+        return None;
+    }
+    let lines = tasks
+        .iter()
+        .rev()
+        .filter(|slot| task_tool_slot_is_in_progress(slot))
+        .take(super::common::STATUS_PANEL_TASK_LIMIT)
+        .map(render_task_tool_slot)
+        .collect::<Vec<_>>();
+    let lines = super::completion_footer::compact_live_panel_terminal_lines(&lines)
+        .map_or(lines, |(out, _)| out); // #3404 cap
+    (!lines.is_empty()).then(|| format!("Tasks\n{}", lines.join("\n")))
+}
+
 /// #3391: stable slot identity for delivered-terminal eviction. Background
 /// tasks key on their `tool_use_id`, Task-tool slots on their `task_id`, and
 /// any slot lacking both falls back to the never-reused `ordinal`. The ordinal
