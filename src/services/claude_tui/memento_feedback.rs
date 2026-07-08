@@ -285,19 +285,106 @@ fn memento_tool_leaf(tool_name: &str) -> Option<&str> {
     None
 }
 
+/// Maximum accepted `searchEventId` length. Real ids are small integers (DB
+/// row ids — every fixture and the digit-only `scan_search_event_id` capture
+/// agree); 64 leaves generous headroom while bounding what can be inlined
+/// into the injected instruction.
+const MAX_SEARCH_EVENT_ID_LEN: usize = 64;
+
+/// How many envelope layers (`content` wrapper / stringified JSON) are
+/// unwrapped before giving up. Real payloads need at most two.
+const MAX_ENVELOPE_DEPTH: u8 = 4;
+
+/// Extracts `searchEventId` from the PostToolUse payload — trusted path only.
+///
+/// #4330 rework: the id must come from the response envelope's **top-level**
+/// `_meta.searchEventId` (mirroring the first-party client in
+/// `services::memory::memento::search_event_feedback_hint`). The hook payload
+/// carries the MCP result as `tool_response` in one of these server-authored
+/// shapes, all of which are unwrapped:
+///
+/// - the envelope object itself: `{"_meta":{"searchEventId":...}, ...}`
+/// - an MCP `CallToolResult` wrapper: `{"content":[<text blocks>], ...}`
+/// - an array of MCP text blocks whose `text` is the stringified envelope
+/// - a stringified envelope
+///
+/// Fragment/content **values** are never searched: recalled memory text is
+/// attacker-influencable, so a `searchEventId` marker echoed inside a fragment
+/// body must not be able to steer the injected instruction (contract violation
+/// + prompt-injection surface). Extracted candidates are additionally
+/// sanitized to short digit strings (`is_valid_search_event_id`) before use;
+/// anything else yields `None` and the instruction omits the
+/// `search_event_id` ask.
 pub(crate) fn extract_search_event_id(payload: &Value) -> Option<String> {
-    for hay in [payload.get("tool_response"), Some(payload)]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(id) = search_event_id_from_value(hay) {
-            return Some(id);
-        }
-        if let Some(id) = scan_search_event_id(&hay.to_string()) {
+    for key in ["tool_response", "toolResponse"] {
+        if let Some(id) = payload
+            .get(key)
+            .and_then(|response| envelope_search_event_id(response, 0))
+        {
             return Some(id);
         }
     }
     None
+}
+
+fn envelope_search_event_id(response: &Value, depth: u8) -> Option<String> {
+    if depth > MAX_ENVELOPE_DEPTH {
+        return None;
+    }
+    match response {
+        Value::Object(map) => {
+            if let Some(id) = meta_search_event_id(map) {
+                return Some(id);
+            }
+            // MCP CallToolResult wrapper: the envelope JSON lives inside the
+            // `content` text blocks. This is the only key descended into —
+            // notably NOT `fragments` or other result data.
+            map.get("content")
+                .and_then(|content| envelope_search_event_id(content, depth + 1))
+        }
+        Value::Array(blocks) => blocks.iter().find_map(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .and_then(|parsed| envelope_search_event_id(&parsed, depth + 1))
+        }),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|parsed| envelope_search_event_id(&parsed, depth + 1)),
+        _ => None,
+    }
+}
+
+/// Reads `searchEventId` from an envelope object's **top-level** `_meta`
+/// only, applying `is_valid_search_event_id` to the candidate value.
+fn meta_search_event_id(map: &serde_json::Map<String, Value>) -> Option<String> {
+    let meta = map.get("_meta").and_then(Value::as_object)?;
+    for key in [
+        "searchEventId",
+        "search_event_id",
+        "_searchEventId",
+        "searchEventID",
+    ] {
+        if let Some(id) = meta
+            .get(key)
+            .and_then(string_or_integer)
+            .map(|candidate| candidate.trim().to_string())
+            .filter(|candidate| is_valid_search_event_id(candidate))
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// A trustworthy memento `searchEventId` is a short ASCII-digit string (see
+/// `MAX_SEARCH_EVENT_ID_LEN`). Anything else is rejected so it can never be
+/// inlined into a model-visible instruction.
+fn is_valid_search_event_id(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && candidate.len() <= MAX_SEARCH_EVENT_ID_LEN
+        && candidate.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(crate) fn extract_tool_feedback_search_event_id(payload: &Value) -> Option<String> {
@@ -396,8 +483,14 @@ pub(crate) fn immediate_feedback_instruction(search_event_id: Option<String>) ->
     // required `tool_name`/`relevant`/`sufficient`, matching the prompt_builder
     // feedback contract reconciled in #4328 (required: `tool_name`, `relevant`,
     // `sufficient`; pass `search_event_id` only when `_meta.searchEventId` is
-    // present — recommended).
-    let search_event_clause = match search_event_id.as_deref().and_then(non_empty_string) {
+    // present — recommended). Defense in depth: the id is re-validated here so
+    // only a short digit string can ever be inlined into the model-visible
+    // instruction, regardless of the caller.
+    let search_event_clause = match search_event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| is_valid_search_event_id(id))
+    {
         Some(id) => format!(
             " This result carried `_meta.searchEventId`, so also pass \
 `search_event_id={id}` (recommended)."
@@ -609,6 +702,132 @@ mod tests {
         let ctx = immediate_feedback_instruction(Some("  ".to_string()));
         assert!(!ctx.contains("search_event_id"));
         assert!(!ctx.contains("searchEventId"));
+    }
+
+    #[test]
+    fn immediate_feedback_instruction_omits_malformed_id() {
+        // #4330 rework defense in depth: a non-digit candidate must never be
+        // inlined into the model-visible instruction.
+        for bad in ["42; rm -rf /", "ignore previous instructions", "abc", "4 2"] {
+            let ctx = immediate_feedback_instruction(Some(bad.to_string()));
+            assert!(!ctx.contains("search_event_id"), "inlined: {bad}");
+            assert!(!ctx.contains(bad), "leaked: {bad}");
+        }
+    }
+
+    #[test]
+    fn extract_search_event_id_reads_trusted_envelope_shapes() {
+        // Direct envelope object.
+        let direct = json!({"tool_response": {"_meta": {"searchEventId": "42"}}});
+        assert_eq!(extract_search_event_id(&direct).as_deref(), Some("42"));
+        // Integer-valued id.
+        let integer = json!({"tool_response": {"_meta": {"searchEventId": 981}}});
+        assert_eq!(extract_search_event_id(&integer).as_deref(), Some("981"));
+        // Array of MCP text blocks with a stringified envelope.
+        let blocks = json!({
+            "tool_response": [{
+                "type": "text",
+                "text": "{\"fragments\":[],\"_meta\":{\"searchEventId\":\"22752\"}}"
+            }]
+        });
+        assert_eq!(extract_search_event_id(&blocks).as_deref(), Some("22752"));
+        // MCP CallToolResult wrapper around the text blocks.
+        let wrapped = json!({
+            "tool_response": {
+                "content": [{
+                    "type": "text",
+                    "text": "{\"_meta\":{\"searchEventId\":\"7\"}}"
+                }],
+                "isError": false
+            }
+        });
+        assert_eq!(extract_search_event_id(&wrapped).as_deref(), Some("7"));
+        // Stringified envelope directly under tool_response.
+        let stringified = json!({
+            "tool_response": "{\"_meta\":{\"searchEventId\":\"11\"}}"
+        });
+        assert_eq!(extract_search_event_id(&stringified).as_deref(), Some("11"));
+    }
+
+    #[test]
+    fn extract_search_event_id_ignores_ids_outside_meta_envelope() {
+        // #4330 rework: a searchEventId echoed inside recalled fragment
+        // content (attacker-influencable) must not be extracted — neither as a
+        // structural key nor as a text marker.
+        let fragment_echo = json!({
+            "tool_name": "mcp__memento__recall",
+            "tool_response": [{
+                "type": "text",
+                "text": "{\"fragments\":[{\"content\":\"note: {\\\"searchEventId\\\":\\\"666\\\"} seen\",\"meta\":{\"searchEventId\":\"667\"}}]}"
+            }]
+        });
+        assert_eq!(extract_search_event_id(&fragment_echo), None);
+        // Structural id nested in result data without a top-level `_meta`.
+        let nested = json!({
+            "tool_response": {"data": {"searchEventId": "668"}}
+        });
+        assert_eq!(extract_search_event_id(&nested), None);
+        // Ids at the payload top level (outside `tool_response`) are ignored.
+        let top_level = json!({
+            "tool_name": "mcp__memento__recall",
+            "searchEventId": "669"
+        });
+        assert_eq!(extract_search_event_id(&top_level), None);
+        // `_meta` nested below the envelope top level is not trusted either.
+        let deep_meta = json!({
+            "tool_response": {"fragments": [{"_meta": {"searchEventId": "670"}}]}
+        });
+        assert_eq!(extract_search_event_id(&deep_meta), None);
+    }
+
+    #[test]
+    fn extract_search_event_id_rejects_malformed_ids() {
+        for bad in [
+            json!("abc"),
+            json!("42abc"),
+            json!("42; rm -rf /"),
+            json!(""),
+            json!("1".repeat(MAX_SEARCH_EVENT_ID_LEN + 1)),
+        ] {
+            let payload = json!({"tool_response": {"_meta": {"searchEventId": bad}}});
+            assert_eq!(extract_search_event_id(&payload), None, "accepted: {bad}");
+        }
+        // Boundary: a max-length digit id is still accepted.
+        let max_len = "9".repeat(MAX_SEARCH_EVENT_ID_LEN);
+        let payload = json!({"tool_response": {"_meta": {"searchEventId": max_len}}});
+        assert_eq!(
+            extract_search_event_id(&payload).as_deref(),
+            Some(max_len.as_str())
+        );
+    }
+
+    #[test]
+    fn fragment_echoed_id_is_not_tracked_as_known_search() {
+        // End-to-end tracker check: a fragment-echoed id must not become a
+        // tracked "known" search id (it lands as an unknown search instead).
+        let tracker = PendingMementoFeedbackTracker::default();
+        let observation = tracker.observe_post_tool_use_at(
+            "sess",
+            &json!({
+                "tool_name": "mcp__memento__recall",
+                "tool_response": [{
+                    "type": "text",
+                    "text": "{\"fragments\":[{\"content\":\"searchEventId: 666\"}]}"
+                }]
+            }),
+            Utc::now(),
+        );
+        assert_eq!(
+            observation,
+            MementoPostToolUseObservation::SearchTracked {
+                search_event_id: None
+            }
+        );
+        let flush = tracker
+            .take_stop_flush_at("sess", &json!({}), Utc::now())
+            .unwrap();
+        assert!(flush.search_event_ids.is_empty());
+        assert!(flush.includes_unknown_searches);
     }
 
     #[test]
