@@ -750,6 +750,15 @@ jobs:
       - name: Hotfile LOC ratchet (always, #3565)
         run: python3 scripts/check_hotfile_ratchet.py
 
+      # Blind `save_inflight_state(` write ratchet (#4259) runs UNCONDITIONALLY
+      # for the same reason as the hotfile ratchet above: it must NOT inherit
+      # the `ci_relax_safe` skip on "Run script checks". Sealing the blind
+      # whole-blob write is pointless if a relax branch can add a new blind
+      # caller and merge before main CI catches it. This standalone step keeps
+      # the monotonic blind-write ceiling in force for every branch, no skip gate.
+      - name: Inflight blind-save ratchet (always, #4259)
+        run: python3 scripts/check_inflight_blind_save_ratchet.py
+
       - name: Upload maintainability audit artifact
         if: always()
         uses: actions/upload-artifact@v4

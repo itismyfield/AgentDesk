@@ -37,53 +37,18 @@ pub(super) use self::identity_gate::{
     save_inflight_state_if_matches_identity_in_root,
 };
 
-// Direct production callers of `save_inflight_state` remain intentionally broad
-// while #4111 narrows three RMW sites. Starting inventory for a future
-// write-API restriction, generated with `rg -n "save_inflight_state\("
-// src/services/discord` and excluding test-only surfaces: files/modules named
-// `tests.rs` / `*_tests.rs` and any `#[cfg(test)]` or `#[cfg(all(test, unix))]`
-// test modules are not production call sites. Current production inventory: 40
-// callers.
-// - src/services/discord/router/message_handler/headless_turn.rs:1071
-// - src/services/discord/router/message_handler/intake_turn.rs:2515
-// - src/services/discord/router/message_handler/provider_isolation.rs:460
-// - src/services/discord/router/message_handler/watchdog.rs:822
-// - src/services/discord/session_runtime/worktree.rs:599
-// - src/services/discord/tui_prompt_relay/codex_idle_rollout.rs:140
-// - src/services/discord/tui_prompt_relay/synthetic_start.rs:297
-// - src/services/discord/tui_prompt_relay/synthetic_start.rs:344
-// - src/services/discord/turn_bridge/mod.rs:1094
-// - src/services/discord/turn_bridge/mod.rs:1139
-// - src/services/discord/turn_bridge/mod.rs:1161
-// - src/services/discord/turn_bridge/mod.rs:1650
-// - src/services/discord/turn_bridge/mod.rs:1694
-// - src/services/discord/turn_bridge/mod.rs:2531
-// - src/services/discord/turn_bridge/mod.rs:2987
-// - src/services/discord/turn_bridge/mod.rs:3040
-// - src/services/discord/turn_bridge/mod.rs:3064
-// - src/services/discord/turn_bridge/mod.rs:3239
-// - src/services/discord/turn_bridge/mod.rs:3270
-// - src/services/discord/turn_bridge/mod.rs:3300
-// - src/services/discord/turn_bridge/mod.rs:3704
-// - src/services/discord/turn_bridge/mod.rs:3725
-// - src/services/discord/turn_bridge/mod.rs:3735
-// - src/services/discord/turn_bridge/mod.rs:3774
-// - src/services/discord/turn_bridge/mod.rs:3829
-// - src/services/discord/turn_bridge/mod.rs:3851
-// - src/services/discord/turn_bridge/mod.rs:3868
-// - src/services/discord/turn_bridge/mod.rs:3897
-// - src/services/discord/turn_bridge/mod.rs:3929
-// - src/services/discord/turn_bridge/mod.rs:4500
-// - src/services/discord/turn_bridge/mod.rs:4524
-// - src/services/discord/turn_bridge/mod.rs:4537
-// - src/services/discord/turn_bridge/mod.rs:4549
-// - src/services/discord/turn_bridge/mod.rs:5536
-// - src/services/discord/turn_bridge/mod.rs:6330
-// - src/services/discord/turn_bridge/mod.rs:6374
-// - src/services/discord/turn_bridge/retry_state.rs:328
-// - src/services/discord/turn_bridge/two_message_panel.rs:205
-// - src/services/discord/turn_bridge/watcher_handoff.rs:427
-// - src/services/discord/turn_bridge/watcher_handoff.rs:451
+/// Blind whole-blob write of `InflightTurnState`: serializes the ENTIRE row and
+/// clobbers whatever is on disk, with no compare-and-set on turn identity.
+///
+/// SEALED (#4259) — do not add new callers. A concurrent turn that legitimately
+/// re-owns the channel between a caller's snapshot and this write is silently
+/// overwritten. For any new site use the drop-in guarded variant
+/// `save_inflight_state_if_identity_unchanged` (save_store/identity_gate.rs),
+/// which refuses that race and returns a `GuardedSaveOutcome`. The remaining
+/// blind callers are tracked as a monotonically-decreasing ceiling by
+/// `scripts/check_inflight_blind_save_ratchet.py` — that ratchet is the living
+/// inventory that replaced the stale hand-maintained line-number list, and its
+/// BASELINE is lowered per track as #4259 PR-2..N convert the sites.
 pub(in crate::services::discord) fn save_inflight_state(
     state: &InflightTurnState,
 ) -> Result<(), String> {

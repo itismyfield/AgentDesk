@@ -68,6 +68,10 @@ echo "=== Discord log field-key drift guard (#4218) ==="
 "$PYTHON" scripts/check_log_key_drift.py
 "$PYTHON" -m unittest tests.test_log_key_drift
 
+echo "=== Inflight blind-save ratchet guard (#4259) ==="
+"$PYTHON" scripts/check_inflight_blind_save_ratchet.py
+"$PYTHON" -m unittest tests.test_inflight_blind_save_ratchet
+
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
 
