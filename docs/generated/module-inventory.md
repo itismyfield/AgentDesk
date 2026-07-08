@@ -629,7 +629,7 @@
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 522 | 522 | 0 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 893 | 301 | 592 |  |
 | `services::discord::runtime_bootstrap::framework_setup` | `src/services/discord/runtime_bootstrap/framework_setup.rs` | 350 | 326 | 24 |  |
-| `services::discord::runtime_bootstrap::gateway_lease` | `src/services/discord/runtime_bootstrap/gateway_lease.rs` | 696 | 549 | 147 |  |
+| `services::discord::runtime_bootstrap::gateway_lease` | `src/services/discord/runtime_bootstrap/gateway_lease.rs` | 587 | 587 | 0 |  |
 | `services::discord::runtime_bootstrap::gateway_runtime` | `src/services/discord/runtime_bootstrap/gateway_runtime.rs` | 148 | 148 | 0 |  |
 | `services::discord::runtime_bootstrap::intake` | `src/services/discord/runtime_bootstrap/intake.rs` | 83 | 83 | 0 |  |
 | `services::discord::runtime_bootstrap::orphan_recovery` | `src/services/discord/runtime_bootstrap/orphan_recovery.rs` | 336 | 336 | 0 |  |
