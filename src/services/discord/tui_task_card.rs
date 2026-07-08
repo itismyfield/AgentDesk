@@ -266,16 +266,27 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
         // summaries stay readable (Discord renders multi-line bold fine). Still
         // escapes the ``` fence hazard. The footer/preview slots below keep using
         // `sanitize_oneline` so they remain compact single-line cells.
-        lines.push(format!("**{}**", sanitize_multiline(summary)));
+        // #4338: decode one layer of harness XML-escaping first, once, so a literal
+        // `&`/`<`/`>` in the summary renders as itself rather than `&amp;`/`&lt;`.
+        lines.push(format!(
+            "**{}**",
+            sanitize_multiline(&decode_entities_once(summary))
+        ));
     }
 
     if let Some(result) = note.result.as_deref().filter(|s| !s.is_empty()) {
-        let body = render_result_preview(result, update_count > 1);
+        // #4338: decode ONE layer of harness XML-escaping up front so the preview,
+        // the JSON-shape summary, and PR-URL extraction all operate on the same
+        // human-facing text (`&amp;provider` → `&provider`). Doing it once here
+        // (not per sub-step) keeps the card a pure, idempotent function of the
+        // payload — a streaming edit re-renders byte-identical.
+        let result = decode_entities_once(result);
+        let body = render_result_preview(&result, update_count > 1);
         if !body.is_empty() {
             lines.push(String::new());
             lines.push(body);
         }
-        for url in extract_pr_urls(result) {
+        for url in extract_pr_urls(&result) {
             lines.push(format!("🔗 {url}"));
         }
     }
@@ -677,6 +688,10 @@ fn extract_pr_urls(result: &str) -> Vec<String> {
 
 /// Collapse a value to a single line and strip Discord-fence/markup hazards for
 /// inline rendering.
+///
+/// NOTE: does NOT decode entities — that is a per-field concern applied once at
+/// the point each prose field enters the card (#4338). This helper runs per
+/// preview LINE, so decoding here would double-decode an already-decoded result.
 fn sanitize_oneline(value: &str) -> String {
     value
         .replace('\r', " ")
@@ -693,6 +708,79 @@ fn sanitize_multiline(value: &str) -> String {
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .replace("```", "` ` `")
+}
+
+/// #4338: decode EXACTLY ONE layer of XML/HTML entity escaping from a
+/// task-notification prose field before it is rendered into a Discord card.
+///
+/// Background: Claude Code / Codex XML-escape the free-form `<summary>`/`<result>`
+/// prose when they inject the `<task-notification>` envelope, so a subagent
+/// report's literal `&`, `<`, `>` arrives as `&amp;`, `&lt;`, `&gt;`. Discord does
+/// not decode HTML entities, so without this the entities leak as literal text
+/// (`&provider` shown as `&amp;provider`). AgentDesk never re-escapes on the card
+/// path — both the first post and every streaming edit rebuild the card from the
+/// raw payload — so the fix is a single decode at render, the inverse of the
+/// harness's single escape pass.
+///
+/// We remove EXACTLY one layer: a source that was already escaped once (an agent
+/// quoting an already-broken card) keeps its remaining literal `&amp;`, and a
+/// re-render of the same payload is byte-identical (idempotent per payload). A
+/// single left-to-right scan that never re-examines emitted output guarantees the
+/// single-layer property independent of entity ordering (`&amp;lt;` → `&lt;`, not
+/// `<`). Unrecognized `&…;` sequences and bare `&` pass through verbatim.
+fn decode_entities_once(input: &str) -> String {
+    // Fast path: nothing to decode (also preserves exact bytes for the common
+    // no-entity case).
+    if !input.contains('&') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        if let Some(semi) = after.find(';') {
+            let body = &after[..semi];
+            if !body.is_empty() && body.len() <= MAX_ENTITY_BODY_LEN {
+                if let Some(ch) = decode_entity_body(body) {
+                    out.push(ch);
+                    rest = &after[semi + 1..];
+                    continue;
+                }
+            }
+        }
+        // Not a recognized entity: emit the literal '&' and advance past it.
+        out.push('&');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Longest entity body we decode (between `&` and `;`). Covers the named refs
+/// (`quot`/`apos`, 4 chars) and the widest numeric ref (`#x10FFFF`, 8 chars) with
+/// slack for zero-padded decimals; anything longer is treated as literal text.
+const MAX_ENTITY_BODY_LEN: usize = 10;
+
+/// Decode a single entity body (the text between `&` and `;`) to its character,
+/// or `None` if it is not a recognized named/numeric reference.
+fn decode_entity_body(body: &str) -> Option<char> {
+    match body {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => {
+            let num = body.strip_prefix('#')?;
+            let code = if let Some(hex) = num.strip_prefix(['x', 'X']) {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                num.parse::<u32>().ok()?
+            };
+            char::from_u32(code)
+        }
+    }
 }
 
 /// Char-bounded truncation appending `...` (ASCII) on overflow. Shared with the
@@ -1153,6 +1241,108 @@ mod tests {
         let parsed = parse_task_notification(raw);
         assert_eq!(parsed.status.as_deref(), Some("completed"));
         assert_eq!(parsed.summary.as_deref(), Some("hi"));
+    }
+
+    // #4338: unit-level guarantees for the entity decoder — single layer,
+    // order-independent, numeric refs, and bare/unknown `&` passthrough.
+    #[test]
+    fn decode_entities_once_is_single_layer_and_order_independent() {
+        assert_eq!(decode_entities_once("&amp;provider"), "&provider");
+        assert_eq!(decode_entities_once("&lt;expr&gt;"), "<expr>");
+        assert_eq!(
+            decode_entities_once("&quot;q&quot; &apos;a&apos;"),
+            "\"q\" 'a'"
+        );
+        // `&amp;lt;` is an escaped `&lt;`; one decode yields `&lt;`, NOT `<`.
+        assert_eq!(decode_entities_once("&amp;lt;"), "&lt;");
+        assert_eq!(decode_entities_once("&amp;amp;x"), "&amp;x");
+        // Numeric (decimal + hex) references.
+        assert_eq!(decode_entities_once("&#38;&#60;&#62;"), "&<>");
+        assert_eq!(decode_entities_once("&#x26;&#x3c;&#X3E;"), "&<>");
+        // Bare `&`, unknown entities, and entity-free text pass through untouched.
+        assert_eq!(decode_entities_once("Tom & Jerry"), "Tom & Jerry");
+        assert_eq!(decode_entities_once("a &nope; b"), "a &nope; b");
+        assert_eq!(decode_entities_once("100% & <ok>"), "100% & <ok>");
+        assert_eq!(decode_entities_once("no entities here"), "no entities here");
+        // A `&` whose nearest `;` is far away with an invalid body stays literal,
+        // and a real entity later in the string still decodes.
+        assert_eq!(decode_entities_once("A & B; C &amp; D"), "A & B; C & D");
+    }
+
+    // #4338: the completion card must render a subagent report's literal
+    // `&`/`<`/`>` — XML-escaped by the harness into the `<task-notification>`
+    // envelope — as the ORIGINAL characters, not as leaked entities.
+    #[test]
+    fn card_decodes_harness_xml_escaped_prose_once() {
+        let note = parse_task_notification(&payload(&[
+            ("task-id", "aa37b21a7adafc7c0"),
+            ("status", "completed"),
+            ("summary", "Agent \"use &lt;expr&gt;\" completed"),
+            (
+                "result",
+                "Uses `&amp;provider` and a generic `&lt;T&gt;` bound.",
+            ),
+        ]));
+        let card = format_task_notification_card(&note, 1);
+        // Decoded original characters are present …
+        assert!(
+            card.contains("use <expr>"),
+            "summary must decode <>: {card}"
+        );
+        assert!(card.contains("&provider"), "result must decode &: {card}");
+        assert!(
+            card.contains("<T>"),
+            "result must decode generic bound: {card}"
+        );
+        // … and no escaped literal leaks (the visible #4338 bug).
+        assert!(!card.contains("&amp;"), "must not leak &amp;: {card}");
+        assert!(!card.contains("&lt;"), "must not leak &lt;: {card}");
+        assert!(!card.contains("&gt;"), "must not leak &gt;: {card}");
+    }
+
+    // #4338: removing EXACTLY one layer. A source escaped twice (an agent quoting
+    // an already-broken card, re-escaped by the harness) keeps its own literal
+    // `&amp;` — we invert only the harness's single pass, never over-decode text
+    // an agent genuinely wrote about entities.
+    #[test]
+    fn card_decode_removes_exactly_one_escape_layer() {
+        let note = parse_task_notification(&payload(&[
+            ("status", "completed"),
+            (
+                "result",
+                "quoted `&amp;amp;provider` and `&amp;lt;expr&amp;gt;`",
+            ),
+        ]));
+        let card = format_task_notification_card(&note, 1);
+        assert!(card.contains("&amp;provider"), "one layer off: {card}");
+        assert!(card.contains("&lt;expr&gt;"), "one layer off: {card}");
+        assert!(
+            !card.contains("&amp;amp;"),
+            "must not remove two layers: {card}"
+        );
+    }
+
+    // #4338: the edit path re-parses the SAME payload and re-renders; decoding one
+    // layer per render keeps the card byte-identical no matter how many times a
+    // streaming update re-fires — no per-edit escape accumulation.
+    #[test]
+    fn card_render_is_invariant_across_streaming_edits() {
+        let raw = payload(&[
+            ("task-id", "aa37b21a7adafc7c0"),
+            ("status", "completed"),
+            ("summary", "Agent \"fix &lt;T&gt;\" completed"),
+            ("result", "Touches `&amp;provider`. See PR."),
+        ]);
+        let first = format_task_notification_card(&parse_task_notification(&raw), 1);
+        let second = format_task_notification_card(&parse_task_notification(&raw), 1);
+        let third = format_task_notification_card(&parse_task_notification(&raw), 1);
+        assert_eq!(first, second, "post vs first edit must be identical");
+        assert_eq!(second, third, "successive edits must be identical");
+        assert!(
+            !first.contains("&amp;provider"),
+            "no leaked entity: {first}"
+        );
+        assert!(first.contains("&provider"), "decoded once: {first}");
     }
 
     // #3075 class 1: single subagent completion → card with summary title +
