@@ -13,6 +13,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
 mod dispatch_reservation;
+mod overflow;
 mod pending_queue_persistence;
 pub(crate) mod registry_purge;
 mod turn_finished_signal;
@@ -31,6 +32,8 @@ use dispatch_reservation::{
     pending_dispatch_lease_is_orphaned, reconcile_pending_dispatch_marker_before_take_next,
     record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
 };
+pub(crate) use overflow::SoftInterventionProbe;
+use overflow::drain_overflow_superseded;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
 use pending_queue_persistence::save_channel_pending_dispatch_marker;
@@ -203,16 +206,7 @@ fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) -> Vec<Qu
     // it (the previous `Expired` retain) lost real user input. Only the
     // MAX_INTERVENTIONS_PER_CHANNEL overflow cap still bounds the queue.
     let _ = now;
-    let mut queue_exit_events = Vec::new();
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue_exit_events.extend(
-            queue
-                .drain(0..overflow)
-                .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded)),
-        );
-    }
-    queue_exit_events
+    drain_overflow_superseded(queue)
 }
 
 fn intervention_age_since(last: &Intervention, current: &Intervention) -> Duration {
@@ -442,14 +436,7 @@ pub(crate) fn enqueue_intervention(
     }
 
     queue.push(intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue_exit_events.extend(
-            queue
-                .drain(0..overflow)
-                .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded)),
-        );
-    }
+    queue_exit_events.extend(drain_overflow_superseded(queue));
     EnqueueInterventionResult {
         enqueued: true,
         merged: false,
@@ -459,14 +446,19 @@ pub(crate) fn enqueue_intervention(
     }
 }
 
-pub(crate) fn has_soft_intervention_at(queue: &mut Vec<Intervention>, now: Instant) -> bool {
+pub(crate) fn has_soft_intervention_at(
+    queue: &mut Vec<Intervention>,
+    now: Instant,
+) -> SoftInterventionProbe {
     // #3177: no age-based eviction — only the overflow cap bounds the queue.
     let _ = now;
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue.drain(0..overflow);
+    // #4260: route the overflow drain through the shared event-producing
+    // primitive instead of a bare `queue.drain(..)`.
+    let queue_exit_events = drain_overflow_superseded(queue);
+    SoftInterventionProbe {
+        has_pending: queue.iter().any(|item| item.mode == InterventionMode::Soft),
+        queue_exit_events,
     }
-    queue.iter().any(|item| item.mode == InterventionMode::Soft)
 }
 
 pub(crate) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> HasPendingSoftQueueResult {
@@ -5289,7 +5281,12 @@ mod no_ttl_evict_tests {
             "no QueueExitEvent should be produced for an old-but-under-cap queue"
         );
         // The soft-queue probe must also keep it.
-        assert!(has_soft_intervention_at(&mut queue, now));
+        let probe = has_soft_intervention_at(&mut queue, now);
+        assert!(probe.has_pending);
+        assert!(
+            probe.queue_exit_events.is_empty(),
+            "an under-cap queue must not evict anything via the probe"
+        );
         assert_eq!(queue.len(), 1);
     }
 
@@ -5315,6 +5312,44 @@ mod no_ttl_evict_tests {
         // The evicted ones are the oldest (lowest message ids).
         assert_eq!(exits[0].intervention.message_id, MessageId::new(1));
         assert_eq!(exits[2].intervention.message_id, MessageId::new(3));
+    }
+
+    /// #4260 regression: the soft-queue probe must NO LONGER drain overflow
+    /// silently — the previous `queue.drain(0..overflow)` here lost queued user
+    /// input with no exit event, so the sink could neither dead-letter nor
+    /// notify. The probe must now surface a `Superseded` event per evicted
+    /// entry (the top-priority silent-loss defect).
+    #[test]
+    fn soft_probe_surfaces_overflow_exit_events() {
+        let now = Instant::now();
+        let mut queue: Vec<Intervention> = (0..(MAX_INTERVENTIONS_PER_CHANNEL as u64 + 2))
+            .map(|i| intervention_at(i + 1, now))
+            .collect();
+
+        let probe = has_soft_intervention_at(&mut queue, now);
+
+        assert_eq!(
+            queue.len(),
+            MAX_INTERVENTIONS_PER_CHANNEL,
+            "overflow cap must still bound the queue"
+        );
+        assert_eq!(
+            probe.queue_exit_events.len(),
+            2,
+            "the 2 oldest evicted entries must surface as exit events, not vanish"
+        );
+        assert!(
+            probe
+                .queue_exit_events
+                .iter()
+                .all(|e| e.kind == QueueExitKind::Superseded),
+            "overflow eviction must be Superseded"
+        );
+        assert_eq!(
+            probe.queue_exit_events[0].intervention.message_id,
+            MessageId::new(1),
+            "the oldest (lowest id) must be the first evicted"
+        );
     }
 }
 

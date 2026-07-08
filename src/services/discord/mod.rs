@@ -45,6 +45,7 @@ mod prompt_builder;
 mod queue_dispatch;
 mod queue_io;
 mod queue_marker;
+mod queue_overflow_dlq;
 mod queue_reactions;
 mod queued_placeholders_store;
 mod reaction_cleanup;
@@ -3237,6 +3238,20 @@ async fn apply_queue_exit_feedback(
     // `queue_exit_drain_queued_placeholders` doc).
     let visible_cards_to_clear =
         queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events).await;
+
+    // #4260: dead-letter every queue-overflow evict (silent-loss vector 2) and,
+    // for evicts that never had a visible placeholder card, enqueue one compact
+    // channel notice. Both run BEFORE the Http guard below: the dead-letter is a
+    // DB write and the notice rides the outbox, so neither needs an Http source.
+    queue_overflow_dlq::record_queue_overflow_dead_letters(shared, channel_id, &queue_exit_events)
+        .await;
+    queue_overflow_dlq::maybe_notify_orphan_queue_overflow(
+        shared,
+        channel_id,
+        &queue_exit_events,
+        &visible_cards_to_clear,
+    )
+    .await;
 
     // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
     // fallback so cluster-standby workers can still rewrite queue-exit

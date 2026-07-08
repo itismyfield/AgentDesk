@@ -104,6 +104,7 @@ src/
 │   ├── meetings.rs
 │   ├── mod.rs
 │   ├── postgres.rs
+│   ├── relay_dead_letter.rs
 │   ├── session_agent_resolution.rs
 │   ├── session_observability.rs
 │   ├── session_status.rs
@@ -287,6 +288,7 @@ src/
 │   ├── maintenance.rs
 │   ├── mod.rs
 │   ├── multinode_regression.rs
+│   ├── outbox_delivery_alert.rs
 │   ├── resource_locks.rs
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
@@ -804,6 +806,7 @@ src/
 │   │   ├── queue_dispatch.rs
 │   │   ├── queue_io.rs
 │   │   ├── queue_marker.rs
+│   │   ├── queue_overflow_dlq.rs
 │   │   ├── queue_reactions.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
@@ -986,6 +989,7 @@ src/
 │   ├── turn_orchestrator/
 │   │   ├── active_source_dedup.rs
 │   │   ├── dispatch_reservation.rs
+│   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── registry_purge.rs
 │   │   └── turn_finished_signal.rs

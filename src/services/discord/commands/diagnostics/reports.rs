@@ -64,7 +64,11 @@ fn normalized_pending_queue(queue: Vec<Intervention>) -> Vec<Intervention> {
 }
 
 fn normalized_pending_queue_at(mut queue: Vec<Intervention>, now: Instant) -> Vec<Intervention> {
-    if crate::services::discord::has_soft_intervention_at(&mut queue, now) {
+    // #4260: this diagnostics path operates on a throwaway CLONE of the live
+    // queue, so any overflow `queue_exit_events` the probe surfaces here are
+    // NOT real losses — the live evict paths already dead-letter + notify their
+    // own drops. Discard them (recording again would double-count).
+    if crate::services::discord::has_soft_intervention_at(&mut queue, now).has_pending {
         queue
     } else {
         Vec::new()

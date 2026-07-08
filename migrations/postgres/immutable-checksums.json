@@ -405,6 +405,11 @@
       "path": "migrations/postgres/0078_session_selector_watermark_raw_id.sql",
       "sha256": "c0f120d145a6300bb73d9a55fcf991f550253ecd988e97c1b835e3b834a970bc",
       "version": 78
+    },
+    {
+      "path": "migrations/postgres/0079_relay_dead_letter.sql",
+      "sha256": "b36edaa1a22ee07137a8911d9a9a39b34a70488228501b23bf08f65e3ce75304",
+      "version": 79
     }
   ],
   "version": 1

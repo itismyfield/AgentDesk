@@ -5,6 +5,7 @@ pub mod dto;
 pub(crate) mod issue_specs;
 pub(crate) mod maintenance;
 pub(crate) mod multinode_regression;
+mod outbox_delivery_alert;
 pub(crate) mod resource_locks;
 pub mod routes;
 pub(crate) mod task_dispatch_claims;
@@ -2148,12 +2149,120 @@ fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction
 
 #[cfg(test)]
 mod message_outbox_retry_tests {
+    use super::outbox_delivery_alert::{
+        OUTBOX_DELIVERY_ALERT_SOURCE, note_terminal_outbox_delivery_failure, outbox_alert_snippet,
+        outbox_alert_target_pg,
+    };
     use super::{
-        MessageOutboxFailureAction, MessageOutboxLeaseUpdateError,
+        MessageOutboxFailureAction, MessageOutboxLeaseUpdateError, PendingMessageOutboxRow,
         is_terminal_turn_delivery_outbox_source, mark_message_outbox_sent_pg,
         message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
     };
     use sqlx::Row as _;
+
+    #[test]
+    fn outbox_alert_snippet_truncates_and_handles_empty() {
+        assert_eq!(outbox_alert_snippet("  hello  "), "hello");
+        assert_eq!(outbox_alert_snippet("   "), "(빈 내용)");
+        let long: String = "a".repeat(200);
+        let snippet = outbox_alert_snippet(&long);
+        assert!(
+            snippet.chars().count() <= 121,
+            "120 content chars + one ellipsis"
+        );
+        assert!(snippet.ends_with('…'));
+    }
+
+    /// #4260 vector 3: a terminal outbox failure enqueues exactly one operator
+    /// card to the `kanban_human_alert_channel_id`, never targets the failing
+    /// destination channel, and the alert card's OWN failure does not recurse.
+    #[tokio::test]
+    async fn terminal_outbox_failure_enqueues_ops_card_and_guards_recursion_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_outbox_delivery_alert",
+            "outbox terminal failure ops alert",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Unconfigured target ⇒ resolver returns None ⇒ no ops card is enqueued.
+        assert!(outbox_alert_target_pg(&pool).await.is_none());
+
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value) VALUES ('kanban_human_alert_channel_id', '555')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed alert channel");
+        assert_eq!(
+            outbox_alert_target_pg(&pool).await.as_deref(),
+            Some("channel:555"),
+            "bare channel id must be normalized to a channel: target"
+        );
+
+        let row = |id: i64, source: &str| PendingMessageOutboxRow {
+            id,
+            target: "channel:123".to_string(),
+            content: "undeliverable body".to_string(),
+            bot: "notify".to_string(),
+            source: source.to_string(),
+            reason_code: None,
+            session_key: Some("sess-1".to_string()),
+            retry_count: 5,
+            claim_owner: "owner".to_string(),
+            claimed_at: chrono::Utc::now(),
+        };
+
+        // A normal (non-alert) source enqueues exactly one ops card.
+        note_terminal_outbox_delivery_failure(&pool, &row(1, "headless_turn"), "500: boom").await;
+        let alert_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM message_outbox
+               WHERE source = $1 AND target = 'channel:555'",
+        )
+        .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
+        .fetch_one(&pool)
+        .await
+        .expect("count alert rows");
+        assert_eq!(alert_count, 1);
+
+        // The alert card's OWN terminal failure must NOT enqueue another card.
+        note_terminal_outbox_delivery_failure(
+            &pool,
+            &row(2, OUTBOX_DELIVERY_ALERT_SOURCE),
+            "500: boom",
+        )
+        .await;
+        let alert_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM message_outbox WHERE source = $1")
+                .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
+                .fetch_one(&pool)
+                .await
+                .expect("count alert rows after recursion guard");
+        assert_eq!(
+            alert_count_after, 1,
+            "the alert source must never recurse into a new card"
+        );
+
+        // The ops card is never sent to the failing destination channel.
+        let to_dest: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM message_outbox
+               WHERE source = $1 AND target = 'channel:123'",
+        )
+        .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
+        .fetch_one(&pool)
+        .await
+        .expect("count destination-directed alert rows");
+        assert_eq!(
+            to_dest, 0,
+            "must not notify the failing destination channel"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 
     #[test]
     fn message_outbox_failure_action_retries_then_fails() {
@@ -2605,6 +2714,20 @@ where
                         row.claimed_at,
                     )
                     .await;
+                    // #4260 silent-loss vector 3: EVERY terminal outbox failure
+                    // (not just terminal turn delivery) is a silently-lost
+                    // message. Surface it — structured warn + quality event +
+                    // per-incident ops card. The destination channel is NOT
+                    // notified (it may be the very channel whose delivery is
+                    // failing). Best-effort; never blocks the outbox loop.
+                    if failed_update.is_ok() {
+                        outbox_delivery_alert::note_terminal_outbox_delivery_failure(
+                            pg_pool,
+                            row,
+                            &error_text,
+                        )
+                        .await;
+                    }
                     // Release only terminal turn-delivery rows, and only if no newer
                     // session heartbeat proves another turn has since taken the channel.
                     if failed_update.is_ok() && is_terminal_turn_delivery_outbox_source(&row.source)
