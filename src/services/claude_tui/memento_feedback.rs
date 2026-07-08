@@ -387,17 +387,31 @@ fn scan_search_event_id_marker(serialized: &str, marker: &str) -> Option<String>
 }
 
 pub(crate) fn immediate_feedback_instruction(search_event_id: Option<String>) -> String {
-    let target = match search_event_id {
-        Some(id) => format!("search_event_id={id}"),
-        None => "the search_event_id shown under `_meta.searchEventId` in that result".to_string(),
+    // #4330: the `search_event_id` ask is conditional on the tool response
+    // actually carrying `_meta.searchEventId`. `recall`/`context` normally
+    // return it, but the hook payload may not surface it (nested/stringified MCP
+    // text), and the fixed defect injected a "submit the searchEventId shown
+    // under `_meta.searchEventId`" line even when the result had none. When we
+    // do have the id we inline it; otherwise the reminder only asks for the
+    // required `tool_name`/`relevant`/`sufficient`, matching the prompt_builder
+    // feedback contract reconciled in #4328 (required: `tool_name`, `relevant`,
+    // `sufficient`; pass `search_event_id` only when `_meta.searchEventId` is
+    // present — recommended).
+    let search_event_clause = match search_event_id.as_deref().and_then(non_empty_string) {
+        Some(id) => format!(
+            " This result carried `_meta.searchEventId`, so also pass \
+`search_event_id={id}` (recommended)."
+        ),
+        None => String::new(),
     };
     format!(
         "Action required: you just received a memento search result. Submit one \
-`mcp__memento__tool_feedback` call immediately for THIS result with \
-{target}, `relevant` = whether any returned fragment was on-topic, and `sufficient` = whether the \
-results were enough to proceed. If `mcp__memento__tool_feedback` is not in your active tools \
-(memento tools are deferred), first load it with ToolSearch query \
-`select:mcp__memento__tool_feedback`, then make the call. Do this now, then continue."
+`mcp__memento__tool_feedback` call immediately for THIS result with the required `tool_name` (the \
+memento search tool you just called), `relevant` = whether any returned fragment was on-topic, and \
+`sufficient` = whether the results were enough to proceed.{search_event_clause} If \
+`mcp__memento__tool_feedback` is not in your active tools (memento tools are deferred), first load \
+it with ToolSearch query `select:mcp__memento__tool_feedback`, then make the call. Do this now, \
+then continue."
     )
 }
 
@@ -559,6 +573,42 @@ mod tests {
                 .take_stop_flush_at("sess", &json!({}), Utc::now())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn immediate_feedback_instruction_inlines_id_when_present() {
+        // #4330: with an extractable searchEventId, the reminder keeps the full
+        // contract (tool_name/relevant/sufficient) and recommends the id inline.
+        let ctx = immediate_feedback_instruction(Some("22752".to_string()));
+        assert!(ctx.contains("search_event_id=22752"));
+        assert!(ctx.contains("_meta.searchEventId"));
+        assert!(ctx.contains("tool_name"));
+        assert!(ctx.contains("relevant"));
+        assert!(ctx.contains("sufficient"));
+        assert!(ctx.contains("mcp__memento__tool_feedback"));
+        assert!(ctx.contains("immediately"));
+    }
+
+    #[test]
+    fn immediate_feedback_instruction_omits_id_when_absent() {
+        // #4330: no searchEventId in the result -> the reminder must not fabricate
+        // a search_event_id ask; only tool_name/relevant/sufficient are required.
+        let ctx = immediate_feedback_instruction(None);
+        assert!(!ctx.contains("search_event_id"));
+        assert!(!ctx.contains("searchEventId"));
+        assert!(ctx.contains("tool_name"));
+        assert!(ctx.contains("relevant"));
+        assert!(ctx.contains("sufficient"));
+        assert!(ctx.contains("mcp__memento__tool_feedback"));
+        assert!(ctx.contains("immediately"));
+    }
+
+    #[test]
+    fn immediate_feedback_instruction_treats_empty_id_as_absent() {
+        // An empty/whitespace id string must fall back to the no-id wording.
+        let ctx = immediate_feedback_instruction(Some("  ".to_string()));
+        assert!(!ctx.contains("search_event_id"));
+        assert!(!ctx.contains("searchEventId"));
     }
 
     #[test]

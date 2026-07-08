@@ -248,8 +248,9 @@ fn memento_search_tool_name(payload: &Value) -> Option<String> {
 /// recall result may be nested inside a stringified MCP text block, so a
 /// structural lookup is unreliable. Scan the serialized `tool_response` (then
 /// the whole payload) for the first integer following the `searchEventId`
-/// marker. Returns `None` when absent — the nudge still fires, just without an
-/// explicit id (the model has the id in its own recall result).
+/// marker. Returns `None` when absent — the nudge still fires, but (per #4330)
+/// without any `search_event_id` ask, since that line is conditional on the
+/// response actually carrying `_meta.searchEventId`.
 fn extract_search_event_id(payload: &Value) -> Option<String> {
     memento_feedback::extract_search_event_id(payload)
 }
@@ -599,18 +600,64 @@ mod tests {
     }
 
     #[test]
-    fn claude_posttooluse_memento_context_injects_even_without_extractable_id() {
-        // tool is a memento search but the payload carries no searchEventId:
-        // still nudge, deferring the id to the model's own recall result.
+    fn claude_posttooluse_memento_context_without_id_omits_search_event_id() {
+        // #4330: tool is a memento search but the payload carries no
+        // searchEventId -> still nudge, but the reminder must NOT fabricate a
+        // search_event_id / `_meta.searchEventId` ask. Only the required
+        // tool_name/relevant/sufficient contract fields remain.
         let payload = serde_json::json!({ "tool_name": "mcp__memento__context" });
         let out = hook_stdout("claude", "PostToolUse", &payload);
         let value: Value = serde_json::from_str(&out).unwrap();
         let ctx = value["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
-        assert!(ctx.contains("_meta.searchEventId"));
         assert!(ctx.contains("mcp__memento__tool_feedback"));
-        assert!(!ctx.contains("search_event_id="));
+        assert!(ctx.contains("tool_name"));
+        assert!(ctx.contains("relevant"));
+        assert!(ctx.contains("sufficient"));
+        assert!(!ctx.contains("search_event_id"));
+        assert!(!ctx.contains("searchEventId"));
+    }
+
+    #[test]
+    fn claude_posttooluse_memento_context_injects_feedback_nudge_with_id() {
+        // #4330: context also returns `_meta.searchEventId`; when present it is
+        // inlined into the reminder just like recall.
+        let payload = serde_json::json!({
+            "tool_name": "mcp__memento__context",
+            "tool_response": [{
+                "type": "text",
+                "text": "{\"fragments\":[],\"_meta\":{\"searchEventId\":\"5150\"}}"
+            }]
+        });
+        let out = hook_stdout("claude", "PostToolUse", &payload);
+        let value: Value = serde_json::from_str(&out).unwrap();
+        let ctx = value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("search_event_id=5150"));
+        assert!(ctx.contains("mcp__memento__tool_feedback"));
+        assert!(ctx.contains("tool_name"));
+        assert_eq!(value["suppressOutput"], true);
+    }
+
+    #[test]
+    fn claude_posttooluse_memento_recall_without_id_omits_search_event_id() {
+        // #4330: recall normally carries the id, but the hook payload may not
+        // surface it. Without an extractable id the reminder drops the
+        // search_event_id ask and keeps only the required contract fields.
+        let payload = serde_json::json!({ "tool_name": "mcp__memento__recall" });
+        let out = hook_stdout("claude", "PostToolUse", &payload);
+        let value: Value = serde_json::from_str(&out).unwrap();
+        let ctx = value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("mcp__memento__tool_feedback"));
+        assert!(ctx.contains("tool_name"));
+        assert!(ctx.contains("relevant"));
+        assert!(ctx.contains("sufficient"));
+        assert!(!ctx.contains("search_event_id"));
+        assert!(!ctx.contains("searchEventId"));
     }
 
     #[test]

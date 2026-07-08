@@ -367,13 +367,13 @@
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 14 | 14 | 0 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1223 | 733 | 490 |  |
 | `services::claude_tui::hook_registry` | `src/services/claude_tui/hook_registry.rs` | 1333 | 718 | 615 |  |
-| `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 852 | 481 | 371 |  |
+| `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 899 | 482 | 417 |  |
 | `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 1161 | 532 | 629 |  |
 | `services::claude_tui::hosting` | `src/services/claude_tui/hosting/mod.rs` | 13 | 13 | 0 |  |
 | `services::claude_tui::hosting::followup_support` | `src/services/claude_tui/hosting/followup_support.rs` | 524 | 409 | 115 |  |
 | `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 750 | 693 | 57 |  |
 | `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3358 | 1932 | 1426 | giant-file |
-| `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 576 | 446 | 130 |  |
+| `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 626 | 460 | 166 |  |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 431 | 180 | 251 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 600 | 299 | 301 |  |
