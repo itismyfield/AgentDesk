@@ -75,9 +75,13 @@ fn request_json(method: &str, path: &str, body: Option<Value>) -> Result<Value, 
             };
             Err(format_monitoring_error(code, &body))
         }
-        Err(ureq::Error::Transport(error)) => {
-            Err(format!("monitoring API request failed: {error}"))
-        }
+        Err(ureq::Error::Transport(error)) => Err(super::client::connection_error_hint(
+            &format!("monitoring API request failed: {error}"),
+            &api_base(),
+            // This module's api_base() prefers ADK_API_URL over
+            // AGENTDESK_API_URL — the hint must match that order.
+            "ADK_API_URL(우선) 또는 AGENTDESK_API_URL",
+        )),
     }
 }
 
