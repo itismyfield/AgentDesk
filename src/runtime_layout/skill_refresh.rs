@@ -24,9 +24,8 @@ const STALE_LOCK_TTL: Duration = Duration::from_secs(300);
 /// failed refresh cannot deadlock later ones.
 ///
 /// The release is ownership-safe: it removes the lockfile only if it still carries THIS
-/// guard's exact `<pid>:<seq>` token. If a recoverer superseded us (different token) or the
-/// file is already gone, it leaves the file untouched -- so even a mistaken steal can never
-/// delete the new owner's lock and let a third entrant into the swap critical section.
+/// guard's exact `<pid>:<seq>` token, so even a mistaken steal can never delete the new
+/// owner's lock and let a third entrant into the swap critical section.
 struct SkillRefreshLock {
     path: PathBuf,
     token: String,
@@ -34,12 +33,47 @@ struct SkillRefreshLock {
 
 impl Drop for SkillRefreshLock {
     fn drop(&mut self) {
-        match fs::read_to_string(&self.path) {
-            Ok(contents) if contents.trim() == self.token => {
-                let _ = fs::remove_file(&self.path);
-            }
-            _ => {} // gone or superseded: not ours to remove
+        // Atomic compare-and-remove, not a read-then-unlink TOCTOU: we first `rename` the
+        // lock aside to a unique grave, so we then inspect and act on THE EXACT FILE WE
+        // MOVED -- never "whatever happens to be at lock_path now" (which a recoverer could
+        // have replaced between a naive read and unlink, so the unlink would delete the
+        // recoverer's fresh lock and reopen the third-entrant hole).
+        let Some(dir) = self.path.parent() else {
+            return;
+        };
+        let lock_name = self
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("skill.lock");
+        let grave = dir.join(format!(
+            "{lock_name}.release.{}.{}",
+            std::process::id(),
+            REFRESH_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        // NotFound => already released (or never written); nothing to do.
+        if fs::rename(&self.path, &grave).is_err() {
+            return;
         }
+        let is_ours = fs::read_to_string(&grave)
+            .map(|c| c.trim() == self.token)
+            .unwrap_or(false);
+        if is_ours {
+            let _ = fs::remove_file(&grave);
+            return;
+        }
+        // We moved a FOREIGN lock (a recoverer superseded us on the indeterminate path).
+        // Restore it create-exclusively via a hard link so a third party's freshly
+        // re-created lock is never clobbered; then drop our extra grave name. If the slot is
+        // already retaken (hard_link EEXIST), the new owner keeps its lock and we warn
+        // rather than silently discarding the graved token.
+        if fs::hard_link(&grave, &self.path).is_err() {
+            tracing::warn!(
+                lock = %self.path.display(),
+                "skill-refresh: superseded lock re-created concurrently; discarding stale grave"
+            );
+        }
+        let _ = fs::remove_file(&grave);
     }
 }
 
@@ -69,6 +103,14 @@ pub(super) fn refresh_managed_skill_dir(
         return Ok(());
     };
 
+    // Residual-risk bound: the rename-based release (see SkillRefreshLock::drop) has a
+    // sub-instant where lock_path is absent, so on the INDETERMINATE path only (non-unix, or
+    // a malformed/empty token -- NEVER on unix with a well-formed token, where liveness is
+    // authoritative and a live holder is never stolen) two refreshers can transiently
+    // overlap in the copy/swap below. This is NOT corrupting: each refresher's staging dir is
+    // unique and a COMPLETE copy of the same source, the swap is an atomic full-dir rename,
+    // so both converge on identical correct content. The worst case is a transient absent
+    // `managed` dir plus a redundant copy, which self-heals on the next ensure_managed_skill_dir.
     let staging = refresh_dir.join(format!(
         "{skill_name}.{}.{}",
         std::process::id(),
@@ -155,11 +197,21 @@ fn skill_refresh_lock_is_stale(lock_path: &Path) -> bool {
     }
 }
 
-/// Parses the holder PID (the leading `<pid>` of the `<pid>:<seq>` token). `None` when the
-/// token is missing/empty/malformed, i.e. liveness cannot be determined from it.
+/// Parses the holder PID from a STRICT `<pid>:<seq>` owner token -- both fields non-empty
+/// and integer-parseable, exactly two colon-separated fields -- or the legacy bare `<pid>`
+/// stamp (all digits, no colon). Every other shape (empty, `123:`, `123:garbage`,
+/// `123:456:extra`, trailing junk) returns `None` so liveness stays indeterminate and the
+/// caller falls back to the TTL branch rather than trusting a garbled PID.
 fn read_lock_pid(lock_path: &Path) -> Option<u32> {
     let contents = fs::read_to_string(lock_path).ok()?;
-    contents.trim().split(':').next()?.parse::<u32>().ok()
+    let mut fields = contents.trim().split(':');
+    let pid = fields.next()?.parse::<u32>().ok()?;
+    match fields.next() {
+        None => Some(pid), // legacy bare `<pid>`
+        // `<pid>:<seq>`: seq must parse and be the final field (reject extra fields).
+        Some(seq) if seq.parse::<u64>().is_ok() && fields.next().is_none() => Some(pid),
+        Some(_) => None,
+    }
 }
 
 fn lock_file_age(lock_path: &Path) -> Option<Duration> {
@@ -214,11 +266,13 @@ mod tests {
 
     /// #4256: dropping a guard whose token no longer matches the on-disk lock (it was
     /// stolen/superseded) must NOT delete that lock -- otherwise a third entrant could
-    /// acquire and race the delete+rename critical section.
+    /// acquire and race the delete+rename critical section. The atomic rename-based release
+    /// moves the file aside, sees a foreign token, and restores it intact (no leftover grave).
     #[test]
     fn superseded_guard_does_not_delete_new_owners_lock() {
         let temp = tempfile::tempdir().unwrap();
-        let lock_path = temp.path().join("demo.lock");
+        let dir = temp.path();
+        let lock_path = dir.join("demo.lock");
 
         // Guard stamped with token A, but the on-disk lock now carries a recoverer's token B.
         let guard = SkillRefreshLock {
@@ -232,6 +286,10 @@ mod tests {
             "222:2",
             "a superseded guard must leave the new owner's lock intact"
         );
+        assert!(
+            release_graves(dir).is_empty(),
+            "a superseded release must not leak a grave file"
+        );
 
         // Sanity: a guard whose token still matches DOES release its own lock on drop.
         let guard = SkillRefreshLock {
@@ -243,5 +301,57 @@ mod tests {
             !lock_path.exists(),
             "a matching guard must release its own lock"
         );
+        assert!(
+            release_graves(dir).is_empty(),
+            "a matching release must not leak a grave file"
+        );
+    }
+
+    /// #4256 Finding A: only a strict `<pid>:<seq>` token or a legacy bare `<pid>` yields a
+    /// PID; every malformed shape stays indeterminate (`None`) so the caller uses the TTL.
+    #[test]
+    fn read_lock_pid_rejects_malformed_tokens() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path().join("demo.lock");
+        for shape in [
+            "",
+            "abc",
+            "123:",
+            "123:garbage",
+            "123:456:extra",
+            ":5",
+            "9a:1",
+        ] {
+            fs::write(&p, shape).unwrap();
+            assert_eq!(
+                read_lock_pid(&p),
+                None,
+                "{shape:?} must be indeterminate (None)"
+            );
+        }
+        fs::write(&p, "123:456").unwrap();
+        assert_eq!(read_lock_pid(&p), Some(123), "well-formed <pid>:<seq>");
+        fs::write(&p, "789").unwrap();
+        assert_eq!(read_lock_pid(&p), Some(789), "legacy bare <pid>");
+        fs::write(&p, "  42:7\n").unwrap();
+        assert_eq!(
+            read_lock_pid(&p),
+            Some(42),
+            "surrounding whitespace is trimmed"
+        );
+    }
+
+    fn release_graves(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains(".release."))
+            })
+            .collect()
     }
 }

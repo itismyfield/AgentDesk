@@ -202,7 +202,7 @@
 | `runtime_layout::config_merge` | `src/runtime_layout/config_merge.rs` | 602 | 602 | 0 |  |
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 | 396 | 0 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 144 | 110 | 34 |  |
-| `runtime_layout::skill_refresh` | `src/runtime_layout/skill_refresh.rs` | 247 | 210 | 37 |  |
+| `runtime_layout::skill_refresh` | `src/runtime_layout/skill_refresh.rs` | 357 | 262 | 95 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 1253 | 962 | 291 |  |
 | `server` | `src/server/mod.rs` | 3348 | 2821 | 527 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 9 | 9 | 0 |  |
