@@ -1826,12 +1826,14 @@
     stale-inflight preservation review hardening; periodic reconcile loop
     covering stale inflights, orphan uploads, dispatched-session drift, and
     queue-review drift — split before adding non-bugfix behavior).
-  - `src/server/maintenance.rs` (1014 lines; #3909 added the leader-only voice
+  - `src/server/maintenance.rs` (1119 lines; #3909 added the leader-only voice
     TTS cache/temp sweep (`ProgressTtsCacheSweepJob`, 15th MaintenanceJob) +
     runtime-config threading, tipping the per-job-impl static registry over the
     1000-line giant threshold — also registered in `giant_file_registry.toml`.
-    The sweep LOGIC lives in `services::maintenance::jobs::voice_cache_sweep`;
-    bugfix-only, decompose the storage/voice job-impl clusters into siblings).
+    The sweep LOGIC lives in `services::maintenance::jobs::voice_cache_sweep`.
+    #4231 promoted the per-job startup-stagger literals to named `*_STARTUP_STAGGER`
+    constants with rationale comments (behavior-preserving; +105 doc/const lines).
+    Bugfix/readability-only, decompose the storage/voice job-impl clusters into siblings).
 - active_callsite_coverage: n/a.
 - invariants: config precedence, runtime path generation, kanban state, receipt
   persistence, and GitHub sync must keep their existing owner-specific

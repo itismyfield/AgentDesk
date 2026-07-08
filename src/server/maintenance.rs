@@ -13,6 +13,81 @@ type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send 
 const DEFAULT_SCHEDULER_TICK: Duration = Duration::from_secs(1);
 const EXTRA_STAGGER_PER_JOB: Duration = Duration::from_secs(15);
 
+// ── Per-job startup stagger offsets ─────────────────────────────────────────
+//
+// Every job carries a *base* startup stagger (the second argument to
+// `MaintenanceSchedule::every`). On a cold start `startup_stagger_for_index`
+// adds `EXTRA_STAGGER_PER_JOB * <registry index>` on top of this base, so the
+// two mechanisms compose: the index-based auto-stagger fans the jobs out, and
+// the per-job bases below fine-tune the ordering *within* that fan-out (e.g.
+// keeping the quality rollup ahead of the alerters that read its aggregates on
+// the same tick). They are intentionally NOT folded into the auto-stagger —
+// doing so would change the real boot timings. The values here are byte-for-byte
+// identical to the historical inline literals; naming them just makes the
+// existing schedule self-describing (cf. `REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY`
+// in `dispatch_context.rs`).
+
+/// `noop_heartbeat` (registry index 0): a small boot offset so the liveness
+/// heartbeat is among the earliest maintenance signals without racing the pool.
+const NOOP_HEARTBEAT_STARTUP_STAGGER: Duration = Duration::from_secs(10);
+
+/// `agent_quality_rollup`: zero base so the hourly rollup runs *before* the
+/// regression + relay alerters below that read its aggregates on the same tick.
+const AGENT_QUALITY_ROLLUP_STARTUP_STAGGER: Duration = Duration::from_secs(0);
+
+/// `quality_regression_alerter`: sequenced after `agent_quality_rollup` (base 0)
+/// on the same hourly tick so alerts evaluate against the freshest aggregates.
+const QUALITY_REGRESSION_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(15);
+
+/// `relay_signal_alerter`: sequenced after the quality alerter on the same
+/// hourly tick so the two alert pipelines do not race for a connection at boot.
+const RELAY_SIGNAL_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(30);
+
+/// `storage.cancel_tombstone_prune`: small boot offset so the tombstone prune
+/// does not pile on top of the other storage jobs at startup.
+const CANCEL_TOMBSTONE_PRUNE_STARTUP_STAGGER: Duration = Duration::from_secs(20);
+
+/// `voice.turn_link_gc`: staggered ~25s after boot so it does not pile on top
+/// of the other storage jobs (see the job's rationale comment).
+const VOICE_TURN_LINK_GC_STARTUP_STAGGER: Duration = Duration::from_secs(25);
+
+/// `storage.prompt_manifest_retention`: small startup stagger so the daily
+/// retention sweep does not pile on top of the other storage jobs at boot.
+const PROMPT_MANIFEST_RETENTION_STARTUP_STAGGER: Duration = Duration::from_secs(45);
+
+/// `storage.voice_transcript_announcement_meta_gc`: boot offset that keeps this
+/// voice-meta GC clear of the sibling voice GC jobs on the same tick.
+const VOICE_TRANSCRIPT_ANNOUNCEMENT_META_GC_STARTUP_STAGGER: Duration = Duration::from_secs(60);
+
+/// `storage.voice_background_handoff_meta_gc`: a touch longer than the
+/// announce-meta GC (60s) so the two voice storage GCs do not race for the same
+/// connection on the same tick.
+const VOICE_BACKGROUND_HANDOFF_META_GC_STARTUP_STAGGER: Duration = Duration::from_secs(75);
+
+/// `voice.progress_tts_cache_sweep`: 35s keeps it clear of the other voice GC
+/// jobs (25/60/75s); the first run is the startup bound (#3909).
+const PROGRESS_TTS_CACHE_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(35);
+
+/// `storage.target_sweep`: 30s keeps the monthly `target/` sweep off the
+/// boot-time pile-up (the job also self-triggers on the disk threshold).
+const STORAGE_TARGET_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(30);
+
+/// `storage.worktree_orphan_sweep`: boot offset so the hourly orphan sweep does
+/// not pile on top of the other storage jobs at startup.
+const STORAGE_WORKTREE_ORPHAN_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(50);
+
+/// `storage.hang_dump_cleanup`: boot offset so the weekly hang-dump cleanup does
+/// not pile on top of the other storage jobs at startup.
+const STORAGE_HANG_DUMP_CLEANUP_STARTUP_STAGGER: Duration = Duration::from_secs(70);
+
+/// `storage.db_retention`: later boot offset so the weekly PG retention sweep
+/// trails the lighter storage GCs at startup.
+const STORAGE_DB_RETENTION_STARTUP_STAGGER: Duration = Duration::from_secs(90);
+
+/// `memory.memento_consolidation`: last base offset (registry tail) so the
+/// weekly memento consolidation trails every other job at startup.
+const MEMORY_MEMENTO_CONSOLIDATION_STARTUP_STAGGER: Duration = Duration::from_secs(110);
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MaintenanceSchedule {
     every: Duration,
@@ -106,7 +181,7 @@ impl MaintenanceJob for NoopHeartbeatJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(15 * 60), Duration::from_secs(10))
+        MaintenanceSchedule::every(Duration::from_secs(15 * 60), NOOP_HEARTBEAT_STARTUP_STAGGER)
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -126,7 +201,10 @@ impl MaintenanceJob for AgentQualityRollupJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(0))
+        MaintenanceSchedule::every(
+            Duration::from_secs(60 * 60),
+            AGENT_QUALITY_ROLLUP_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -157,7 +235,10 @@ impl MaintenanceJob for QualityRegressionAlerterJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(15))
+        MaintenanceSchedule::every(
+            Duration::from_secs(60 * 60),
+            QUALITY_REGRESSION_ALERTER_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -192,7 +273,10 @@ impl MaintenanceJob for RelaySignalAlerterJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(30))
+        MaintenanceSchedule::every(
+            Duration::from_secs(60 * 60),
+            RELAY_SIGNAL_ALERTER_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -221,7 +305,10 @@ impl MaintenanceJob for CancelTombstonePruneJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(30 * 60), Duration::from_secs(20))
+        MaintenanceSchedule::every(
+            Duration::from_secs(30 * 60),
+            CANCEL_TOMBSTONE_PRUNE_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -261,7 +348,10 @@ impl MaintenanceJob for VoiceTurnLinkGcJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(25))
+        MaintenanceSchedule::every(
+            Duration::from_secs(60 * 60),
+            VOICE_TURN_LINK_GC_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -304,7 +394,10 @@ impl MaintenanceJob for PromptManifestRetentionJob {
     fn schedule(&self) -> MaintenanceSchedule {
         // Daily cadence with a small startup stagger so it doesn't pile on
         // top of the other storage jobs at boot.
-        MaintenanceSchedule::every(Duration::from_secs(24 * 60 * 60), Duration::from_secs(45))
+        MaintenanceSchedule::every(
+            Duration::from_secs(24 * 60 * 60),
+            PROMPT_MANIFEST_RETENTION_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -346,7 +439,10 @@ impl MaintenanceJob for VoiceTranscriptAnnouncementMetaGcJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(15 * 60), Duration::from_secs(60))
+        MaintenanceSchedule::every(
+            Duration::from_secs(15 * 60),
+            VOICE_TRANSCRIPT_ANNOUNCEMENT_META_GC_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -390,7 +486,10 @@ impl MaintenanceJob for VoiceBackgroundHandoffMetaGcJob {
         // 15-minute cadence matches the announce-meta GC pattern; the
         // stagger is a touch longer so the two storage GCs do not race
         // for the same connection on the same tick.
-        MaintenanceSchedule::every(Duration::from_secs(15 * 60), Duration::from_secs(75))
+        MaintenanceSchedule::every(
+            Duration::from_secs(15 * 60),
+            VOICE_BACKGROUND_HANDOFF_META_GC_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -432,7 +531,10 @@ impl MaintenanceJob for ProgressTtsCacheSweepJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(30 * 60), Duration::from_secs(35))
+        MaintenanceSchedule::every(
+            Duration::from_secs(30 * 60),
+            PROGRESS_TTS_CACHE_SWEEP_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -461,7 +563,7 @@ impl MaintenanceJob for StorageTargetSweepJob {
         // threshold. 30s stagger keeps it off the boot-time pile-up.
         MaintenanceSchedule::every(
             Duration::from_secs(30 * 24 * 60 * 60),
-            Duration::from_secs(30),
+            STORAGE_TARGET_SWEEP_STARTUP_STAGGER,
         )
     }
 
@@ -491,7 +593,10 @@ impl MaintenanceJob for StorageWorktreeOrphanSweepJob {
     }
 
     fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(50))
+        MaintenanceSchedule::every(
+            Duration::from_secs(60 * 60),
+            STORAGE_WORKTREE_ORPHAN_SWEEP_STARTUP_STAGGER,
+        )
     }
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
@@ -519,7 +624,7 @@ impl MaintenanceJob for StorageHangDumpCleanupJob {
     fn schedule(&self) -> MaintenanceSchedule {
         MaintenanceSchedule::every(
             Duration::from_secs(7 * 24 * 60 * 60),
-            Duration::from_secs(70),
+            STORAGE_HANG_DUMP_CLEANUP_STARTUP_STAGGER,
         )
     }
 
@@ -548,7 +653,7 @@ impl MaintenanceJob for StorageDbRetentionJob {
     fn schedule(&self) -> MaintenanceSchedule {
         MaintenanceSchedule::every(
             crate::services::maintenance::jobs::STORAGE_MAINTENANCE_INTERVAL,
-            Duration::from_secs(90),
+            STORAGE_DB_RETENTION_STARTUP_STAGGER,
         )
     }
 
@@ -581,7 +686,7 @@ impl MaintenanceJob for MemoryMementoConsolidationJob {
     fn schedule(&self) -> MaintenanceSchedule {
         MaintenanceSchedule::every(
             crate::services::maintenance::jobs::memento_consolidation::DEFAULT_INTERVAL,
-            Duration::from_secs(110),
+            MEMORY_MEMENTO_CONSOLIDATION_STARTUP_STAGGER,
         )
     }
 

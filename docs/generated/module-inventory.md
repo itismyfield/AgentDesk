@@ -214,7 +214,7 @@
 | `server::dto::kanban` | `src/server/dto/kanban.rs` | 109 | 109 | 0 |  |
 | `server::dto::settings` | `src/server/dto/settings.rs` | 16 | 16 | 0 |  |
 | `server::issue_specs` | `src/server/issue_specs.rs` | 396 | 284 | 112 |  |
-| `server::maintenance` | `src/server/maintenance.rs` | 1149 | 1014 | 135 | giant-file |
+| `server::maintenance` | `src/server/maintenance.rs` | 1254 | 1119 | 135 | giant-file |
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 | 0 | 419 |  |
 | `server::outbox_delivery_alert` | `src/server/outbox_delivery_alert.rs` | 148 | 148 | 0 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 416 | 239 | 177 |  |
