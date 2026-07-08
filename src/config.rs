@@ -953,6 +953,17 @@ pub struct ClusterConfig {
     pub lease_ttl_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base_url: Option<String>,
+    /// #4351: instance that should own the Discord gateway singleton lease — in
+    /// practice, the node every conversational tmux session runs on. `None` keeps
+    /// the pre-#4351 first-come behavior. Yield protocol and failover semantics:
+    /// `discord::runtime_bootstrap::gateway_lease`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_preferred_instance_id: Option<String>,
+    /// #4351: how long a non-preferred node stands by for the preferred node
+    /// before taking the lease itself. Only consulted while the preferred node is
+    /// online and advertising gateway intent.
+    #[serde(default = "default_gateway_yield_grace_secs")]
+    pub gateway_yield_grace_secs: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -998,6 +1009,8 @@ impl Default for ClusterConfig {
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             lease_ttl_secs: default_cluster_lease_ttl_secs(),
             api_base_url: None,
+            gateway_preferred_instance_id: None,
+            gateway_yield_grace_secs: default_gateway_yield_grace_secs(),
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
             nodes: BTreeMap::new(),
@@ -2177,6 +2190,11 @@ fn default_cluster_heartbeat_interval_secs() -> u64 {
 }
 fn default_cluster_lease_ttl_secs() -> u64 {
     30
+}
+/// #4351. Covers `deploy-release.sh` restarting the local node then SSH-deploying
+/// a peer; a dead preferred node only delays the gateway by this much.
+fn default_gateway_yield_grace_secs() -> u64 {
+    90
 }
 fn default_session_bound_relay_enabled() -> bool {
     // Epic #2285 / E5 (#2412): flipped to `true` once the production tmux
