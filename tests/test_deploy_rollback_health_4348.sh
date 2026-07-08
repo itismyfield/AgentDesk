@@ -51,6 +51,18 @@ DB_DOWN_BODY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboar
 OTHER_UNHEALTHY_BODY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"startup_status":"doctor_passed","latest_startup_doctor":{"doctor_status":"passed","skipped_reason":null}}'
 # Fully healthy.
 HEALTHY_BODY='{"ok":true,"status":"healthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":false,"startup_status":"doctor_passed"}'
+# Finding #2 (jq-less top-level parity): malformed / future-shape body where the
+# TOP-LEVEL server_up/db/dashboard are FALSE but a NESTED object carries them
+# true (and a nested status="healthy"). jq matches the root only and REJECTS;
+# the jq-less grep fallback must agree — a naive "any occurrence" grep would be
+# fooled by the nested keys and green-light a broken node (false-ready).
+NESTED_FIELD_MALFORMED_BODY='{"ok":false,"status":"unhealthy","version":"x","db":false,"dashboard":false,"server_up":false,"fully_recovered":false,"startup_status":"doctor_skipped","subsystem":{"server_up":true,"db":true,"dashboard":true,"status":"healthy"},"latest_startup_doctor":{"available":true,"doctor_status":"skipped","skipped":true,"skipped_reason":"no_provider_runtimes_registered"}}'
+# Finding #1 (adjudicated SAFE): the NO_PROVIDER body PLUS a co-existing
+# DEGRADED/non-blocking axis (disk_low true, stale outbox age). Severity never
+# downgrades Unhealthy→Degraded so status stays "unhealthy" with server_up=true.
+# This must STILL be deploy-ready under opt-in — exactly as a provider-present
+# degraded node passes the gate today.
+DEGRADED_AXIS_NO_PROVIDER_BODY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"cluster_standby":false,"degraded":true,"disk_low":true,"outbox_oldest_age_secs":1800,"startup_status":"doctor_skipped","startup_degraded":false,"startup_degraded_reasons":[],"latest_startup_doctor":{"available":true,"doctor_status":"skipped","skipped":true,"skipped_reason":"no_provider_runtimes_registered"}}'
 
 run_gate_cases() {
   local mode="$1"
@@ -81,6 +93,27 @@ run_gate_cases() {
     _health_json_unhealthy_only_no_provider_runtimes "$OTHER_UNHEALTHY_BODY"
   assert_rc "[$mode] predicate rejects db-down body" 1 \
     _health_json_unhealthy_only_no_provider_runtimes "$DB_DOWN_BODY"
+
+  # Finding #2 — nested-field malformed body: jq matches TOP-LEVEL only and
+  # rejects; the jq-less grep fallback MUST agree (must not be fooled by nested
+  # server_up/db/dashboard=true). Both the predicate and the gate must reject in
+  # BOTH modes — this negative case is what caught the false-ready path.
+  assert_rc "[$mode] nested-field malformed body → predicate REJECTS" 1 \
+    _health_json_unhealthy_only_no_provider_runtimes "$NESTED_FIELD_MALFORMED_BODY"
+  assert_rc "[$mode] nested-field malformed body + allow=1 → NOT ready" 1 \
+    health_json_is_ready "$NESTED_FIELD_MALFORMED_BODY" 1 1 1
+  # Direct field-helper parity: a top-level FALSE with a nested TRUE must read as
+  # false/absent at the top level (mirrors jq's `.field` / `has()`).
+  assert_rc "[$mode] field_is_true(server_up) ignores nested true" 1 \
+    _health_json_field_is_true "$NESTED_FIELD_MALFORMED_BODY" "server_up"
+
+  # Finding #1 (adjudicated SAFE) — a serving no-provider node with a co-existing
+  # DEGRADED/non-blocking axis (disk_low / stale outbox) is STILL deploy-ready
+  # under opt-in, and the predicate still fires. Documents the intended behavior.
+  assert_rc "[$mode] no-provider + degraded axis + allow=1 → READY" 0 \
+    health_json_is_ready "$DEGRADED_AXIS_NO_PROVIDER_BODY" 1 1 1
+  assert_rc "[$mode] no-provider + degraded axis → predicate matches" 0 \
+    _health_json_unhealthy_only_no_provider_runtimes "$DEGRADED_AXIS_NO_PROVIDER_BODY"
 }
 
 # jq path (jq is present in this environment).

@@ -196,8 +196,10 @@ _health_json_get_string_field() {
     return
   fi
 
+  # #4348 review finding #2: match the TOP-LEVEL field only (jq's `.key` is
+  # top-level), so a nested `"status":"..."` cannot shadow the root value.
   match=$(
-    _health_json_compact "$health_json" \
+    _health_json_top_level_compact "$health_json" \
       | grep -Eo "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
       | head -n 1 \
       || true
@@ -230,6 +232,69 @@ _health_json_get_string_array_csv() {
     | sed -E 's/^[^[]*\[//; s/\]$//; s/"[[:space:]]*,[[:space:]]*"/,/g; s/^"//; s/"$//'
 }
 
+_health_json_top_level_only() {
+  # #4348 review finding #2: the jq-less field checks below must interrogate the
+  # ROOT object only — jq's `.field` / `has("field")` are top-level, so the
+  # grep fallback has to match top-level too. A naive grep over the compacted
+  # body matches ANY occurrence, so a nested object carrying `"server_up":true`
+  # (malformed / future-shape body) would satisfy a top-level `server_up` check
+  # that jq correctly REJECTS — a false-ready deploy path.
+  #
+  # This helper emits ONLY the brace-depth-1 portion of the root object: the
+  # contents of any nested object/array are elided while the top-level scalar
+  # key:value pairs (and their `,`/`}` delimiters) are preserved, so the
+  # existing grep patterns keep working but can no longer see nested keys. It is
+  # a pure-bash scan (no jq/python) that tracks JSON string state so braces or
+  # brackets inside string values never skew the depth count. NOTE: because
+  # nested containers are elided, callers that need ARRAY/object contents (e.g.
+  # degraded_reasons via _health_json_get_string_array_csv, or the legitimately
+  # nested latest_startup_doctor.skipped_reason) must NOT route through here.
+  local compact="$1"
+  local n=${#compact}
+  local i ch out="" depth=0 in_string=0 escaped=0
+
+  for (( i = 0; i < n; i++ )); do
+    ch="${compact:i:1}"
+    if [ "$in_string" -eq 1 ]; then
+      [ "$depth" -eq 1 ] && out+="$ch"
+      if [ "$escaped" -eq 1 ]; then
+        escaped=0
+      elif [ "$ch" = '\' ]; then
+        escaped=1
+      elif [ "$ch" = '"' ]; then
+        in_string=0
+      fi
+      continue
+    fi
+    case "$ch" in
+      '{'|'[')
+        depth=$((depth + 1))
+        [ "$depth" -eq 1 ] && out+="$ch"
+        ;;
+      '}'|']')
+        [ "$depth" -eq 1 ] && out+="$ch"
+        depth=$((depth - 1))
+        ;;
+      '"')
+        in_string=1
+        [ "$depth" -eq 1 ] && out+="$ch"
+        ;;
+      *)
+        [ "$depth" -eq 1 ] && out+="$ch"
+        ;;
+    esac
+  done
+
+  printf '%s' "$out"
+}
+
+_health_json_top_level_compact() {
+  # Compact + top-level-only, in one place so every scalar field check shares
+  # the same top-level view of the body (#4348 review finding #2).
+  local health_json="$1"
+  _health_json_top_level_only "$(_health_json_compact "$health_json")"
+}
+
 _health_json_field_is_true() {
   local health_json="$1"
   local key="$2"
@@ -241,7 +306,7 @@ _health_json_field_is_true() {
     return
   fi
 
-  _health_json_compact "$health_json" \
+  _health_json_top_level_compact "$health_json" \
     | grep -Eq "\"$key\"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}])"
 }
 
@@ -256,7 +321,7 @@ _health_json_field_is_false() {
     return
   fi
 
-  _health_json_compact "$health_json" \
+  _health_json_top_level_compact "$health_json" \
     | grep -Eq "\"$key\"[[:space:]]*:[[:space:]]*false([[:space:]]*[,}])"
 }
 
@@ -271,7 +336,7 @@ _health_json_field_exists() {
     return
   fi
 
-  _health_json_compact "$health_json" \
+  _health_json_top_level_compact "$health_json" \
     | grep -Eq "\"$key\"[[:space:]]*:"
 }
 
@@ -316,16 +381,35 @@ _health_json_reconcile_only() {
 
 _health_json_unhealthy_only_no_provider_runtimes() {
   # #4348 DEPLOY/RESTART readiness rescue — NOT a runtime /health change.
-  # Returns 0 when the node is serving correctly (server_up + db + dashboard all
-  # true) but /api/health reports status=unhealthy SOLELY because no provider
-  # runtimes are registered (leader-only / no-agent-session topology). In that
-  # state the runtime is structurally unhealthy forever — providers.is_empty()
-  # emits `no_providers_registered` and the startup doctor is skipped with
-  # skipped_reason=no_provider_runtimes_registered — yet the server is fully
-  # serving. The runtime /health endpoint intentionally keeps reporting
-  # unhealthy for monitoring; only the deploy/rollback readiness gate opts in to
-  # this rescue, and only for this EXACT cause (server_up=false / db_unavailable
-  # / any other unhealthy reason must still fail the gate).
+  # Returns 0 when the node is provably SERVING the new binary (server_up + db +
+  # dashboard all true) and its ONLY deploy-BLOCKING condition is that no
+  # provider runtimes are registered (leader-only / no-agent-session topology):
+  # providers.is_empty() emits `no_providers_registered`, the startup doctor is
+  # skipped with skipped_reason=no_provider_runtimes_registered, and status is
+  # pinned to `unhealthy` forever even though the server is fully up.
+  #
+  # NAME/SCOPE NOTE (#4348 review finding #1): the `_only_` here means the only
+  # deploy-BLOCKING cause is no-providers — it does NOT claim no-providers is
+  # the *sole* condition on the node. A serving no-provider node may ALSO carry
+  # a DEGRADED-severity axis (disk-low / stale outbox / pipeline warnings /
+  # opencode), and it still reports status=unhealthy (severity never downgrades
+  # Unhealthy→Degraded) with server_up=true, so this predicate still fires. That
+  # is INTENTIONAL and SAFE, not a false-ready:
+  #   • server_up && db && dashboard already prove the new binary is serving, so
+  #     no broken node is green-lit;
+  #   • those extra axes are DEGRADED severity = NON-BLOCKING for deploy — a
+  #     provider-present node with the same axis reports status=degraded and
+  #     PASSES the deploy gate today, so rescuing a no-provider node with a
+  #     co-existing degraded axis is CONSISTENT with the existing gate, not a
+  #     new risk;
+  #   • the PUBLIC /api/health body STRIPS degraded_reasons, so proving
+  #     "solely no-providers" from this body is impossible without switching the
+  #     gate to the detailed body — a larger change we deliberately do NOT make.
+  # The runtime /health endpoint intentionally keeps reporting unhealthy for
+  # monitoring; only the deploy/rollback readiness gate opts in to this rescue,
+  # and only for this EXACT deploy-blocking cause (server_up=false /
+  # db_unavailable / any other unhealthy DEPLOY-BLOCKING reason must still fail
+  # the gate).
   local health_json="$1"
   [ -n "$health_json" ] || return 1
 
@@ -387,8 +471,10 @@ health_json_is_ready() {
   local health_json="$1"
   local require_dashboard="${2:-0}"
   local allow_reconcile_degraded="${3:-1}"
-  # #4348: when 1, treat a serving node that is unhealthy SOLELY because no
-  # provider runtimes are registered as DEPLOY-READY. Default 0 keeps every
+  # #4348: when 1, treat a serving node whose only deploy-BLOCKING condition is
+  # no registered provider runtimes as DEPLOY-READY (co-existing degraded/
+  # non-blocking axes are permitted — see
+  # _health_json_unhealthy_only_no_provider_runtimes). Default 0 keeps every
   # existing (non-deploy) caller's semantics unchanged.
   local allow_no_provider_runtimes="${4:-0}"
   local status=""
@@ -406,8 +492,10 @@ health_json_is_ready() {
     _health_json_field_is_true "$health_json" "server_up" || return 1
     if [ "$status" = "unhealthy" ]; then
       # #4348: rescue a serving leader-only / no-session node whose only
-      # unhealthy cause is no_provider_runtimes_registered. server_up is already
-      # confirmed true above, so db_unavailable can never take this branch.
+      # deploy-BLOCKING cause is no_provider_runtimes_registered (co-existing
+      # degraded/non-blocking axes are allowed — same as a provider-present
+      # degraded node that passes the gate). server_up is already confirmed true
+      # above, so db_unavailable can never take this branch.
       if [ "$allow_no_provider_runtimes" = "1" ] \
         && _health_json_unhealthy_only_no_provider_runtimes "$health_json"; then
         return 0
@@ -444,8 +532,9 @@ wait_for_http_service_health() {
   local delay_secs="$4"
   local require_dashboard="${5:-0}"
   local allow_reconcile_degraded="${6:-1}"
-  # #4348: opt-in — accept a serving node that is unhealthy solely because no
-  # provider runtimes are registered. Default 0 preserves existing callers.
+  # #4348: opt-in — accept a serving node whose only deploy-BLOCKING condition
+  # is no registered provider runtimes (co-existing degraded/non-blocking axes
+  # permitted). Default 0 preserves existing callers.
   local allow_no_provider_runtimes="${7:-0}"
 
   # shellcheck disable=SC2034 # Read by callers after the function returns.
