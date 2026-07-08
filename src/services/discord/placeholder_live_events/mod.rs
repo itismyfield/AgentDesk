@@ -18,6 +18,7 @@ mod session_panel;
 mod slot_rehydration;
 mod status_events;
 mod status_panel;
+mod subagent_panel;
 mod subagent_rollout;
 mod subagent_summary;
 mod task_panel;

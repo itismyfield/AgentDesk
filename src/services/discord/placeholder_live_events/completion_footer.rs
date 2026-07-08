@@ -8,7 +8,8 @@ use super::common::{
     truncate_chars_with_marker,
 };
 use super::context_panel::render_context_panel_line;
-use super::status_panel::{StatusPanelState, SubagentSlot, render_subagent_slot};
+use super::status_panel::{StatusPanelState, SubagentSlot};
+use super::subagent_panel::render_subagent_slot;
 use super::task_panel::{
     TaskToolSlot, render_task_panel_line, render_task_tool_slot, task_tool_slot_identity,
     task_tool_slot_is_terminal, task_tool_terminal_marker,
@@ -518,27 +519,16 @@ fn line_is_terminal_slot(line: &str) -> bool {
 /// `STATUS_PANEL_*_LIMIT` window + per-section cap). Drives the one-line INFO
 /// observability log without re-deriving the rendered section strings.
 pub(in crate::services::discord) fn live_panel_compaction_counts(
-    snapshot: &StatusPanelState,
-    provider: &ProviderKind,
+    _snapshot: &StatusPanelState,
+    _provider: &ProviderKind,
 ) -> (usize, usize) {
-    let collapsed = |total: usize| total.saturating_sub(LIVE_PANEL_TERMINAL_RENDER_CAP);
-    // #4093: the live render now hides terminal (completed/failed) task slots
-    // entirely, so no terminal task line ever reaches the live compaction — the
-    // Tasks section can no longer be collapsed. Mirror that here so the
-    // observability count stays honest.
+    // #4093 + #4367: the live render now hides terminal (completed/failed) task
+    // AND subagent slots entirely, so no terminal line ever reaches the live
+    // compaction — neither section can be collapsed anymore. Both counts are
+    // therefore always 0; the function is kept (not deleted) as a stable
+    // observability hook so the caller's #3404 compaction INFO log and its
+    // count-change gate survive, mirroring how #4093 zeroed the Tasks side.
     let tasks_collapsed = 0;
-    let subagents_collapsed = if matches!(provider, ProviderKind::Codex) {
-        0
-    } else {
-        collapsed(
-            snapshot
-                .subagents
-                .iter()
-                .rev()
-                .take(STATUS_PANEL_SUBAGENT_LIMIT)
-                .filter(|slot| slot.is_terminal())
-                .count(),
-        )
-    };
+    let subagents_collapsed = 0;
     (tasks_collapsed, subagents_collapsed)
 }
