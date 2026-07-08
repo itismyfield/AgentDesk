@@ -59,7 +59,7 @@ pub(super) fn proactive_memory_guidance(
                 format!(
                     "\n- scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.\n\
                      - full memory policy: `docs/memory-scope.md`; read it before broad memory cleanup or scope changes.\n\
-                     - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `search_event_id`=`_meta.searchEventId`, `relevant`, `sufficient`). If the tool is deferred, load it first via ToolSearch `select:mcp__memento__tool_feedback`."
+                     - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `tool_name`, `relevant`, `sufficient`; when the response carries `_meta.searchEventId`, also pass it as `search_event_id` — recommended). If the tool is deferred, load it first via ToolSearch `select:mcp__memento__tool_feedback`."
                 ),
             )
         }

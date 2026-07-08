@@ -784,10 +784,14 @@ fn full_memento_prompt_carries_tool_feedback_contract() {
         ),
         "Full+memento prompt must carry the tool_feedback contract, got: {prompt}"
     );
-    // Required params surfaced verbatim per the current memento schema.
-    assert!(prompt.contains("`search_event_id`=`_meta.searchEventId`"));
-    assert!(prompt.contains("`relevant`"));
-    assert!(prompt.contains("`sufficient`"));
+    // Required params surfaced verbatim per the current memento schema:
+    // required = tool_name/relevant/sufficient; search_event_id is optional
+    // (recommended when the response carries _meta.searchEventId).
+    assert!(prompt.contains("required: `tool_name`, `relevant`, `sufficient`"));
+    assert!(prompt.contains(
+        "when the response carries `_meta.searchEventId`, \
+         also pass it as `search_event_id` — recommended"
+    ));
     // Deferred-tool loading instruction.
     assert!(prompt.contains("ToolSearch `select:mcp__memento__tool_feedback`"));
 }
