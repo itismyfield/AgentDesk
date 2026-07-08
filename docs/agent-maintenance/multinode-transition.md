@@ -410,7 +410,10 @@
   `full_response.push_str(text)` for `assistant` text blocks — when the running
   response is non-empty and `semantic_boundaries::semantic_chunk_separator_needed`
   reports a genuine sentence boundary (not a decimal, file extension, markdown
-  continuation, or open inline-code span), it inserts `"\n\n"` before appending.
+  continuation, open inline-code span, or — r2, folded into the shared predicate
+  via `text_ends_inside_open_code_fence` so the watcher matches the streaming
+  path's `streamed_text_inside_open_code_fence` guard — inside an open ``` code
+  fence), it inserts `"\n\n"` before appending.
   This is the watcher-path twin of the #3608 streaming-path separator: Claude
   interleaves prose with `tool_use`, so pre-/post-tool text arrive as two discrete
   events that previously glued into one run-on line. The `content_block_delta`

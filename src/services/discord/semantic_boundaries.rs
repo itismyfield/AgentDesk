@@ -209,6 +209,21 @@ pub(in crate::services::discord) fn message_split_boundary(
     }
 }
 
+/// #4275: true when `text` currently ends *inside* an open ``` code fence.
+/// Uses this module's canonical fence toggle (`line_starts_code_fence`, i.e.
+/// `trim_start().starts_with("```")`) — the same toggle
+/// `chunk_compose::streamed_text_inside_open_code_fence` mirrors on the #3608
+/// streaming path.
+pub(in crate::services::discord) fn text_ends_inside_open_code_fence(text: &str) -> bool {
+    let mut in_code_block = false;
+    for line in text.lines() {
+        if line_starts_code_fence(line) {
+            in_code_block = !in_code_block;
+        }
+    }
+    in_code_block
+}
+
 pub(in crate::services::discord) fn semantic_chunk_separator_needed(
     prefix: &str,
     incoming: &str,
@@ -221,6 +236,16 @@ pub(in crate::services::discord) fn semantic_chunk_separator_needed(
         return false;
     }
     if markdown_continuation_head(incoming) {
+        return false;
+    }
+    // #4275 r2 (codex review Finding 1): a paragraph separator is NEVER
+    // needed while the accumulated prefix still ends inside an open ``` code
+    // fence — injecting "\n\n" there corrupts fenced content (e.g. a fenced
+    // line ending "complete." followed by the next segment). The #3608
+    // streaming caller (chunk_compose) already guards externally with
+    // `streamed_text_inside_open_code_fence`, so this fold is a no-op there;
+    // it closes the gap for the #4275 watcher/jsonl caller and any future one.
+    if text_ends_inside_open_code_fence(prefix) {
         return false;
     }
 

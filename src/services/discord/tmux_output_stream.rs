@@ -287,7 +287,9 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                                             // separator: insert "\n\n" only when the two
                                             // segments form a genuine sentence boundary
                                             // (not a decimal, file extension, markdown
-                                            // continuation, or mid-code span). content_block_delta
+                                            // continuation, mid-inline-code span, or — r2,
+                                            // folded into the predicate itself — inside an
+                                            // open ``` code fence). content_block_delta
                                             // (line ~360, qwen intra-block streaming) must
                                             // stay a bare push_str — a separator there would
                                             // fracture a single sentence.
@@ -1239,6 +1241,40 @@ mod tests {
         assert!(
             !full.contains("\n\n"),
             "markdown list continuation must not gain a boundary, got: {full:?}"
+        );
+    }
+
+    /// Negative (#4275 r2, codex review Finding 1): when the accumulated
+    /// response ends INSIDE an open ``` code fence, a fenced line ending with
+    /// sentence punctuation ("complete.") followed by a non-whitespace-start
+    /// segment must NOT gain a boundary — "\n\n" inside fenced content would
+    /// corrupt it. Mirrors the #3608 streaming-path
+    /// `streamed_text_inside_open_code_fence` guard.
+    #[test]
+    fn process_watcher_lines_keeps_open_code_fence_interior_across_split_segments() {
+        let full =
+            watcher_full_response_for_two_segments("```bash\necho complete.", "echo two\n```");
+        assert!(
+            !full.contains("complete.\n\n"),
+            "open-fence interior must not gain a boundary, got: {full:?}"
+        );
+        assert!(
+            full.contains("complete.echo two"),
+            "fenced content must stay glued, got: {full:?}"
+        );
+    }
+
+    /// Positive pair for the open-fence negative: once the fence is CLOSED,
+    /// a genuine sentence boundary after the fence gains the separator again.
+    #[test]
+    fn process_watcher_lines_inserts_boundary_after_closed_code_fence_segment() {
+        let full = watcher_full_response_for_two_segments(
+            "```bash\necho hi\n```\n실행을 완료했습니다.",
+            "다음 단계로 넘어갑니다.",
+        );
+        assert!(
+            full.contains("완료했습니다.\n\n다음"),
+            "closed fence must not suppress a genuine boundary, got: {full:?}"
         );
     }
 
