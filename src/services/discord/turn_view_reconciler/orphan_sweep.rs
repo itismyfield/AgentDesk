@@ -1,0 +1,450 @@
+//! #4278 defense-in-depth: sweep ORPHANED `⏳` TUI-direct bot-anchor reactions.
+//!
+//! ## Why this exists
+//! The normal `⏳ → ✅` completion ([`note_tui_anchor_completed`]) and the
+//! #3296 aborted-anchor marker + TTL sweep both reconcile a synthetic turn's
+//! `⏳`. But a `/loop` system-injection anchor whose synthetic turn-start
+//! ABORTed on a FOREIGN stale inflight keeps its `⏳` pinned to the FOREIGN
+//! prior turn's commit: while a live inflight on the same tmux session defers
+//! the marker sweep (`inflight_defers_sweep` name-match branch), the `⏳`
+//! lingers up to the 1-hour hard cap, and if the foreign phantom never commits
+//! it only converges to `⚠`. Any path that left a `⏳` WITHOUT a live turn and
+//! WITHOUT a covering marker (a lost in-memory pending-removal across restart,
+//! a marker write that never landed, a code path that dropped the marker but
+//! not the reaction) orphans the hourglass entirely — the channel fills with
+//! "stuck work" cards (#4278, #3164 lineage).
+//!
+//! This sweep is the universal backstop: it reads the reconciler's OWN durable
+//! per-target state (the `⏳` this bot added, with its `token_hash` identity —
+//! #4049) and removes a `⏳` whose (provider, channel) has NO live inflight row
+//! and NO abort marker covering the exact anchor, once the record has aged past
+//! a conservative grace window. It never fights the live lifecycle: an active
+//! turn (inflight row present) or a valid marker always defers to the primary
+//! reconcilers, and the removal uses the SAME persisted bot identity that added
+//! the `⏳` (add≡remove, #3164).
+
+use std::time::{Duration, SystemTime};
+
+use super::*;
+
+/// A persisted `tui_direct_bot_anchor` target currently in the `⏳` (Pending)
+/// state that MAY be an orphan. The caller (`placeholder_sweeper`) supplies the
+/// live-inflight / valid-marker signals the orphan verdict needs.
+pub(in crate::services::discord) struct PendingAnchorCandidate {
+    pub channel_id: u64,
+    pub message_id: u64,
+    /// Age since the persisted `⏳` record was last written (file mtime proxy).
+    /// Records younger than the grace window are skipped so a legitimately
+    /// slow-starting turn (whose inflight row has not landed yet) is never
+    /// swept.
+    pub attached_age: Duration,
+}
+
+/// Pure orphan verdict (conservative by design, #4278): a `⏳` is only swept
+/// when it has aged past the grace window AND there is no live inflight row for
+/// the channel AND no abort marker covers the exact anchor. Any single hold
+/// (young record / live turn / valid marker) defers to the primary reconcilers.
+pub(in crate::services::discord) fn orphan_tui_anchor_should_clear(
+    attached_age: Duration,
+    min_age: Duration,
+    has_live_inflight: bool,
+    has_valid_marker: bool,
+) -> bool {
+    attached_age >= min_age && !has_live_inflight && !has_valid_marker
+}
+
+/// Drive one orphan-`⏳` sweep pass over the reconciler's persisted
+/// `tui_direct_bot_anchor` targets. Generic over the live-inflight and
+/// valid-marker probes so the production sweep supplies the real inflight /
+/// abort-marker store reads while a test drives the verdict directly. Returns
+/// the number of orphan `⏳` reactions resolved this pass.
+pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
+    reconciler: &TurnViewReconciler,
+    shared: &SharedData,
+    now: SystemTime,
+    min_age: Duration,
+    has_live_inflight: &(dyn Fn(u64) -> bool + Send + Sync),
+    has_valid_marker: &(dyn Fn(u64, u64) -> bool + Send + Sync),
+    source: &'static str,
+) -> usize {
+    let mut cleared = 0usize;
+    for candidate in reconciler.persisted_pending_tui_anchors(shared, now) {
+        if !orphan_tui_anchor_should_clear(
+            candidate.attached_age,
+            min_age,
+            has_live_inflight(candidate.channel_id),
+            has_valid_marker(candidate.channel_id, candidate.message_id),
+        ) {
+            continue;
+        }
+        if reconciler
+            .clear_orphan_pending_tui_anchor(
+                shared,
+                ChannelId::new(candidate.channel_id),
+                MessageId::new(candidate.message_id),
+                source,
+            )
+            .await
+        {
+            cleared += 1;
+            tracing::warn!(
+                channel_id = candidate.channel_id,
+                anchor_message_id = candidate.message_id,
+                attached_age_secs = candidate.attached_age.as_secs(),
+                source,
+                "tui_direct: swept orphan ⏳ anchor (no live turn, no reconcile marker) (#4278)"
+            );
+        }
+    }
+    cleared
+}
+
+impl TurnViewReconciler {
+    /// Enumerate persisted `tui_direct_bot_anchor` targets currently in the
+    /// `⏳` (Pending) state that belong to THIS runtime's provider. Read-only:
+    /// never mutates or deletes on-disk state (a malformed / mismatched file is
+    /// simply skipped, left for [`load_persisted_target`]'s own repair path).
+    pub(in crate::services::discord) fn persisted_pending_tui_anchors(
+        &self,
+        shared: &SharedData,
+        now: SystemTime,
+    ) -> Vec<PendingAnchorCandidate> {
+        let Some(root) =
+            crate::services::discord::runtime_store::discord_turn_view_reconciler_root()
+        else {
+            return Vec::new();
+        };
+        let dir = root.join(TurnViewTargetKind::TuiDirectBotAnchor.as_str());
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<PersistedTargetState>(&text) else {
+                continue;
+            };
+            if record.version != PERSISTED_STATE_VERSION
+                || record.provider != shared.provider.as_str()
+                || TurnViewTargetKind::from_str(&record.kind)
+                    != Some(TurnViewTargetKind::TuiDirectBotAnchor)
+            {
+                continue;
+            }
+            if TurnViewState::from_str(&record.applied) != Some(TurnViewState::Pending) {
+                continue;
+            }
+            let attached_age = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .unwrap_or(Duration::ZERO);
+            candidates.push(PendingAnchorCandidate {
+                channel_id: record.channel_id,
+                message_id: record.message_id,
+                attached_age,
+            });
+        }
+        candidates
+    }
+
+    /// Remove an orphaned `⏳` from a pending `tui_direct_bot_anchor`, then
+    /// delete the persisted target. The removal resolves the PERSISTED bot
+    /// identity (`token_hash`, #4049) so the same `@me` that added the `⏳`
+    /// removes it (add≡remove, #3164). Fail-open: a transient delivery failure
+    /// keeps the record for the next pass; a permanently-gone message
+    /// terminates the record. Returns `true` iff this call resolved the orphan.
+    pub(in crate::services::discord) async fn clear_orphan_pending_tui_anchor(
+        &self,
+        shared: &SharedData,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        source: &'static str,
+    ) -> bool {
+        let target = TurnViewTarget::tui_direct_bot_anchor(channel_id, message_id);
+        let target_lock = self.target_lock(target);
+        let _guard = target_lock.lock().await;
+        let current = self
+            .targets
+            .get(&target)
+            .map(|entry| entry.clone())
+            .or_else(|| self.load_persisted_target(target, shared, source));
+        let Some(current) = current else {
+            // A concurrent drain / marker sweep / normal completion already
+            // resolved this anchor between enumeration and now — nothing to do.
+            return false;
+        };
+        if current.applied != TurnViewState::Pending {
+            // A terminal / queue-marker state is owned by the live lifecycle;
+            // the orphan sweep only ever removes a stranded `⏳`.
+            self.targets.insert(target, current);
+            return false;
+        }
+        let delivery = self
+            .apply_diff(
+                shared,
+                target,
+                TurnViewState::Pending,
+                TurnViewState::None,
+                &current.identity,
+                source,
+            )
+            .await;
+        match delivery {
+            TurnViewDelivery::Delivered | TurnViewDelivery::FailedPermanent => {
+                self.discard_target_locked(target, source, &target_lock);
+                true
+            }
+            TurnViewDelivery::Failed => {
+                // Transient (5xx / rate-limit / transport): keep the record so
+                // the next sweep pass retries the removal.
+                self.targets.insert(target, current);
+                false
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Isolate each test from the process-global `AGENTDESK_ROOT_DIR` (mirrors
+    /// the reconciler `tests.rs` `ScopedRuntimeRoot`): acquire the crate env
+    /// lock for the full scope, point the env at a private temp dir, restore on
+    /// drop. The guard is held across `.await` points; sound because these run
+    /// on the current-thread `#[tokio::test]` runtime (the future never moves
+    /// threads).
+    struct ScopedRuntimeRoot {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for ScopedRuntimeRoot {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(value) => std::env::set_var("AGENTDESK_ROOT_DIR", value),
+                    None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    fn scoped_runtime_root() -> ScopedRuntimeRoot {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let prev = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = tempfile::tempdir().expect("create temp runtime dir for orphan-sweep test");
+        unsafe {
+            std::env::set_var(
+                "AGENTDESK_ROOT_DIR",
+                temp.path().to_str().expect("temp path must be valid utf-8"),
+            );
+        }
+        ScopedRuntimeRoot {
+            _lock: lock,
+            _temp: temp,
+            prev,
+        }
+    }
+
+    fn anchor_target(channel_id: u64, message_id: u64) -> TurnViewTarget {
+        TurnViewTarget::tui_direct_bot_anchor(
+            ChannelId::new(channel_id),
+            MessageId::new(message_id),
+        )
+    }
+
+    fn write_pending_anchor(shared: &SharedData, channel_id: u64, message_id: u64) {
+        let target = anchor_target(channel_id, message_id);
+        let record = PersistedTargetState {
+            version: PERSISTED_STATE_VERSION,
+            provider: shared.provider.as_str().to_string(),
+            kind: target.kind.as_str().to_string(),
+            channel_id,
+            message_id,
+            owner_generation: 7,
+            owner_turn_id: "turn-orphan".to_string(),
+            applied: TurnViewState::Pending.as_str().to_string(),
+            identity_label: target.kind.identity_label().to_string(),
+            token_hash: Some(shared.token_hash.clone()),
+            start_attempt_id: None,
+        };
+        let path = TurnViewReconciler::persisted_target_path(target).expect("persisted path");
+        let json = serde_json::to_string_pretty(&record).expect("serialize persisted anchor");
+        crate::services::discord::runtime_store::atomic_write(&path, &json)
+            .expect("write persisted anchor");
+    }
+
+    fn persisted_exists(channel_id: u64, message_id: u64) -> bool {
+        TurnViewReconciler::persisted_target_path(anchor_target(channel_id, message_id))
+            .expect("persisted path")
+            .exists()
+    }
+
+    fn hourglass_removed(reconciler: &TurnViewReconciler, message_id: u64) -> bool {
+        reconciler
+            .ops()
+            .iter()
+            .any(|op| op.target.message_id.get() == message_id && !op.add && op.emoji == '⏳')
+    }
+
+    // Pure verdict truth table: the `⏳` is swept ONLY when aged AND no live
+    // turn AND no covering marker; any single hold defers to the reconcilers.
+    #[test]
+    fn orphan_verdict_requires_aged_and_no_live_turn_and_no_marker() {
+        let min = Duration::from_secs(600);
+        let aged = Duration::from_secs(900);
+        let young = Duration::from_secs(60);
+
+        assert!(orphan_tui_anchor_should_clear(aged, min, false, false));
+        // young record → skip (a turn may still be starting).
+        assert!(!orphan_tui_anchor_should_clear(young, min, false, false));
+        // live inflight row → skip (active turn owns the ⏳).
+        assert!(!orphan_tui_anchor_should_clear(aged, min, true, false));
+        // valid abort marker → skip (marker + drain own the reconcile).
+        assert!(!orphan_tui_anchor_should_clear(aged, min, false, true));
+    }
+
+    // Enumeration returns only THIS provider's pending anchors; a non-pending
+    // (e.g. completed) persisted target and a different-provider record are
+    // excluded.
+    #[tokio::test]
+    async fn enumerate_returns_only_matching_provider_pending_anchors() {
+        let _root = scoped_runtime_root();
+        let reconciler = TurnViewReconciler::default();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        write_pending_anchor(&shared, 5001, 6001);
+        // A completed target must not be enumerated (only ⏳ is swept).
+        let completed = anchor_target(5002, 6002);
+        let completed_record = PersistedTargetState {
+            version: PERSISTED_STATE_VERSION,
+            provider: shared.provider.as_str().to_string(),
+            kind: completed.kind.as_str().to_string(),
+            channel_id: 5002,
+            message_id: 6002,
+            owner_generation: 7,
+            owner_turn_id: "turn-done".to_string(),
+            applied: TurnViewState::Completed.as_str().to_string(),
+            identity_label: completed.kind.identity_label().to_string(),
+            token_hash: Some(shared.token_hash.clone()),
+            start_attempt_id: None,
+        };
+        let path = TurnViewReconciler::persisted_target_path(completed).expect("path");
+        crate::services::discord::runtime_store::atomic_write(
+            &path,
+            &serde_json::to_string_pretty(&completed_record).unwrap(),
+        )
+        .unwrap();
+
+        let candidates = reconciler.persisted_pending_tui_anchors(&shared, SystemTime::now());
+        assert_eq!(candidates.len(), 1, "only the pending anchor is enumerated");
+        assert_eq!(candidates[0].channel_id, 5001);
+        assert_eq!(candidates[0].message_id, 6001);
+    }
+
+    // Full sweep: an aged orphan `⏳` with no live turn and no marker is
+    // removed (⏳ reaction removed + persisted record deleted).
+    #[tokio::test]
+    async fn sweep_removes_aged_orphan_hourglass() {
+        let _root = scoped_runtime_root();
+        let reconciler = TurnViewReconciler::default();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        write_pending_anchor(&shared, 7001, 8001);
+
+        let no_inflight = |_: u64| false;
+        let no_marker = |_: u64, _: u64| false;
+        let cleared = sweep_orphan_tui_anchors_with_probes(
+            &reconciler,
+            &shared,
+            // Force the record to read as aged: sweep "now" far in the future.
+            SystemTime::now() + Duration::from_secs(3600),
+            Duration::from_secs(600),
+            &no_inflight,
+            &no_marker,
+            "test_orphan_sweep",
+        )
+        .await;
+
+        assert_eq!(cleared, 1, "the orphan ⏳ is swept");
+        assert!(hourglass_removed(&reconciler, 8001), "⏳ reaction removed");
+        assert!(
+            !persisted_exists(7001, 8001),
+            "persisted orphan record deleted after removal"
+        );
+    }
+
+    // Conservative skip: a live inflight row (active turn) OR a valid marker
+    // defers the sweep — the `⏳` survives untouched.
+    #[tokio::test]
+    async fn sweep_skips_when_live_turn_or_marker_present() {
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        for (channel, message, live, marker) in
+            [(7101_u64, 8101_u64, true, false), (7102, 8102, false, true)]
+        {
+            let reconciler = TurnViewReconciler::default();
+            write_pending_anchor(&shared, channel, message);
+            let inflight = move |_: u64| live;
+            let has_marker = move |_: u64, _: u64| marker;
+            let cleared = sweep_orphan_tui_anchors_with_probes(
+                &reconciler,
+                &shared,
+                SystemTime::now() + Duration::from_secs(3600),
+                Duration::from_secs(600),
+                &inflight,
+                &has_marker,
+                "test_orphan_sweep",
+            )
+            .await;
+            assert_eq!(cleared, 0, "an active turn / valid marker defers the sweep");
+            assert!(
+                !hourglass_removed(&reconciler, message),
+                "⏳ must not be removed while held"
+            );
+            assert!(
+                persisted_exists(channel, message),
+                "persisted record survives a held sweep"
+            );
+        }
+    }
+
+    // Young record skip: a freshly-attached `⏳` (within the grace window) is
+    // never swept even with no live turn and no marker.
+    #[tokio::test]
+    async fn sweep_skips_young_record_within_grace_window() {
+        let _root = scoped_runtime_root();
+        let reconciler = TurnViewReconciler::default();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        write_pending_anchor(&shared, 7201, 8201);
+
+        let no_inflight = |_: u64| false;
+        let no_marker = |_: u64, _: u64| false;
+        let cleared = sweep_orphan_tui_anchors_with_probes(
+            &reconciler,
+            &shared,
+            SystemTime::now(), // record just written → age ~0 < grace
+            Duration::from_secs(600),
+            &no_inflight,
+            &no_marker,
+            "test_orphan_sweep",
+        )
+        .await;
+
+        assert_eq!(cleared, 0, "a young ⏳ is within the grace window");
+        assert!(persisted_exists(7201, 8201), "young record survives");
+    }
+}

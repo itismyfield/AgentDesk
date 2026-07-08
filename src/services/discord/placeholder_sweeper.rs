@@ -84,6 +84,15 @@ pub(crate) const SWEEP_HEARTBEAT_INTERVAL_SWEEPS: u64 = 120;
 /// without racing the recovery sweep itself.
 pub(crate) const INITIAL_DELAY_SECS: u64 = 180;
 
+/// #4278: grace window before the orphan-`⏳` defense sweep may remove a
+/// persisted TUI-direct bot-anchor hourglass. A record younger than this is
+/// skipped so a legitimately slow-starting turn (whose inflight row has not
+/// landed yet, or whose completion `⏳`-removal is in flight) is never swept.
+/// Comfortably above `ABORT_MARKER_TTL` (600s) so the #3296 marker + drain get
+/// first claim on every aborted anchor; the orphan sweep only fires when NO
+/// live turn and NO marker remain.
+pub(crate) const ORPHAN_TUI_ANCHOR_MIN_AGE_SECS: u64 = 900;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepDecision {
     Active,
@@ -945,6 +954,42 @@ fn should_log_sweep_report(report: SweepPassReport, sweeps_since_heartbeat: u64)
         || sweeps_since_heartbeat >= SWEEP_HEARTBEAT_INTERVAL_SWEEPS
 }
 
+/// #4278 defense-in-depth: sweep orphaned `⏳` TUI-direct bot-anchor reactions.
+///
+/// Reads the turn-view reconciler's OWN durable per-target state (the `⏳` this
+/// bot added, with its `token_hash` identity) and removes a `⏳` only when the
+/// (provider, channel) has NO live inflight row AND no abort marker covers the
+/// exact anchor, once the record has aged past the grace window. This is the
+/// universal backstop for a `⏳` that neither the normal `⏳ → ✅` completion nor
+/// the #3296 marker + TTL sweep ever cleared (an aborted synthetic turn whose
+/// FOREIGN-pinned marker deferred to the 1-hour hard cap, a lost in-memory
+/// pending-removal across restart, a marker that never landed). Conservative by
+/// construction — an active turn or a valid marker always defers to the primary
+/// reconcilers; removal uses the persisted `@me` that added the `⏳` (#3164).
+async fn sweep_orphan_tui_anchor_reactions(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) -> usize {
+    let has_live_inflight = |channel_id: u64| {
+        super::inflight::load_inflight_state_read_only(provider, channel_id).is_some()
+    };
+    let has_valid_marker = |channel_id: u64, anchor_message_id: u64| {
+        super::tui_direct_abort_marker::load_for_channel(provider.as_str(), channel_id)
+            .iter()
+            .any(|marker| marker.anchor_message_id == anchor_message_id)
+    };
+    super::turn_view_reconciler::sweep_orphan_tui_anchors_with_probes(
+        &shared.turn_view_reconciler,
+        shared,
+        std::time::SystemTime::now(),
+        std::time::Duration::from_secs(ORPHAN_TUI_ANCHOR_MIN_AGE_SECS),
+        &has_live_inflight,
+        &has_valid_marker,
+        "orphan_tui_anchor_sweep",
+    )
+    .await
+}
+
 /// Spawn the long-lived background task that runs the stall sweeper at the
 /// configured interval until the runtime exits. Should be called once per
 /// provider during dcserver bootstrap.
@@ -977,6 +1022,12 @@ pub(super) fn spawn_placeholder_sweeper(
             // owns this reclaim so an aborted anchor always converges (#3282).
             let drained_abort_markers =
                 super::tui_direct_abort_marker::sweep_expired(&shared, &provider).await;
+            // #4278: after the marker sweep has had its claim, remove any
+            // orphaned `⏳` TUI-direct anchor left with no live turn and no
+            // covering marker (an aborted synthetic turn whose FOREIGN-pinned
+            // marker never converged, or a lost pending-removal). Runs AFTER
+            // `sweep_expired` so the marker + drain always reconcile first.
+            let swept_orphan_anchors = sweep_orphan_tui_anchor_reactions(&shared, &provider).await;
             // #3859: finalize placeholders stranded by a failure-path inflight
             // eviction (turn-task Drop / heartbeat-gap sweeper). Each durable
             // abandon-request is edited to its terminal "중단됨" card BY MESSAGE
@@ -990,10 +1041,11 @@ pub(super) fn spawn_placeholder_sweeper(
                 || drained > 0
                 || drained_abort_markers > 0
                 || drained_abandon_requests > 0
+                || swept_orphan_anchors > 0
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={} swept_orphan_anchors={}",
                     provider.as_str(),
                     report.scanned,
                     report.stalled,
@@ -1001,7 +1053,8 @@ pub(super) fn spawn_placeholder_sweeper(
                     report.reclaimed_panels,
                     drained,
                     drained_abort_markers,
-                    drained_abandon_requests
+                    drained_abandon_requests,
+                    swept_orphan_anchors
                 );
                 sweeps_since_heartbeat = 0;
             }
