@@ -794,6 +794,10 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     // stand-in for the intake path's settings-resolved profile: a named-but-
     // missing profile makes the probe return `false` (fail-open to normal
     // dispatch) instead of misclassifying a remote session as a local TUI.
+    // #4353: `tui_busy_followup_diagnostic` probes a live tmux pane, so it is
+    // cfg(unix). A platform without tmux can never host a busy TUI, and the gate
+    // fails open exactly as it does for a missing pane.
+    #[cfg(unix)]
     let blocked = tui_busy_followup_diagnostic(
         shared,
         provider,
@@ -804,6 +808,18 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         session_id.as_deref(),
     )
     .is_some();
+    #[cfg(not(unix))]
+    let blocked = {
+        let _ = (
+            shared,
+            provider,
+            &tmux_session_name,
+            remote_profile_named,
+            &current_path,
+            &session_id,
+        );
+        false
+    };
     if blocked {
         tracing::info!(
             channel_id = channel_id.get(),

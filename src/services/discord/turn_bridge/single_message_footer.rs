@@ -375,10 +375,20 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
         this_turn_status_panel_generation,
         tmux_session_name.map(str::to_string),
         |tmux_session_name| async move {
-            super::super::tmux::sniff_background_agent_pending_for_completion(
-                tmux_session_name.as_deref(),
-            )
-            .await
+            // #4353: `super::super::tmux` is cfg(unix). No tmux pane means nothing
+            // can be pending in one.
+            #[cfg(unix)]
+            {
+                super::super::tmux::sniff_background_agent_pending_for_completion(
+                    tmux_session_name.as_deref(),
+                )
+                .await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tmux_session_name;
+                false
+            }
         },
     )
     .await

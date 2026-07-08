@@ -101,6 +101,10 @@ impl DestructiveCancelProbeSnapshot {
     }
 }
 
+/// #4353: the frontier lives in tmux session files, and `super::tmux` is
+/// `cfg(unix)`. Without a session there is no frontier, which is exactly the
+/// answer on a platform that cannot host one.
+#[cfg(unix)]
 fn relay_frontier_for_current_generation(
     shared: &SharedData,
     watcher_owner_channel: ChannelId,
@@ -113,6 +117,15 @@ fn relay_frontier_for_current_generation(
             tmux_session_name,
         )
     })
+}
+
+#[cfg(not(unix))]
+fn relay_frontier_for_current_generation(
+    _shared: &SharedData,
+    _watcher_owner_channel: ChannelId,
+    _tmux_session_name: Option<&str>,
+) -> Option<u64> {
+    None
 }
 
 pub(in crate::services::discord) fn terminal_envelope_present(
@@ -530,6 +543,8 @@ mod tests {
         });
     }
 
+    // #4353: reads tmux generation files via `super::super::tmux` (cfg(unix)).
+    #[cfg(unix)]
     #[test]
     fn generation_mismatched_relay_frontier_does_not_fake_reprobe_progress() {
         let _lock = crate::config::shared_test_env_lock()
@@ -584,6 +599,8 @@ mod tests {
         });
     }
 
+    // #4353: reads tmux generation files via `super::super::tmux` (cfg(unix)).
+    #[cfg(unix)]
     #[test]
     fn current_generation_relay_frontier_after_empty_snapshot_denies_destructive_cancel() {
         let _lock = crate::config::shared_test_env_lock()

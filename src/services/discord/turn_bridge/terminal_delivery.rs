@@ -1238,6 +1238,8 @@ mod tests {
         ));
     }
 
+    // #4353: drives `discord::tmux` (cfg(unix)) directly.
+    #[cfg(unix)]
     #[test]
     fn stopped_turn_terminal_replace_raw_fingerprint_refuses_phantom_rerelay_4081() {
         let _lock = crate::config::shared_test_env_lock()

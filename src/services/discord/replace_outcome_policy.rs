@@ -1,3 +1,11 @@
+//! #3089 A0: shared `ReplaceLongMessageOutcome` disposition policy.
+//!
+//! #4353: this module is pure disposition logic — no tmux, no unix syscalls, no
+//! imports at all. It used to be declared `#[cfg(unix)]` in `discord/mod.rs`,
+//! which only reflected that its first callers were unix-only. `formatting`,
+//! `gateway`, `long_send_rollback`, `bridge_gateway`, `terminal_delivery` and
+//! `turn_output_controller` all reference it unguarded, so the gate broke every
+//! non-unix build (34 errors, nightly red for 5 days).
 //! #3089 A0 — behavior-preserving disposition policy for the
 //! `ReplaceLongMessageOutcome` returned by `replace_long_message_raw_with_outcome`.
 //!
