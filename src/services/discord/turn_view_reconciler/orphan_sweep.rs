@@ -58,6 +58,14 @@ pub(in crate::services::discord) fn orphan_tui_anchor_should_clear(
 /// valid-marker probes so the production sweep supplies the real inflight /
 /// abort-marker store reads while a test drives the verdict directly. Returns
 /// the number of orphan `⏳` reactions resolved this pass.
+///
+/// `has_live_inflight` / `has_valid_marker` feed the CHEAP pass-level verdict
+/// (the caller may serve them from a pass-local cache); `holds_before_removal`
+/// is the codex-r1 TOCTOU closer — re-evaluated FRESH inside the removal's
+/// `target_lock` (see [`TurnViewReconciler::clear_orphan_pending_tui_anchor`]),
+/// so a deferred claim / recovery that saved an inflight row, a marker, or a
+/// durable pending-start AFTER the verdict aborts the removal instead of
+/// stripping a legitimate `⏳`.
 pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
     reconciler: &TurnViewReconciler,
     shared: &SharedData,
@@ -65,6 +73,7 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
     min_age: Duration,
     has_live_inflight: &(dyn Fn(u64) -> bool + Send + Sync),
     has_valid_marker: &(dyn Fn(u64, u64) -> bool + Send + Sync),
+    holds_before_removal: &(dyn Fn(u64, u64) -> bool + Send + Sync),
     source: &'static str,
 ) -> usize {
     let mut cleared = 0usize;
@@ -82,6 +91,7 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
                 shared,
                 ChannelId::new(candidate.channel_id),
                 MessageId::new(candidate.message_id),
+                holds_before_removal,
                 source,
             )
             .await
@@ -161,11 +171,20 @@ impl TurnViewReconciler {
     /// removes it (add≡remove, #3164). Fail-open: a transient delivery failure
     /// keeps the record for the next pass; a permanently-gone message
     /// terminates the record. Returns `true` iff this call resolved the orphan.
+    ///
+    /// TOCTOU guard (codex r1): the pass-level orphan verdict and this removal
+    /// are not atomic — a deferred synthetic claim / recovery can save an
+    /// inflight row, an abort marker, or a durable pending-start in between.
+    /// `holds_before_removal(channel_id, anchor_message_id)` is therefore
+    /// re-evaluated FRESH here, inside the `target_lock`, immediately before
+    /// the reaction removal; any hold that appeared aborts the sweep for this
+    /// pass (record preserved, `⏳` untouched).
     pub(in crate::services::discord) async fn clear_orphan_pending_tui_anchor(
         &self,
         shared: &SharedData,
         channel_id: ChannelId,
         message_id: MessageId,
+        holds_before_removal: &(dyn Fn(u64, u64) -> bool + Send + Sync),
         source: &'static str,
     ) -> bool {
         let target = TurnViewTarget::tui_direct_bot_anchor(channel_id, message_id);
@@ -184,6 +203,19 @@ impl TurnViewReconciler {
         if current.applied != TurnViewState::Pending {
             // A terminal / queue-marker state is owned by the live lifecycle;
             // the orphan sweep only ever removes a stranded `⏳`.
+            self.targets.insert(target, current);
+            return false;
+        }
+        if holds_before_removal(channel_id.get(), message_id.get()) {
+            // codex r1 TOCTOU: a hold (live inflight / marker / pending-start)
+            // landed between the verdict and this locked removal — the `⏳` is
+            // legitimate again; defer to the primary reconcilers.
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                anchor_message_id = message_id.get(),
+                source,
+                "orphan ⏳ sweep aborted: a hold appeared before removal (#4278 codex r1)"
+            );
             self.targets.insert(target, current);
             return false;
         }
@@ -366,6 +398,7 @@ mod tests {
 
         let no_inflight = |_: u64| false;
         let no_marker = |_: u64, _: u64| false;
+        let no_hold = |_: u64, _: u64| false;
         let cleared = sweep_orphan_tui_anchors_with_probes(
             &reconciler,
             &shared,
@@ -374,6 +407,7 @@ mod tests {
             Duration::from_secs(600),
             &no_inflight,
             &no_marker,
+            &no_hold,
             "test_orphan_sweep",
         )
         .await;
@@ -400,6 +434,7 @@ mod tests {
             write_pending_anchor(&shared, channel, message);
             let inflight = move |_: u64| live;
             let has_marker = move |_: u64, _: u64| marker;
+            let no_hold = |_: u64, _: u64| false;
             let cleared = sweep_orphan_tui_anchors_with_probes(
                 &reconciler,
                 &shared,
@@ -407,6 +442,7 @@ mod tests {
                 Duration::from_secs(600),
                 &inflight,
                 &has_marker,
+                &no_hold,
                 "test_orphan_sweep",
             )
             .await;
@@ -433,6 +469,7 @@ mod tests {
 
         let no_inflight = |_: u64| false;
         let no_marker = |_: u64, _: u64| false;
+        let no_hold = |_: u64, _: u64| false;
         let cleared = sweep_orphan_tui_anchors_with_probes(
             &reconciler,
             &shared,
@@ -440,11 +477,60 @@ mod tests {
             Duration::from_secs(600),
             &no_inflight,
             &no_marker,
+            &no_hold,
             "test_orphan_sweep",
         )
         .await;
 
         assert_eq!(cleared, 0, "a young ⏳ is within the grace window");
         assert!(persisted_exists(7201, 8201), "young record survives");
+    }
+
+    // codex r1 TOCTOU interleaving: the pass-level verdict sees NO holds (the
+    // anchor looks orphaned), but a hold (e.g. a deferred claim saving its
+    // abort marker / inflight row) lands BEFORE the locked removal runs. The
+    // fresh `holds_before_removal` re-verification inside the target_lock must
+    // abort the removal: no `⏳` reaction op, record preserved. RED if the
+    // removal trusts the stale verdict.
+    #[tokio::test]
+    async fn sweep_aborts_when_hold_appears_between_verdict_and_removal() {
+        let _root = scoped_runtime_root();
+        let reconciler = TurnViewReconciler::default();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        write_pending_anchor(&shared, 7301, 8301);
+
+        // Verdict-time probes: no live turn, no marker → candidate passes.
+        let no_inflight = |_: u64| false;
+        let no_marker = |_: u64, _: u64| false;
+        // Removal-time fresh re-probe: the marker/inflight save has now landed.
+        let hold_appeared = |channel_id: u64, anchor_message_id: u64| {
+            assert_eq!(channel_id, 7301, "re-probe targets the candidate channel");
+            assert_eq!(anchor_message_id, 8301, "re-probe targets the exact anchor");
+            true
+        };
+        let cleared = sweep_orphan_tui_anchors_with_probes(
+            &reconciler,
+            &shared,
+            SystemTime::now() + Duration::from_secs(3600),
+            Duration::from_secs(600),
+            &no_inflight,
+            &no_marker,
+            &hold_appeared,
+            "test_orphan_sweep",
+        )
+        .await;
+
+        assert_eq!(
+            cleared, 0,
+            "a hold appearing after the verdict must abort the removal"
+        );
+        assert!(
+            !hourglass_removed(&reconciler, 8301),
+            "the now-legitimate ⏳ must not be removed"
+        );
+        assert!(
+            persisted_exists(7301, 8301),
+            "the persisted record survives the aborted removal"
+        );
     }
 }
