@@ -142,6 +142,121 @@ async fn persist_turn_pg(pool: &PgPool, entry: &PreparedSessionTranscript) -> Re
     Ok(())
 }
 
+/// #4307: per-turn memento recall/feedback stats surfaced by the `/api/stats`
+/// reader (`load_memento_feedback_counts`). Restores the writer a1492c05 dropped
+/// when it removed the SQLite twin without porting the PG path — the
+/// `memento_feedback_turn_stats` table has shipped in the PG schema all along
+/// (migrations/postgres/0001_initial_schema.sql) but nothing wrote to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MementoFeedbackTurnStat {
+    pub turn_id: String,
+    pub stat_date: String,
+    pub agent_id: String,
+    pub provider: String,
+    pub recall_count: i64,
+    pub manual_tool_feedback_count: i64,
+    pub manual_covered_recall_count: i64,
+    pub auto_tool_feedback_count: i64,
+    pub covered_recall_count: i64,
+}
+
+/// Upsert a turn's memento feedback stats keyed by `turn_id`. Returns `Err`
+/// when no PG pool is available (the caller gates on `pg_pool.is_some()`).
+pub async fn record_memento_feedback_turn_stats(
+    pg_pool: Option<&PgPool>,
+    stat: &MementoFeedbackTurnStat,
+) -> Result<()> {
+    let Some(pool) = pg_pool else {
+        return Err(anyhow!(
+            "postgres pool is required to record memento feedback stats"
+        ));
+    };
+    validate_memento_feedback_turn_stat(stat)?;
+
+    sqlx::query(
+        "INSERT INTO memento_feedback_turn_stats (
+            turn_id,
+            stat_date,
+            agent_id,
+            provider,
+            recall_count,
+            manual_tool_feedback_count,
+            manual_covered_recall_count,
+            auto_tool_feedback_count,
+            covered_recall_count
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (turn_id) DO UPDATE SET
+            stat_date = EXCLUDED.stat_date,
+            agent_id = EXCLUDED.agent_id,
+            provider = EXCLUDED.provider,
+            recall_count = EXCLUDED.recall_count,
+            manual_tool_feedback_count = EXCLUDED.manual_tool_feedback_count,
+            manual_covered_recall_count = EXCLUDED.manual_covered_recall_count,
+            auto_tool_feedback_count = EXCLUDED.auto_tool_feedback_count,
+            covered_recall_count = EXCLUDED.covered_recall_count",
+    )
+    .bind(&stat.turn_id)
+    .bind(&stat.stat_date)
+    .bind(&stat.agent_id)
+    .bind(&stat.provider)
+    .bind(stat.recall_count)
+    .bind(stat.manual_tool_feedback_count)
+    .bind(stat.manual_covered_recall_count)
+    .bind(stat.auto_tool_feedback_count)
+    .bind(stat.covered_recall_count)
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow!("record memento feedback turn stats failed: {e}"))?;
+
+    Ok(())
+}
+
+fn validate_memento_feedback_turn_stat(stat: &MementoFeedbackTurnStat) -> Result<()> {
+    if stat.turn_id.trim().is_empty() {
+        return Err(anyhow!("memento feedback stats require non-empty turn_id"));
+    }
+    if stat.stat_date.trim().is_empty() {
+        return Err(anyhow!(
+            "memento feedback stats require non-empty stat_date"
+        ));
+    }
+    if stat.agent_id.trim().is_empty() {
+        return Err(anyhow!("memento feedback stats require non-empty agent_id"));
+    }
+    if stat.provider.trim().is_empty() {
+        return Err(anyhow!("memento feedback stats require non-empty provider"));
+    }
+
+    for (label, value) in [
+        ("recall_count", stat.recall_count),
+        (
+            "manual_tool_feedback_count",
+            stat.manual_tool_feedback_count,
+        ),
+        (
+            "manual_covered_recall_count",
+            stat.manual_covered_recall_count,
+        ),
+        ("auto_tool_feedback_count", stat.auto_tool_feedback_count),
+        ("covered_recall_count", stat.covered_recall_count),
+    ] {
+        if value < 0 {
+            return Err(anyhow!(
+                "memento feedback stats {label} must be non-negative"
+            ));
+        }
+    }
+    if stat.manual_covered_recall_count > stat.recall_count {
+        return Err(anyhow!(
+            "manual_covered_recall_count cannot exceed recall_count"
+        ));
+    }
+    if stat.covered_recall_count > stat.recall_count {
+        return Err(anyhow!("covered_recall_count cannot exceed recall_count"));
+    }
+    Ok(())
+}
+
 fn prepare_persist_entry_base(
     entry: &PersistSessionTranscript<'_>,
 ) -> Result<Option<PreparedSessionTranscript>> {

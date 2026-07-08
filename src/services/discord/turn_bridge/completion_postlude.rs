@@ -371,12 +371,10 @@ pub(super) async fn run_completion_postlude(
     } else {
         None
     };
-    let mut voluntary_feedback_reminder_injected = false;
     if let Some(analysis) = recall_feedback_analysis.as_ref()
         && let Some(reminder) = build_voluntary_feedback_reminder(analysis)
     {
         push_transcript_event(&mut transcript_events, reminder_transcript_event(reminder));
-        voluntary_feedback_reminder_injected = true;
         recall_feedback_analysis = Some(analyze_recall_feedback_turn(&transcript_events));
     }
     let model_token_usage = TurnTokenUsage {
@@ -469,6 +467,40 @@ pub(super) async fn run_completion_postlude(
         }
     }
 
+    // #4307 PR-A: persist per-turn memento recall/feedback stats so the
+    // /api/stats reader (load_memento_feedback_counts) surfaces real
+    // compliance/coverage counts. Restores the writer a1492c05 dropped when it
+    // removed the SQLite twin without porting the PG path. auto_tool_feedback_count
+    // is always 0 now that the dead auto-submit fallback is gone.
+    if shared_owned.pg_pool.is_some()
+        && let Some(analysis) = recall_feedback_analysis.as_ref()
+        && analysis.recall_count > 0
+    {
+        let stat = crate::db::session_transcripts::MementoFeedbackTurnStat {
+            turn_id: turn_id.clone(),
+            stat_date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            agent_id: memory_role_id.clone(),
+            provider: provider.as_str().to_string(),
+            recall_count: i64::try_from(analysis.recall_count).unwrap_or(i64::MAX),
+            manual_tool_feedback_count: i64::try_from(analysis.manual_feedback_count)
+                .unwrap_or(i64::MAX),
+            manual_covered_recall_count: i64::try_from(analysis.manual_covered_recall_count)
+                .unwrap_or(i64::MAX),
+            auto_tool_feedback_count: 0,
+            covered_recall_count: i64::try_from(analysis.manual_covered_recall_count)
+                .unwrap_or(i64::MAX),
+        };
+        if let Err(error) = crate::db::session_transcripts::record_memento_feedback_turn_stats(
+            shared_owned.pg_pool.as_ref(),
+            &stat,
+        )
+        .await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ failed to persist memento feedback stats: {error}");
+        }
+    }
+
     if shared_owned.pg_pool.is_some() && !api_friction_reports.is_empty() {
         match crate::services::api_friction::record_api_friction_reports(
             shared_owned.pg_pool.as_ref(),
@@ -520,40 +552,6 @@ pub(super) async fn run_completion_postlude(
             model_token_usage,
             turn_duration_ms(turn_start),
         );
-    }
-
-    if let Some(analysis) = recall_feedback_analysis.as_ref()
-        && should_submit_automatic_feedback_fallback(analysis, voluntary_feedback_reminder_injected)
-    {
-        let submit_result = match tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            submit_pending_feedbacks(
-                &capture_memory_settings,
-                session_id_to_persist.as_deref(),
-                analysis.pending_feedbacks.clone(),
-            ),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] [memory] submit_pending_feedbacks timed out after 20s for channel {}",
-                    channel_id.get(),
-                );
-                Default::default()
-            }
-        };
-        let _submitted_count = submit_result.submitted_count;
-        accumulated_memory_input_tokens =
-            accumulated_memory_input_tokens.saturating_add(submit_result.token_usage.input_tokens);
-        accumulated_memory_output_tokens = accumulated_memory_output_tokens
-            .saturating_add(submit_result.token_usage.output_tokens);
-        for error in submit_result.errors {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ failed to auto-submit recall tool_feedback: {error}");
-        }
     }
 
     let mut background_memory_tasks = Vec::new();

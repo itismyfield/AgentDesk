@@ -1,37 +1,12 @@
 use std::collections::VecDeque;
-use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
-use crate::services::discord::settings::ResolvedMemorySettings;
-use crate::services::memory::{MementoBackend, MementoToolFeedbackRequest, TokenUsage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingRecallFeedback {
-    pub session_id: Option<String>,
     pub search_event_id: Option<String>,
-    pub fragment_ids: Vec<String>,
-    pub relevant: bool,
-    pub sufficient: bool,
-}
-
-impl PendingRecallFeedback {
-    fn into_request(self, session_id_fallback: Option<&str>) -> MementoToolFeedbackRequest {
-        MementoToolFeedbackRequest {
-            tool_name: "recall".to_string(),
-            relevant: self.relevant,
-            sufficient: self.sufficient,
-            session_id: self
-                .session_id
-                .or_else(|| normalized_opt(session_id_fallback)),
-            search_event_id: self.search_event_id,
-            fragment_ids: self.fragment_ids,
-            suggestion: None,
-            context: None,
-            trigger_type: Some("sampled".to_string()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -72,20 +47,6 @@ pub(super) fn build_voluntary_feedback_reminder(
     ))
 }
 
-pub(super) fn should_submit_automatic_feedback_fallback(
-    analysis: &RecallFeedbackTurnAnalysis,
-    voluntary_reminder_injected: bool,
-) -> bool {
-    !voluntary_reminder_injected && !analysis.pending_feedbacks.is_empty()
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct RecallFeedbackAutoSubmitResult {
-    pub submitted_count: usize,
-    pub token_usage: TokenUsage,
-    pub errors: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 struct PendingToolCall {
     name: String,
@@ -109,7 +70,6 @@ struct CompletedMementoToolCall {
 #[derive(Debug, Clone)]
 struct RecallObservation {
     completed_at: usize,
-    session_id: Option<String>,
     search_event_id: Option<String>,
     fragment_ids: Vec<String>,
 }
@@ -155,12 +115,8 @@ pub(super) fn analyze_recall_feedback_turn(
         .iter()
         .enumerate()
         .filter(|(index, _)| !matched_recalls[*index])
-        .map(|(index, recall)| PendingRecallFeedback {
-            session_id: recall.session_id.clone(),
+        .map(|(_, recall)| PendingRecallFeedback {
             search_event_id: recall.search_event_id.clone(),
-            fragment_ids: recall.fragment_ids.clone(),
-            relevant: recall_is_relevant(events, recall),
-            sufficient: index + 1 == recalls.len(),
         })
         .collect::<Vec<_>>();
 
@@ -173,40 +129,6 @@ pub(super) fn analyze_recall_feedback_turn(
             .count(),
         pending_feedbacks,
     }
-}
-
-pub(super) async fn submit_pending_feedbacks(
-    settings: &ResolvedMemorySettings,
-    session_id: Option<&str>,
-    pending_feedbacks: Vec<PendingRecallFeedback>,
-) -> RecallFeedbackAutoSubmitResult {
-    if pending_feedbacks.is_empty() {
-        return RecallFeedbackAutoSubmitResult::default();
-    }
-
-    let backend = MementoBackend::new(settings.clone());
-    let mut result = RecallFeedbackAutoSubmitResult::default();
-
-    for pending_feedback in pending_feedbacks {
-        match tokio::time::timeout(
-            Duration::from_millis(settings.capture_timeout_ms),
-            backend.tool_feedback(pending_feedback.into_request(session_id)),
-        )
-        .await
-        {
-            Ok(Ok(token_usage)) => {
-                result.submitted_count += 1;
-                result.token_usage.saturating_add_assign(token_usage);
-            }
-            Ok(Err(error)) => result.errors.push(error),
-            Err(_) => result.errors.push(format!(
-                "memento tool_feedback timed out after {}ms",
-                settings.capture_timeout_ms
-            )),
-        }
-    }
-
-    result
 }
 
 pub(super) fn transcript_contains_explicit_memento_tool_call(
@@ -270,11 +192,9 @@ fn completed_memento_tool_calls(
 }
 
 fn parse_recall_observation(call: &CompletedMementoToolCall) -> RecallObservation {
-    let input = serde_json::from_str::<Value>(&call.input).unwrap_or(Value::Null);
     let payload = serde_json::from_str::<Value>(&call.output).unwrap_or(Value::Null);
     RecallObservation {
         completed_at: call.completed_at,
-        session_id: string_field(&input, &["session_id", "sessionId"]),
         search_event_id: string_field(
             &payload,
             &["_searchEventId", "searchEventId", "search_event_id"],
@@ -366,22 +286,6 @@ fn find_latest_prior_unmatched_recall(
         .map(|(index, _)| index)
 }
 
-fn recall_is_relevant(events: &[SessionTranscriptEvent], recall: &RecallObservation) -> bool {
-    if recall.fragment_ids.is_empty() {
-        return false;
-    }
-
-    events.iter().skip(recall.completed_at + 1).any(|event| {
-        matches!(
-            event.kind,
-            SessionTranscriptEventKind::Assistant | SessionTranscriptEventKind::Result
-        ) && recall
-            .fragment_ids
-            .iter()
-            .any(|fragment_id| event.content.contains(fragment_id))
-    })
-}
-
 fn canonical_memento_tool_kind(name: &str) -> Option<MementoToolKind> {
     let normalized = name.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -455,13 +359,6 @@ fn string_array_field(payload: &Value, keys: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn normalized_opt(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
 pub(super) fn reminder_transcript_event(content: String) -> SessionTranscriptEvent {
     SessionTranscriptEvent {
         kind: SessionTranscriptEventKind::System,
@@ -474,20 +371,112 @@ pub(super) fn reminder_transcript_event(content: String) -> SessionTranscriptEve
 }
 
 #[cfg(test)]
-mod trigger_type_tests {
+mod recall_feedback_reminder_tests {
     use super::*;
 
-    #[test]
-    fn automatic_fallback_request_uses_sampled_trigger_type() {
-        let request = PendingRecallFeedback {
-            session_id: None,
-            search_event_id: Some("search-1".to_string()),
-            fragment_ids: vec!["frag-1".to_string()],
-            relevant: true,
-            sufficient: true,
+    fn tool_event(
+        kind: SessionTranscriptEventKind,
+        tool_name: &str,
+        content: &str,
+    ) -> SessionTranscriptEvent {
+        SessionTranscriptEvent {
+            kind,
+            tool_name: Some(tool_name.to_string()),
+            summary: None,
+            content: content.to_string(),
+            status: None,
+            is_error: false,
         }
-        .into_request(Some("session-1"));
+    }
 
-        assert_eq!(request.trigger_type.as_deref(), Some("sampled"));
+    fn recall_pair(search_event_id: &str) -> Vec<SessionTranscriptEvent> {
+        vec![
+            tool_event(SessionTranscriptEventKind::ToolUse, "recall", "{}"),
+            tool_event(
+                SessionTranscriptEventKind::ToolResult,
+                "recall",
+                &format!("{{\"_searchEventId\":\"{search_event_id}\"}}"),
+            ),
+        ]
+    }
+
+    fn tool_feedback_pair(search_event_id: &str) -> Vec<SessionTranscriptEvent> {
+        vec![
+            tool_event(
+                SessionTranscriptEventKind::ToolUse,
+                "tool_feedback",
+                &format!("{{\"tool_name\":\"recall\",\"search_event_id\":\"{search_event_id}\"}}"),
+            ),
+            tool_event(
+                SessionTranscriptEventKind::ToolResult,
+                "tool_feedback",
+                "{}",
+            ),
+        ]
+    }
+
+    // Truth table core: whenever there is at least one recall AND at least one
+    // uncovered recall (pending_feedbacks non-empty), a voluntary reminder is
+    // required — and therefore always injected. This is exactly why the removed
+    // auto-submit fallback (`!reminder_injected && !pending.is_empty()`) was
+    // unreachable: its second conjunct implies the first is false. #4307 PR-A.
+    #[test]
+    fn pending_feedback_presence_drives_reminder_truth_table() {
+        let with_pending = RecallFeedbackTurnAnalysis {
+            recall_count: 2,
+            manual_feedback_count: 1,
+            manual_covered_recall_count: 1,
+            pending_feedbacks: vec![PendingRecallFeedback {
+                search_event_id: Some("evt-1".to_string()),
+            }],
+        };
+        assert!(with_pending.needs_voluntary_feedback_reminder());
+        assert!(build_voluntary_feedback_reminder(&with_pending).is_some());
+
+        let all_covered = RecallFeedbackTurnAnalysis {
+            recall_count: 2,
+            manual_feedback_count: 2,
+            manual_covered_recall_count: 2,
+            pending_feedbacks: Vec::new(),
+        };
+        assert!(!all_covered.needs_voluntary_feedback_reminder());
+        assert!(build_voluntary_feedback_reminder(&all_covered).is_none());
+
+        let no_recall = RecallFeedbackTurnAnalysis::default();
+        assert!(!no_recall.needs_voluntary_feedback_reminder());
+        assert!(build_voluntary_feedback_reminder(&no_recall).is_none());
+    }
+
+    #[test]
+    fn uncovered_recall_yields_pending_and_requires_reminder() {
+        let events = recall_pair("evt-1");
+        let analysis = analyze_recall_feedback_turn(&events);
+
+        assert_eq!(analysis.recall_count, 1);
+        assert_eq!(analysis.manual_feedback_count, 0);
+        assert_eq!(analysis.manual_covered_recall_count, 0);
+        assert_eq!(analysis.pending_feedbacks.len(), 1);
+        assert_eq!(
+            analysis.pending_feedbacks[0].search_event_id.as_deref(),
+            Some("evt-1")
+        );
+        assert!(analysis.needs_voluntary_feedback_reminder());
+
+        let reminder = build_voluntary_feedback_reminder(&analysis).expect("reminder");
+        assert!(reminder.contains("evt-1"));
+    }
+
+    #[test]
+    fn covered_recall_leaves_no_pending_and_no_reminder() {
+        let mut events = recall_pair("evt-1");
+        events.extend(tool_feedback_pair("evt-1"));
+        let analysis = analyze_recall_feedback_turn(&events);
+
+        assert_eq!(analysis.recall_count, 1);
+        assert_eq!(analysis.manual_feedback_count, 1);
+        assert_eq!(analysis.manual_covered_recall_count, 1);
+        assert!(analysis.pending_feedbacks.is_empty());
+        assert!(!analysis.needs_voluntary_feedback_reminder());
+        assert!(build_voluntary_feedback_reminder(&analysis).is_none());
     }
 }

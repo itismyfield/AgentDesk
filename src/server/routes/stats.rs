@@ -586,3 +586,137 @@ async fn load_memento_feedback_counts(state: &AppState) -> Option<(i64, i64)> {
 fn load_memento_feedback_counts_legacy(_state: &AppState) -> Option<(i64, i64)> {
     None
 }
+
+#[cfg(test)]
+mod memento_feedback_stats_pg_tests {
+    use super::{AppState, load_memento_feedback_counts};
+    use crate::db::session_transcripts::{
+        MementoFeedbackTurnStat, record_memento_feedback_turn_stats,
+    };
+
+    const PG_TEST_LABEL: &str = "stats memento feedback counts pg test";
+
+    struct StatsPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl StatsPostgresDb {
+        async fn try_create() -> Option<Self> {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
+            let database_name = format!("agentdesk_pg_stats_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!(
+                "{}/{}",
+                crate::dispatch::test_support::postgres_base_database_url(),
+                database_name
+            );
+            if let Err(error) =
+                crate::db::postgres::create_test_database(&admin_url, &database_name, PG_TEST_LABEL)
+                    .await
+            {
+                eprintln!("skipping {PG_TEST_LABEL}: {error}");
+                drop(lock);
+                return None;
+            }
+
+            Some(Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, PG_TEST_LABEL)
+                .await
+                .expect("connect + migrate stats postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                PG_TEST_LABEL,
+            )
+            .await
+            .expect("drop stats postgres test db");
+        }
+    }
+
+    fn test_state_with_pg(pg_pool: sqlx::PgPool) -> AppState {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        let engine =
+            crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool.clone())).unwrap();
+        let tx = crate::eventbus::new_broadcast();
+        let buf = crate::eventbus::spawn_batch_flusher(tx.clone());
+        AppState {
+            pg_pool: Some(pg_pool),
+            engine,
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    fn stat(turn_id: &str, manual: i64, manual_covered: i64, auto: i64) -> MementoFeedbackTurnStat {
+        MementoFeedbackTurnStat {
+            turn_id: turn_id.to_string(),
+            stat_date: "2026-07-08".to_string(),
+            agent_id: "project-agentdesk".to_string(),
+            provider: "codex".to_string(),
+            recall_count: 6,
+            manual_tool_feedback_count: manual,
+            manual_covered_recall_count: manual_covered,
+            auto_tool_feedback_count: auto,
+            covered_recall_count: manual_covered,
+        }
+    }
+
+    // #4307 PR-A: prove the restored writer round-trips through the /api/stats
+    // reader (`load_memento_feedback_counts`): the reader returns the real
+    // persisted SUM(auto_tool_feedback_count) / SUM(manual_tool_feedback_count),
+    // and the writer's ON CONFLICT(turn_id) upsert replaces a turn in place.
+    #[tokio::test]
+    async fn load_memento_feedback_counts_returns_persisted_writer_values_pg() {
+        let Some(pg_db) = StatsPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let state = test_state_with_pg(pool.clone());
+
+        // Empty table: the reader returns real zero sums (COALESCE), not None.
+        assert_eq!(load_memento_feedback_counts(&state).await, Some((0, 0)));
+
+        // Production-shaped row (auto is always 0 post-#4307) ...
+        record_memento_feedback_turn_stats(Some(&pool), &stat("turn-1", 1, 1, 0))
+            .await
+            .expect("write turn-1");
+        // ... plus a row with a non-zero auto count so the reader's `automatic`
+        // sum column is exercised end-to-end, not just defaulted to 0.
+        record_memento_feedback_turn_stats(Some(&pool), &stat("turn-2", 2, 2, 3))
+            .await
+            .expect("write turn-2");
+
+        // automatic = 0 + 3, voluntary = 1 + 2.
+        assert_eq!(load_memento_feedback_counts(&state).await, Some((3, 3)));
+
+        // ON CONFLICT(turn_id) DO UPDATE replaces turn-2 in place (no dup row).
+        record_memento_feedback_turn_stats(Some(&pool), &stat("turn-2", 5, 4, 1))
+            .await
+            .expect("upsert turn-2");
+
+        // automatic = 0 + 1, voluntary = 1 + 5.
+        assert_eq!(load_memento_feedback_counts(&state).await, Some((1, 6)));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}

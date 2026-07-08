@@ -192,7 +192,6 @@ pub(in crate::services::discord) use memory_lifecycle::{
 };
 use recall_feedback::{
     analyze_recall_feedback_turn, build_voluntary_feedback_reminder, reminder_transcript_event,
-    should_submit_automatic_feedback_fallback, submit_pending_feedbacks,
     transcript_contains_explicit_memento_tool_call,
 };
 use retry_state::{
