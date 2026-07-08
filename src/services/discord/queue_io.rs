@@ -408,6 +408,33 @@ pub(super) async fn arm_event_backstop_after_no_start_if_queue_nonempty(
     )
 }
 
+/// #4270 — busy-defer edge-trigger net: arm ONLY the slow (60s) fail-open
+/// backstop for a channel, WITHOUT the fast 2s deferred kick. Used by (1) the
+/// hosted-TUI busy-defer release path
+/// (`release_mailbox_after_hosted_tui_busy_pre_submit`) and (2) the live
+/// dispatch promote gate (`DiscordGateway::dispatch_queued_turn`), so a
+/// still-busy follow-up does not fast-spin the kickoff: the watcher-idle
+/// re-drain delivers the fast edge when the TUI reaches Idle, and this backstop
+/// is the lost-wakeup net. Thin wrapper over
+/// [`arm_event_backstop_after_no_start_if_queue_nonempty`] with a synthetic
+/// no-start outcome so the same "arm only when queue is non-empty" guard and
+/// single-backstop coalescing apply.
+pub(super) async fn arm_slow_idle_queue_backstop_if_queue_nonempty(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+) -> bool {
+    arm_event_backstop_after_no_start_if_queue_nonempty(
+        shared,
+        provider,
+        channel_id,
+        IdleQueueKickoffChannelOutcome { started: false },
+        reason,
+    )
+    .await
+}
+
 fn emit_idle_queue_backstop_warn(
     provider: &ProviderKind,
     channel_id: Option<ChannelId>,
@@ -466,12 +493,21 @@ async fn run_single_slow_idle_queue_backstop(
         backlog_units,
         "channel_backstop",
     );
-    let outcome =
+    let _outcome =
         kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason).await;
-    if outcome.started {
-        return None;
-    }
 
+    // #4270 — decide the re-arm from the ACTUAL post-kick mailbox state, not
+    // from the kick's `started` flag. A kickoff can report `started == true`
+    // without a real turn owning the slot: the pre-claim readiness gate (#4270 A)
+    // re-preserves a still-busy hosted-TUI follow-up and returns `Ok`, so the
+    // kickoff reports `started` while the message is merely back in the queue.
+    // The previous `if outcome.started { return None; }` short-circuit then
+    // dropped this backstop (and the gate's own re-arm had coalesced onto this
+    // very still-registered task), stranding the follow-up with no fail-open net
+    // until the watcher-idle edge — a #4247-class lost-wakeup. Re-checking the
+    // real state below is strictly more precise: a genuinely started turn now
+    // owns the slot (`blocked_by_real_turn`) and still suppresses the successor,
+    // while a defer/no-start that leaves un-drained backlog re-arms as intended.
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -1914,5 +1950,358 @@ mod presleep_tests {
         });
 
         super::super::tui_direct_pending_start::reset_present_for_tests();
+    }
+
+    /// #4270 — env-lock + temp runtime root held inside a struct so the guard
+    /// is not a local binding across `.await` (keeps the repo-wide
+    /// `await_holding_lock` allow ratchet flat; same pattern as
+    /// `queue_marker.rs::ScopedRuntimeRoot`).
+    struct ScopedRuntimeRoot {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for ScopedRuntimeRoot {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(value) => std::env::set_var("AGENTDESK_ROOT_DIR", value),
+                    None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+                }
+            }
+        }
+    }
+
+    fn scoped_runtime_root() -> ScopedRuntimeRoot {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let prev = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        unsafe {
+            std::env::set_var(
+                "AGENTDESK_ROOT_DIR",
+                temp.path().to_str().expect("temp path must be valid utf-8"),
+            );
+        }
+        ScopedRuntimeRoot {
+            _lock: lock,
+            _temp: temp,
+            prev,
+        }
+    }
+
+    /// #4270 pin — sustained-busy convergence over the PRODUCTION defer
+    /// sequence (`take_next_soft` promote → `mailbox_requeue_intervention_front`
+    /// + slow-backstop arm, exactly what the `dispatch_queued_turn` promote gate
+    /// runs): repeated cycles converge to a SINGLE queue entry and a SINGLE
+    /// coalesced slow backstop (no accumulation / oscillation), and never fire a
+    /// fast kick.
+    #[tokio::test(flavor = "current_thread")]
+    async fn promote_defer_requeue_converges_no_oscillation_across_cycles_4270() {
+        let _root = scoped_runtime_root();
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_270_200);
+        let user_msg = MessageId::new(4_270_201);
+
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |_shared, _provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel == channel_id {
+                        hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    None
+                })
+            },
+        ));
+
+        with_post_enqueue_idle_queue_kick_suppressed(mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(user_msg.get(), "sustained busy follow-up"),
+        ))
+        .await;
+
+        for cycle in 0..3 {
+            let taken = shared
+                .mailbox(channel_id)
+                .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
+                .await;
+            let intervention = taken
+                .intervention
+                .unwrap_or_else(|| panic!("cycle {cycle}: the follow-up must still be promotable"));
+            mailbox_requeue_intervention_front(&shared, &provider, channel_id, intervention).await;
+            arm_slow_idle_queue_backstop_if_queue_nonempty(
+                &shared,
+                &provider,
+                channel_id,
+                "hosted_tui_busy_pre_drain_defer",
+            )
+            .await;
+            yield_backstop_tasks().await;
+
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
+            assert_eq!(
+                snapshot.intervention_queue.len(),
+                1,
+                "cycle {cycle}: exactly one queue entry (never accumulates duplicates)"
+            );
+            assert_eq!(
+                snapshot.pending_user_dispatch, None,
+                "cycle {cycle}: the front-requeue consumes the stale dispatch reservation"
+            );
+            assert!(
+                snapshot.cancel_token.is_none(),
+                "cycle {cycle}: the mailbox is never claimed by the still-busy follow-up"
+            );
+            assert_eq!(
+                shared
+                    .restart
+                    .deferred_hook_backlog
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "cycle {cycle}: the slow backstop coalesces to a single armed net"
+            );
+        }
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no fast kick across any busy cycle"
+        );
+    }
+
+    /// #4270 pin #2 — the busy-defer edge-trigger helper arms ONLY the slow
+    /// (60s) fail-open backstop for a non-empty queue and fires NO fast kickoff;
+    /// the fast wakeup is delegated to the watcher-idle re-drain. This is the
+    /// arm that both `release_mailbox_after_hosted_tui_busy_pre_submit`
+    /// (post-claim busy defer, turn_start.rs) and the `dispatch_queued_turn`
+    /// promote gate call instead of the fixed-delay kickoff.
+    #[tokio::test(flavor = "current_thread")]
+    async fn busy_defer_arms_slow_backstop_not_fast_kickoff_4270() {
+        let _root = scoped_runtime_root();
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_270_300);
+        let user_msg = MessageId::new(4_270_301);
+
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |_shared, _provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel == channel_id {
+                        hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    None
+                })
+            },
+        ));
+
+        // Suppress the setup enqueue's OWN post-enqueue kick so this test
+        // exercises `arm_slow_idle_queue_backstop_if_queue_nonempty` in
+        // isolation (otherwise that kick would arm the backstop first and this
+        // direct call would merely coalesce).
+        with_post_enqueue_idle_queue_kick_suppressed(mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(user_msg.get(), "busy-defer backlog"),
+        ))
+        .await;
+
+        let armed = arm_slow_idle_queue_backstop_if_queue_nonempty(
+            &shared,
+            &provider,
+            channel_id,
+            "hosted_tui_busy_pre_submit_pending",
+        )
+        .await;
+        assert!(armed, "a non-empty queue arms the slow backstop");
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the slow-backstop arm must not fire an immediate fast kickoff"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "exactly one slow (60s) backstop is armed"
+        );
+
+        // A second call for the same channel coalesces onto the single armed
+        // backstop (no accumulation) rather than arming a duplicate.
+        let armed_again = arm_slow_idle_queue_backstop_if_queue_nonempty(
+            &shared,
+            &provider,
+            channel_id,
+            "hosted_tui_busy_pre_submit_pending",
+        )
+        .await;
+        assert!(
+            !armed_again,
+            "a second arm coalesces onto the single channel-scoped backstop"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the slow backstop stays coalesced to a single armed net"
+        );
+    }
+
+    /// #4270 pin #4 — TUI Idle transition: once the promote gate has re-preserved
+    /// the follow-up at the queue front (production defer sequence), the
+    /// watcher-idle drain (soft-take → claim) dispatches it EXACTLY once and
+    /// empties the queue.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_drain_after_promote_defer_dispatches_exactly_once_4270() {
+        let _root = scoped_runtime_root();
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_270_400);
+        let user_msg = MessageId::new(4_270_401);
+        let owner = UserId::new(4_270_402);
+
+        with_post_enqueue_idle_queue_kick_suppressed(mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(user_msg.get(), "deferred until TUI idle"),
+        ))
+        .await;
+        let taken = shared
+            .mailbox(channel_id)
+            .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
+            .await;
+        let intervention = taken.intervention.expect("promote once");
+        mailbox_requeue_intervention_front(&shared, &provider, channel_id, intervention).await;
+
+        // Watcher-idle drain: the TUI reached Idle, so the drain soft-takes and
+        // claims. It must start exactly once and leave the queue empty.
+        let drained = shared
+            .mailbox(channel_id)
+            .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
+            .await
+            .intervention
+            .expect("idle drain re-promotes the preserved follow-up");
+        let started = mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            owner,
+            drained.message_id,
+        )
+        .await;
+        assert!(started, "on TUI Idle the follow-up claims exactly once");
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.active_user_message_id, Some(user_msg));
+        assert!(
+            snapshot.intervention_queue.is_empty(),
+            "the idle dispatch consumes the single queued follow-up"
+        );
+    }
+
+    /// #4270 fail-open — the slow (60s) backstop RE-ARMS itself when its own kick
+    /// reports `started` yet leaves un-drained backlog with no real turn owning
+    /// the slot. That is exactly the promote gate's steady state (the kickoff
+    /// defers pre-dequeue and reports no-start, or the dispatch gate re-preserves
+    /// and returns `Ok`), and the gate's own inline re-arm coalesces onto THIS
+    /// still-registered task. The net must therefore persist across busy cycles
+    /// instead of dying after a single fire — otherwise the follow-up strands
+    /// with no fail-open net until the watcher-idle edge (a #4247-class
+    /// lost-wakeup).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn slow_backstop_rearms_when_kick_defers_without_claiming_4270() {
+        let _root = scoped_runtime_root();
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_270_500);
+
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_270_501, "still-busy follow-up")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        // Emulate the promote-gate deferral: the kick reports `started` but
+        // never claims and leaves the follow-up queued (no active turn).
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |_shared, _provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Some(IdleQueueKickoffChannelOutcome { started: true })
+                })
+            },
+        ));
+
+        assert!(
+            arm_slow_idle_queue_backstop_if_queue_nonempty(
+                &shared,
+                &provider,
+                channel_id,
+                "hosted_tui_busy_pre_submit_pending",
+            )
+            .await
+        );
+
+        // Let the spawned backstop task reach its 60s sleep before advancing.
+        yield_backstop_tasks().await;
+
+        // First fire (60s): the kick defers again ⇒ the successor net must re-arm.
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the backstop fired once"
+        );
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "a started-but-deferred kick that leaves backlog must re-arm the fail-open backstop (no strand)"
+        );
+
+        // Second fire: still deferring ⇒ the net persists across successive cycles.
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the re-armed backstop fires again on the next cycle"
+        );
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "the fail-open net persists across successive busy cycles"
+        );
     }
 }

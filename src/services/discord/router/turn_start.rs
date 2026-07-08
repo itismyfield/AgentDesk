@@ -429,13 +429,20 @@ pub(in crate::services::discord) async fn release_mailbox_after_hosted_tui_busy_
 ) -> bool {
     let finish = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
     if finish.mailbox_online && finish.has_pending {
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
+        // #4270 B — edge-trigger conversion: do NOT re-arm the fast ~2s deferred
+        // kickoff for a hosted-TUI busy-defer release (that fixed-delay re-kick,
+        // combined with the mailbox-only kickoff gate, was the ~2s promote
+        // spin). Arm ONLY the slow (60s) fail-open backstop; the fast wakeup is
+        // delegated to the watcher-idle re-drain when the TUI reaches Idle, and
+        // the pre-claim readiness gate (#4270 A) absorbs any interim kick
+        // without re-claiming the mailbox.
+        super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+            shared,
+            provider,
             channel_id,
             "hosted_tui_busy_pre_submit_pending",
-        );
-        true
+        )
+        .await
     } else {
         false
     }

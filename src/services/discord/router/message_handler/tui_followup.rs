@@ -701,6 +701,165 @@ pub(super) fn tui_busy_followup_diagnostic(
     )
 }
 
+/// #4270 test seam for [`hosted_tui_promote_readiness_blocked`]: lets pin tests
+/// force the busy/ready verdict without a live tmux pane + hook server. `None`
+/// (production) falls through to the real diagnostic.
+#[cfg(test)]
+pub(in crate::services::discord) static HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS: std::sync::Mutex<
+    Option<bool>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(in crate::services::discord) struct HostedTuiPromoteBusyHookResetForTests;
+
+#[cfg(test)]
+impl Drop for HostedTuiPromoteBusyHookResetForTests {
+    fn drop(&mut self) {
+        *HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS
+            .lock()
+            .expect("hosted tui promote busy hook lock") = None;
+    }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
+    busy: bool,
+) -> HostedTuiPromoteBusyHookResetForTests {
+    *HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS
+        .lock()
+        .expect("hosted tui promote busy hook lock") = Some(busy);
+    HostedTuiPromoteBusyHookResetForTests
+}
+
+/// #4270 A — pre-teardown hosted-TUI readiness probe for the two queued-turn
+/// promote entrypoints (`kickoff_idle_queue_channel` pre-dequeue and
+/// `DiscordGateway::dispatch_queued_turn` pre-drain). Returns `true` when the
+/// channel's hosted TUI is verifiably busy per the SAME diagnostic the
+/// post-claim busy branch uses (`tui_busy_followup_diagnostic`), so the caller
+/// can defer the promotion BEFORE any user-visible teardown (turn-view
+/// started/⏳ flip, 📬/➕ marker drain, merged queued-card deletion, mailbox
+/// claim). Everything else — no session, no tmux pane, remote profile,
+/// non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
+/// dispatch path, whose existing post-claim busy branch owns the defer UX
+/// (queued-card render + 📬 re-attach). This probe must NEVER be load-bearing
+/// for message preservation; it only avoids churn.
+///
+/// Root cause it closes (#4270): the promote path used to dequeue + flip the
+/// head's turn-view to started/⏳ + drain 📬 + claim the mailbox, and only THEN
+/// discover the hosted TUI was busy — re-queue + re-attach + release + fast
+/// re-kick, every ~2s, forever. Probing the same verdict before teardown
+/// short-circuits the whole cycle with zero visible state change.
+///
+/// Session context (tmux name / current_path / session_id / remote-profile
+/// presence) is resolved here once from the channel session snapshot; the
+/// promote entrypoints have no resolved intake context yet, so nothing is
+/// duplicated.
+pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    #[cfg(test)]
+    if let Some(busy) = *HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS
+        .lock()
+        .expect("hosted tui promote busy hook lock")
+    {
+        return busy;
+    }
+
+    let (tmux_session_name, remote_profile_named, current_path, session_id) = {
+        let data = shared.core.lock().await;
+        let Some(session) = data.sessions.get(&channel_id) else {
+            return false;
+        };
+        let tmux_session_name = if provider.uses_managed_tmux_backend() {
+            session
+                .channel_name
+                .as_ref()
+                .map(|name| provider.build_tmux_session_name(name))
+        } else {
+            None
+        };
+        (
+            tmux_session_name,
+            session.remote_profile_name.is_some(),
+            session.current_path.clone(),
+            session.session_id.clone(),
+        )
+    };
+    let Some(tmux_session_name) = tmux_session_name else {
+        return false;
+    };
+    // `remote_profile_named` (name recorded on the session) is a conservative
+    // stand-in for the intake path's settings-resolved profile: a named-but-
+    // missing profile makes the probe return `false` (fail-open to normal
+    // dispatch) instead of misclassifying a remote session as a local TUI.
+    let blocked = tui_busy_followup_diagnostic(
+        shared,
+        provider,
+        channel_id,
+        Some(tmux_session_name.as_str()),
+        remote_profile_named,
+        current_path.as_deref(),
+        session_id.as_deref(),
+    )
+    .is_some();
+    if blocked {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            tmux_session_name = %tmux_session_name,
+            "#4270 promote gate: hosted TUI busy before queued-turn teardown; deferring promotion"
+        );
+    }
+    blocked
+}
+
+/// #4270 A — live-dispatch promote defer: the composite the
+/// `DiscordGateway::dispatch_queued_turn` gate runs when
+/// [`hosted_tui_promote_readiness_blocked`] says the hosted TUI is busy. The
+/// caller (finalize epilogue) already soft-took `intervention` off the queue;
+/// put it straight back at the FRONT (order + merged identity preserved; the
+/// front-requeue consumes the dispatch reservation/marker) BEFORE any teardown
+/// (📬/➕ marker drain, merged queued-card deletion, turn-view ⏳ flip), so the
+/// user keeps the steady `📬 Queued` view with zero churn. Only the slow (60s)
+/// fail-open backstop is armed — the watcher-idle re-drain delivers the fast
+/// edge on TUI Idle. Returns `true` when deferred (caller must return `Ok`:
+/// the epilogue's success branch is a no-op after the reservation was
+/// consumed, while its `Err` branch would re-arm the fast ~2s kickoff — the
+/// exact spin #4270 removes).
+pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_busy(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    intervention: &crate::services::turn_orchestrator::Intervention,
+) -> bool {
+    if !hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
+        return false;
+    }
+    super::super::super::mailbox_requeue_intervention_front(
+        shared,
+        provider,
+        channel_id,
+        intervention.clone(),
+    )
+    .await;
+    super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+        shared,
+        provider,
+        channel_id,
+        "hosted_tui_busy_pre_drain_defer",
+    )
+    .await;
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 📬 #4270 promote gate: hosted TUI busy — queued turn re-preserved at queue front without teardown (channel {}, msg {})",
+        channel_id,
+        intervention.message_id
+    );
+    true
+}
+
 pub(super) async fn enqueue_busy_tui_followup_for_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

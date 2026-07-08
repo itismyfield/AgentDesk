@@ -69,6 +69,14 @@ pub(in crate::services::discord) use self::headless_turn::{
 };
 pub(in crate::services::discord) use self::intake_turn::{IntakeDeps, handle_text_message};
 pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core};
+// #4270 — pre-teardown hosted-TUI readiness probe + live-dispatch defer for the
+// queued-turn promote entrypoints (idle kickoff in discord/mod.rs, live
+// dispatch in gateway.rs).
+#[cfg(test)]
+pub(in crate::services::discord) use self::tui_followup::set_hosted_tui_promote_busy_for_tests;
+pub(in crate::services::discord) use self::tui_followup::{
+    defer_promoted_dispatch_if_hosted_tui_busy, hosted_tui_promote_readiness_blocked,
+};
 
 #[cfg(test)]
 mod session_strategy_lifecycle_tests;

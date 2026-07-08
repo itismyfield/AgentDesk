@@ -442,8 +442,8 @@ mod last_message_checkpoint_tests {
 }
 
 pub(in crate::services::discord) use queue_io::{
-    schedule_deferred_idle_queue_kickoff, schedule_deferred_idle_queue_kickoff_immediate,
-    spawn_turn_completion_idle_queue_listener,
+    arm_slow_idle_queue_backstop_if_queue_nonempty, schedule_deferred_idle_queue_kickoff,
+    schedule_deferred_idle_queue_kickoff_immediate, spawn_turn_completion_idle_queue_listener,
 };
 pub(super) fn single_message_panel_enabled() -> bool {
     single_message_panel::enabled()
@@ -4046,6 +4046,17 @@ async fn kickoff_idle_queue_channel(
             provider = provider.as_str(),
             "KICKOFF: skipped queued turn after fresh mailbox/TUI guard"
         );
+        return IdleQueueKickoffChannelOutcome::default();
+    }
+
+    // #4270 A — pre-dequeue hosted-TUI readiness gate. A verifiably busy hosted
+    // TUI defers the promotion BEFORE `take_next_soft` and BEFORE the queued-view
+    // teardown below (turn-view started/⏳ flip + 📬 marker drain + merged-card
+    // deletion), so a still-busy channel keeps its steady `📬 Queued` view with
+    // zero churn. No-start here is fail-open: callers arm the slow (60s)
+    // backstop on a no-start with backlog, and the watcher-idle re-drain
+    // delivers the fast edge once the TUI reaches Idle.
+    if router::hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
         return IdleQueueKickoffChannelOutcome::default();
     }
 
