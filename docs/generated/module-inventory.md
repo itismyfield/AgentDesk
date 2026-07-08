@@ -79,7 +79,7 @@
 | `compat` | `src/compat/mod.rs` | 39 | 39 | 0 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 | 12 | 0 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 27 | 27 | 0 |  |
-| `config` | `src/config.rs` | 3047 | 2705 | 342 | giant-file |
+| `config` | `src/config.rs` | 3079 | 2737 | 342 | giant-file |
 | `config_live_reload` | `src/config_live_reload.rs` | 966 | 525 | 441 |  |
 | `crate` | `src/main.rs` | 7 | 7 | 0 |  |
 | `credential` | `src/credential.rs` | 212 | 59 | 153 |  |
@@ -385,8 +385,8 @@
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 1326 | 645 | 681 |  |
 | `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
 | `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 418 | 336 | 82 |  |
-| `services::cluster::intake_worker_capabilities` | `src/services/cluster/intake_worker_capabilities.rs` | 83 | 83 | 0 |  |
-| `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1021 | 751 | 270 |  |
+| `services::cluster::intake_worker_capabilities` | `src/services/cluster/intake_worker_capabilities.rs` | 152 | 152 | 0 |  |
+| `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1022 | 752 | 270 |  |
 | `services::cluster::registry_adapter_sink` | `src/services/cluster/registry_adapter_sink.rs` | 344 | 117 | 227 |  |
 | `services::cluster::relay_producer_registry` | `src/services/cluster/relay_producer_registry.rs` | 254 | 148 | 106 |  |
 | `services::cluster::session_discovery` | `src/services/cluster/session_discovery.rs` | 1280 | 693 | 587 |  |
@@ -629,7 +629,7 @@
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 522 | 522 | 0 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 893 | 301 | 592 |  |
 | `services::discord::runtime_bootstrap::framework_setup` | `src/services/discord/runtime_bootstrap/framework_setup.rs` | 350 | 326 | 24 |  |
-| `services::discord::runtime_bootstrap::gateway_lease` | `src/services/discord/runtime_bootstrap/gateway_lease.rs` | 259 | 259 | 0 |  |
+| `services::discord::runtime_bootstrap::gateway_lease` | `src/services/discord/runtime_bootstrap/gateway_lease.rs` | 696 | 549 | 147 |  |
 | `services::discord::runtime_bootstrap::gateway_runtime` | `src/services/discord/runtime_bootstrap/gateway_runtime.rs` | 148 | 148 | 0 |  |
 | `services::discord::runtime_bootstrap::intake` | `src/services/discord/runtime_bootstrap/intake.rs` | 83 | 83 | 0 |  |
 | `services::discord::runtime_bootstrap::orphan_recovery` | `src/services/discord/runtime_bootstrap/orphan_recovery.rs` | 336 | 336 | 0 |  |
