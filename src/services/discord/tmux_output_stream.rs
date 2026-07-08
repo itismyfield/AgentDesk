@@ -277,6 +277,28 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                                         if let Some(text) =
                                             block.get("text").and_then(|t| t.as_str())
                                         {
+                                            // #4275: the watcher/jsonl path emits each
+                                            // assistant text block as a discrete event
+                                            // (split by interleaved tool_use blocks), so a
+                                            // bare push_str glued the tail of one segment
+                                            // onto the head of the next with no boundary —
+                                            // "…정리합니다." + "macOS엔…" became one run-on
+                                            // line. Mirror the #3608 streaming-path
+                                            // separator: insert "\n\n" only when the two
+                                            // segments form a genuine sentence boundary
+                                            // (not a decimal, file extension, markdown
+                                            // continuation, or mid-code span). content_block_delta
+                                            // (line ~360, qwen intra-block streaming) must
+                                            // stay a bare push_str — a separator there would
+                                            // fracture a single sentence.
+                                            if !full_response.is_empty()
+                                                && crate::services::discord::semantic_boundaries::semantic_chunk_separator_needed(
+                                                    &full_response,
+                                                    text,
+                                                )
+                                            {
+                                                full_response.push_str("\n\n");
+                                            }
                                             full_response.push_str(text);
                                             outcome.assistant_text_seen = true;
                                             push_transcript_event(
@@ -1114,5 +1136,124 @@ mod tests {
         assert!(!outcome.found_result);
         assert!(outcome.soft_terminal_candidate);
         assert_eq!(full_response, "ssh direct answer");
+    }
+
+    // ---- #4275: watcher/jsonl segment-boundary separator ----
+
+    fn assistant_text_line(text: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]},
+            "sessionId": "sess-4275",
+        })
+        .to_string()
+            + "\n"
+    }
+
+    fn assistant_tool_use_line(name: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "name": name,
+                "input": {"command": "timeout 5 sleep 10"},
+            }]},
+            "sessionId": "sess-4275",
+        })
+        .to_string()
+            + "\n"
+    }
+
+    /// Drive two discrete assistant text blocks through the real watcher entry
+    /// point and return the accumulated `full_response`.
+    fn watcher_full_response_for_two_segments(first: &str, second: &str) -> String {
+        let mut buffer = String::new();
+        buffer.push_str(&assistant_text_line(first));
+        buffer.push_str(&assistant_text_line(second));
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+        full_response
+    }
+
+    /// #4275 live repro (2026-07-08): Claude interleaves assistant text with a
+    /// `tool_use`, so the watcher/jsonl path sees the pre-tool and post-tool
+    /// prose as two discrete `assistant` text events. Before the fix a bare
+    /// `push_str` glued them into one run-on line ("…정리합니다.macOS엔…"); the
+    /// guard must insert a blank-line boundary at the sentence break.
+    #[test]
+    fn process_watcher_lines_inserts_boundary_between_tool_split_assistant_segments() {
+        let mut buffer = String::new();
+        buffer.push_str(&assistant_text_line("필요한 명령어를 정리합니다."));
+        buffer.push_str(&assistant_tool_use_line("Bash"));
+        buffer.push_str(&assistant_text_line("macOS엔 timeout이 없네요."));
+
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(
+            full_response.contains("정리합니다.\n\nmacOS"),
+            "split assistant segments must gain a blank-line boundary, got: {full_response:?}"
+        );
+    }
+
+    /// Negative: a decimal fraction spanning the split ("1." + "2") must NOT
+    /// gain a boundary — the guard evaluates but declines.
+    #[test]
+    fn process_watcher_lines_keeps_decimal_across_split_segments() {
+        let full = watcher_full_response_for_two_segments("버전은 1.", "2로 올렸습니다.");
+        assert!(
+            !full.contains("\n\n"),
+            "decimal fraction must not gain a boundary, got: {full:?}"
+        );
+        assert!(
+            full.contains("1.2"),
+            "decimal must stay glued, got: {full:?}"
+        );
+    }
+
+    /// Negative: a file extension spanning the split ("config." + "yaml") must
+    /// NOT gain a boundary.
+    #[test]
+    fn process_watcher_lines_keeps_file_extension_across_split_segments() {
+        let full = watcher_full_response_for_two_segments("설정은 config.", "yaml에 있습니다.");
+        assert!(
+            !full.contains("\n\n"),
+            "file extension must not gain a boundary, got: {full:?}"
+        );
+        assert!(
+            full.contains("config.yaml"),
+            "extension must stay glued, got: {full:?}"
+        );
+    }
+
+    /// Negative: a markdown list continuation ("- item." + "- next") must NOT
+    /// gain a boundary that would fracture the list structure.
+    #[test]
+    fn process_watcher_lines_keeps_markdown_continuation_across_split_segments() {
+        let full = watcher_full_response_for_two_segments("- 첫 항목.", "- 다음 항목");
+        assert!(
+            !full.contains("\n\n"),
+            "markdown list continuation must not gain a boundary, got: {full:?}"
+        );
+    }
+
+    /// Negative: text with no sentence-terminal punctuation ("…계속" + "진행…")
+    /// is a mid-sentence continuation and must NOT gain a boundary.
+    #[test]
+    fn process_watcher_lines_keeps_unterminated_run_on_across_split_segments() {
+        let full = watcher_full_response_for_two_segments("이 작업은 계속", "진행됩니다.");
+        assert!(
+            !full.contains("\n\n"),
+            "unterminated continuation must not gain a boundary, got: {full:?}"
+        );
+        assert!(
+            full.contains("계속진행됩니다"),
+            "continuation must stay glued, got: {full:?}"
+        );
     }
 }

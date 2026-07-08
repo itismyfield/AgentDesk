@@ -405,6 +405,21 @@
 
 ### Audited touches
 
+- #4275 watcher/jsonl segment-boundary separator: `tmux_output_stream.rs`
+  (WATCHER) `process_watcher_lines_for_turn` now guards the bare
+  `full_response.push_str(text)` for `assistant` text blocks — when the running
+  response is non-empty and `semantic_boundaries::semantic_chunk_separator_needed`
+  reports a genuine sentence boundary (not a decimal, file extension, markdown
+  continuation, or open inline-code span), it inserts `"\n\n"` before appending.
+  This is the watcher-path twin of the #3608 streaming-path separator: Claude
+  interleaves prose with `tool_use`, so pre-/post-tool text arrive as two discrete
+  events that previously glued into one run-on line. The `content_block_delta`
+  intra-block streaming push (qwen `--include-partial-messages`) is deliberately
+  left a bare `push_str` so a separator never fractures a single sentence.
+  Classification: worker-local — the change only reshapes the per-node watcher's
+  in-memory `full_response` assembly before relay; it adds no new inflight-row
+  field, delivery record, PG lease, leader gate, or cross-node routing state, and
+  no DB/schema change.
 - #3805 P2 PR-D two-message rollover re-anchor: `turn_bridge/mod.rs` (SINK) and
   `tmux_watcher.rs` (WATCHER) each re-anchor the separate two-message status panel
   BELOW the new tail answer after a mid-turn answer rollover, gated on the

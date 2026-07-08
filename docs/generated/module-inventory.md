@@ -674,7 +674,7 @@
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 70 | 60 | 10 |  |
 | `services::discord::tmux_kill_policy` | `src/services/discord/tmux_kill_policy.rs` | 637 | 547 | 90 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 190 | 190 | 0 |  |
-| `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 1118 | 733 | 385 |  |
+| `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 1259 | 755 | 504 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 347 | 200 | 147 |  |
 | `services::discord::tmux_placeholder_suppression` | `src/services/discord/tmux_placeholder_suppression/mod.rs` | 1377 | 348 | 1029 |  |
 | `services::discord::tmux_placeholder_suppression::evidence` | `src/services/discord/tmux_placeholder_suppression/evidence.rs` | 259 | 259 | 0 |  |
