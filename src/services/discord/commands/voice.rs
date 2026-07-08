@@ -859,11 +859,17 @@ async fn leave_voice_channel(
     let manager = songbird::get(ctx)
         .await
         .ok_or_else(|| anyhow!("Songbird voice manager is not registered"))?;
+    // #4234 leave/rejoin TOCTOU: set the per-guild rejoin cancel flag and clear
+    // occupancy *before* disconnecting, so an in-flight rejoin aborts (on the
+    // flag, even mid-backoff) or, if its join raced past this leave, tears the
+    // fresh connection back down at its post-join re-check instead of re-joining.
+    let provider = data.provider.as_str();
+    super::super::voice_lifecycle::signal_rejoin_cancel(provider, guild_id.get());
+    voice_occupancy().remove(&(provider.to_string(), guild_id.get()));
     manager
         .leave(guild_id)
         .await
         .with_context(|| format!("failed to leave voice guild {}", guild_id.get()))?;
-    voice_occupancy().remove(&(data.provider.as_str().to_string(), guild_id.get()));
     // F2 (#2046): voice_guilds DashMap에서 guild_id에 매핑된 control_channel_id들을
     // 먼저 모은 다음 unregister한다. 이후 receiver flush는 해당 channel scope으로만 한다 —
     // 멀티-길드 환경에서 다른 길드의 진행 중인 utterance·SSRC 매핑을 보존한다.

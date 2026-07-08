@@ -76,6 +76,73 @@ pub(in crate::services::discord) fn release_rejoin_inflight(provider: &str, guil
     rejoin_inflight().remove(&(provider.to_string(), guild_id));
 }
 
+/// Per-`(provider, guild)` rejoin cancel flags. `/vc leave` sets the flag so an
+/// in-flight rejoin loop aborts promptly — during backoff, before starting a
+/// join, or (critically) right after a join succeeds but before it re-asserts
+/// occupancy — instead of clobbering the user's leave (#4234 leave/rejoin
+/// TOCTOU). Occupancy remains the authoritative desired-state; this flag is the
+/// low-latency edge signal that lets a *specific* in-flight loop notice the
+/// leave without waiting out a 300s backoff. Mirrors the `Arc<AtomicBool>`
+/// shutdown-flag convention already used for `shutting_down`.
+fn rejoin_cancel() -> &'static DashMap<(String, u64), Arc<std::sync::atomic::AtomicBool>> {
+    static CANCEL: std::sync::OnceLock<DashMap<(String, u64), Arc<std::sync::atomic::AtomicBool>>> =
+        std::sync::OnceLock::new();
+    CANCEL.get_or_init(DashMap::new)
+}
+
+/// Register a fresh (un-cancelled) cancel flag for an about-to-start rejoin loop
+/// and return a clone the loop polls. Replaces any stale entry — the in-flight
+/// guard guarantees at most one loop per `(provider, guild)`, so no live loop is
+/// ever displaced. Paired with `clear_rejoin_cancel` on loop exit.
+pub(in crate::services::discord) fn register_rejoin_cancel(
+    provider: &str,
+    guild_id: u64,
+) -> Arc<std::sync::atomic::AtomicBool> {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    rejoin_cancel().insert((provider.to_string(), guild_id), Arc::clone(&flag));
+    flag
+}
+
+/// Signal any in-flight rejoin loop for `(provider, guild)` to abort. A no-op
+/// when no loop is currently registered (nothing to cancel). Called by
+/// `/vc leave`.
+pub(in crate::services::discord) fn signal_rejoin_cancel(provider: &str, guild_id: u64) {
+    if let Some(flag) = rejoin_cancel().get(&(provider.to_string(), guild_id)) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Drop the cancel flag for `(provider, guild)` once the loop has exited.
+pub(in crate::services::discord) fn clear_rejoin_cancel(provider: &str, guild_id: u64) {
+    rejoin_cancel().remove(&(provider.to_string(), guild_id));
+}
+
+/// Finalize decision for a *successful* rejoin join, kept pure for unit testing.
+/// A join can land inside the window in which `/vc leave` cleared occupancy
+/// and/or set the cancel flag; in that case the connection must be torn down
+/// and `record_join_success` skipped so the bot honours the leave (#4234).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum PostJoinDecision {
+    /// Occupancy still desires the connection and no leave raced us — keep it.
+    Keep,
+    /// `/vc leave` won the race (occupancy gone or cancel signalled) — abort:
+    /// leave the channel and do not record the join.
+    AbortAndLeave,
+}
+
+/// Pure post-join finalize transition: keep the freshly-established connection
+/// only if occupancy still desires it *and* no leave signalled a cancel.
+pub(in crate::services::discord) fn post_join_decision(
+    occupancy_has_entry: bool,
+    canceled: bool,
+) -> PostJoinDecision {
+    if canceled || !occupancy_has_entry {
+        PostJoinDecision::AbortAndLeave
+    } else {
+        PostJoinDecision::Keep
+    }
+}
+
 /// Route a reconnect request to the provider's supervisor, if one is running.
 /// Returns `true` when the request was enqueued.
 pub(in crate::services::discord) fn dispatch_reconnect(request: ReconnectRequest) -> bool {
@@ -317,15 +384,19 @@ pub(in crate::services::discord) fn spawn_voice_rejoin_supervisor(
                 &provider_key,
                 &shutting_down,
                 request,
-            )
-            .await;
+            );
         }
     });
 }
 
-/// Claim the per-guild in-flight slot, run the rejoin loop, then release it —
-/// so a disconnect storm cannot spawn overlapping loops for the same guild.
-async fn handle_rejoin_request(
+/// Spawn the rejoin loop for one request as its own task (#4234 liveness). The
+/// supervisor must return to `rx.recv()` immediately: the old design inline-
+/// `await`ed the loop, so a permanently-unreachable guild — whose loop backs off
+/// up to 300s *forever* — serialized behind it and starved every other guild's
+/// rejoin on the same provider. Spawning makes the per-`(provider, guild)`
+/// in-flight guard the real concurrency bound (one live loop per guild); under
+/// the old inline await that guard was dead code.
+fn handle_rejoin_request(
     ctx: &serenity::Context,
     receiver: &crate::voice::VoiceReceiver,
     barge_in: &Arc<super::voice_barge_in::VoiceBargeInRuntime>,
@@ -333,13 +404,47 @@ async fn handle_rejoin_request(
     shutting_down: &Arc<std::sync::atomic::AtomicBool>,
     request: ReconnectRequest,
 ) {
-    let guild_id = request.guild_id;
-    if !try_acquire_rejoin_inflight(provider, guild_id.get()) {
+    let ctx = ctx.clone();
+    let receiver = receiver.clone();
+    let barge_in = Arc::clone(barge_in);
+    let provider_owned = provider.to_string();
+    let shutting_down = Arc::clone(shutting_down);
+    let _spawned = spawn_rejoin_task(provider, request.guild_id.get(), move |cancel| async move {
+        run_rejoin_loop(
+            &ctx,
+            &receiver,
+            &barge_in,
+            &provider_owned,
+            &shutting_down,
+            &cancel,
+            &request,
+        )
+        .await;
+    });
+}
+
+/// Guard + cancel-flag + task lifecycle for one rejoin loop, factored out so the
+/// spawn-per-guild concurrency contract is unit-testable with a stubbed loop
+/// body. Claims the in-flight slot (returning `false` and dropping the request
+/// if a loop is already running for this guild), registers a fresh cancel flag,
+/// spawns `run(cancel)` on its own task, and releases both on completion.
+fn spawn_rejoin_task<F, Fut>(provider: &str, guild_id: u64, run: F) -> bool
+where
+    F: FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    if !try_acquire_rejoin_inflight(provider, guild_id) {
         // A rejoin loop for this guild is already running — drop the duplicate.
-        return;
+        return false;
     }
-    run_rejoin_loop(ctx, receiver, barge_in, provider, shutting_down, &request).await;
-    release_rejoin_inflight(provider, guild_id.get());
+    let cancel = register_rejoin_cancel(provider, guild_id);
+    let provider_owned = provider.to_string();
+    tokio::spawn(async move {
+        run(Arc::clone(&cancel)).await;
+        clear_rejoin_cancel(&provider_owned, guild_id);
+        release_rejoin_inflight(&provider_owned, guild_id);
+    });
+    true
 }
 
 async fn run_rejoin_loop(
@@ -348,6 +453,7 @@ async fn run_rejoin_loop(
     barge_in: &Arc<super::voice_barge_in::VoiceBargeInRuntime>,
     provider: &str,
     shutting_down: &Arc<std::sync::atomic::AtomicBool>,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
     request: &ReconnectRequest,
 ) {
     use std::sync::atomic::Ordering;
@@ -376,15 +482,36 @@ async fn run_rejoin_loop(
             );
             return;
         }
-        let backoff = reconnect_backoff(attempt);
-        if !sleep_with_shutdown(backoff, shutting_down).await {
+        if cancel.load(Ordering::SeqCst) {
             tracing::info!(
                 provider,
                 guild_id = guild_id.get(),
                 attempt,
-                "voice rejoin canceled: process shutting down during backoff"
+                "voice rejoin canceled: /vc leave requested"
             );
             return;
+        }
+        let backoff = reconnect_backoff(attempt);
+        match sleep_through_backoff(backoff, shutting_down, cancel).await {
+            BackoffOutcome::Elapsed => {}
+            BackoffOutcome::Shutdown => {
+                tracing::info!(
+                    provider,
+                    guild_id = guild_id.get(),
+                    attempt,
+                    "voice rejoin canceled: process shutting down during backoff"
+                );
+                return;
+            }
+            BackoffOutcome::Canceled => {
+                tracing::info!(
+                    provider,
+                    guild_id = guild_id.get(),
+                    attempt,
+                    "voice rejoin canceled: /vc leave requested during backoff"
+                );
+                return;
+            }
         }
 
         // Desired-state (occupancy) + live-connection check.
@@ -455,6 +582,39 @@ async fn run_rejoin_loop(
         .await
         {
             Ok(()) => {
+                // #4234 TOCTOU: the occupancy sample above is stale by the time
+                // the join completes — `/vc leave` can have cleared occupancy
+                // and/or signalled cancel inside the join window. Re-check both
+                // *before* record_join_success (which unconditionally re-asserts
+                // occupancy + barge-in). If the leave won, tear the fresh
+                // connection back down instead of clobbering the user's leave.
+                let occupancy_has_entry = super::commands::voice_occupancy()
+                    .contains_key(&(provider.to_string(), guild_id.get()));
+                let canceled = cancel.load(Ordering::SeqCst);
+                match post_join_decision(occupancy_has_entry, canceled) {
+                    PostJoinDecision::AbortAndLeave => {
+                        if let Err(error) = manager.leave(guild_id).await {
+                            tracing::warn!(
+                                provider,
+                                guild_id = guild_id.get(),
+                                channel_id = channel_id.get(),
+                                attempt,
+                                error = %error,
+                                "voice rejoin abort-leave failed after leave raced join"
+                            );
+                        }
+                        tracing::info!(
+                            provider,
+                            guild_id = guild_id.get(),
+                            channel_id = channel_id.get(),
+                            attempt,
+                            canceled,
+                            "voice rejoin discarded: /vc leave raced the join (occupancy released)"
+                        );
+                        return;
+                    }
+                    PostJoinDecision::Keep => {}
+                }
                 record_join_success(barge_in, provider, guild_id, channel_id, control_channel_id);
                 tracing::info!(
                     provider,
@@ -482,25 +642,40 @@ async fn run_rejoin_loop(
     }
 }
 
-/// Sleep for `duration`, waking every 5s to poll the shutdown flag so a long
-/// backoff does not delay process teardown. Returns `false` if shutdown was
-/// observed (the caller should abandon the loop).
-async fn sleep_with_shutdown(
+/// Why a backoff sleep ended: it either ran to completion or was cut short by
+/// process teardown (`Shutdown`) or a `/vc leave` cancel (`Canceled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackoffOutcome {
+    Elapsed,
+    Shutdown,
+    Canceled,
+}
+
+/// Sleep for `duration`, waking every 5s to poll the shutdown *and* cancel flags
+/// so neither a process teardown nor a `/vc leave` waits out a long (up to 300s)
+/// backoff. Cancel is checked first so an explicit leave is reported as such.
+async fn sleep_through_backoff(
     duration: Duration,
     shutting_down: &Arc<std::sync::atomic::AtomicBool>,
-) -> bool {
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+) -> BackoffOutcome {
     use std::sync::atomic::Ordering;
     let slice = Duration::from_secs(5);
     let mut remaining = duration;
-    while remaining > Duration::ZERO {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return BackoffOutcome::Canceled;
+        }
         if shutting_down.load(Ordering::Relaxed) {
-            return false;
+            return BackoffOutcome::Shutdown;
+        }
+        if remaining == Duration::ZERO {
+            return BackoffOutcome::Elapsed;
         }
         let step = remaining.min(slice);
         tokio::time::sleep(step).await;
         remaining = remaining.saturating_sub(step);
     }
-    !shutting_down.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -678,5 +853,128 @@ mod lifecycle_tests {
         // After release it can be acquired again.
         assert!(try_acquire_rejoin_inflight(provider, guild));
         release_rejoin_inflight(provider, guild);
+    }
+
+    // #4234 LIVENESS regression: a permanently-stuck guild's rejoin loop must
+    // not starve rejoins for other guilds on the same provider. Exercises the
+    // real `spawn_rejoin_task` seam (guard + cancel + task lifecycle) that the
+    // supervisor uses per request, with a stubbed loop body.
+    #[tokio::test]
+    async fn supervisor_spawns_per_guild_so_stuck_guild_does_not_block_others() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let provider = "test-liveness-0xC0FFEE";
+        let guild_stuck: u64 = 0xC0FFEE_0000_0D01;
+        let guild_free: u64 = 0xC0FFEE_0000_0D02;
+
+        // Guild A's loop is permanently stuck (models an unreachable guild whose
+        // backoff loop never terminates).
+        let stuck_started = spawn_rejoin_task(provider, guild_stuck, |_cancel| async move {
+            std::future::pending::<()>().await;
+        });
+        assert!(
+            stuck_started,
+            "first request for a guild must start its loop"
+        );
+
+        // A duplicate request for the still-running guild is dropped by the
+        // in-flight guard — proving the guard is now *live* (it was dead code
+        // under the old serial inline-await supervisor).
+        let stuck_dup = spawn_rejoin_task(provider, guild_stuck, |_cancel| async move {
+            std::future::pending::<()>().await;
+        });
+        assert!(
+            !stuck_dup,
+            "duplicate in-flight guild must be rejected by the per-guild guard"
+        );
+
+        // Guild B runs to completion *concurrently* even though guild A never
+        // returns — the liveness property the spawn-per-guild fix restores.
+        let done = Arc::new(AtomicBool::new(false));
+        let done_in_task = Arc::clone(&done);
+        let free_started = spawn_rejoin_task(provider, guild_free, move |_cancel| async move {
+            done_in_task.store(true, Ordering::SeqCst);
+        });
+        assert!(free_started, "second guild must start its own loop");
+
+        let mut settled = false;
+        for _ in 0..200 {
+            if done.load(Ordering::SeqCst) {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            settled,
+            "guild B rejoin must complete while guild A is permanently stuck"
+        );
+
+        // Guild A's task is pending forever and never runs its own release/clear,
+        // so drop its process-static registry entries by hand. Guild B's task
+        // self-cleans; the removes are idempotent.
+        release_rejoin_inflight(provider, guild_stuck);
+        clear_rejoin_cancel(provider, guild_stuck);
+        release_rejoin_inflight(provider, guild_free);
+        clear_rejoin_cancel(provider, guild_free);
+    }
+
+    // #4234 RACE regression (finalize half): after a join succeeds, the loop must
+    // keep the connection only if occupancy still desires it *and* no leave
+    // signalled cancel — otherwise record_join_success is skipped and the fresh
+    // connection is torn back down, so a raced `/vc leave` is not clobbered.
+    #[test]
+    fn post_join_decision_keeps_only_when_desired_and_not_canceled() {
+        assert_eq!(post_join_decision(true, false), PostJoinDecision::Keep);
+        // Occupancy released by /vc leave -> abort (record_join_success skipped).
+        assert_eq!(
+            post_join_decision(false, false),
+            PostJoinDecision::AbortAndLeave
+        );
+        // Cancel signalled by /vc leave -> abort even if the stale occupancy
+        // sample still shows an entry.
+        assert_eq!(
+            post_join_decision(true, true),
+            PostJoinDecision::AbortAndLeave
+        );
+        assert_eq!(
+            post_join_decision(false, true),
+            PostJoinDecision::AbortAndLeave
+        );
+    }
+
+    // #4234 RACE regression (signal half): `/vc leave` must be able to abort an
+    // in-flight rejoin loop, and a stale signal after the loop cleared its flag
+    // must not pre-cancel a subsequently-registered loop.
+    #[test]
+    fn leave_signal_cancels_inflight_rejoin() {
+        use std::sync::atomic::Ordering;
+        let provider = "test-cancel-0xC0FFEE";
+        let guild: u64 = 0xC0FFEE_0000_0C01;
+
+        // A running rejoin loop registers a fresh, un-cancelled flag.
+        let cancel = register_rejoin_cancel(provider, guild);
+        assert!(
+            !cancel.load(Ordering::SeqCst),
+            "a fresh rejoin cancel flag starts un-cancelled"
+        );
+
+        // /vc leave signals it -> the in-flight loop observes the cancel.
+        signal_rejoin_cancel(provider, guild);
+        assert!(
+            cancel.load(Ordering::SeqCst),
+            "leave must set the in-flight rejoin cancel flag"
+        );
+
+        // After the loop clears its flag, a stale signal is a harmless no-op and
+        // must not resurrect into a future loop's fresh flag.
+        clear_rejoin_cancel(provider, guild);
+        signal_rejoin_cancel(provider, guild);
+        let next = register_rejoin_cancel(provider, guild);
+        assert!(
+            !next.load(Ordering::SeqCst),
+            "a signal after clear must not pre-cancel a later-registered loop"
+        );
+        clear_rejoin_cancel(provider, guild);
     }
 }

@@ -444,7 +444,7 @@
 | `services::discord::commands::steer` | `src/services/discord/commands/steer.rs` | 147 | 147 | 0 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1476 | 1476 | 0 | giant-file |
 | `services::discord::commands::tui_passthrough` | `src/services/discord/commands/tui_passthrough.rs` | 412 | 357 | 55 |  |
-| `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 1050 | 992 | 58 |  |
+| `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 1056 | 998 | 58 |  |
 | `services::discord::delivery_lease_key` | `src/services/discord/delivery_lease_key.rs` | 156 | 156 | 0 |  |
 | `services::discord::destructive_cancel_capture` | `src/services/discord/destructive_cancel_capture.rs` | 63 | 34 | 29 |  |
 | `services::discord::destructive_cancel_gate` | `src/services/discord/destructive_cancel_gate.rs` | 688 | 337 | 351 |  |
@@ -805,7 +805,7 @@
 | `services::discord::voice_barge_in::tts_pipeline` | `src/services/discord/voice_barge_in/tts_pipeline.rs` | 86 | 86 | 0 |  |
 | `services::discord::voice_config_cache` | `src/services/discord/voice_config_cache.rs` | 79 | 79 | 0 |  |
 | `services::discord::voice_id_sequences` | `src/services/discord/voice_id_sequences.rs` | 69 | 69 | 0 |  |
-| `services::discord::voice_lifecycle` | `src/services/discord/voice_lifecycle.rs` | 682 | 505 | 177 |  |
+| `services::discord::voice_lifecycle` | `src/services/discord/voice_lifecycle.rs` | 980 | 680 | 300 |  |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 163 | 138 | 25 |  |
 | `services::discord::voice_sensitivity` | `src/services/discord/voice_sensitivity.rs` | 113 | 113 | 0 |  |
 | `services::discord::watchers::codex_tui_restore` | `src/services/discord/watchers/codex_tui_restore.rs` | 178 | 146 | 32 |  |
