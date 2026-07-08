@@ -263,10 +263,22 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
     let agent_id = (kind == "subagent")
         .then(|| parsed.task_id.as_deref())
         .flatten();
+    // #4338 rework (codex r1): the harness XML-escapes the free-form `<summary>`
+    // prose in the injected envelope; when the notify card is footer-suppressed
+    // this bridge is the summary's only visible surface (panel slot text), so
+    // decode ONE layer here — same single-pass inverse the card applies to its
+    // own fresh parse. The card and this bridge never consume each other's
+    // output (both re-parse the raw payload), so no text is decoded twice.
+    // Kind classification above is unaffected: it matches ASCII-letter prefixes
+    // the escape pass never rewrites. Footer-visibility pairing is unaffected
+    // too: `task_notification_success_completion_visible_in_snapshot` matches on
+    // `tool_use_id` only, never on summary text.
+    let summary =
+        super::super::tui_task_card::decode_entities_once(parsed.summary.as_deref().unwrap_or(""));
     let events = status_events_from_task_notification_with_metadata(
         kind,
         status,
-        parsed.summary.as_deref().unwrap_or(""),
+        &summary,
         parsed.tool_use_id.as_deref(),
         agent_id,
     );

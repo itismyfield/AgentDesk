@@ -720,7 +720,11 @@ fn sanitize_multiline(value: &str) -> String {
 /// (`&provider` shown as `&amp;provider`). AgentDesk never re-escapes on the card
 /// path — both the first post and every streaming edit rebuild the card from the
 /// raw payload — so the fix is a single decode at render, the inverse of the
-/// harness's single escape pass.
+/// harness's single escape pass. Shared with the #3393 footer/status-panel bridge
+/// (`status_events_from_task_notification_xml_for_footer_mode`), which renders
+/// the same XML `<summary>` when the card is footer-suppressed — the two surfaces
+/// each decode their own fresh parse of the raw payload, never each other's
+/// output, so each applies exactly one layer.
 ///
 /// We remove EXACTLY one layer: a source that was already escaped once (an agent
 /// quoting an already-broken card) keeps its remaining literal `&amp;`, and a
@@ -728,7 +732,7 @@ fn sanitize_multiline(value: &str) -> String {
 /// single left-to-right scan that never re-examines emitted output guarantees the
 /// single-layer property independent of entity ordering (`&amp;lt;` → `&lt;`, not
 /// `<`). Unrecognized `&…;` sequences and bare `&` pass through verbatim.
-fn decode_entities_once(input: &str) -> String {
+pub(super) fn decode_entities_once(input: &str) -> String {
     // Fast path: nothing to decode (also preserves exact bytes for the common
     // no-entity case).
     if !input.contains('&') {
@@ -739,9 +743,19 @@ fn decode_entities_once(input: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let after = &rest[amp + 1..];
-        if let Some(semi) = after.find(';') {
+        // #4338 rework (codex r1): bound the `;` search to the longest decodable
+        // body + 1 byte so a failed candidate costs O(1) — an unbounded
+        // `after.find(';')` re-scans the remaining tail per bare `&`, going
+        // quadratic on `&`-dense prose (`a && b` repeated). `;` is ASCII, so the
+        // byte position is always a char boundary and the body slice below stays
+        // UTF-8-safe; a window hit also implies `body.len() <= MAX_ENTITY_BODY_LEN`.
+        let semi = after
+            .bytes()
+            .take(MAX_ENTITY_BODY_LEN + 1)
+            .position(|b| b == b';');
+        if let Some(semi) = semi {
             let body = &after[..semi];
-            if !body.is_empty() && body.len() <= MAX_ENTITY_BODY_LEN {
+            if !body.is_empty() {
                 if let Some(ch) = decode_entity_body(body) {
                     out.push(ch);
                     rest = &after[semi + 1..];
@@ -1267,6 +1281,25 @@ mod tests {
         // A `&` whose nearest `;` is far away with an invalid body stays literal,
         // and a real entity later in the string still decodes.
         assert_eq!(decode_entities_once("A & B; C &amp; D"), "A & B; C & D");
+    }
+
+    // #4338 rework (codex r1): the `;` search is bounded to the entity-body
+    // window, so `&`-dense long prose scans linearly. This guards the bounded
+    // window's CORRECTNESS (no timing assert): bare-`&` runs pass through, an
+    // entity after the dense run still decodes, window-edge bodies behave, and
+    // a multi-byte body slices UTF-8-safely.
+    #[test]
+    fn decode_entities_once_stays_correct_on_ampersand_dense_long_text() {
+        let dense = "a && b &&& c & d ".repeat(20_000);
+        assert_eq!(decode_entities_once(&dense), dense);
+        let tail_entity = format!("{dense}&amp;end");
+        assert_eq!(decode_entities_once(&tail_entity), format!("{dense}&end"));
+        // A valid body at the window edge (9 chars ≤ MAX_ENTITY_BODY_LEN) decodes…
+        assert_eq!(decode_entities_once("&#x0000026;"), "&");
+        // …an 11-char candidate body lies beyond the window and stays literal…
+        assert_eq!(decode_entities_once("&abcdefghijk;"), "&abcdefghijk;");
+        // …and a multi-byte candidate body inside the window is sliced safely.
+        assert_eq!(decode_entities_once("&한글;"), "&한글;");
     }
 
     // #4338: the completion card must render a subagent report's literal

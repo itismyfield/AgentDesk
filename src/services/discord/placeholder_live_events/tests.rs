@@ -5753,6 +5753,124 @@ fn task_notification_xml_unknown_id_and_duplicate_and_nonterminal_are_safe() {
     );
 }
 
+// #4338 rework (codex r1) — FOOTER mode: when the notify card is footer-
+// suppressed, this bridge is the XML `<summary>`'s only visible surface. The
+// harness XML-escapes that prose, so the bridged events must carry the DECODED
+// text — exactly one layer (`&amp;amp;x` keeps one literal `&amp;x`) — and the
+// rendered panel must not leak entities.
+#[test]
+fn task_notification_xml_bridge_decodes_escaped_summary_once() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_338_001);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Task",
+            &json!({
+                "subagent_type": "scout",
+                "description": "probe refs",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_4338_bridge"),
+            true,
+        ),
+    );
+    let raw = "<task-notification><task-id>e4338aa</task-id>\
+        <tool-use-id>toolu_4338_bridge</tool-use-id><status>completed</status>\
+        <summary>Agent \"probe &amp;provider &lt;T&gt; quoting &amp;amp;x\" completed</summary>\
+        <result>Done.</result></task-notification>";
+    let bridged = status_events_from_task_notification_xml_for_footer_mode(raw, true);
+    let end_desc = bridged
+        .iter()
+        .find_map(|e| match e {
+            StatusEvent::SubagentEnd { desc, .. } => desc.clone(),
+            _ => None,
+        })
+        .expect("terminal subagent XML must bridge a SubagentEnd with a desc");
+    assert!(
+        end_desc.contains("&provider") && end_desc.contains("<T>"),
+        "bridge must decode the harness-escaped summary: {end_desc}"
+    );
+    assert!(
+        end_desc.contains("&amp;x") && !end_desc.contains("&amp;amp;"),
+        "bridge must strip exactly one escape layer: {end_desc}"
+    );
+    assert!(
+        !end_desc.contains("&amp;provider") && !end_desc.contains("&lt;T&gt;"),
+        "no leaked entity in the bridged desc: {end_desc}"
+    );
+    let activity_summary = bridged
+        .iter()
+        .find_map(|e| match e {
+            StatusEvent::SubagentActivity { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("id-bearing subagent XML must bridge a SubagentActivity");
+    assert!(
+        activity_summary.contains("&provider <T>") && !activity_summary.contains("amp;provider"),
+        "activity summary must carry the decoded prose: {activity_summary}"
+    );
+
+    events.push_status_events(channel_id, bridged);
+    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = done.block.expect("completed subagent should render");
+    // The single-layer remainder `&amp;x` is LEGITIMATE decoded content; only
+    // the wrongly-escaped forms must never surface in the rendered panel.
+    assert!(
+        !block.contains("&amp;provider")
+            && !block.contains("&lt;T&gt;")
+            && !block.contains("&amp;amp;"),
+        "panel render must not leak escaped entities: {block}"
+    );
+}
+
+// #4338 rework — CARD mode counterpart + path exclusivity: the notify card and
+// the footer bridge each decode their OWN fresh parse of the same raw payload
+// (neither consumes the other's output), so each surface strips exactly one
+// layer and running both never compounds.
+#[test]
+fn task_notification_card_and_footer_bridge_each_decode_once() {
+    let raw = "<task-notification><task-id>e4338bb</task-id>\
+        <tool-use-id>toolu_4338_card</tool-use-id><status>completed</status>\
+        <summary>Agent \"probe &amp;provider &lt;T&gt;\" completed</summary>\
+        <result>Touches &amp;provider and &lt;T&gt; refs.</result></task-notification>";
+
+    // Card mode: escaped prose decoded once in the posted card.
+    let parsed = super::super::tui_task_card::parse_task_notification(raw);
+    let card = super::super::tui_task_card::format_task_notification_card(&parsed, 1);
+    assert!(
+        card.contains("&provider") && card.contains("<T>"),
+        "card must decode the harness-escaped prose: {card}"
+    );
+    assert!(
+        !card.contains("&amp;") && !card.contains("&lt;"),
+        "card must not leak entities: {card}"
+    );
+
+    // Footer mode on the SAME payload: bridge decodes its own parse, one layer.
+    let bridged = status_events_from_task_notification_xml_for_footer_mode(raw, true);
+    let end_desc = bridged
+        .iter()
+        .find_map(|e| match e {
+            StatusEvent::SubagentEnd { desc, .. } => desc.clone(),
+            _ => None,
+        })
+        .expect("subagent XML must bridge a SubagentEnd with a desc");
+    assert_eq!(end_desc, "probe &provider <T>");
+
+    // Exclusivity: running the bridge does not perturb the card render (both are
+    // pure functions of the raw payload) — re-render stays byte-identical.
+    let card_again = super::super::tui_task_card::format_task_notification_card(
+        &super::super::tui_task_card::parse_task_notification(raw),
+        1,
+    );
+    assert_eq!(
+        card, card_again,
+        "card and bridge decode independently; no compounding across surfaces"
+    );
+}
+
 #[test]
 fn task_notification_xml_bridge_inert_when_footer_mode_off() {
     // Footer-mode OFF → the bridge yields no events so the legacy separate-panel
