@@ -211,7 +211,7 @@ _health_json_get_string_field() {
 _health_json_get_string_array_csv() {
   local health_json="$1"
   local key="$2"
-  local match
+  local raw
 
   [ -n "$health_json" ] || return 1
 
@@ -220,15 +220,21 @@ _health_json_get_string_array_csv() {
     return
   fi
 
-  match=$(
-    _health_json_compact "$health_json" \
-      | grep -Eo "\"$key\"[[:space:]]*:[[:space:]]*\\[[^]]*\\]" \
-      | head -n 1 \
-      || true
-  )
-  [ -n "$match" ] || return 0
+  # #4348 review finding #4: read the TOP-LEVEL array only (jq evaluates the
+  # root `.${key}`). A naive grep over the whole compacted body would pick up a
+  # same-named array nested inside another object (e.g. subsystem.degraded_reasons),
+  # accepting reconcile-only reasons that jq — reading the ABSENT top-level array
+  # as `[]` — correctly rejects.
+  raw=$(_health_json_top_level_field_raw "$key" "$(_health_json_compact "$health_json")")
+  # Only a genuine top-level ARRAY value contributes reasons; anything else
+  # (absent key, null, scalar, object) is treated as an empty list, matching
+  # jq's `(.key // []) | join(",")` for our reason-list callers.
+  case "$raw" in
+    *\[*\]*) ;;
+    *) return 0 ;;
+  esac
 
-  printf '%s' "$match" \
+  printf '%s' "$raw" \
     | sed -E 's/^[^[]*\[//; s/\]$//; s/"[[:space:]]*,[[:space:]]*"/,/g; s/^"//; s/"$//'
 }
 
@@ -293,6 +299,101 @@ _health_json_top_level_compact() {
   # the same top-level view of the body (#4348 review finding #2).
   local health_json="$1"
   _health_json_top_level_only "$(_health_json_compact "$health_json")"
+}
+
+_health_json_top_level_field_raw() {
+  # #4348 review findings #3/#4: emit the RAW top-level value token for <key>
+  # from the root object (or nothing if <key> is absent at the top level),
+  # preserving the value's own nested contents INTACT — unlike
+  # _health_json_top_level_only, which elides all nested contents. This is what
+  # lets the jq-less path read `.degraded_reasons` (a top-level array whose
+  # elements matter) and `.latest_startup_doctor` (a top-level object we then
+  # descend into for skipped_reason) at the SAME paths jq uses, so a same-named
+  # key buried in some other nested object cannot shadow the root value.
+  #
+  # Pure-bash scan: finds a string that sits in KEY position at brace-depth 1
+  # (a depth-1 string immediately followed by `:`) and, on a name match,
+  # captures the following value up to the next depth-1 `,` / `}` / `]`. JSON
+  # string state is tracked throughout so punctuation inside string values never
+  # confuses key detection, depth accounting, or the value boundary.
+  local key="$1"
+  local compact="$2"
+  local n=${#compact}
+  local i ch
+  local depth=0 in_string=0 escaped=0
+  local cur_str="" pending_key="" awaiting_colon=0
+  local capturing=0 value="" cap_base=0
+
+  for (( i = 0; i < n; i++ )); do
+    ch="${compact:i:1}"
+
+    if [ "$capturing" -eq 1 ]; then
+      if [ "$in_string" -eq 1 ]; then
+        value+="$ch"
+        if [ "$escaped" -eq 1 ]; then
+          escaped=0
+        elif [ "$ch" = '\' ]; then
+          escaped=1
+        elif [ "$ch" = '"' ]; then
+          in_string=0
+        fi
+        continue
+      fi
+      case "$ch" in
+        '"') in_string=1; value+="$ch" ;;
+        '{'|'[') depth=$((depth + 1)); value+="$ch" ;;
+        '}'|']')
+          if [ "$depth" -le "$cap_base" ]; then
+            printf '%s' "$value"
+            return 0
+          fi
+          depth=$((depth - 1)); value+="$ch"
+          ;;
+        ',')
+          if [ "$depth" -eq "$cap_base" ]; then
+            printf '%s' "$value"
+            return 0
+          fi
+          value+="$ch"
+          ;;
+        *) value+="$ch" ;;
+      esac
+      continue
+    fi
+
+    if [ "$in_string" -eq 1 ]; then
+      if [ "$escaped" -eq 1 ]; then
+        escaped=0; cur_str+="$ch"
+      elif [ "$ch" = '\' ]; then
+        escaped=1; cur_str+="$ch"
+      elif [ "$ch" = '"' ]; then
+        in_string=0
+        if [ "$depth" -eq 1 ]; then
+          pending_key="$cur_str"
+          awaiting_colon=1
+        fi
+      else
+        cur_str+="$ch"
+      fi
+      continue
+    fi
+
+    case "$ch" in
+      '"') in_string=1; cur_str=""; awaiting_colon=0 ;;
+      ':')
+        if [ "$awaiting_colon" -eq 1 ] && [ "$depth" -eq 1 ] && [ "$pending_key" = "$key" ]; then
+          capturing=1; cap_base="$depth"; value=""
+        fi
+        awaiting_colon=0
+        ;;
+      '{'|'[') depth=$((depth + 1)); awaiting_colon=0 ;;
+      '}'|']') depth=$((depth - 1)); awaiting_colon=0 ;;
+      ' '|$'\t') ;;
+      *) awaiting_colon=0 ;;
+    esac
+  done
+
+  return 0
 }
 
 _health_json_field_is_true() {
@@ -425,19 +526,23 @@ _health_json_unhealthy_only_no_provider_runtimes() {
     return
   fi
 
-  # jq-less fallback. Every predicate must hold. `skipped_reason` only appears in
-  # the PUBLIC /api/health body nested under latest_startup_doctor, so matching
-  # its exact value on the compacted body is safe here.
+  # jq-less fallback. Every predicate must hold, at the SAME paths jq reads.
   _health_json_field_is_true "$health_json" "server_up" || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
   _health_json_field_is_true "$health_json" "dashboard" || return 1
   [ "$(_health_json_status "$health_json")" = "unhealthy" ] || return 1
-  local compact
-  compact=$(_health_json_compact "$health_json")
-  printf '%s' "$compact" \
-    | grep -Eq '"startup_status"[[:space:]]*:[[:space:]]*"doctor_skipped"' || return 1
-  printf '%s' "$compact" \
-    | grep -Eq '"skipped_reason"[[:space:]]*:[[:space:]]*"no_provider_runtimes_registered"'
+  # startup_status is a TOP-LEVEL field (jq: .startup_status).
+  [ "$(_health_json_get_string_field "$health_json" "startup_status")" = "doctor_skipped" ] || return 1
+  # #4348 review finding #3: skipped_reason must be read from the TOP-LEVEL
+  # latest_startup_doctor object specifically (jq:
+  # .latest_startup_doctor.skipped_reason), NOT grepped anywhere in the body —
+  # a decoy `skipped_reason` in some OTHER nested object must not satisfy this
+  # while the real latest_startup_doctor.skipped_reason differs. Extract the
+  # top-level object, then read its own top-level skipped_reason.
+  local lsd
+  lsd=$(_health_json_top_level_field_raw "latest_startup_doctor" "$(_health_json_compact "$health_json")")
+  [ -n "$lsd" ] || return 1
+  [ "$(_health_json_get_string_field "$lsd" "skipped_reason")" = "no_provider_runtimes_registered" ]
 }
 
 _migration_seq_from_name() {

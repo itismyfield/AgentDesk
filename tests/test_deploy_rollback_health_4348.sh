@@ -63,6 +63,25 @@ NESTED_FIELD_MALFORMED_BODY='{"ok":false,"status":"unhealthy","version":"x","db"
 # This must STILL be deploy-ready under opt-in — exactly as a provider-present
 # degraded node passes the gate today.
 DEGRADED_AXIS_NO_PROVIDER_BODY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"cluster_standby":false,"degraded":true,"disk_low":true,"outbox_oldest_age_secs":1800,"startup_status":"doctor_skipped","startup_degraded":false,"startup_degraded_reasons":[],"latest_startup_doctor":{"available":true,"doctor_status":"skipped","skipped":true,"skipped_reason":"no_provider_runtimes_registered"}}'
+# Finding #3 (jq-less skipped_reason path parity): a DECOY `skipped_reason` with
+# the rescue value lives in an UNRELATED nested object, while the REAL
+# latest_startup_doctor.skipped_reason is something else. jq reads
+# .latest_startup_doctor.skipped_reason (→ reject); a jq-less grep that matches
+# skipped_reason ANYWHERE would be fooled by the decoy (→ false accept).
+DECOY_SKIPPED_REASON_BODY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"startup_status":"doctor_skipped","other":{"skipped_reason":"no_provider_runtimes_registered"},"latest_startup_doctor":{"available":true,"doctor_status":"passed","skipped":false,"skipped_reason":"providers_present"}}'
+# Finding #3 positive control: the REAL latest_startup_doctor.skipped_reason is
+# the rescue value while a decoy elsewhere differs — must STILL be accepted, so
+# the fix targets the right path in BOTH directions (not "any decoy rejects").
+REAL_SKIPPED_REASON_WITH_DECOY_BODY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"startup_status":"doctor_skipped","other":{"skipped_reason":"something_else"},"latest_startup_doctor":{"available":true,"doctor_status":"skipped","skipped":true,"skipped_reason":"no_provider_runtimes_registered"}}'
+# Finding #4 (jq-less degraded_reasons path parity): NO top-level
+# degraded_reasons, but a nested object carries a reconcile-only array. jq reads
+# the TOP-LEVEL .degraded_reasons (absent → [] → reconcile gate REJECTS); a
+# jq-less grep matching degraded_reasons ANYWHERE would accept the nested array.
+NESTED_ONLY_DEGRADED_REASONS_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"subsystem":{"degraded_reasons":["provider:codex:reconcile_in_progress"]}}'
+# Finding #4 positive control: a genuine TOP-LEVEL reconcile-only degraded body
+# must STILL be accepted by the reconcile gate — the fix must not break the
+# legitimate reconcile-in-progress path.
+TOP_LEVEL_RECONCILE_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:codex:reconcile_in_progress"]}'
 
 run_gate_cases() {
   local mode="$1"
@@ -114,6 +133,31 @@ run_gate_cases() {
     health_json_is_ready "$DEGRADED_AXIS_NO_PROVIDER_BODY" 1 1 1
   assert_rc "[$mode] no-provider + degraded axis → predicate matches" 0 \
     _health_json_unhealthy_only_no_provider_runtimes "$DEGRADED_AXIS_NO_PROVIDER_BODY"
+
+  # Finding #3 — skipped_reason must be read from the TOP-LEVEL
+  # latest_startup_doctor object (jq: .latest_startup_doctor.skipped_reason).
+  # A decoy skipped_reason in another nested object must NOT satisfy the rescue
+  # while the real one differs; both modes must reject. Positive control proves
+  # the real path is still accepted when a differing decoy is present.
+  assert_rc "[$mode] decoy skipped_reason (real differs) → predicate REJECTS" 1 \
+    _health_json_unhealthy_only_no_provider_runtimes "$DECOY_SKIPPED_REASON_BODY"
+  assert_rc "[$mode] decoy skipped_reason + allow=1 → NOT ready" 1 \
+    health_json_is_ready "$DECOY_SKIPPED_REASON_BODY" 1 1 1
+  assert_rc "[$mode] real skipped_reason (decoy differs) → predicate matches" 0 \
+    _health_json_unhealthy_only_no_provider_runtimes "$REAL_SKIPPED_REASON_WITH_DECOY_BODY"
+
+  # Finding #4 — degraded_reasons must be read from the TOP-LEVEL array
+  # (jq: .degraded_reasons). A nested-only reconcile array must NOT satisfy the
+  # reconcile gate; both modes must reject. Positive control keeps the genuine
+  # top-level reconcile-in-progress path working.
+  assert_rc "[$mode] nested-only degraded_reasons → reconcile_only REJECTS" 1 \
+    _health_json_reconcile_only "$NESTED_ONLY_DEGRADED_REASONS_BODY"
+  assert_rc "[$mode] nested-only degraded_reasons → NOT ready" 1 \
+    health_json_is_ready "$NESTED_ONLY_DEGRADED_REASONS_BODY" 1 1
+  assert_rc "[$mode] top-level reconcile degraded_reasons → reconcile_only matches" 0 \
+    _health_json_reconcile_only "$TOP_LEVEL_RECONCILE_BODY"
+  assert_rc "[$mode] top-level reconcile degraded_reasons → READY" 0 \
+    health_json_is_ready "$TOP_LEVEL_RECONCILE_BODY" 1 1
 }
 
 # jq path (jq is present in this environment).
