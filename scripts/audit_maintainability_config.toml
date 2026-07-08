@@ -31,5 +31,6 @@
 "src/services/discord/tmux_watcher/turn_stream_collector.rs" = 1161 # 2026-07-08 #4229 S4: approved contiguous verbatim extraction of the turn stream collector (seed restore/first parse/forward/monitor auto-turn claim/active read-parse loop); giant file (>=1000), registered in giant_file_registry.toml; irreducible as one review-verified move.
 "src/services/discord/tmux_watcher/**" = 700
 "src/services/discord/turn_bridge/headless_delivery.rs" = 700
+"src/services/discord/turn_bridge/stream_loop.rs" = 1638 # 2026-07-08 #4230 S6: registered giant-file, plan-marked irreducible stream loop shell (event arms share placeholder/background/transcript/inflight state); tracked in giant_file_registry.toml.
 "src/services/discord/turn_bridge/status_panel.rs" = 700
 "src/services/discord/turn_bridge/voice_completion.rs" = 700

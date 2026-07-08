@@ -1238,7 +1238,9 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (2492 lines; production LoC; -1339
+  - `src/services/discord/turn_bridge/mod.rs` (1232 lines; production LoC; -1260
+    from #4230 S6 moving the main stream loop shell + remaining event arms to
+    `turn_bridge/stream_loop.rs`; behavior-preserving decompose. Prior -1339
     from #4230 S5 moving the terminal outcome delivery block to
     `turn_bridge/terminal_outcome_delivery.rs`; behavior-preserving decompose.
     Prior -495
@@ -1506,6 +1508,16 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
+  - `src/services/discord/turn_bridge/stream_loop.rs` (1638 prod lines; #4230 S6
+    main stream loop shell extracted verbatim from `turn_bridge/mod.rs`: cancel
+    gates, ready-frame drain, `RetryBoundary`/`Init`/`Text`/`Thinking`/`ToolUse`/
+    `ToolResult`/`TaskNotification`/`Done`/`Error`/status arms, runtime handoff
+    delegation, stream/status ticks, long-running placeholder open/retarget
+    state, and bridge latency span emission. Registered giant-file (#4230
+    decompose target continuation — see `giant-file-registry.md`, owner
+    `discord-relay`, deadline 2026-08-31); plan-marked irreducible because the
+    arms share placeholder state, background-child tracking, transcript events,
+    and inflight persistence. Bugfix only outside the #4230 decompose plan).
   - `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` (1669 lines;
     production LoC; #4230 S5 terminal outcome delivery extracted verbatim from
     `turn_bridge/mod.rs`: cancel, prompt-too-long, recovery retry, empty
