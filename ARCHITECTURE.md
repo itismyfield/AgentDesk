@@ -646,6 +646,7 @@ src/
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
+│   │   │   ├── terminal_direct_fallback.rs
 │   │   │   ├── terminal_long_chunks.rs
 │   │   │   ├── terminal_readiness.rs
 │   │   │   ├── terminal_readiness_tests.rs
