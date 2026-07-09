@@ -244,7 +244,7 @@
 | `server::routes::docs::guides` | `src/server/routes/docs/guides.rs` | 247 | 247 | 0 |  |
 | `server::routes::docs::inventory` | `src/server/routes/docs/inventory.rs` | 279 | 279 | 0 |  |
 | `server::routes::docs::inventory::endpoints` | `src/server/routes/docs/inventory/endpoints/mod.rs` | 25 | 25 | 0 |  |
-| `server::routes::docs::inventory::endpoints::part_01` | `src/server/routes/docs/inventory/endpoints/part_01.rs` | 659 | 659 | 0 |  |
+| `server::routes::docs::inventory::endpoints::part_01` | `src/server/routes/docs/inventory/endpoints/part_01.rs` | 661 | 661 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_02` | `src/server/routes/docs/inventory/endpoints/part_02.rs` | 684 | 684 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_03` | `src/server/routes/docs/inventory/endpoints/part_03.rs` | 646 | 646 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_04` | `src/server/routes/docs/inventory/endpoints/part_04.rs` | 719 | 719 | 0 |  |
@@ -266,7 +266,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1641 | 1376 | 265 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 949 | 680 | 269 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 | 188 | 0 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2355 | 1664 | 691 | giant-file |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2456 | 1674 | 782 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 | 129 | 0 |  |
 | `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 405 | 405 | 0 |  |
