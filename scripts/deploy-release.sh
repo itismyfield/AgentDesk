@@ -888,6 +888,28 @@ git merge --quiet --ff-only origin/main"
         return 1
     fi
 
+    # Operator-private routines are excluded from the repo (.gitignore:50), so the
+    # peer's own `git fetch` above cannot deliver them. Push them before the peer
+    # deploys: leadership can move between nodes, and the routine runtime is a
+    # LeaderOnly worker that resolves `script_ref` against the local disk. A node
+    # missing these files fails every routine row with "routine script ... is not
+    # loaded". No --delete: the peer may hold routines this node does not.
+    if [ -d "$ADK_REL/routines" ]; then
+        local peer_adk_rel
+        if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
+            'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
+            echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR"
+            return 1
+        fi
+        peer_adk_rel="$(printf '%s' "$peer_adk_rel" | tr -d '\r')"
+        echo "▸ [peer:$peer] Syncing operator routine scripts..."
+        if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
+            "$ADK_REL/routines/" "$peer:$peer_adk_rel/routines/"; then
+            echo "✗ [peer:$peer] routine script sync failed"
+            return 1
+        fi
+    fi
+
     echo "▸ [peer:$peer] Running deploy-release.sh..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_deploy_command")"; then
         echo "✗ [peer:$peer] deploy-release.sh failed"
@@ -1221,7 +1243,15 @@ if [ -d "$REPO/routines" ]; then
     ROUTINES_STAGED="$ADK_REL/routines.new"
     rm -rf "$ROUTINES_STAGED"
     mkdir -p "$ROUTINES_STAGED"
-    rsync -a --delete "$REPO/routines/" "$ROUTINES_STAGED/"
+    # Operator-private routines (.gitignore:50) live only under $ADK_REL/routines,
+    # never in the repo. Seed the staging dir with them first so the repo overlay
+    # below cannot delete a routine whose row still exists in `routines`; the
+    # runtime would then fail it with "routine script ... is not loaded".
+    if [ -d "$ADK_REL/routines" ]; then
+        rsync -a "$ADK_REL/routines/" "$ROUTINES_STAGED/"
+    fi
+    # Engine-owned routines win on conflict. No --delete: see above.
+    rsync -a "$REPO/routines/" "$ROUTINES_STAGED/"
 else
     echo "⚠ Routines source missing: $REPO/routines"
     echo "  Skipping routine staging — existing $ADK_REL/routines/ will be retained."
