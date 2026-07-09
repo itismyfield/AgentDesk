@@ -173,6 +173,12 @@ impl MemoryBackendKind {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedMemorySettings {
     pub backend: MemoryBackendKind,
+    /// True only when the resolved `backend` is `File` because memento was the
+    /// requested/configured backend but is degraded (unreachable). Lets the
+    /// guidance layer distinguish a deliberate file backend from a transparent
+    /// memento fallback, which have different write policies. Always false for a
+    /// deliberately configured file backend and for an active memento backend.
+    pub memento_fallback: bool,
     pub recall_timeout_ms: u64,
     pub capture_timeout_ms: u64,
 }
@@ -181,6 +187,7 @@ impl Default for ResolvedMemorySettings {
     fn default() -> Self {
         Self {
             backend: MemoryBackendKind::File,
+            memento_fallback: false,
             recall_timeout_ms: DEFAULT_MEMORY_RECALL_TIMEOUT_MS,
             capture_timeout_ms: DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
         }
