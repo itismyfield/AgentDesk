@@ -9,8 +9,8 @@ use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
 use super::subagent_panel::{
-    clean_match_key, log_idless_terminal_fallback, match_subagent_end_fallback,
-    render_live_subagents_section,
+    SubagentKeyTombstones, clean_match_key, log_idless_terminal_fallback,
+    match_subagent_end_fallback, render_live_subagents_section,
 };
 use super::task_panel::{
     STUCK_BACKGROUND_TASK_TTL, TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot,
@@ -99,6 +99,10 @@ pub(super) struct StatusPanelState {
     todos: Vec<StatusTodoItem>,
     pub(super) tasks: Vec<TaskToolSlot>,
     pub(super) subagents: Vec<SubagentSlot>,
+    // #4396 r3: ownership-conflict tombstones for subagent slots that LEFT this
+    // state (footer eviction / trim / resets) — consulted by the fallback
+    // matcher, carried across the turn reset. See `SubagentKeyTombstones`.
+    pub(super) recently_evicted_subagent_keys: SubagentKeyTombstones,
     pub(super) workflows: Vec<WorkflowSlot>,
     next_slot_ordinal: u64, // #3391: advancing, never-reused task/subagent ordinals.
     // #3477 item 3: instant the turn entered `Completed` (None until then); vs the
@@ -129,6 +133,13 @@ impl StatusPanelState {
         self.status = DerivedStatus::Running;
         self.todos.clear();
         self.tasks.clear();
+        // #4396 r3: the cleared subagents leave the state — tombstone their keys
+        // so a late end cannot close a same-key slot of the NEXT session.
+        let now = std::time::Instant::now();
+        for slot in &self.subagents {
+            self.recently_evicted_subagent_keys
+                .push_slot_keys(slot, now);
+        }
         self.subagents.clear();
         self.workflows.clear();
         self.completed_at = None; // #3477 item 3: drop the stale freshness gate.
@@ -186,9 +197,23 @@ impl StatusPanelState {
             .cloned()
             .collect::<Vec<_>>();
         let has_residuals = !tasks.is_empty() || !subagents.is_empty();
+        // #4396 r3: every slot NOT kept as a residual leaves the state here —
+        // tombstone the departing keys before the state is rebuilt.
+        for slot in self
+            .subagents
+            .iter()
+            .filter(|s| !s.is_unfinished_background())
+        {
+            self.recently_evicted_subagent_keys
+                .push_slot_keys(slot, now);
+        }
         *self = StatusPanelState {
             tasks,
             subagents,
+            // #4396 r3: the tombstones outlive the slots they guard.
+            recently_evicted_subagent_keys: std::mem::take(
+                &mut self.recently_evicted_subagent_keys,
+            ),
             background_agent_pending: self.background_agent_pending,
             // #3391: carry the counter so a residual ordinal is never reissued.
             next_slot_ordinal: self.next_slot_ordinal,
@@ -272,7 +297,10 @@ impl StatusPanelState {
                     started_at: std::time::Instant::now(),
                 });
                 self.status = DerivedStatus::SubagentRunning { desc };
-                trim_subagents(&mut self.subagents);
+                trim_subagents(
+                    &mut self.subagents,
+                    &mut self.recently_evicted_subagent_keys,
+                );
             }
             StatusEvent::SubagentEvent { summary } => {
                 if let Some(slot) = self
@@ -316,6 +344,7 @@ impl StatusPanelState {
                     .then(|| {
                         match_subagent_end_fallback(
                             &self.subagents,
+                            &self.recently_evicted_subagent_keys,
                             agent_id.as_deref(),
                             desc.as_deref(),
                         )
@@ -340,6 +369,7 @@ impl StatusPanelState {
                     {
                         let matched = match_subagent_end_fallback(
                             &self.subagents,
+                            &self.recently_evicted_subagent_keys,
                             agent_id.as_deref(),
                             desc.as_deref(),
                         );
@@ -737,12 +767,14 @@ pub(super) fn force_abort_stuck_subagent_slots(
     swept
 }
 
-fn trim_subagents(slots: &mut Vec<SubagentSlot>) {
+fn trim_subagents(slots: &mut Vec<SubagentSlot>, tombstones: &mut SubagentKeyTombstones) {
     while slots.len() > STATUS_PANEL_SUBAGENT_LIMIT {
         let remove_index = slots
             .iter()
             .position(|slot| slot.finished.is_some())
             .unwrap_or(0);
-        slots.remove(remove_index);
+        // #4396 r3: the trimmed slot leaves the state — tombstone its keys.
+        let removed = slots.remove(remove_index);
+        tombstones.push_slot_keys(&removed, std::time::Instant::now());
     }
 }

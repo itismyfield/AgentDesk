@@ -101,15 +101,29 @@ impl super::PlaceholderLiveEvents {
         let mut guard = entry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = &mut *guard;
         let mut evicted = EvictedTerminalCounts::default();
-        guard.tasks.retain(|slot| {
+        state.tasks.retain(|slot| {
             let drop = task_tool_slot_is_terminal(slot)
                 && delivered_terminal_ids
                     .contains(&TerminalSlotId::Task(task_tool_slot_identity(slot)));
             evicted.tasks += usize::from(drop);
             !drop
         });
-        guard.subagents.retain(|slot| {
+        // #4396 r3: an evicted terminal subagent leaves the state entirely — the
+        // codex-review wrong-kill precondition (evicted ✗ A + a same-key live
+        // respawn B). Tombstone its match keys BEFORE the retain drops it so the
+        // fallback matcher still sees the ownership conflict.
+        let now = std::time::Instant::now();
+        for slot in state.subagents.iter().filter(|slot| {
+            slot.is_terminal()
+                && delivered_terminal_ids.contains(&TerminalSlotId::Subagent(slot.identity()))
+        }) {
+            state
+                .recently_evicted_subagent_keys
+                .push_slot_keys(slot, now);
+        }
+        state.subagents.retain(|slot| {
             let drop = slot.is_terminal()
                 && delivered_terminal_ids.contains(&TerminalSlotId::Subagent(slot.identity()));
             evicted.subagents += usize::from(drop);

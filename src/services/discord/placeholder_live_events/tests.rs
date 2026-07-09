@@ -6569,6 +6569,153 @@ fn idless_end_with_agent_id_shared_by_finished_slot_never_closes_the_live_slot()
     );
 }
 
+// #4396 r3 (codex review repro): the r2 finished-slot conflict guard only holds
+// while the finished slot is still IN the state. Here A is TTL-forced ✗ by the
+// render-tick sweep, the completion footer delivers it and the #3391 eviction
+// REMOVES it from the state, a same-desc B respawns live, and A's real
+// completion finally arrives (id-less, desc-keyed). Without the tombstone the
+// evicted A is invisible and B becomes the unique live match → wrong-kill. The
+// tombstone ring must drop the end — logged with the tombstone conflict reason
+// — and leave B running. Removing the `contains_fresh` check in
+// `unique_live_owner` (or the eviction-path `push_slot_keys`) closes B and
+// fails this test.
+#[test]
+fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
+    use super::completion_footer::{SlotKey, TerminalSlotId};
+    use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_396_009);
+    // Instance A: background, then TTL-forced ✗ by the periodic render tick.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("research foo".to_string()),
+            agent_id: None,
+            tool_use_id: Some("toolu_4396_r3_a".to_string()),
+            background: true,
+        },
+    );
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.subagents[0].started_at = std::time::Instant::now()
+            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
+            .expect("monotonic clock far enough past origin");
+    }
+    let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    // Footer delivery evicts terminal A — it leaves the state entirely (#3391).
+    events.evict_delivered_terminal_footer_tasks(
+        channel_id,
+        &[TerminalSlotId::Subagent(SlotKey::ToolUseId(
+            "toolu_4396_r3_a".to_string(),
+        ))],
+    );
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.subagents.is_empty(),
+            "precondition: evicted A must have left the state: {:?}",
+            guard.subagents
+        );
+    }
+
+    // Instance B: same-desc live respawn.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("research foo".to_string()),
+            agent_id: None,
+            tool_use_id: Some("toolu_4396_r3_b".to_string()),
+            background: true,
+        },
+    );
+
+    // A's real completion, late: id-less, desc is the only key. Capture the
+    // panel's INFO logs across the apply to assert the tombstone drop reason.
+    let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(CapturingWriter {
+            buffer: buffer.clone(),
+        })
+        .finish();
+    {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let raw = "<task-notification>\n\
+            <status>completed</status>\n\
+            <summary>Agent \"research foo\" completed</summary>\n\
+            </task-notification>";
+        events.push_status_events(
+            channel_id,
+            status_events_from_task_notification_xml_for_footer_mode(raw, true),
+        );
+    }
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot_b = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_4396_r3_b"))
+        .expect("live respawn B");
+    assert_eq!(
+        slot_b.finished, None,
+        "the live same-desc respawn must NOT be closed by evicted A's late completion"
+    );
+    let logs = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 logs");
+    assert!(
+        logs.contains("tombstone"),
+        "the drop must be logged with the tombstone conflict reason, got: {logs}"
+    );
+}
+
 // #3393 finding 3: a workflow `<task-notification>` XML with a NON-terminal
 // status (e.g. running) must NOT emit `WorkflowEnd`; terminal statuses still map
 // success via `!is_error`, consistent with the subagent/background arms.
