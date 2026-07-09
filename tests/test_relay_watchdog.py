@@ -560,6 +560,29 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(state["999"]["read_failures"], 0)
 
+    # r2 review (PR #4399): save_state was the only unguarded call in the main
+    # loop. A disk-full/unwritable-logs OSError there kills the process; the
+    # plist's KeepAlive+ThrottleInterval=30 respawns it every ~30s with empty
+    # in-memory state, and since the alert fires BEFORE the save, the cooldown
+    # evaporates on each restart → ~2 alerts/min storm during a live gap
+    # (amplified by announce-triggered agent turns), while gap_since never
+    # persists so the auto-issue threshold can never fire.
+    def test_unwritable_state_dir_does_not_kill_process_or_break_cooldown(self):
+        rt = self.gap_rt()
+        logs = self.root / "logs"
+        self.addCleanup(os.chmod, logs, 0o755)
+        os.chmod(logs, 0o555)  # every state save now raises OSError
+        state: dict = {}
+        # Three tick+save rounds sharing the SAME in-memory dict, exactly like
+        # main(). An unguarded OSError escapes the loop and fails this test.
+        for i in range(3):
+            tick_channel(rt, TICK_CHANNEL, state, self.now + i)
+            relay_watchdog.save_state_guarded(rt, state)
+        self.assertEqual(
+            len(rt.alerts), 1, "cooldown must survive failed state saves"
+        )
+        self.assertTrue(any("state save failed" in l for l in rt.log_lines))
+
 
 class AlertFallbackTests(unittest.TestCase):
     """(f) Runtime.alert delivery chain: announce-bot primary, bot-token

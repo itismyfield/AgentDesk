@@ -362,6 +362,25 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def save_state_guarded(rt: "Runtime", state: dict[str, Any]) -> None:
+    """Persist state, but NEVER die on a write failure (r2 review, PR #4399).
+
+    Same "KeepAlive would crash-loop us" invariant as the config-retry loop in
+    main(): if a disk-full/unwritable-logs OSError killed the process here,
+    launchd (KeepAlive, ThrottleInterval=30) would respawn it every ~30s with
+    EMPTY in-memory state. The alert goes out BEFORE the save, so each respawn
+    would forget last_alert and re-alert — a live gap becomes an ~2/min alert
+    storm, amplified by announce-triggered agent turns; gap_since would also
+    never persist, so the auto-issue threshold could never fire. Log and
+    continue: the caller keeps the SAME dict across ticks, so cooldown state
+    survives in memory and persistence resumes when the disk does.
+    """
+    try:
+        save_state(rt.state_path, state)
+    except OSError as e:
+        rt.log(f"state save failed ({e}); continuing with in-memory state")
+
+
 # ── Runtime side (subprocess/IO); kept thin so judgment stays pure ─────────────
 
 
@@ -696,6 +715,10 @@ def main() -> int:
     root = adk_root()
     cfg: Config | None = None
     rt: Runtime | None = None
+    # Loaded from disk ONCE (per Runtime), then kept in memory across ticks so
+    # cooldown/issue-dedup state survives even while saves fail — see
+    # save_state_guarded().
+    state: dict[str, Any] | None = None
     last_cfg_err = ""
     while True:
         try:
@@ -711,19 +734,21 @@ def main() -> int:
         last_cfg_err = ""
         if rt is None or rt.cfg != cfg:
             rt = Runtime(cfg, root)
+            state = None
             rt.log(
                 f"watchdog armed channels={[c.channel_id for c in cfg.channels]} "
                 f"poll={cfg.poll_secs}s grace={cfg.grace_secs}s "
                 f"gap_alert={cfg.gap_alert_secs}s"
             )
-        state = load_state(rt.state_path)
+        if state is None:
+            state = load_state(rt.state_path)
         now = time.time()
         for ch in cfg.channels:
             try:
                 tick_channel(rt, ch, state, now)
             except Exception as e:  # noqa: BLE001 — one channel must not kill the loop
                 rt.log(f"[{ch.channel_id}] tick error: {type(e).__name__}: {e}")
-        save_state(rt.state_path, state)
+        save_state_guarded(rt, state)
         time.sleep(cfg.poll_secs)
 
 
