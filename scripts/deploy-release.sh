@@ -1714,25 +1714,47 @@ if install -m 0755 "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
         # _write_release_source_manifest / _deploy_to_all_peers below.
         # The function body runs from an `if` guard, so `set -e` is suspended
         # inside it; every step therefore carries its own `|| return 1`.
+        #
+        # Runtime python preflight: relay_watchdog.py declares MIN_PYTHON=3.10
+        # and exits 1 below it. If `command -v python3` resolved to the macOS
+        # system 3.9, arming the plist would put KeepAlive into a silent ~30s
+        # crash-loop — refuse to arm instead (r4 review, PR #4399).
+        _xml_escape() {
+            # Plist bodies are XML: raw &, <, > (and quotes, for safety) in an
+            # operator path would render the plist plutil-invalid and the
+            # watchdog silently unarmed (r4 review, PR #4399).
+            local s=$1
+            s=${s//&/\&amp;}
+            s=${s//</\&lt;}
+            s=${s//>/\&gt;}
+            s=${s//\"/\&quot;}
+            s=${s//\'/\&apos;}
+            printf '%s' "$s"
+        }
         _install_relay_watchdog_plist() {
+            local label_x python_x bin_x root_x
+            label_x=$(_xml_escape "$WATCHDOG_LABEL") || return 1
+            python_x=$(_xml_escape "$WATCHDOG_PYTHON") || return 1
+            bin_x=$(_xml_escape "$WATCHDOG_BIN") || return 1
+            root_x=$(_xml_escape "$ADK_REL") || return 1
             mkdir -p "$HOME/Library/LaunchAgents" || return 1
             cat > "$WATCHDOG_PLIST_PATH.tmp" <<PLIST_EOF || return 1
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$WATCHDOG_LABEL</string>
+  <key>Label</key><string>$label_x</string>
   <key>ProgramArguments</key>
-  <array><string>$WATCHDOG_PYTHON</string><string>$WATCHDOG_BIN</string></array>
+  <array><string>$python_x</string><string>$bin_x</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>$ADK_REL/logs/relay-watchdog.launchd.out.log</string>
-  <key>StandardErrorPath</key><string>$ADK_REL/logs/relay-watchdog.launchd.err.log</string>
+  <key>StandardOutPath</key><string>$root_x/logs/relay-watchdog.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$root_x/logs/relay-watchdog.launchd.err.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>AGENTDESK_ROOT_DIR</key><string>$ADK_REL</string>
+    <key>AGENTDESK_ROOT_DIR</key><string>$root_x</string>
   </dict>
 </dict>
 </plist>
@@ -1741,7 +1763,11 @@ PLIST_EOF
             # interrupted write leaves only the .tmp (cleaned by the caller).
             mv -f "$WATCHDOG_PLIST_PATH.tmp" "$WATCHDOG_PLIST_PATH" || return 1
         }
-        if _install_relay_watchdog_plist; then
+        if ! "$WATCHDOG_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+            echo "⚠ Relay watchdog requires python3 >= 3.10 (MIN_PYTHON in relay_watchdog.py);"
+            echo "  resolved runner: $WATCHDOG_PYTHON — NOT armed (arming would KeepAlive-crash-loop)."
+            echo "  Install a newer python3 (e.g. brew install python) and redeploy."
+        elif _install_relay_watchdog_plist; then
             xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
             # bootout+bootstrap (not kickstart) so a script/plist change is picked up.
             launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true

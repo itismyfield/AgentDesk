@@ -172,7 +172,16 @@ def parse_config(raw: dict[str, Any]) -> Config:
         "dcserver_port",
     ):
         if key in raw:
-            kwargs[key] = int(raw[key])
+            # A malformed number must surface as ConfigError, never ValueError:
+            # main()'s retry loop only catches ConfigError, and anything else
+            # would kill the process → KeepAlive crash-loop every ~30s until an
+            # operator notices (r4 review, PR #4399).
+            try:
+                kwargs[key] = int(raw[key])
+            except (ValueError, TypeError) as e:
+                raise ConfigError(
+                    f"config field {key!r} must be an integer, got {raw[key]!r}"
+                ) from e
     if "github_repo" in raw:
         kwargs["github_repo"] = str(raw["github_repo"])
     return Config(channels=tuple(channels), **kwargs)
@@ -421,8 +430,23 @@ class Runtime:
             d = json.loads(p.stdout)
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             return None
-        msgs = d if isinstance(d, list) else d.get("messages", d.get("data", []))
-        bot = [m for m in msgs if (m.get("author") or {}).get("bot")]
+        # Shape-validate: rc=0 with VALID but non-list/dict JSON (`null`, a bare
+        # number/string) must join the read-failure path (return None) — an
+        # AttributeError here would skip the read_failures escalation and leave
+        # the prober silently blind (r4 review, PR #4399).
+        if isinstance(d, list):
+            msgs = d
+        elif isinstance(d, dict):
+            msgs = d.get("messages", d.get("data", []))
+        else:
+            return None
+        if not isinstance(msgs, list):
+            return None
+        bot = [
+            m
+            for m in msgs
+            if isinstance(m, dict) and (m.get("author") or {}).get("bot")
+        ]
         return norm(" ".join((m.get("content") or "") for m in bot))
 
     def dcserver_snapshot(self) -> str:

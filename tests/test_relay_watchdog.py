@@ -345,6 +345,92 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_config({"channels": [{"channel_id": "123"}]})
 
+    # r4 review (PR #4399): a non-numeric numeric field raised bare ValueError,
+    # which main()'s retry loop does not catch → process death → KeepAlive
+    # crash-loop every ~30s. It must surface as ConfigError so main() logs and
+    # retries instead of dying.
+    def test_non_numeric_field_is_config_error_not_valueerror(self):
+        base = {
+            "channels": [
+                {
+                    "channel_id": "123",
+                    "sendmessage_key": "k",
+                    "worktree_root": WORKTREE_ROOT,
+                }
+            ]
+        }
+        with self.assertRaises(ConfigError):
+            parse_config({**base, "poll_secs": "bad"})
+        with self.assertRaises(ConfigError):
+            parse_config({**base, "gap_alert_secs": None})
+
+    def test_load_config_surfaces_bad_numeric_as_config_error(self):
+        # File-level proof that main()'s `except ConfigError` retry path (the
+        # crash-loop avoidance) covers the exact config an operator could typo.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "relay-watchdog.json"
+            p.write_text(
+                json.dumps(
+                    {
+                        "channels": [
+                            {
+                                "channel_id": "123",
+                                "sendmessage_key": "k",
+                                "worktree_root": WORKTREE_ROOT,
+                            }
+                        ],
+                        "poll_secs": "bad",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConfigError):
+                relay_watchdog.load_config(p)
+
+
+class DiscordHaystackShapeTests(unittest.TestCase):
+    """r4 review (PR #4399): `agentdesk discord read` returning rc=0 with VALID
+    but non-list/dict JSON (`null`, a bare number/string) raised AttributeError
+    — read_failures never incremented, so the 'watchdog blind' escalation was
+    silently skipped. Such shapes must join the read-failure path (None)."""
+
+    def _haystack_for(self, stdout: str) -> "str | None":
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(Config(channels=(TICK_CHANNEL,)), Path(tmp))
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                return rt.discord_haystack("999")
+
+    def test_valid_but_non_collection_json_is_read_failure(self):
+        for stdout in ("null", "123", '"str"'):
+            with self.subTest(stdout=stdout):
+                self.assertIsNone(self._haystack_for(stdout))
+
+    def test_dict_with_non_list_messages_is_read_failure(self):
+        self.assertIsNone(self._haystack_for('{"messages": 5}'))
+
+    def test_non_dict_entries_are_skipped_not_fatal(self):
+        out = self._haystack_for(
+            '[null, 7, {"author": {"bot": true}, "content": "hello  world"}]'
+        )
+        self.assertEqual(out, "hello world")
+
+    def test_valid_shapes_still_parse(self):
+        self.assertEqual(
+            self._haystack_for('[{"author": {"bot": true}, "content": "ok"}]'),
+            "ok",
+        )
+        self.assertEqual(
+            self._haystack_for(
+                '{"messages": [{"author": {"bot": true}, "content": "ok"}]}'
+            ),
+            "ok",
+        )
+
 
 class StateTests(unittest.TestCase):
     def test_round_trip(self):
@@ -560,6 +646,25 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(state["999"]["read_failures"], 0)
 
+    # r4 review (PR #4399), end-to-end for the AttributeError defect: with the
+    # REAL discord_haystack wired in, `discord read` printing `null` (rc=0,
+    # valid JSON) must increment read_failures instead of crashing the tick.
+    def test_null_discord_json_increments_read_failures(self):
+        self.write_transcript([(self.now - 60, "fresh block")])
+        rt = self.make_rt()
+        rt.discord_haystack = Runtime.discord_haystack.__get__(rt)
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout="null", stderr="")
+
+        state: dict = {}
+        with mock.patch.object(
+            relay_watchdog.subprocess, "run", side_effect=fake_run
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(state["999"]["read_failures"], 1)
+        self.assertTrue(any("discord read failed" in l for l in rt.log_lines))
+
     # r2 review (PR #4399): save_state was the only unguarded call in the main
     # loop. A disk-full/unwritable-logs OSError there kills the process; the
     # plist's KeepAlive+ThrottleInterval=30 respawns it every ~30s with empty
@@ -678,6 +783,80 @@ class DeploymentWiringTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("scripts/relay_watchdog.py", checker)
+
+    @staticmethod
+    def _watchdog_block() -> str:
+        """Extract the actual watchdog install block from deploy-release.sh so
+        the harness below executes the SHIPPED code, not a copy."""
+        lines = (
+            (REPO_ROOT / "scripts" / "deploy-release.sh")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        start = next(
+            i
+            for i, l in enumerate(lines)
+            if 'WATCHDOG_LABEL="com.agentdesk.relay-watchdog"' in l
+        )
+        # The block's final `fi` is the line after the staging-FAILED warning.
+        end = next(
+            i for i, l in enumerate(lines) if "Relay watchdog staging FAILED" in l
+        )
+        return "\n".join(lines[start : end + 2])
+
+    def _run_block(self, block: str, adk_rel: Path, home: Path):
+        import shlex
+
+        script = (
+            "set -euo pipefail\n"
+            f"REPO={shlex.quote(str(REPO_ROOT))}\n"
+            f"ADK_REL={shlex.quote(str(adk_rel))}\n"
+            f"HOME={shlex.quote(str(home))}\n"
+            # Nonexistent domain: bootstrap must fail (fail-open ⚠ path) rather
+            # than loading a test plist into the developer's real launchd.
+            "LAUNCHD_DOMAIN=gui/999999\n" + block + "\necho HARNESS-END\n"
+        )
+        return subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=60
+        )
+
+    # r4 review (PR #4399): plist values were raw-interpolated into the XML
+    # heredoc, so an operator path containing &, <, or > produced an invalid
+    # plist and a silently unarmed watchdog.
+    def test_generated_plist_survives_xml_metachars_in_paths(self):
+        import plistlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk & <rel>"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config" / "relay-watchdog.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            (home / "Library").mkdir(parents=True)
+
+            p = self._run_block(self._watchdog_block(), adk, home)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("HARNESS-END", p.stdout, "fail-open must reach the end")
+
+            plist_path = (
+                home / "Library/LaunchAgents/com.agentdesk.relay-watchdog.plist"
+            )
+            self.assertTrue(plist_path.is_file(), p.stdout + p.stderr)
+            with plist_path.open("rb") as f:
+                data = plistlib.load(f)  # raises on invalid XML → test fails
+            # Escaping must round-trip: the parsed values are the RAW paths.
+            self.assertEqual(
+                data["ProgramArguments"][1], str(adk / "bin/relay-watchdog.py")
+            )
+            self.assertEqual(
+                data["EnvironmentVariables"]["AGENTDESK_ROOT_DIR"], str(adk)
+            )
+            self.assertEqual(
+                data["StandardOutPath"],
+                str(adk / "logs/relay-watchdog.launchd.out.log"),
+            )
 
 
 if __name__ == "__main__":
