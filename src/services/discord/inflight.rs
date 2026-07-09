@@ -4105,7 +4105,20 @@ mod stall_recovery_tests {
     /// must not clobber it (`IdentityMismatch`); restart recovery owns it.
     #[test]
     fn skip_save_does_not_clobber_planned_restart_marker() {
+        // #4361: `set_restart_mode` stamps `restart_generation = load_generation()`
+        // and `load_inflight_states_from_root` re-reads `load_generation()` to
+        // decide staleness — BOTH resolve the PROCESS-WIDE runtime root (env
+        // `AGENTDESK_ROOT_DIR`), NOT the tempdir passed as `root`. If a parallel
+        // test mutates that env between the stamp and the load, the two generations
+        // diverge and the planned-restart marker is evicted as "old generation",
+        // dropping `rows.len()` to 0 (the observed parallel-only flake). Pin the
+        // ambient root to this tempdir under the shared env lock so both reads see
+        // one stable generation, exactly like the sibling rebind-adoption test.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
+        let _env_reset = set_agentdesk_root_for_test(temp.path());
         let mut marker = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
         marker.set_restart_mode(InflightRestartMode::DrainRestart);
         save_inflight_state_in_root(temp.path(), &marker).unwrap();
@@ -4126,6 +4139,60 @@ mod stall_recovery_tests {
         assert!(
             rows[0].restart_mode.is_some(),
             "the planned-restart marker must be preserved for recovery"
+        );
+    }
+
+    /// #4361 regression (DETERMINISTIC): pins down the eviction mechanism behind
+    /// the parallel-only flake in `skip_save_does_not_clobber_planned_restart_marker`.
+    ///
+    /// `set_restart_mode` stamps `restart_generation = load_generation()` and
+    /// `load_inflight_states_from_root` re-reads `load_generation()` — BOTH resolve
+    /// the PROCESS-WIDE runtime root (env `AGENTDESK_ROOT_DIR`), not the tempdir
+    /// passed as `root`. A planned-restart marker is kept ONLY while its
+    /// `restart_generation == current_generation` (see `stale_removal_reason`);
+    /// when a parallel test perturbs that env between the stamp and the load, the
+    /// two generations diverge and the marker is evicted, dropping `rows.len()` to
+    /// 0. This reproduces that eviction deterministically by advancing the pinned
+    /// generation, and proves a matching generation preserves the row — so pinning
+    /// the ambient root (the fix) is provably load-bearing and any future
+    /// ambient-generation leak is caught here, not on CI.
+    #[test]
+    fn planned_restart_marker_evicted_on_generation_skew_4361() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _env_reset = set_agentdesk_root_for_test(temp.path());
+
+        // Marker stamped at the pinned generation (0 — no generation file yet).
+        let mut marker = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        marker.set_restart_mode(InflightRestartMode::DrainRestart);
+        assert_eq!(
+            marker.restart_generation,
+            Some(0),
+            "marker is stamped at the pinned generation 0"
+        );
+        save_inflight_state_in_root(temp.path(), &marker).unwrap();
+
+        // Matching generation (still 0) → the marker survives the load.
+        let rows_same = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(
+            rows_same.len(),
+            1,
+            "a planned-restart marker at the current generation is preserved"
+        );
+
+        // Advance the AMBIENT generation — the exact perturbation a parallel test
+        // would race in between the stamp and the load. The marker (gen 0) is now
+        // an "old generation" row and MUST be evicted, dropping rows to 0. This is
+        // the #4361 flake mechanism, reproduced without a timing race.
+        let bumped = crate::services::discord::runtime_store::increment_generation();
+        assert!(bumped >= 1, "generation advanced past the marker's stamp");
+        let rows_skew = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(
+            rows_skew.len(),
+            0,
+            "a generation skew evicts the planned-restart marker (#4361 flake mechanism)"
         );
     }
 
