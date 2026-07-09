@@ -1,6 +1,7 @@
 pub(crate) mod args;
 pub(crate) mod client;
 pub(crate) mod dcserver;
+pub(crate) mod dcserver_pg_bootstrap;
 pub(crate) mod direct;
 pub(crate) mod discord;
 pub(crate) mod doctor;
