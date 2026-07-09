@@ -41,24 +41,36 @@ use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind};
 use crate::services::provider::ProviderKind;
 
-/// The structural shape of a re-adopted **real-user** bridge turn that is still
-/// live (uncommitted) and whose relay owner is still the (now dead) bridge —
+/// The structural shape of a re-adopted **real-user** bridge turn that a **crash**
+/// left still live (uncommitted) and still bridge-owned (the now-dead bridge) —
 /// independent of whether the `readopted_from_inflight` marker durably persisted.
+/// This is EXACTLY the yield-gate black-hole condition: every clause below mirrors a
+/// gate check, so the "would be black-holed" set (this predicate) and the "resume /
+/// dead-letter" decisions can never diverge.
 ///
-/// Excludes rebind-origin rows (owned by the rebind API), committed turns (already
-/// delivered → a watcher relay would be a duplicate), the TUI-direct synthetic
-/// owner and id-0 rows (not real-user turns), and any row whose relay is already
-/// owned by a live path (`Watcher` / `StandbyRelay` / `SessionBoundRelay`). Only a
-/// `None` (bridge-owned/default) owner reaches the yield-gate escape hatch, so this
-/// is exactly the population at risk of the #4380 black-hole.
+/// Excludes, each closing a concrete false-positive:
+///   - `rebind_origin` rows — owned by the rebind API, not this path.
+///   - committed turns (`terminal_delivery_committed`) — already delivered, so a
+///     watcher relay would be a duplicate (the gate yields them too).
+///   - **planned restarts (`restart_mode.is_some()`)** — the yield gate resumes
+///     those via its OWN `restart_mode.is_some() && !committed` escape hatch, so
+///     they are NEVER black-holed; DLQ-ing them would be a false loss + a
+///     double-delivery on recovery (review defect 1).
+///   - the TUI-direct synthetic owner and **id-0 rows** (`user_msg_id == 0`,
+///     injected / task-notification turns) — not real-user turns; the #4370 marker
+///     gate deliberately never marks them, so the backstop must not mistake that for
+///     a failed write (review defect 2). Enforced by sharing
+///     [`super::runtime::readopt_marker_eligible_real_user`] verbatim with that gate.
+///   - any row already owned by a live relay path (`Watcher` / `StandbyRelay` /
+///     `SessionBoundRelay`) — only a `None` (bridge-owned/default) owner reaches the
+///     yield-gate escape hatch.
 pub(in crate::services::discord) fn crash_readopt_real_user_live_turn(
     state: &InflightTurnState,
 ) -> bool {
     !state.rebind_origin
+        && state.restart_mode.is_none()
         && !state.terminal_delivery_committed
-        && state.request_owner_user_id != 0
-        && state.request_owner_user_id
-            != crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+        && super::runtime::readopt_marker_eligible_real_user(state)
         && state.effective_relay_owner_kind() == RelayOwnerKind::None
 }
 
@@ -72,6 +84,20 @@ pub(in crate::services::discord) fn crash_readopt_live_relay_resume_required(
     state: &InflightTurnState,
 ) -> bool {
     state.readopted_from_inflight && crash_readopt_real_user_live_turn(state)
+}
+
+/// Pure DLQ-fire decision for the #4380 backstop, extracted so it is unit-testable
+/// WITHOUT Postgres (the sink `record_detached` needs a live pool). Fires iff the
+/// reloaded row is still the crash black-hole shape
+/// ([`crash_readopt_real_user_live_turn`]) AND lacks the `readopted_from_inflight`
+/// marker — i.e. the resume guard could not be armed (the marker WRITE failed with
+/// IoError), so the recovered watcher WILL yield to the dead bridge. The shape
+/// already excludes planned restarts and id-0 rows, so a marker that is absent
+/// BY DESIGN (never eligible) can never trip this.
+pub(in crate::services::discord) fn readopt_relay_black_hole_dead_letter_required(
+    state: &InflightTurnState,
+) -> bool {
+    crash_readopt_real_user_live_turn(state) && !state.readopted_from_inflight
 }
 
 /// #4380 backstop: WARN + durable dead-letter for a re-adopted real-user live turn
@@ -129,7 +155,7 @@ pub(in crate::services::discord) fn guard_readopt_relay_resume_or_dead_letter(
     else {
         return;
     };
-    if crash_readopt_real_user_live_turn(&reloaded) && !reloaded.readopted_from_inflight {
+    if readopt_relay_black_hole_dead_letter_required(&reloaded) {
         record_readopt_relay_black_hole_dead_letter(
             shared.pg_pool.as_ref(),
             channel_id,
@@ -262,6 +288,72 @@ mod tests {
         with_readopted_crash_turn(|mut state| {
             state.rebind_origin = true;
             assert!(!crash_readopt_real_user_live_turn(&state));
+        });
+    }
+
+    // --- #4380 review round 2: guard/DLQ-fire decision ---
+    // These pin the pure fire predicate `readopt_relay_black_hole_dead_letter_required`
+    // (the decision inside `guard_readopt_relay_resume_or_dead_letter`) so the fire
+    // condition is verified WITHOUT Postgres — the sink `record_detached` needs a
+    // live pool, but the *decision* is a pure function.
+
+    /// #4380 review defect 1: a PLANNED restart (DrainRestart) row is resumed by the
+    /// yield gate's own `restart_mode.is_some()` hatch, so it is NEVER black-holed.
+    /// The backstop must NOT dead-letter it even with the marker absent (else false
+    /// loss + double-delivery on recovery). MUTATION: delete `restart_mode.is_none()`
+    /// from `crash_readopt_real_user_live_turn` → this assert FAILS.
+    #[test]
+    fn planned_restart_missing_marker_does_not_dead_letter() {
+        with_readopted_crash_turn(|mut state| {
+            state.readopted_from_inflight = false;
+            state.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+            assert!(
+                !readopt_relay_black_hole_dead_letter_required(&state),
+                "a planned-restart row is resumed by the restart_mode escape hatch, not black-holed"
+            );
+        });
+    }
+
+    /// #4380 review defect 2: a real-owner but id-0 (`user_msg_id == 0`) row is an
+    /// injected / task-notification turn the #4370 marker gate deliberately never
+    /// marks. The backstop must NOT mistake that BY-DESIGN absence for a failed
+    /// write. MUTATION: delete `user_msg_id != 0` from
+    /// `runtime::readopt_marker_eligible_real_user` → this assert FAILS.
+    #[test]
+    fn real_owner_id0_missing_marker_does_not_dead_letter() {
+        with_readopted_crash_turn(|mut state| {
+            state.readopted_from_inflight = false;
+            state.user_msg_id = 0;
+            assert!(
+                !readopt_relay_black_hole_dead_letter_required(&state),
+                "id-0 rows are never marker-eligible; an absent marker is by-design, not a failed write"
+            );
+        });
+    }
+
+    /// A genuine crash (`restart_mode == None`) real-user (`user_msg_id != 0`) live
+    /// turn whose marker write FAILED → the recovered watcher WILL yield to the dead
+    /// bridge, so the backstop MUST dead-letter the undelivered body.
+    #[test]
+    fn crash_real_user_missing_marker_dead_letters() {
+        with_readopted_crash_turn(|mut state| {
+            state.readopted_from_inflight = false;
+            assert!(
+                readopt_relay_black_hole_dead_letter_required(&state),
+                "a crash re-adopt whose marker failed to persist is the real black-hole → must DLQ"
+            );
+        });
+    }
+
+    /// The normal path: the marker persisted (helper sets it), so the resume guard
+    /// is armed and the backstop is a no-op.
+    #[test]
+    fn marker_present_is_a_no_op() {
+        with_readopted_crash_turn(|state| {
+            assert!(
+                !readopt_relay_black_hole_dead_letter_required(&state),
+                "when the marker persisted the resume guard is armed → no dead-letter"
+            );
         });
     }
 }
