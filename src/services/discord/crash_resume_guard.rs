@@ -140,7 +140,19 @@ mod tests {
 
     const REAL_OWNER: u64 = 343_742_347_365_974_026;
 
-    fn readopted_crash_turn() -> InflightTurnState {
+    /// Build the #4380 stuck-row shape under an isolated `AGENTDESK_ROOT_DIR`
+    /// tempdir (`InflightTurnState::new` resolves the runtime generation from the
+    /// root and asserts a test never touches the live release store) and run the
+    /// pure-predicate assertion while the env guard is held. Mirrors the
+    /// `active_bridge_turn_guard_tests` helper in `tmux.rs`.
+    fn with_readopted_crash_turn(test: impl FnOnce(InflightTurnState)) {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
         let mut state = InflightTurnState::new(
             ProviderKind::Claude,
             1_479_671_301_387_059_200,
@@ -162,74 +174,88 @@ mod tests {
         // Crash: no planned drain, bridge-owned relay, re-adopted from inflight.
         state.set_relay_owner_kind(RelayOwnerKind::None);
         state.readopted_from_inflight = true;
-        state
+
+        test(state);
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
     }
 
     #[test]
     fn crash_readopt_real_user_live_turn_matches_the_black_hole_shape() {
-        assert!(crash_readopt_real_user_live_turn(&readopted_crash_turn()));
+        with_readopted_crash_turn(|state| {
+            assert!(crash_readopt_real_user_live_turn(&state));
+        });
     }
 
     #[test]
     fn resume_required_holds_for_the_readopted_crash_turn() {
-        assert!(crash_readopt_live_relay_resume_required(
-            &readopted_crash_turn()
-        ));
+        with_readopted_crash_turn(|state| {
+            assert!(crash_readopt_live_relay_resume_required(&state));
+        });
     }
 
     #[test]
     fn resume_required_needs_the_readopted_marker() {
-        let mut state = readopted_crash_turn();
-        state.readopted_from_inflight = false;
-        assert!(
-            !crash_readopt_live_relay_resume_required(&state),
-            "without the marker the yield gate must fall back to the planned-restart hatch"
-        );
-        // …but the row is still the at-risk shape → the DLQ backstop must fire.
-        assert!(crash_readopt_real_user_live_turn(&state));
+        with_readopted_crash_turn(|mut state| {
+            state.readopted_from_inflight = false;
+            assert!(
+                !crash_readopt_live_relay_resume_required(&state),
+                "without the marker the yield gate must fall back to the planned-restart hatch"
+            );
+            // …but the row is still the at-risk shape → the DLQ backstop must fire.
+            assert!(crash_readopt_real_user_live_turn(&state));
+        });
     }
 
     #[test]
     fn committed_turn_is_not_a_black_hole_risk() {
-        let mut state = readopted_crash_turn();
-        state.terminal_delivery_committed = true;
-        assert!(
-            !crash_readopt_real_user_live_turn(&state),
-            "an already-delivered turn's watcher relay would be a duplicate, not a loss"
-        );
-        assert!(!crash_readopt_live_relay_resume_required(&state));
+        with_readopted_crash_turn(|mut state| {
+            state.terminal_delivery_committed = true;
+            assert!(
+                !crash_readopt_real_user_live_turn(&state),
+                "an already-delivered turn's watcher relay would be a duplicate, not a loss"
+            );
+            assert!(!crash_readopt_live_relay_resume_required(&state));
+        });
     }
 
     #[test]
     fn watcher_owned_turn_is_not_a_black_hole_risk() {
-        let mut state = readopted_crash_turn();
-        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
-        assert!(
-            !crash_readopt_real_user_live_turn(&state),
-            "a watcher-owned turn already resumes relay; the None-owner escape hatch must not touch it"
-        );
+        with_readopted_crash_turn(|mut state| {
+            state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+            assert!(
+                !crash_readopt_real_user_live_turn(&state),
+                "a watcher-owned turn already resumes relay; the None-owner escape hatch must not touch it"
+            );
+        });
     }
 
     #[test]
     fn session_bound_relay_turn_is_not_a_black_hole_risk() {
-        let mut state = readopted_crash_turn();
-        state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
-        assert!(!crash_readopt_real_user_live_turn(&state));
-        assert!(!crash_readopt_live_relay_resume_required(&state));
+        with_readopted_crash_turn(|mut state| {
+            state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+            assert!(!crash_readopt_real_user_live_turn(&state));
+            assert!(!crash_readopt_live_relay_resume_required(&state));
+        });
     }
 
     #[test]
     fn synthetic_owner_turn_is_not_a_real_user_black_hole() {
-        let mut state = readopted_crash_turn();
-        state.request_owner_user_id =
-            crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
-        assert!(!crash_readopt_real_user_live_turn(&state));
+        with_readopted_crash_turn(|mut state| {
+            state.request_owner_user_id =
+                crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+            assert!(!crash_readopt_real_user_live_turn(&state));
+        });
     }
 
     #[test]
     fn rebind_origin_turn_is_owned_by_the_rebind_api() {
-        let mut state = readopted_crash_turn();
-        state.rebind_origin = true;
-        assert!(!crash_readopt_real_user_live_turn(&state));
+        with_readopted_crash_turn(|mut state| {
+            state.rebind_origin = true;
+            assert!(!crash_readopt_real_user_live_turn(&state));
+        });
     }
 }
