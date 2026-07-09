@@ -5,6 +5,7 @@ pub(crate) mod direct;
 pub(crate) mod discord;
 pub(crate) mod doctor;
 pub(crate) mod init;
+pub(crate) mod json_output;
 pub(crate) mod migrate;
 pub(crate) mod monitoring;
 pub(crate) mod provider_cli;

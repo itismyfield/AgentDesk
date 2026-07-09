@@ -50,7 +50,7 @@ fn json_cli_error_line(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
 }
 
-pub(crate) fn execute(command: Commands) -> Result<()> {
+pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
     match command {
         Commands::Dcserver { token } => {
             let token = token.or_else(|| std::env::var("AGENTDESK_TOKEN").ok());
@@ -213,9 +213,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         Commands::ForceKill { session_key, retry } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_force_kill(&session_key, retry),
         )),
-        Commands::Diag { identifier, json } => {
-            exit_for_cli(super::client::cmd_diag(&identifier, json))
-        }
+        Commands::Diag { identifier } => exit_for_cli(super::client::cmd_diag(&identifier, json)),
         Commands::GithubSync { repo } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_github_sync(repo.as_deref()),
         )),
@@ -437,8 +435,22 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             uninstall,
         )
         .map_err(anyhow::Error::msg),
-        Commands::Status => exit_for_cli(super::client::cmd_status()),
-        Commands::Cards { status } => exit_for_cli(super::client::cmd_cards(status.as_deref())),
+        Commands::Status => {
+            let invoke = super::client::cmd_status(json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
+        Commands::Cards { status } => {
+            let invoke = super::client::cmd_cards(status.as_deref(), json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Dispatch(args) => exit_for_cli(match args.action {
             Some(DispatchAction::List) => super::client::cmd_dispatch_list(),
             Some(DispatchAction::Retry { card_id }) => {
@@ -467,12 +479,23 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         )),
         Commands::Agents => exit_for_cli(super::client::cmd_agents()),
         Commands::Advance { issue_number } => {
-            exit_for_cli(super::client::cmd_advance(&issue_number))
+            let invoke = super::client::cmd_advance(&issue_number, json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
         }
-        Commands::Queue => exit_for_cli(super::client::cmd_queue()),
+        Commands::Queue => {
+            let invoke = super::client::cmd_queue(json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Query {
             action,
-            json,
             filters,
             agent,
             limit,
@@ -494,11 +517,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 exit_for_cli(invoke)
             }
         }
-        Commands::Phase {
-            action,
-            json,
-            detailed,
-        } => {
+        Commands::Phase { action, detailed } => {
             // Default + explicit `status` are identical for now; PhaseAction
             // is left as a Subcommand so future verbs (`watch`, `clear`) can
             // attach without breaking call sites.
@@ -525,19 +544,26 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             dispatch_id,
             session,
             limit,
-        } => exit_for_cli(super::client::cmd_terminations(
-            card_id.as_deref(),
-            dispatch_id.as_deref(),
-            session.as_deref(),
-            limit,
-        )),
+        } => {
+            let invoke = super::client::cmd_terminations(
+                card_id.as_deref(),
+                dispatch_id.as_deref(),
+                session.as_deref(),
+                limit,
+                json,
+            );
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Doctor {
             fix,
             allow_restart,
             repair_sqlite_cache,
             allow_remote,
             profile,
-            json,
         } => {
             let profile = match profile {
                 Some(DoctorProfileArg::Quick) => {
@@ -570,13 +596,12 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         }),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
-        Commands::Health { json } => exit_for_cli(super::client::cmd_health(json)),
-        Commands::MachineCompare { json } => exit_for_cli(super::client::cmd_machine_compare(json)),
+        Commands::Health => exit_for_cli(super::client::cmd_health(json)),
+        Commands::MachineCompare => exit_for_cli(super::client::cmd_machine_compare(json)),
         Commands::Activity {
             since,
             until,
             repo,
-            json,
             no_agentdesk,
         } => exit_for_cli(super::client::cmd_activity(
             &since,

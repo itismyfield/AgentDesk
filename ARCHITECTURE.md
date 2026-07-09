@@ -40,6 +40,7 @@ src/
 │   ├── discord.rs
 │   ├── doctor.rs
 │   ├── init.rs
+│   ├── json_output.rs
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs

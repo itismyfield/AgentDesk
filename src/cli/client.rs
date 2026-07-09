@@ -651,10 +651,20 @@ fn render_auto_queue_status_lines(queue_summary: &str, entries: &[Value]) -> Vec
 // ── Subcommand handlers ──────────────────────────────────────
 
 /// `agentdesk status` — server health + auto-queue status
-pub fn cmd_status() -> Result<(), String> {
+pub fn cmd_status(json: bool) -> Result<(), String> {
     let health = get_json("/api/health")?;
     let sessions = get_json("/api/dispatched-sessions?include_merged=1")?;
     let queue = get_json("/api/queue/status")?;
+
+    if json {
+        print_json(&super::json_output::status(
+            &api_base(),
+            &health,
+            &sessions,
+            &queue,
+        ));
+        return Ok(());
+    }
 
     let version = health
         .get("version")
@@ -1914,7 +1924,7 @@ pub fn cmd_machine_compare(json_output: bool) -> Result<(), String> {
 }
 
 /// `agentdesk cards [--status <STATUS>]`
-pub fn cmd_cards(status: Option<&str>) -> Result<(), String> {
+pub fn cmd_cards(status: Option<&str>, json: bool) -> Result<(), String> {
     let path = match status {
         Some(s) => format!("/api/kanban-cards?status={s}"),
         None => "/api/kanban-cards".to_string(),
@@ -1924,6 +1934,10 @@ pub fn cmd_cards(status: Option<&str>) -> Result<(), String> {
         .get("cards")
         .and_then(Value::as_array)
         .ok_or_else(|| "invalid /api/kanban-cards response".to_string())?;
+    if json {
+        print_json(&super::json_output::cards(cards));
+        return Ok(());
+    }
     if cards.is_empty() {
         println!("No cards found.");
     } else {
@@ -2261,7 +2275,7 @@ pub fn cmd_api(method: &str, path: &str, body: Option<&str>) -> Result<(), Strin
 ///
 /// Complete the pending implementation/rework dispatch for an issue and verify
 /// that the server created the follow-up review dispatch.
-pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
+pub fn cmd_advance(issue_number: &str, json: bool) -> Result<(), String> {
     let card = find_card_for_issue(issue_number)?;
     let card_id = card["id"].as_str().unwrap_or("");
     let card_title = card["title"].as_str().unwrap_or("");
@@ -2273,7 +2287,9 @@ pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
     });
     if let Some(d) = pending {
         let did = d["id"].as_str().unwrap_or("");
-        println!("Completing dispatch {did}...");
+        if !json {
+            println!("Completing dispatch {did}...");
+        }
         let completion_result = build_cli_advance_completion_result(&card, Some(d));
         request_json(
             "PATCH",
@@ -2290,7 +2306,17 @@ pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
         if let Some(review_dispatch) = find_active_dispatch_by_type(&refreshed_dispatches, "review")
         {
             let review_dispatch_id = review_dispatch["id"].as_str().unwrap_or("?");
-            println!("✅ #{issue_number} advanced to review (dispatch: {review_dispatch_id})");
+            if json {
+                print_json(&super::json_output::advance(
+                    issue_number,
+                    card_id,
+                    "advanced_to_review",
+                    review_dispatch_id,
+                    Some(did),
+                ));
+            } else {
+                println!("✅ #{issue_number} advanced to review (dispatch: {review_dispatch_id})");
+            }
             return Ok(());
         }
 
@@ -2313,9 +2339,19 @@ pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
     } else {
         if let Some(review_dispatch) = find_active_dispatch_by_type(&dispatches, "review") {
             let review_dispatch_id = review_dispatch["id"].as_str().unwrap_or("?");
-            println!(
-                "✅ #{issue_number} already has an active review dispatch ({review_dispatch_id})"
-            );
+            if json {
+                print_json(&super::json_output::advance(
+                    issue_number,
+                    card_id,
+                    "already_in_review",
+                    review_dispatch_id,
+                    None,
+                ));
+            } else {
+                println!(
+                    "✅ #{issue_number} already has an active review dispatch ({review_dispatch_id})"
+                );
+            }
             return Ok(());
         }
         return Err(format!(
@@ -2327,9 +2363,13 @@ pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
 /// `agentdesk queue`
 ///
 /// Show auto-queue status with work/review thread links.
-pub fn cmd_queue() -> Result<(), String> {
+pub fn cmd_queue(json: bool) -> Result<(), String> {
     let data = get_json("/api/queue/status")?;
     let entries = data["entries"].as_array().ok_or("No entries")?;
+    if json {
+        print_json(&super::json_output::queue(&data));
+        return Ok(());
+    }
     let run = &data["run"];
 
     let unified = run["unified_thread"].as_bool().unwrap_or(false);
@@ -2468,6 +2508,7 @@ pub fn cmd_terminations(
     dispatch_id: Option<&str>,
     session: Option<&str>,
     limit: u32,
+    json: bool,
 ) -> Result<(), String> {
     let mut params = vec![format!("limit={limit}")];
     if let Some(v) = card_id {
@@ -2485,6 +2526,11 @@ pub fn cmd_terminations(
         .get("events")
         .and_then(Value::as_array)
         .ok_or_else(|| "invalid response".to_string())?;
+
+    if json {
+        print_json(&super::json_output::terminations(events));
+        return Ok(());
+    }
 
     if events.is_empty() {
         println!("No termination events found.");
