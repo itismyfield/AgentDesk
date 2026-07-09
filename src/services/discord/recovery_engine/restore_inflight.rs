@@ -1892,6 +1892,18 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
 
+            // #4380 backstop: `reregister_active_turn_from_inflight` stamps
+            // `readopted_from_inflight`, which the watcher-yield escape hatch honours
+            // to resume relay for this re-adopted live turn. If that marker did NOT
+            // durably persist (IoError), the recovered watcher will still yield to
+            // the dead bridge and drop the remaining output silently — dead-letter it
+            // so the loss is observable/recoverable instead of a silent wedge. No-op
+            // on the normal path (marker present).
+            #[cfg(unix)]
+            crate::services::discord::crash_resume_guard::guard_readopt_relay_resume_or_dead_letter(
+                shared, provider, channel_id,
+            );
+
             let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
             {
                 RestorePersistOutcome::UseOutputPath(output_path) => output_path,
