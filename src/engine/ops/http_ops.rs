@@ -135,7 +135,6 @@ fn loopback_http_post_inner(
     timeout: std::time::Duration,
 ) -> Result<String, String> {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
 
     let request_target = request_target(url)?;
     let authority = url.authority();
@@ -143,12 +142,9 @@ fn loopback_http_post_inner(
         return Err("unsafe request authority".to_string());
     }
 
-    let addr = url
+    let addrs = url
         .socket_addrs(|| Some(80))
-        .map_err(|e| format!("resolve {authority}: {e}"))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("no socket address for {authority}"))?;
+        .map_err(|e| format!("resolve {authority}: {e}"))?;
 
     // Total-deadline anchor: the per-read socket timeout below bounds each
     // `read` syscall, NOT the whole exchange — a peer dribbling one byte per
@@ -157,11 +153,10 @@ fn loopback_http_post_inner(
     // `timeout + one read window` (≤ 2×timeout) without re-arming
     // `set_read_timeout` mid-stream, which is the exact syscall-after-peer-
     // close that EINVALs on macOS (see the #4251 note on
-    // `loopback_http_post`).
+    // `loopback_http_post`). It also caps the combined connect attempts below.
     let deadline = std::time::Instant::now() + timeout;
 
-    let mut stream =
-        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
+    let mut stream = connect_first_reachable(&addrs, deadline)?;
 
     // Set the socket timeouts exactly once, immediately after connect while
     // the fd is guaranteed valid, and never touch them again (see the #4251
@@ -175,14 +170,7 @@ fn loopback_http_post_inner(
         .set_write_timeout(Some(socket_timeout))
         .map_err(|e| format!("set_write_timeout: {e}"))?;
 
-    let head = format!(
-        "POST {request_target} HTTP/1.1\r\n\
-         Host: {authority}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\r\n",
-        body.len()
-    );
+    let head = build_request_head(&request_target, authority, body.len());
     stream
         .write_all(head.as_bytes())
         .and_then(|()| stream.write_all(body.as_bytes()))
@@ -266,6 +254,68 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Try every resolved address until one connects, all under the caller's
+/// total deadline (codex #4391 r3-1: macOS resolves `localhost` to `::1`
+/// before `127.0.0.1`; taking only the first address made an IPv4-only
+/// loopback server unreachable — ureq looped the list too).
+fn connect_first_reachable(
+    addrs: &[std::net::SocketAddr],
+    deadline: std::time::Instant,
+) -> Result<std::net::TcpStream, String> {
+    if addrs.is_empty() {
+        return Err("no socket address for target".to_string());
+    }
+    let mut last_error = String::new();
+    for addr in addrs {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return Err(if last_error.is_empty() {
+                "connect deadline exceeded".to_string()
+            } else {
+                format!("connect deadline exceeded (last attempt: {last_error})")
+            });
+        };
+        match std::net::TcpStream::connect_timeout(addr, remaining) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_error = format!("connect {addr}: {e}"),
+        }
+    }
+    Err(last_error)
+}
+
+/// Request head for the loopback POST. Deliberately `HTTP/1.0`: a compliant
+/// server must not reply with `Transfer-Encoding: chunked` to a 1.0 client,
+/// so every well-formed response is either `Content-Length`-delimited or
+/// close-delimited — the two framings the read loop understands. This keeps
+/// the client free of a chunked decoder (parsing surface we chose not to
+/// grow; a rogue chunked reply is rejected fail-closed in `build_response`).
+fn build_request_head(request_target: &str, authority: &str, body_len: usize) -> String {
+    format!(
+        "POST {request_target} HTTP/1.0\r\n\
+         Host: {authority}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {body_len}\r\n\
+         Connection: close\r\n\r\n"
+    )
+}
+
+/// Case-insensitive check for `Transfer-Encoding: chunked` in the response
+/// header block. We never decode chunked framing (see [`build_request_head`]);
+/// returning the raw framing bytes as a "body" would hand policy JS silent
+/// garbage, so it is rejected with an explicit error instead.
+fn response_is_chunked(header_block: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(header_block);
+    for line in text.split("\r\n") {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("transfer-encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn parse_content_length(header_block: &[u8]) -> Option<usize> {
     let text = String::from_utf8_lossy(header_block);
     for line in text.split("\r\n") {
@@ -294,9 +344,25 @@ fn build_response(
     content_length: Option<usize>,
 ) -> Result<String, String> {
     let status = parse_status_code(&raw[..header_end])?;
+    if response_is_chunked(&raw[..header_end]) {
+        return Err(
+            "chunked transfer encoding not supported by the loopback client \
+             (HTTP/1.0 request forbids it from compliant servers)"
+                .to_string(),
+        );
+    }
     let body_slice = match content_length {
         Some(cl) => {
-            let end = header_end.saturating_add(cl).min(raw.len());
+            let end = header_end.saturating_add(cl);
+            // codex #4391 r3-2: a premature EOF under a declared
+            // Content-Length is a transport error; silently returning the
+            // truncated prefix could hand policy JS a misleading "success".
+            if raw.len() < end {
+                return Err(format!(
+                    "truncated response: Content-Length {cl} but only {} body bytes arrived",
+                    raw.len() - header_end
+                ));
+            }
             &raw[header_end..end]
         }
         None => &raw[header_end..],
@@ -374,6 +440,42 @@ mod tests {
                 let _ = sock.flush();
                 std::thread::sleep(keep_open);
                 // drop(sock) closes the connection (FIN).
+            }
+        });
+        port
+    }
+
+    /// Like `spawn_oneshot_server`, but drains the FULL request (headers +
+    /// declared body) before replying and signals end-of-response with a
+    /// write-side FIN (`shutdown(Write)`) while keeping the socket alive
+    /// briefly. Dropping a socket with unread request bytes emits RST, which
+    /// races ahead of the buffered response and turns a deterministic
+    /// EOF-path test flaky ("connection reset by peer").
+    fn spawn_draining_oneshot_server(response: Vec<u8>) -> u16 {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test server");
+        let port = listener.local_addr().expect("test server addr").port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut req: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match sock.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                    if let Some(pos) = find_subslice(&req, b"\r\n\r\n") {
+                        let body_len = parse_content_length(&req[..pos]).unwrap_or(0);
+                        if req.len() >= pos + 4 + body_len {
+                            break;
+                        }
+                    }
+                }
+                let _ = sock.write_all(&response);
+                let _ = sock.flush();
+                let _ = sock.shutdown(std::net::Shutdown::Write);
+                std::thread::sleep(Duration::from_millis(500));
             }
         });
         port
@@ -572,6 +674,87 @@ mod tests {
             delivered < total,
             "client kept reading to EOF: server pushed all {total} bytes"
         );
+    }
+
+    /// MUTATION GUARD (codex #4391 r3-1). `localhost` can resolve to `::1`
+    /// before `127.0.0.1`; the client must try every resolved address, not
+    /// just the first. The first address below is a closed port (instant
+    /// ECONNREFUSED); reverting `connect_first_reachable` to first-only makes
+    /// this fail its own assert.
+    #[test]
+    fn connect_first_reachable_falls_through_to_second_address() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind reachable server");
+        let good = listener.local_addr().expect("addr");
+        // Reserve-and-drop a port so the first candidate refuses connections.
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+            let a = l.local_addr().expect("probe addr");
+            drop(l);
+            a
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let stream = connect_first_reachable(&[closed, good], deadline);
+        assert!(
+            stream.is_ok(),
+            "second resolved address must be attempted, got {:?}",
+            stream.err()
+        );
+    }
+
+    /// MUTATION GUARD (codex #4391 r3-2). A server that closes early under a
+    /// declared Content-Length must surface a transport error, not a
+    /// truncated "success" body.
+    #[test]
+    fn short_content_length_is_a_transport_error() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{}".to_vec();
+        let port = spawn_draining_oneshot_server(response);
+        let url = url::Url::parse(&format!("http://127.0.0.1:{port}/api/x")).expect("url");
+        let result = loopback_http_post_inner(&url, "{}", Duration::from_secs(5));
+        assert!(
+            matches!(&result, Err(message) if message.contains("truncated response")),
+            "short Content-Length must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_response_rejects_truncated_content_length() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}";
+        let header_end = find_subslice(raw, b"\r\n\r\n").expect("header terminator") + 4;
+        let result = build_response(raw, header_end, Some(20));
+        assert!(
+            result.is_err(),
+            "truncated Content-Length must be rejected, got {result:?}"
+        );
+    }
+
+    /// MUTATION GUARD (codex #4391 r3-3). We speak HTTP/1.0 precisely so a
+    /// compliant server never chunks; a rogue chunked reply must be rejected
+    /// fail-closed instead of returning raw chunk framing as a "body".
+    #[test]
+    fn chunked_response_is_rejected_explicitly() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nB\r\n{\"ok\":true}\r\n0\r\n\r\n".to_vec();
+        let port = spawn_draining_oneshot_server(response);
+        let url = url::Url::parse(&format!("http://127.0.0.1:{port}/api/x")).expect("url");
+        let result = loopback_http_post_inner(&url, "{}", Duration::from_secs(5));
+        assert!(
+            matches!(&result, Err(message) if message.contains("chunked")),
+            "chunked reply must be an explicit error, got {result:?}"
+        );
+    }
+
+    /// MUTATION GUARD: the chunked-rejection contract above only holds
+    /// because the request line pins HTTP/1.0 (compliant servers must not
+    /// chunk to a 1.0 client). Bumping it back to HTTP/1.1 fails this assert.
+    #[test]
+    fn request_head_speaks_http_1_0_and_closes() {
+        let head = build_request_head("/api/x", "127.0.0.1:8791", 2);
+        assert!(
+            head.starts_with("POST /api/x HTTP/1.0\r\n"),
+            "request line must pin HTTP/1.0: {head:?}"
+        );
+        assert!(head.contains("Connection: close\r\n"), "head={head:?}");
+        assert!(head.contains("Content-Length: 2\r\n"), "head={head:?}");
     }
 
     /// MUTATION GUARD (fail-closed request-target sanitizer). A request target
