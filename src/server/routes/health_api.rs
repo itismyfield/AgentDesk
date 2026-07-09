@@ -2657,7 +2657,7 @@ mod tests {
             &reasons_db
         ));
 
-        // Multiple reasons stay false.
+        // Multiple reasons with a Degraded status still leave fully_recovered=true.
         let reasons_outbox_disk = vec![
             json!("dispatch_outbox_oldest_pending_age:120"),
             json!("disk_low_free_bytes:104857600"),
