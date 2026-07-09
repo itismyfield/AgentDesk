@@ -166,6 +166,9 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # duplicate downstream inventory refresh PRs.
 "$PYTHON" scripts/generate_inventory_docs.py --check
 
+echo "=== Inventory prod/test split regression tests (#4394) ==="
+"$PYTHON" -m unittest tests.test_inventory_giant_split
+
 echo "=== API docs coverage gate (#3719) ==="
 "$PYTHON" scripts/check_api_docs_coverage.py
 "$PYTHON" -m unittest tests.test_api_docs_coverage
