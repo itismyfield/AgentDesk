@@ -35,3 +35,36 @@
 "src/services/discord/turn_bridge/stream_loop.rs" = 1638 # 2026-07-08 #4230 S6: registered giant-file, plan-marked irreducible stream loop shell (event arms share placeholder/background/transcript/inflight state); tracked in giant_file_registry.toml.
 "src/services/discord/turn_bridge/status_panel.rs" = 700
 "src/services/discord/turn_bridge/voice_completion.rs" = 700
+
+# Frozen test-residue ceilings for the parent_test_residue check (#4267).
+#
+# When a giant file is decomposed its production code moves out but its inline
+# `#[cfg(test)]` blocks often stay behind, leaving a "test graveyard" whose
+# stranded test LoC dwarfs its remaining production LoC. The check flags files
+# whose test/prod ratio exceeds 3x (and that are >= 500 raw LoC). It is
+# report-only with a no-regression baseline: each value below is the file's
+# CURRENT stranded test LoC, frozen so CI is green on introduction. The gate
+# fails only when a NEW graveyard appears or one of these grows past its
+# ceiling. Lower a ceiling as tests migrate out (the fix this check wants);
+# RAISING a ceiling admits more residue and is forbidden (#4269) — migrate the
+# tests with the production code instead.
+[parent_test_residue]
+# The #4267 exemplar: inflight.rs kept its ~5.4k-line inline test module after
+# its production logic was carved into the inflight/ children (ratio ~9.2x).
+# Tracked for migration alongside the #4201 decomposition.
+"src/services/discord/inflight.rs" = 5451
+# turn_finalizer.rs is itself a production giant (1048 prod LoC) carrying a
+# 3992-line inline test module (ratio ~3.8x). Freeze pending test migration.
+"src/services/discord/turn_finalizer.rs" = 3992
+# save_store.rs carries 730 test LoC over 235 prod LoC (ratio ~3.1x) after the
+# inflight/ save-path carve-out; tests to migrate with the store split.
+"src/services/discord/inflight/save_store.rs" = 730
+# codex_tui_replay.rs: 711 test LoC over 233 prod LoC (ratio ~3.0x) left in the
+# recovery_engine manual-rebind carve-out.
+"src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs" = 711
+# cancel_finalize_policy.rs: 450 test LoC over 131 prod LoC (ratio ~3.4x) in the
+# turn_bridge cancel/finalize policy carve-out.
+"src/services/discord/turn_bridge/cancel_finalize_policy.rs" = 450
+# delivery_lease.rs: 428 test LoC over 87 prod LoC (ratio ~4.9x) in the
+# turn_finalizer delivery-lease carve-out.
+"src/services/discord/turn_finalizer/delivery_lease.rs" = 428

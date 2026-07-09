@@ -46,6 +46,7 @@ from audit_maintainability.common import REPO_ROOT, Finding  # noqa: E402
 CHECK_MODULES = (
     "audit_maintainability.checks.giant_files",
     "audit_maintainability.checks.giant_file_ratchet",
+    "audit_maintainability.checks.parent_test_residue",
     "audit_maintainability.checks.namespace_size_caps",
     "audit_maintainability.checks.route_srp",
     "audit_maintainability.checks.service_server_backflow",

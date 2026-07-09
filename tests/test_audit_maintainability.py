@@ -49,6 +49,7 @@ from audit_maintainability.checks import (  # noqa: E402
 )
 from audit_maintainability.checks import giant_files  # noqa: E402
 from audit_maintainability.checks import giant_file_ratchet  # noqa: E402
+from audit_maintainability.checks import parent_test_residue  # noqa: E402
 
 
 def _write(root: Path, rel: str, body: str) -> None:
@@ -228,6 +229,105 @@ class GiantFileRatchetCheck(unittest.TestCase):
                 )
             )
         self.assertEqual(hits, [])
+
+
+def _residue_body(prod_lines: int, test_lines: int) -> str:
+    """A Rust source body with ``prod_lines`` production fns plus a whole
+    ``#[cfg(test)] mod tests`` block of ``test_lines`` inner fns.
+
+    ``split_prod_test_lines`` (shared with ``giant_files``) counts the entire
+    ``#[cfg(test)] mod { ... }`` span — attribute line through closing brace —
+    as test LoC, and everything else as production LoC.
+    """
+
+    prod = "".join(f"fn p{i}() {{}}\n" for i in range(prod_lines))
+    inner = "".join(f"    fn t{i}() {{}}\n" for i in range(test_lines))
+    return f"{prod}#[cfg(test)]\nmod tests {{\n{inner}}}\n"
+
+
+class ParentTestResidueCheck(unittest.TestCase):
+    def test_flags_graveyard_but_not_balanced_small_or_pure_test(self) -> None:
+        files = {
+            # ratio ~4.3x, raw ~625 -> flagged
+            "src/services/discord/graveyard.rs": _residue_body(120, 500),
+            # ratio < 1 (test < prod) -> not flagged even though raw is large
+            "src/services/discord/balanced.rs": _residue_body(400, 100),
+            # ratio high but raw < MIN_RAW_LOC (500) -> not flagged (small file)
+            "src/services/discord/tiny.rs": _residue_body(20, 100),
+            # zero production LoC -> pure test module, ratio undefined, skipped
+            "src/services/discord/pure_tests.rs": _residue_body(0, 300),
+        }
+        with _FakeSrcTree(files):
+            hits = list(parent_test_residue.CHECK.runner(set()))
+        self.assertEqual(_files(hits), {"src/services/discord/graveyard.rs"})
+
+    def test_reuses_giant_files_split_accounting(self) -> None:
+        body = _residue_body(120, 500)
+        with _FakeSrcTree({"src/services/discord/graveyard.rs": body}):
+            hits = list(parent_test_residue.CHECK.runner(set()))
+            # The finding's prod/test numbers must equal the exact values the
+            # shared giant_files accounting reports for the same text — i.e. we
+            # reuse split_prod_test_lines, not a second divergent parser.
+            prod, test = giant_files._INVENTORY.split_prod_test_lines(body)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].extra["prod"], str(prod))
+        self.assertEqual(hits[0].extra["test"], str(test))
+        self.assertGreater(test / prod, parent_test_residue.RATIO_THRESHOLD)
+
+    def test_allowlist_suppresses(self) -> None:
+        body = _residue_body(120, 500)
+        with _FakeSrcTree({"src/services/discord/graveyard.rs": body}):
+            hits = list(
+                parent_test_residue.CHECK.runner({"src/services/discord/graveyard.rs"})
+            )
+        self.assertEqual(hits, [])
+
+    def test_baseline_gate_passes_seeded_offender(self) -> None:
+        body = _residue_body(120, 500)
+        rel = "src/services/discord/graveyard.rs"
+        with _FakeSrcTree({rel: body}) as root:
+            prod, test = giant_files._INVENTORY.split_prod_test_lines(body)
+            _write(
+                root,
+                parent_test_residue.CONFIG_REL_PATH,
+                f"""
+                [parent_test_residue]
+                "{rel}" = {test}
+                """,
+            )
+            hits = list(parent_test_residue.CHECK.runner(set()))
+            gate = list(parent_test_residue.CHECK.baseline_gate(hits))
+        self.assertEqual(_files(hits), {rel})  # still reported
+        self.assertEqual(gate, [])  # but not a regression
+
+    def test_baseline_gate_flags_new_graveyard(self) -> None:
+        body = _residue_body(120, 500)
+        rel = "src/services/discord/graveyard.rs"
+        with _FakeSrcTree({rel: body}):
+            # No [parent_test_residue] config at all -> unseeded -> regression.
+            hits = list(parent_test_residue.CHECK.runner(set()))
+            gate = list(parent_test_residue.CHECK.baseline_gate(hits))
+        self.assertEqual(_files(gate), {rel})
+        self.assertTrue(all(f.severity == "error" for f in gate))
+
+    def test_baseline_gate_flags_grown_residue(self) -> None:
+        body = _residue_body(120, 500)
+        rel = "src/services/discord/graveyard.rs"
+        with _FakeSrcTree({rel: body}) as root:
+            prod, test = giant_files._INVENTORY.split_prod_test_lines(body)
+            # Freeze the ceiling one line BELOW current -> current > ceiling.
+            _write(
+                root,
+                parent_test_residue.CONFIG_REL_PATH,
+                f"""
+                [parent_test_residue]
+                "{rel}" = {test - 1}
+                """,
+            )
+            hits = list(parent_test_residue.CHECK.runner(set()))
+            gate = list(parent_test_residue.CHECK.baseline_gate(hits))
+        self.assertEqual(_files(gate), {rel})
+        self.assertTrue(all(f.severity == "error" for f in gate))
 
 
 class NamespaceSizeCapsCheck(unittest.TestCase):
@@ -717,16 +817,17 @@ class SourceOfTruthAliasCheck(unittest.TestCase):
 
 
 class HarnessCli(unittest.TestCase):
-    def test_runs_all_thirteen_checks_and_emits_yaml_keys(self) -> None:
+    def test_runs_all_fourteen_checks_and_emits_yaml_keys(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
-            findings = HARNESS.run_all(specs, {})
+            findings, _ = HARNESS.run_all(specs, {})
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_text = HARNESS.render_json(specs, findings)
             md_text = HARNESS.render_markdown(specs, findings)
         for key in (
             "giant_files",
             "giant_file_ratchet",
+            "parent_test_residue",
             "namespace_size_caps",
             "route_srp_violations",
             "service_server_backflow",
@@ -746,7 +847,7 @@ class HarnessCli(unittest.TestCase):
     def test_markdown_summary_includes_every_registered_check(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
-            findings = HARNESS.run_all(specs, {})
+            findings, _ = HARNESS.run_all(specs, {})
             md_text = HARNESS.render_markdown(specs, findings)
 
         summary_keys: list[str] = []
@@ -783,27 +884,28 @@ class HarnessCli(unittest.TestCase):
         )
         self.assertEqual(
             baseline_gated,
-            {"route_srp_violations", "service_server_backflow"},
+            {"route_srp_violations", "service_server_backflow", "parent_test_residue"},
         )
         warning_only = {
             "route_srp_violations",
             "service_server_backflow",
             "limit_clamp_duplication",
+            "parent_test_residue",
         }
         self.assertTrue(all(not spec.hard_gate for spec in specs if spec.key in warning_only))
 
     def test_renderers_report_hard_gate_enabled(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
-            findings = HARNESS.run_all(specs, {})
+            findings, _ = HARNESS.run_all(specs, {})
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
         self.assertIn("hard_gate_count: 10", yaml_text)
-        self.assertIn("baseline_gate_count: 2", yaml_text)
+        self.assertIn("baseline_gate_count: 3", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
         self.assertEqual(json_payload["hard_gate_count"], 10)
-        self.assertEqual(json_payload["baseline_gate_count"], 2)
+        self.assertEqual(json_payload["baseline_gate_count"], 3)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
