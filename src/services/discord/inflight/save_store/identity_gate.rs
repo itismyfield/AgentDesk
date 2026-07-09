@@ -619,6 +619,88 @@ pub(in crate::services::discord::inflight) fn persist_recovery_output_path_if_ma
     }
 }
 
+/// #4370: stamp the `readopted_from_inflight` marker onto the persisted row for a
+/// turn this process re-adopted from inflight, under the sidecar flock and pinned
+/// to the re-adopted turn's identity. Returns a [`GuardedSaveOutcome`]:
+///
+///   - `Saved`            — the marker is now set (or was already set → still
+///                          `Saved`, idempotent).
+///   - `Missing`          — no row exists; it was cleared concurrently. We do NOT
+///                          resurrect it (there is no live turn to protect).
+///   - `IdentityMismatch` — a newer turn (or a rebind-origin placeholder) owns the
+///                          row. We do NOT clobber it.
+///   - `IoError`          — filesystem / serialization failure.
+///
+/// This is a NARROW single-field read-modify-write (like
+/// [`persist_recovery_output_path_if_matches_identity_locked`]), deliberately NOT
+/// [`save_inflight_state_if_identity_unchanged`]. Re-adoption legitimately
+/// preserves a DrainRestart row's `restart_mode`, and the broad identity-refresh
+/// save REFUSES any row that still carries `restart_mode` (see
+/// `save_inflight_state_identity_gated_in_root`), so it would silently no-op on
+/// exactly the restart-resume rows this marker exists for. Here we re-read the
+/// on-disk row under the lock, verify it is still the SAME turn (identity match,
+/// and not a rebind-origin placeholder), flip ONLY the additive
+/// `readopted_from_inflight` bit, and persist — `restart_mode` and every other
+/// field are preserved. It never resurrects a concurrently-cleared row (closes
+/// the load-then-blind-save TOCTOU window, #4370 F1).
+pub(in crate::services::discord) fn mark_readopted_from_inflight_if_identity_unchanged(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    mark_readopted_from_inflight_if_identity_unchanged_in_root(
+        &root, provider, channel_id, expected,
+    )
+}
+
+pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_identity_unchanged_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+) -> GuardedSaveOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return GuardedSaveOutcome::IoError;
+    }
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
+        return GuardedSaveOutcome::Missing;
+    };
+    if on_disk.rebind_origin || !expected.matches_state(&on_disk) {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if on_disk.readopted_from_inflight {
+        return GuardedSaveOutcome::Saved;
+    }
+
+    on_disk.readopted_from_inflight = true;
+    match persist_under_lock(
+        root,
+        &path,
+        &on_disk,
+        "src/services/discord/inflight.rs:mark_readopted_from_inflight_if_identity_unchanged_in_root",
+    ) {
+        Ok(()) => GuardedSaveOutcome::Saved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id,
+                error = %error,
+                "readopted-from-inflight marker patch failed; leaving durable row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
+}
+
 /// #3041 P1-2 (codex P1-2 R3): identity-guarded re-save for the bridge's
 /// delivery-lease `Skip` epilogue. On a Skip the live HOLDER (watcher) owns the
 /// turn and CLEARS the row on success, so the bridge epilogue must NOT blindly

@@ -1202,19 +1202,31 @@
   user turn (`recovery_engine/runtime.rs::reregister_active_turn_from_inflight`,
   mailbox owner == `request_owner_user_id`), so the synthetic-owner-only reclaim
   could never free that mailbox and follow-up injection / task-notification
-  synthetic turns starved for relay ownership. The fix (a) stamps an additive
-  node-local inflight-row marker `restart_readopted` (`inflight/model.rs`,
-  `#[serde(default)]`, legacy rows deserialize `false`; no `INFLIGHT_STATE_VERSION`
-  bump) at the restart re-adopt site, and (b) widens the
-  `synthetic_start/stale_reclaim.rs` eligibility to a restart-re-adopted real-user
-  owner reusing the EXISTING absent/replaced/`terminal_delivery_committed`
-  predicate and the `age >= 120s` positive-staleness gate. All touched state is the
-  same per-node mailbox / inflight / relay-owner surface #4018 used; the marker is
-  DELIBERATELY DISTINCT from `relay_ownership_only` so the re-adopted turn's own
-  `✅`/footer + analytics/transcript still fire. No leader election, PG lease, PG
-  schema, cross-node read, or singleton assumption is introduced. The core-4 serial
-  hotfiles (`turn_bridge/mod.rs`, `tmux_watcher.rs`, `session_relay_sink.rs`,
-  `turn_finalizer.rs`) are untouched, as in #4018.
+  synthetic turns starved for relay ownership. The fix records the re-adopt in two
+  node-local places, each for a different reclaim shape: (a) an additive inflight-
+  row marker `readopted_from_inflight` (`inflight/model.rs`, `#[serde(default)]`,
+  legacy rows deserialize `false`; no `INFLIGHT_STATE_VERSION` bump), written by an
+  identity-guarded single-field patch `mark_readopted_from_inflight_if_identity_unchanged`
+  (NOT a blind whole-row save — it preserves `restart_mode` and never resurrects a
+  concurrently-cleared row), used for the PRESENT-row reclaim; and (b) an
+  IN-MEMORY, per-process `SharedData::readopted_mailbox_ledger`
+  (`DashMap<(provider, channel_id), ReadoptedMailboxOwner>`), the authority for the
+  ROW-ABSENT reclaim (the row was cleared but the mailbox stayed stuck). The ledger
+  is deliberately NOT persisted and NOT shared across nodes: only the process that
+  performed the re-adopt can know a mailbox is a re-adopted real turn, and a fresh
+  process re-derives the mailbox from disk, so its lifetime is exactly one process.
+  A stale entry is inert — a live successor turn owns a different
+  `active_user_message_id` and can never match — reinforced by the `age >= 120s`
+  gate on the resulting `OwnerInflightAbsent` reason. (c) `synthetic_start/stale_reclaim.rs`
+  eligibility is widened to a re-adopted-from-inflight real-user owner reusing the
+  EXISTING absent/`terminal_delivery_committed` predicate and the age gate. All
+  touched state is the same per-node mailbox / inflight / relay-owner surface #4018
+  used plus the new in-memory ledger; the marker is DELIBERATELY DISTINCT from
+  `relay_ownership_only` so the re-adopted turn's own `✅`/footer + analytics/transcript
+  still fire. No leader election, PG lease, PG schema, cross-node read, or singleton
+  assumption is introduced. The core-4 serial hotfiles (`turn_bridge/mod.rs`,
+  `tmux_watcher.rs`, `session_relay_sink.rs`, `turn_finalizer.rs`) are untouched, as
+  in #4018.
 - #3805 P2 PR-A (two-message model scaffolding — worker-local UI flag): adds the
   additive `two_message_panel_enabled` flag to `PlaceholderConfig` and threads it
   through the per-node UI plumbing (`runtime_bootstrap.rs` RunBotContext /

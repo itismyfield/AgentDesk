@@ -18,6 +18,7 @@ mod identity_gate;
 
 pub(in crate::services::discord) use self::identity_gate::{
     GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
+    mark_readopted_from_inflight_if_identity_unchanged,
     patch_restart_full_response_if_identity_unchanged,
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,
@@ -30,15 +31,16 @@ pub(in crate::services::discord) use self::identity_gate::{
 };
 
 #[cfg(test)]
+use self::identity_gate::{
+    mark_readopted_from_inflight_if_identity_unchanged_in_root,
+    save_inflight_state_if_identity_matches_allow_output_restamp_in_root,
+    save_inflight_state_if_identity_unchanged_in_root,
+};
+#[cfg(test)]
 pub(super) use self::identity_gate::{
     save_existing_inflight_rebind_adoption_if_matches_identity_in_root,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root,
     save_inflight_state_if_matches_identity_in_root,
-};
-#[cfg(test)]
-use self::identity_gate::{
-    save_inflight_state_if_identity_matches_allow_output_restamp_in_root,
-    save_inflight_state_if_identity_unchanged_in_root,
 };
 
 /// Blind whole-blob write of `InflightTurnState`: serializes the ENTIRE row and
@@ -816,6 +818,96 @@ mod tests {
         );
         assert_eq!(persisted.full_response, "adopted durable response");
         assert!(!persisted.terminal_delivery_committed);
+    }
+
+    // #4370 F1: the `readopted_from_inflight` marker is a NARROW single-field
+    // patch. It lands on a DrainRestart-preserved row (where the broad
+    // identity-refresh save deliberately refuses `restart_mode` rows), preserving
+    // `restart_mode`; it never resurrects a concurrently-cleared row (`Missing`);
+    // and it refuses to clobber a different turn's row (`IdentityMismatch`).
+    #[test]
+    fn readopted_marker_lands_on_restart_preserved_row_and_never_resurrects() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let provider = ProviderKind::Codex;
+
+        // (1) Missing: no durable row → the marker patch does NOT resurrect it.
+        let mut state = state_with_full_response(44_370, "seeded", "AgentDesk-codex-4370-drain");
+        let expected = InflightTurnIdentity::from_state(&state);
+        assert_eq!(
+            mark_readopted_from_inflight_if_identity_unchanged_in_root(
+                temp.path(),
+                &provider,
+                state.channel_id,
+                &expected,
+            ),
+            GuardedSaveOutcome::Missing,
+            "an absent row must not be resurrected by the marker patch",
+        );
+
+        // (2) Saved on a DrainRestart-preserved row — where the broad refresh
+        // REFUSES (`restart_mode.is_some()`), proving why F1 needs this narrow
+        // patch instead of `save_inflight_state_if_identity_unchanged`.
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        save_inflight_state_in_root(temp.path(), &state).expect("seed restart-preserved row");
+        let expected = InflightTurnIdentity::from_state(&state);
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged_in_root(
+                temp.path(),
+                &state,
+                "test::readopted_marker_broad_refresh_refuses",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "the broad identity-refresh save must keep refusing restart_mode rows",
+        );
+        assert_eq!(
+            mark_readopted_from_inflight_if_identity_unchanged_in_root(
+                temp.path(),
+                &provider,
+                state.channel_id,
+                &expected,
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+
+        let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_path).expect("read persisted inflight"),
+        )
+        .expect("parse persisted inflight");
+        assert!(
+            persisted.readopted_from_inflight,
+            "the marker must land on the restart-preserved row"
+        );
+        assert_eq!(
+            persisted.restart_mode,
+            Some(InflightRestartMode::DrainRestart),
+            "restart_mode must be preserved by the single-field patch"
+        );
+
+        // (3) Idempotent: a re-mark of an already-marked row is a `Saved` no-op.
+        assert_eq!(
+            mark_readopted_from_inflight_if_identity_unchanged_in_root(
+                temp.path(),
+                &provider,
+                state.channel_id,
+                &expected,
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+
+        // (4) IdentityMismatch: a different turn identity must not be clobbered.
+        let mut other = state.clone();
+        other.user_msg_id = 99_999;
+        let mismatched = InflightTurnIdentity::from_state(&other);
+        assert_eq!(
+            mark_readopted_from_inflight_if_identity_unchanged_in_root(
+                temp.path(),
+                &provider,
+                state.channel_id,
+                &mismatched,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+        );
     }
 }
 

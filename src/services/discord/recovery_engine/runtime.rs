@@ -45,30 +45,77 @@ fn reseed_watcher_owned_finalizer_ledger(
     );
 }
 
-/// #4370: stamp the persisted inflight row as restart-re-adopted so the
-/// TUI-direct synthetic `stale_reclaim` path recognises this real-user mailbox
-/// owner as reclaimable-when-stale (generalising #4018's synthetic-owner-only
-/// reclaim to the restart-resume path). Idempotent — a re-load that already
-/// carries the marker is a no-op. Never resurrects a row that was concurrently
-/// cleared (only rewrites an on-disk row that still exists). This does NOT touch
-/// the completion lifecycle: the re-adopted turn's own `✅`/footer + analytics
-/// still fire (see the `restart_readopted` field doc for why it is DISTINCT from
-/// `relay_ownership_only`).
-fn mark_inflight_restart_readopted(provider: &ProviderKind, channel_id: ChannelId) {
-    let Some(mut row) = inflight::load_inflight_state(provider, channel_id.get()) else {
-        return;
-    };
-    if row.restart_readopted {
-        return;
-    }
-    row.restart_readopted = true;
-    if let Err(error) = inflight::save_inflight_state(&row) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            error = %error,
-            "failed to persist restart-readopted marker on re-adopted turn (#4370)"
-        );
+/// #4370: mark this mailbox slot as re-adopted-from-inflight so the TUI-direct
+/// synthetic `stale_reclaim` path recognises this real-user mailbox owner as
+/// reclaimable-when-stale (generalising #4018's synthetic-owner-only reclaim to
+/// the restart-resume path). Two records are written, each serving a different
+/// reclaim shape:
+///
+///   * The in-memory `SharedData::readopted_mailbox_ledger` — AUTHORITATIVE for
+///     the row-ABSENT reclaim (#4370 Path B). If the on-disk row is later cleared
+///     while the mailbox stays stuck owned by the re-adopted real user, only this
+///     process knows the mailbox is re-adopted; the ledger records the owner + the
+///     mailbox `active_user_message_id` (the turn's effective finalizer id). A
+///     live successor turn owns a DIFFERENT id and can never match, so the entry
+///     is inert once its turn ends (see `ReadoptedMailboxOwner`).
+///   * The on-disk `readopted_from_inflight` marker — the companion signal for a
+///     PRESENT row, written through the identity-guarded single-field patch
+///     `mark_readopted_from_inflight_if_identity_unchanged` (NOT a blind whole-row
+///     save): a concurrently-cleared row is NOT resurrected (`Missing`), and a row
+///     a newer turn re-owns is NOT clobbered (`IdentityMismatch`). It preserves
+///     `restart_mode`, so it also lands on DrainRestart-preserved rows — where the
+///     broad identity-refresh save would refuse to write, which is why the ABSENT
+///     path relies on the ledger rather than this marker.
+///
+/// This does NOT touch the completion lifecycle: the re-adopted turn's own
+/// `✅`/footer + analytics still fire (see the `readopted_from_inflight` field doc
+/// for why it is DISTINCT from `relay_ownership_only`).
+fn mark_readopted_from_inflight(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    state: &inflight::InflightTurnState,
+) {
+    // The re-adopted mailbox slot carries the turn's effective finalizer id as its
+    // `active_user_message_id` (`mailbox_try_start_turn(..., finalizer_msg_id)` /
+    // the existing-active-turn rebind below), so the ledger keys the row-ABSENT
+    // reclaim decision on exactly that id.
+    let active_user_message_id = state.effective_finalizer_turn_id();
+    shared.record_readopted_mailbox_owner(
+        provider,
+        channel_id.get(),
+        state.request_owner_user_id,
+        active_user_message_id,
+    );
+
+    let expected = inflight::InflightTurnIdentity::from_state(state);
+    match inflight::mark_readopted_from_inflight_if_identity_unchanged(
+        provider,
+        channel_id.get(),
+        &expected,
+    ) {
+        inflight::GuardedSaveOutcome::Saved => {}
+        inflight::GuardedSaveOutcome::Missing => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                "readopted-from-inflight marker skipped: durable row cleared concurrently; not resurrecting (#4370)"
+            );
+        }
+        inflight::GuardedSaveOutcome::IdentityMismatch => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                "readopted-from-inflight marker skipped: a newer turn owns the durable row; not clobbering (#4370)"
+            );
+        }
+        inflight::GuardedSaveOutcome::IoError => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                "failed to persist readopted-from-inflight marker on re-adopted turn (#4370)"
+            );
+        }
     }
 }
 
@@ -125,7 +172,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
             reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if state.request_owner_user_id != 0 {
-                mark_inflight_restart_readopted(&provider, channel_id);
+                mark_readopted_from_inflight(shared, &provider, channel_id, state);
             }
         }
         return restored;
@@ -154,13 +201,14 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     .await;
     if started {
         reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
-        // #4370: the mailbox now carries a restart-re-adopted REAL user turn
+        // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
         // (owner == request_owner_user_id, reached only when it is non-zero).
-        // Mark the persisted row so a later starved injection / task-notification
-        // synthetic turn can reclaim this mailbox once the re-adopted turn is
-        // stale — without this, #4018's synthetic-owner-only reclaim can never
-        // free it and the follow-up relay text is silently dropped.
-        mark_inflight_restart_readopted(&provider, channel_id);
+        // Record it in the ledger + on-disk marker so a later starved injection /
+        // task-notification synthetic turn can reclaim this mailbox once the
+        // re-adopted turn is stale — without this, #4018's synthetic-owner-only
+        // reclaim can never free it and the follow-up relay text is silently
+        // dropped.
+        mark_readopted_from_inflight(shared, &provider, channel_id, state);
     }
     started
 }

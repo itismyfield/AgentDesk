@@ -3315,6 +3315,8 @@ mod tests {
             )
             .0,
             turn_view_reconciler: super::super::turn_view_reconciler::TurnViewReconciler::default(),
+            readopted_mailbox_ledger:
+                super::super::readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
         })
     }
 
