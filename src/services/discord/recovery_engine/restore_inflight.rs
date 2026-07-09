@@ -1900,9 +1900,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             // so the loss is observable/recoverable instead of a silent wedge. No-op
             // on the normal path (marker present).
             #[cfg(unix)]
-            crate::services::discord::crash_resume_guard::guard_readopt_relay_resume_or_dead_letter(
-                shared, provider, channel_id,
-            );
+            super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
 
             let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
             {

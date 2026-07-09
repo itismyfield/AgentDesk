@@ -27,14 +27,18 @@
 //! [`guard_readopt_relay_resume_or_dead_letter`] dead-letters the undelivered body
 //! (`KIND_READOPT_RELAY_STUCK`) with a WARN, turning a silent 30-minute wedge into
 //! an observable, recoverable row.
+//!
+//! Lives under `recovery_engine` (a non-giant) so declaring it never re-inflates
+//! the `discord/mod.rs` giant; the yield-gate predicate is re-exported at
+//! `pub(in crate::services::discord)` for the `tmux.rs` call site.
 
 use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
-use super::SharedData;
-use super::inflight::{InflightTurnState, RelayOwnerKind};
+use crate::services::discord::SharedData;
+use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind};
 use crate::services::provider::ProviderKind;
 
 /// The structural shape of a re-adopted **real-user** bridge turn that is still
@@ -120,7 +124,9 @@ pub(in crate::services::discord) fn guard_readopt_relay_resume_or_dead_letter(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) {
-    let Some(reloaded) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
+    let Some(reloaded) =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+    else {
         return;
     };
     if crash_readopt_real_user_live_turn(&reloaded) && !reloaded.readopted_from_inflight {

@@ -1651,7 +1651,7 @@ fn watcher_should_yield_to_inflight_state(
     // recovery watcher — honour it exactly like the planned-restart hatch below,
     // otherwise the recovered watcher yields to the DEAD bridge and black-holes
     // 100% of the turn's remaining output (the recurring `.stuck-manual-*` wedge).
-    if super::crash_resume_guard::crash_readopt_live_relay_resume_required(state) {
+    if super::recovery_engine::crash_readopt_live_relay_resume_required(state) {
         return false;
     }
 

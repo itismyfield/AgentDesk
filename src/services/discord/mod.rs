@@ -7,11 +7,6 @@ mod answer_flush_barrier;
 // recovery) subsystem extracted verbatim to its own sibling module.
 mod catch_up;
 mod commands;
-// #4380: crash-restart relay-resume guard (yield-gate escape-hatch predicate +
-// black-hole DLQ backstop). Unix-gated to match its callers (the `tmux` watcher
-// yield gate and the recovery watcher spawn path).
-#[cfg(unix)]
-mod crash_resume_guard;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
