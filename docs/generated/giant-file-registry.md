@@ -78,7 +78,7 @@
 | `src/server/routes/agents_crud.rs` | 1903 |
 | `src/server/routes/agents_setup.rs` | 1365 |
 | `src/server/routes/escalation.rs` | 1376 |
-| `src/server/routes/health_api.rs` | 1715 |
+| `src/server/routes/health_api.rs` | 1771 |
 | `src/server/routes/kanban.rs` | 2725 |
 | `src/server/routes/meetings.rs` | 1290 |
 | `src/server/routes/resume.rs` | 1260 |
