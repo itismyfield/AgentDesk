@@ -37,23 +37,43 @@ fn auto_detect_memory_backend() -> MemoryBackendKind {
     }
 }
 
-fn resolve_memory_backend(raw: Option<&str>) -> MemoryBackendKind {
+/// Outcome of backend resolution. `memento_fallback` is true only when memento
+/// was requested but degraded, so `kind` collapsed to `File`; it lets the
+/// guidance layer tell a deliberate file backend apart from a memento fallback.
+struct ResolvedBackend {
+    kind: MemoryBackendKind,
+    memento_fallback: bool,
+}
+
+fn resolve_memory_backend(raw: Option<&str>) -> ResolvedBackend {
     let configured = configured_memory_backend_name();
     let requested = normalize_memory_backend_name(raw)
         .or_else(|| normalize_memory_backend_name(configured.as_deref()))
         .unwrap_or("auto");
 
     match requested {
-        "auto" => auto_detect_memory_backend(),
-        "file" => MemoryBackendKind::File,
+        "auto" => ResolvedBackend {
+            kind: auto_detect_memory_backend(),
+            memento_fallback: false,
+        },
+        "file" => ResolvedBackend {
+            kind: MemoryBackendKind::File,
+            memento_fallback: false,
+        },
         "memento" => resolve_explicit_memory_backend(MemoryBackendKind::Memento),
-        _ => MemoryBackendKind::File,
+        _ => ResolvedBackend {
+            kind: MemoryBackendKind::File,
+            memento_fallback: false,
+        },
     }
 }
 
-fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind {
+fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> ResolvedBackend {
     if crate::services::memory::backend_is_active(kind) {
-        return kind;
+        return ResolvedBackend {
+            kind,
+            memento_fallback: false,
+        };
     }
 
     if let Some(state) = crate::services::memory::backend_state(kind) {
@@ -70,7 +90,10 @@ fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind
         );
     }
 
-    MemoryBackendKind::File
+    ResolvedBackend {
+        kind: MemoryBackendKind::File,
+        memento_fallback: kind == MemoryBackendKind::Memento,
+    }
 }
 
 fn merge_memory_config(
@@ -95,8 +118,10 @@ pub(crate) fn resolve_memory_settings(
     override_cfg: Option<&MemoryConfigOverride>,
 ) -> ResolvedMemorySettings {
     let merged = merge_memory_config(base, override_cfg);
+    let resolved_backend = resolve_memory_backend(merged.backend.as_deref());
     ResolvedMemorySettings {
-        backend: resolve_memory_backend(merged.backend.as_deref()),
+        backend: resolved_backend.kind,
+        memento_fallback: resolved_backend.memento_fallback,
         recall_timeout_ms: clamp_timeout(
             "memory.recall_timeout_ms",
             merged

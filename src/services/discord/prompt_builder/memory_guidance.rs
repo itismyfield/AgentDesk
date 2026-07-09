@@ -31,6 +31,22 @@ pub(super) fn proactive_memory_guidance(
     }
 
     let settings = memory_settings?;
+
+    // Fallback mode: memento is the configured backend but is degraded, so
+    // memory silently ran on the local file store. This is NOT a deliberate
+    // file backend — authoritative writes must be held, not committed to the
+    // degraded store. Guidance branches on the CAUSE (memento_fallback), not on
+    // the resulting `File` backend alone.
+    if settings.backend == MemoryBackendKind::File && settings.memento_fallback {
+        return Some(String::from(
+            "\n\n[Proactive Memory Guidance — Fallback Mode]\n\
+             memento is configured but unreachable; memory has degraded to the local file store. \
+             Use `memory-read` skill for explicit past-context/error/config lookups. \
+             HOLD permanent writes: do NOT commit confirmed decisions, root causes, or config \
+             changes to the degraded store — record them with `remember` once memento recovers.",
+        ));
+    }
+
     let (backend_name, read_tool, write_tool, extra_note) = match settings.backend {
         MemoryBackendKind::File => (
             "local",
@@ -69,4 +85,89 @@ pub(super) fn proactive_memory_guidance(
         "\n\n[Proactive Memory Guidance]\n\
          `{backend_name}` memory is available. Use {read_tool} for explicit past-context/error/config lookups; use {write_tool} only for confirmed decisions, root causes, or config changes.{extra_note}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_settings(memento_fallback: bool) -> ResolvedMemorySettings {
+        ResolvedMemorySettings {
+            backend: MemoryBackendKind::File,
+            memento_fallback,
+            ..ResolvedMemorySettings::default()
+        }
+    }
+
+    #[test]
+    fn configured_file_backend_yields_unchanged_file_guidance() {
+        // #4316 (a): a deliberately configured file backend (memento_fallback =
+        // false) must keep the existing, unchanged file guidance and must NOT
+        // show the fallback wording.
+        let settings = file_settings(false);
+        let guidance = proactive_memory_guidance(
+            Some(&settings),
+            "/tmp/agentdesk",
+            ChannelId::new(1),
+            None,
+            DispatchProfile::Full,
+            false,
+        )
+        .expect("file backend must produce proactive guidance");
+
+        assert!(guidance.contains("[Proactive Memory Guidance]"));
+        assert!(guidance.contains("`local` memory is available"));
+        assert!(guidance.contains("`memory-read` skill"));
+        assert!(guidance.contains("`memory-write` skill"));
+        assert!(
+            !guidance.contains("Fallback Mode"),
+            "configured file backend must not show fallback wording, got: {guidance}"
+        );
+        assert!(!guidance.contains("HOLD permanent"));
+    }
+
+    #[test]
+    fn memento_fallback_yields_hold_permanent_writes_guidance() {
+        // #4316 (b): memento configured but degraded → File. Guidance must flag
+        // FALLBACK mode and instruct holding permanent/authoritative writes
+        // rather than committing them to the degraded store.
+        let settings = file_settings(true);
+        let guidance = proactive_memory_guidance(
+            Some(&settings),
+            "/tmp/agentdesk",
+            ChannelId::new(1),
+            None,
+            DispatchProfile::Full,
+            false,
+        )
+        .expect("fallback mode must produce proactive guidance");
+
+        assert!(guidance.contains("[Proactive Memory Guidance — Fallback Mode]"));
+        assert!(guidance.contains("memento is configured but unreachable"));
+        // Core semantics: hold permanent writes; record after memento recovers.
+        assert!(
+            guidance.contains("HOLD permanent writes"),
+            "fallback guidance must instruct holding permanent writes, got: {guidance}"
+        );
+        assert!(guidance.contains("once memento recovers"));
+        // Must not read like the deliberate-file backend guidance.
+        assert!(!guidance.contains("`local` memory is available"));
+    }
+
+    #[test]
+    fn non_full_profile_suppresses_guidance() {
+        // Guidance stays gated to the Full profile in both states.
+        let settings = file_settings(true);
+        assert!(
+            proactive_memory_guidance(
+                Some(&settings),
+                "/tmp/agentdesk",
+                ChannelId::new(1),
+                None,
+                DispatchProfile::ReviewLite,
+                false,
+            )
+            .is_none()
+        );
+    }
 }
