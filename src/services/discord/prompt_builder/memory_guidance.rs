@@ -26,6 +26,31 @@ pub(super) fn proactive_memory_guidance(
     profile: DispatchProfile,
     memento_mcp_available: bool,
 ) -> Option<String> {
+    proactive_memory_guidance_with(
+        memory_settings,
+        current_path,
+        channel_id,
+        role_binding,
+        profile,
+        memento_mcp_available,
+        |p| std::path::Path::new(p).exists(),
+    )
+}
+
+/// Filesystem-injectable seam for [`proactive_memory_guidance`] so the
+/// workspace-aware gate on the repo-relative `docs/memory-scope.md` reference
+/// (#4314) can be tested deterministically. The `exists` closure decides
+/// whether the current workspace is an AgentDesk checkout; everything else
+/// (scope hints, the always-on `tool_feedback` contract) is unchanged.
+pub(super) fn proactive_memory_guidance_with(
+    memory_settings: Option<&ResolvedMemorySettings>,
+    current_path: &str,
+    channel_id: ChannelId,
+    role_binding: Option<&RoleBinding>,
+    profile: DispatchProfile,
+    memento_mcp_available: bool,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
     if profile != DispatchProfile::Full {
         return None;
     }
@@ -68,13 +93,23 @@ pub(super) fn proactive_memory_guidance(
                 .unwrap_or_else(|| "default".to_string());
             let agent_workspace = resolve_memento_workspace(role_id, channel_id.get(), None);
             let agent_id = resolve_memento_agent_id(role_id, channel_id.get());
+            // #4314: `docs/memory-scope.md` is an AgentDesk repo-relative path.
+            // Only reference it when the agent's workspace actually is an
+            // AgentDesk checkout — otherwise it points at a nonexistent file.
+            let memory_policy_line = if super::layer_rendering::workspace_has_agentdesk_docs_with(
+                current_path,
+                &exists,
+            ) {
+                "\n- full memory policy: `docs/memory-scope.md`; read it before broad memory cleanup or scope changes."
+            } else {
+                ""
+            };
             (
                 "memento",
                 "`recall` MCP tool",
                 "`remember` MCP tool",
                 format!(
-                    "\n- scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.\n\
-                     - full memory policy: `docs/memory-scope.md`; read it before broad memory cleanup or scope changes.\n\
+                    "\n- scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.{memory_policy_line}\n\
                      - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `tool_name`, `relevant`, `sufficient`; when the response carries `_meta.searchEventId`, also pass it as `search_event_id` — recommended). If the tool is deferred, load it first via ToolSearch `select:mcp__memento__tool_feedback`."
                 ),
             )
@@ -152,6 +187,65 @@ mod tests {
         assert!(guidance.contains("once memento recovers"));
         // Must not read like the deliberate-file backend guidance.
         assert!(!guidance.contains("`local` memory is available"));
+    }
+
+    fn memento_settings() -> ResolvedMemorySettings {
+        ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        }
+    }
+
+    #[test]
+    fn foreign_workspace_memento_omits_memory_scope_but_keeps_feedback_contract() {
+        // #4314 T4 (guard mutation, memento branch): a foreign workspace (docs
+        // absent) must drop the repo-relative `docs/memory-scope.md` reference
+        // while keeping the always-on scope hints and tool_feedback contract.
+        // Removing the guard so the reference is always injected makes THIS
+        // assert fail on its own — not on a compile error.
+        let settings = memento_settings();
+        let guidance = proactive_memory_guidance_with(
+            Some(&settings),
+            "/foreign/repo",
+            ChannelId::new(1),
+            None,
+            DispatchProfile::Full,
+            true,
+            |_| false,
+        )
+        .expect("memento guidance must be produced");
+
+        assert!(guidance.contains("[Proactive Memory Guidance]"));
+        assert!(guidance.contains("scope hints:"));
+        assert!(guidance.contains("mcp__memento__tool_feedback"));
+        assert!(
+            !guidance.contains("docs/memory-scope.md"),
+            "foreign workspace must not reference docs/memory-scope.md, got: {guidance}"
+        );
+    }
+
+    #[test]
+    fn agentdesk_workspace_memento_keeps_memory_scope_reference() {
+        // #4314 T4 reverse: an AgentDesk workspace (docs present) must keep the
+        // `docs/memory-scope.md` reference. Forcing the guard to always omit
+        // makes THIS assert fail on its own.
+        let settings = memento_settings();
+        let guidance = proactive_memory_guidance_with(
+            Some(&settings),
+            "/agentdesk",
+            ChannelId::new(1),
+            None,
+            DispatchProfile::Full,
+            true,
+            |_| true,
+        )
+        .expect("memento guidance must be produced");
+
+        assert!(
+            guidance.contains("full memory policy: `docs/memory-scope.md`"),
+            "AgentDesk workspace must keep docs/memory-scope.md, got: {guidance}"
+        );
+        assert!(guidance.contains("mcp__memento__tool_feedback"));
     }
 
     #[test]

@@ -232,12 +232,17 @@ pub(super) fn build_system_prompt_with_manifest(
                  - 큰 변경이나 장시간 작업이 필요하면 먼저 범위와 다음 행동을 짧게 확인한다",
             );
         } else {
-            system_prompt_owned.push_str(shared_agent_rules_lookup());
+            // #4314: the shared-rules index now depends on the agent's cwd —
+            // repo-relative `docs/*` references are injected only when the
+            // workspace actually is an AgentDesk checkout. Compute once and
+            // reuse for both the log and the append.
+            let shared_rules = shared_agent_rules_lookup(current_path);
             tracing::warn!(
                 "  [role-map] Injected compact shared rule index ({} chars) for channel {}",
-                shared_agent_rules_lookup().len(),
+                shared_rules.len(),
                 channel_id.get()
             );
+            system_prompt_owned.push_str(&shared_rules);
         }
 
         if profile != DispatchProfile::Lite {

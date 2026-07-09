@@ -838,3 +838,50 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
         );
     }
 }
+
+#[test]
+fn foreign_workspace_full_prompt_omits_repo_relative_doc_paths() {
+    // #4314 (end-to-end anchor): a Full-profile agent whose cwd is NOT an
+    // AgentDesk checkout (no docs/source-of-truth.md / docs/memory-scope.md
+    // under it) must never get the repo-relative doc references injected into
+    // its assembled system prompt — neither via the Shared Agent Rules Index
+    // nor via the Proactive Memory Guidance memento branch. The generic
+    // shared-rules block and the absolute `_shared.prompt.md` source line stay.
+    let binding = test_role_binding("project-cookingheart");
+    let prompt = build_system_prompt(
+        "ctx",
+        &[],
+        "/nonexistent-foreign-workspace-4314", // no docs/*.md rooted here
+        ChannelId::new(1),
+        "tok",
+        Some(&binding),
+        false,
+        DispatchProfile::Full,
+        Some("implementation"),
+        None,
+        None,
+        None,
+        Some(&ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        }),
+        true,
+    );
+
+    assert!(
+        prompt.contains("[Shared Agent Rules Index]"),
+        "generic shared-rules block must stay, got: {prompt}"
+    );
+    assert!(
+        prompt.contains("_shared.prompt.md"),
+        "absolute shared-prompt source line must stay, got: {prompt}"
+    );
+    assert!(
+        !prompt.contains("docs/source-of-truth.md"),
+        "foreign workspace must not reference docs/source-of-truth.md, got: {prompt}"
+    );
+    assert!(
+        !prompt.contains("docs/memory-scope.md"),
+        "foreign workspace must not reference docs/memory-scope.md, got: {prompt}"
+    );
+}
