@@ -254,5 +254,7 @@ pub(super) fn run_bot_build_shared_data(
         .0,
         turn_view_reconciler:
             crate::services::discord::turn_view_reconciler::TurnViewReconciler::default(),
+        readopted_mailbox_ledger:
+            crate::services::discord::readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
     })
 }

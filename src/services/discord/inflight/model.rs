@@ -333,6 +333,55 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// synthetic birth site.
     #[serde(default)]
     pub relay_ownership_only: bool,
+    /// #4370: `true` when this turn was re-adopted from persisted inflight state
+    /// by `recovery_engine::reregister_active_turn_from_inflight` — i.e. a REAL
+    /// user turn (mailbox owner == `request_owner_user_id`, NOT the synthetic
+    /// relay owner) whose mailbox slot was reseeded from disk instead of being
+    /// born through the normal turn loop or a synthetic compact-resume note. The
+    /// re-adopt site is reached from restart restore AND from the mid-execution
+    /// watcher/manual-rebind reattach entries, so the name says "re-adopted from
+    /// inflight", not "restart-only".
+    ///
+    /// DELIBERATELY DISTINCT FROM `relay_ownership_only`: that marker means "this
+    /// turn does not own the user-turn lifecycle" and its guards SUPPRESS the
+    /// completion lifecycle (`watcher_completion_lifecycle_applies`,
+    /// `inflight_skips_tui_completion_observation`, the early/late TUI completion
+    /// gates, the `⏳ → ✅` reaction + `session_transcripts` / `turn_analytics`
+    /// persistence). A re-adopted turn DOES still own its user's turn, so its own
+    /// `✅`/footer + analytics/transcript must STILL fire — reusing
+    /// `relay_ownership_only` would wrongly mute the very prose this fix protects.
+    ///
+    /// This marker therefore feeds EXACTLY ONE guard: TUI-direct synthetic
+    /// `stale_reclaim` eligibility for a PRESENT row. It lets a later starved
+    /// injection / task-notification synthetic turn reclaim the mailbox of a
+    /// re-adopted real-user owner once that owner is stale
+    /// (`terminal_delivery_committed`) — closing the #4018 regression on the
+    /// restart-resume path, where the synthetic-owner-only reclaim could never
+    /// free a real-user mailbox (#4370). It NEVER by itself triggers a reclaim; a
+    /// live, progressing re-adopted turn (matching `user_msg_id`, not committed)
+    /// still yields reclaim-reason `None`.
+    ///
+    /// NOTE (#4370): this marker IS persisted on a DrainRestart-preserved row. The
+    /// BROAD identity-refresh save (`save_inflight_state_if_identity_unchanged`)
+    /// refuses any row still carrying `restart_mode`, which is precisely why the
+    /// marker is written through the NARROW single-field patch
+    /// `mark_readopted_from_inflight_if_identity_unchanged`
+    /// (`inflight/save_store/identity_gate.rs`) instead: it re-reads under the
+    /// sidecar flock, pins the turn identity, flips only this additive bit, and
+    /// preserves `restart_mode`. Test `readopted_marker_lands_on_restart_preserved_row_and_never_resurrects`
+    /// pins that behavior. So the present-row (Path A) reclaim DOES cover
+    /// restart-preserved rows.
+    ///
+    /// The ROW-ABSENT reclaim (Path B) still does not consult this field — there is
+    /// no row left to read — and uses the in-memory
+    /// `SharedData::readopted_mailbox_ledger` instead. This field is the
+    /// present-row companion signal.
+    ///
+    /// Additive `#[serde(default)]` field — legacy rows deserialize as `false`
+    /// (no `INFLIGHT_STATE_VERSION` bump, #2235 compat convention); set only at
+    /// the inflight re-adopt site.
+    #[serde(default)]
+    pub readopted_from_inflight: bool,
     /// #1255 codex round-2 P2: `true` while a long-running tool placeholder
     /// (`Monitor` / background `Bash`/`Task`/`Agent`) owns `current_msg_id`.
     /// `placeholder_sweeper` skips inflights whose `full_response` is non-empty
@@ -909,6 +958,8 @@ impl InflightTurnState {
             rebind_origin_birth_generation: None,
             // #4002: only the SystemContinuation synthetic birth site sets this.
             relay_ownership_only: false,
+            // #4370: only the inflight re-adopt site sets this.
+            readopted_from_inflight: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
             relay_owner_kind: RelayOwnerKind::None,

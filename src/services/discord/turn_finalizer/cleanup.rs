@@ -430,7 +430,12 @@ where
 
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ReactionCleanupRecord {
+// #4370 R3-3: widened from `pub(super)` so the tui_prompt_relay stale-reclaim
+// F3(b) test (in a sibling discord submodule) can observe that a stale-owner
+// reclaim schedules NO reaction change. Test-only (`#[cfg(test)]`); no production
+// surface. Both that test and the recorder-driving finalizer tests serialize on
+// `crate::config::shared_test_env_lock`, so the global recorder never races.
+pub(in crate::services::discord) struct ReactionCleanupRecord {
     pub(super) channel_id: u64,
     pub(super) message_id: u64,
     pub(super) emoji: char,
@@ -453,8 +458,11 @@ static REACTION_CLEANUP_FAILED_CHANNELS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<u64>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
+// #4370 R3-3: widened to `pub(in crate::services::discord)` (test-only) so the
+// stale-reclaim F3(b) test can drive/observe the recorder — see the
+// `ReactionCleanupRecord` note above.
 #[cfg(test)]
-pub(super) fn begin_reaction_cleanup_recording() {
+pub(in crate::services::discord) fn begin_reaction_cleanup_recording() {
     *REACTION_CLEANUP_RECORDS
         .lock()
         .expect("reaction cleanup recorder lock") = Some(Vec::new());
@@ -468,7 +476,7 @@ pub(super) fn begin_reaction_cleanup_recording() {
 }
 
 #[cfg(test)]
-pub(super) fn take_reaction_cleanup_records() -> Vec<ReactionCleanupRecord> {
+pub(in crate::services::discord) fn take_reaction_cleanup_records() -> Vec<ReactionCleanupRecord> {
     REACTION_CLEANUP_RECORDS
         .lock()
         .expect("reaction cleanup recorder lock")

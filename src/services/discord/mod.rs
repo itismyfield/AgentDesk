@@ -50,6 +50,7 @@ mod queue_reactions;
 mod queued_placeholders_store;
 mod reaction_cleanup;
 mod reaction_lifecycle;
+mod readopted_mailbox_ledger;
 mod relay_health;
 pub(crate) mod relay_recovery;
 mod replace_outcome_policy;
@@ -2276,6 +2277,7 @@ pub(crate) struct SharedData {
     pub(in crate::services::discord) turn_completion_events:
         tokio::sync::broadcast::Sender<turn_completion_events::TurnCompletionEvent>,
     pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
+    readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
 }
 
 impl SharedData {
@@ -2560,6 +2562,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         inflight_signals: tokio::sync::broadcast::channel(256).0,
         turn_completion_events: turn_completion_events::turn_completion_event_bus(),
         turn_view_reconciler: turn_view_reconciler::TurnViewReconciler::default(),
+        readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
     })
 }
 

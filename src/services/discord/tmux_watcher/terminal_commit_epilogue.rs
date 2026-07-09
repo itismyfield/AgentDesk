@@ -57,6 +57,27 @@ pub(super) struct TerminalCommitEpilogueState<'a> {
     pub(super) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
 }
 
+/// #4370 (codex r3 #1): may THIS terminal-commit pass stamp the re-adopted
+/// mailbox ledger entry FINISHED?
+///
+/// Only when the pass is not flushing an older turn's trailing output while a
+/// NEWER turn owns `inflight_state`. Both staleness predicates are required, and
+/// the id-0-inclusive one is the load-bearing half: `completion_is_stale_for_newer_turn`
+/// returns FALSE for a newer turn whose `user_msg_id == 0` (an injected /
+/// task-notification turn), and such a turn can be re-adopted across a restart
+/// and therefore own a ledger entry. Stamping it FINISHED while it is still
+/// producing output would let a later absent-row aged reclaim steal it.
+///
+/// `anchor_cleanup_is_stale_for_newer_turn` (#3142) is the id-0-inclusive sibling
+/// used by the committed-output anchor-cleanup branch; the FINISHED stamp is the
+/// same kind of branch and takes the same guard.
+pub(super) fn readopted_finish_mark_allowed(
+    completion_is_stale_for_newer_turn: bool,
+    anchor_cleanup_is_stale_for_newer_turn: bool,
+) -> bool {
+    !completion_is_stale_for_newer_turn && !anchor_cleanup_is_stale_for_newer_turn
+}
+
 pub(super) async fn run_terminal_commit_epilogue(
     context: &TerminalCommitEpilogueContext<'_>,
     locals: TerminalCommitEpilogueLocals<'_>,
@@ -289,6 +310,42 @@ pub(super) async fn run_terminal_commit_epilogue(
                     "  [{ts}] 👁 watcher committed-output clear for {tmux_session_name}: no pinned committed-turn identity at offset {current_offset}; skipping the on-disk clear"
                 );
             }
+        }
+        // #4370 R3-1: this pass just committed the terminal delivery for the
+        // pinned turn and cleared its on-disk row above (the row-ABSENT "Path B"
+        // shape). Stamp the re-adopted-mailbox ledger entry FINISHED so a later
+        // starved synthetic relay turn can reclaim the stuck mailbox on a POSITIVE
+        // liveness signal instead of the unenforced "absent row => not live"
+        // assumption. Runs only inside the terminal-commit pass
+        // (`terminal_output_committed && !lifecycle_stage_paused`), and is a no-op
+        // unless THIS exact turn was re-adopted from inflight (the ledger has no
+        // entry otherwise, and the mark requires an exact `(owner, id)` match).
+        //
+        // #4370 codex r3 #1 — the staleness guard MUST be the id-0-inclusive one.
+        // `completion_is_stale_for_newer_turn` deliberately ignores a newer turn
+        // whose `user_msg_id == 0` (`turn_identity.rs`
+        // `committed_completion_is_stale_for_newer_turn`). An injected /
+        // task-notification turn is exactly that shape, it CAN be re-adopted across
+        // a restart, and it therefore CAN own a ledger entry. Gating only on the
+        // id!=0 predicate let a pass that is merely flushing an OLDER turn's
+        // trailing output stamp FINISHED on that still-producing id-0 turn — after
+        // which an absent-row aged reclaim would steal it, losing its prose and
+        // suppressing its footer. That is the very bug class this PR fixes, in
+        // reverse. `anchor_cleanup_is_stale_for_newer_turn` is the id-0-inclusive
+        // sibling (#3142) already used by the anchor-cleanup branch above; the
+        // FINISHED stamp is the same kind of committed-output branch, so it takes
+        // the same guard.
+        if readopted_finish_mark_allowed(
+            completion_is_stale_for_newer_turn,
+            anchor_cleanup_is_stale_for_newer_turn,
+        ) && let Some(committed) = inflight_state.as_ref()
+        {
+            shared.mark_readopted_mailbox_owner_finished(
+                provider_kind,
+                channel_id.get(),
+                committed.request_owner_user_id,
+                committed.effective_finalizer_turn_id(),
+            );
         }
         // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token
         // release) MUST run on every relay-completed terminal even when

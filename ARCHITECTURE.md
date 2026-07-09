@@ -818,6 +818,7 @@ src/
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
 │   │   ├── reaction_lifecycle.rs
+│   │   ├── readopted_mailbox_ledger.rs
 │   │   ├── recovery_engine.rs
 │   │   ├── relay_health.rs
 │   │   ├── relay_owner_observability.rs

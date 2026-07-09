@@ -69,6 +69,7 @@ fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnStat
         rebind_origin_deadline_secs: None,
         rebind_origin_birth_generation: None,
         relay_ownership_only: false,
+        readopted_from_inflight: false,
         long_running_placeholder_active: false,
         watcher_owns_live_relay: false,
         relay_owner_kind: crate::services::discord::inflight::RelayOwnerKind::None,
@@ -1427,4 +1428,45 @@ fn watcher_monitor_turn_never_needs_anchor_cleanup() {
     monitor.turn_source = crate::services::discord::inflight::TurnSource::MonitorTriggered;
     monitor.rebind_origin = true;
     assert!(!watcher_inflight_needs_anchor_lifecycle_cleanup(&monitor));
+}
+
+// #4370 (codex r3 #1). The re-adopted-mailbox ledger's FINISHED stamp is a
+// committed-output branch, so it must take the id==0-INCLUSIVE staleness guard.
+//
+// An injected / task-notification turn has `user_msg_id == 0`. It can be
+// re-adopted across a dcserver restart, so it CAN own a ledger entry. If the
+// stamp were gated only on the id!=0 `committed_completion_is_stale_for_newer_turn`,
+// a pass merely flushing an OLDER turn's trailing output would stamp FINISHED on
+// that still-producing id-0 turn — after which an absent-row aged reclaim would
+// steal it, losing its prose and suppressing its footer. That is exactly the bug
+// class #4370 fixes, in reverse.
+#[test]
+fn readopted_finish_mark_refuses_a_live_id0_newer_turn() {
+    let session = "AgentDesk-codex-adk-cdx";
+
+    // A NEWER, still-producing id-0 injected turn starting at/after this range.
+    let newer_injected = state_with_anchor(0, session, Some(50), 50, Some(4242), false);
+
+    let completion_stale =
+        committed_completion_is_stale_for_newer_turn(None, Some(&newer_injected), session, 50);
+    let anchor_stale =
+        committed_anchor_cleanup_is_stale_for_newer_turn(None, Some(&newer_injected), session, 50);
+
+    assert!(
+        !completion_stale,
+        "the id!=0 predicate deliberately ignores an id-0 newer turn (#3142)"
+    );
+    assert!(
+        anchor_stale,
+        "the id==0-inclusive sibling must catch the injected newer turn"
+    );
+    assert!(
+        !readopted_finish_mark_allowed(completion_stale, anchor_stale),
+        "a still-producing id-0 newer turn must NEVER be stamped FINISHED"
+    );
+
+    // Normal completion — no newer turn on either predicate — still stamps.
+    assert!(readopted_finish_mark_allowed(false, false));
+    // An id!=0 newer turn trips both predicates and is likewise refused.
+    assert!(!readopted_finish_mark_allowed(true, true));
 }

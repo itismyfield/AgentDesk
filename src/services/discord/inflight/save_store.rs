@@ -18,6 +18,7 @@ mod identity_gate;
 
 pub(in crate::services::discord) use self::identity_gate::{
     GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
+    mark_readopted_from_inflight_if_identity_unchanged,
     patch_restart_full_response_if_identity_unchanged,
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,

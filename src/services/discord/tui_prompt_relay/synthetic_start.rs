@@ -879,6 +879,842 @@ mod tests {
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
     }
+
+    // ===================================================================
+    // #4370 — restart-resume path. Generalises #4018's synthetic-owner-only
+    // stale reclaim so a REAL user turn re-adopted across a dcserver restart
+    // (owner == request_owner_user_id, `readopted_from_inflight` marker) can also
+    // yield its stale mailbox to a starved injection / task-notification
+    // synthetic relay turn — while a genuinely live re-adopted turn is never
+    // stolen.
+    // ===================================================================
+
+    /// A non-synthetic (real) Discord user id. Must differ from
+    /// `TUI_DIRECT_SYNTHETIC_OWNER_USER_ID` so the #4018 synthetic branch does
+    /// not apply.
+    fn real_owner() -> UserId {
+        UserId::new(4_370_007)
+    }
+
+    /// A real-user in-flight turn (NOT relay-ownership-only): it owns its own
+    /// completion lifecycle. `readopted_from_inflight` starts `false`; callers set it
+    /// explicitly (unit tests) or let `reregister_active_turn_from_inflight`
+    /// stamp it (the re-adopt integration test).
+    fn real_user_inflight_state(
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+        tmux_session_name: &str,
+        terminal_delivery_committed: bool,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id.get(),
+            None,
+            real_owner().get(),
+            user_msg_id.get(),
+            user_msg_id.get(),
+            "real user turn spanning a dcserver restart".to_string(),
+            Some("session-4370".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-4370.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.turn_source = TurnSource::ExternalInput;
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.terminal_delivery_committed = terminal_delivery_committed;
+        // Invariant the fix relies on: a real re-adopted turn is NOT muted like a
+        // relay-ownership-only compact-resume note.
+        assert!(!state.relay_ownership_only);
+        state
+    }
+
+    async fn seed_real_owner_mailbox(
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+    ) -> Arc<CancelToken> {
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn_kinded(
+                shared,
+                channel_id,
+                token.clone(),
+                real_owner(),
+                user_msg_id,
+                ActiveTurnKind::UserOrAgent,
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        token
+    }
+
+    // Positive: a restart-re-adopted real-user owner that has committed its
+    // terminal delivery (turn finished) but whose mailbox was never released is
+    // reclaimable WITHOUT the age gate — exactly the #4018 finalized-row rule,
+    // now reachable for a real owner. This is the transition that lets the
+    // starved injection / task-notification turn win relay ownership.
+    #[tokio::test(flavor = "current_thread")]
+    async fn readopted_from_inflight_real_owner_committed_row_reclaims_for_starved_synthetic() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_050);
+        let tmux = "AgentDesk-claude-4370-committed";
+        let real_id = MessageId::new(4_370_150);
+        let synth_id = MessageId::new(4_370_250);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        let mut state = real_user_inflight_state(channel_id, real_id, tmux, true);
+        state.readopted_from_inflight = true;
+        inflight::save_inflight_state(&state).expect("save committed re-adopted inflight");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            young_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            reclaimed,
+            "a committed restart-re-adopted real-user owner must be reclaimable (#4370)"
+        );
+        assert!(real_token.cancelled.load(Ordering::Relaxed));
+
+        // Mailbox-ownership transition: the synthetic relay turn now wins the
+        // mailbox (relay ownership yielded) — its prose is no longer dropped.
+        let synth_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            synth_id,
+            ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(
+            synth_claimed,
+            "the starved synthetic relay turn must claim the freed mailbox"
+        );
+        let after = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(after.active_request_owner, Some(synthetic_owner()));
+        assert_eq!(after.active_user_message_id, Some(synth_id));
+    }
+
+    // Negative (REQUIRED): a genuinely live, progressing re-adopted turn —
+    // matching `user_msg_id`, NOT `terminal_delivery_committed` — is never
+    // stolen, even when aged and marked. Reclaim reason is `None`, so the
+    // widened eligibility gate cannot cancel it. This is the guard against the
+    // fix regressing into a live-turn thief.
+    #[tokio::test(flavor = "current_thread")]
+    async fn readopted_from_inflight_real_owner_live_turn_is_never_stolen() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_060);
+        let tmux = "AgentDesk-claude-4370-live";
+        let real_id = MessageId::new(4_370_160);
+        let synth_id = MessageId::new(4_370_260);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        let mut state = real_user_inflight_state(channel_id, real_id, tmux, false);
+        state.readopted_from_inflight = true;
+        inflight::save_inflight_state(&state).expect("save live re-adopted inflight");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "a live progressing restart-re-adopted turn must never be stolen (#4370)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+
+        let synth_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            synth_id,
+            ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(
+            !synth_claimed,
+            "the live re-adopted turn must keep the mailbox slot"
+        );
+    }
+
+    // #4370 (fresh-Claude r3 #1). The mailbox's `active_user_message_id` is the turn's
+    // `effective_finalizer_turn_id()`, which equals `user_msg_id` only when that id is
+    // NON-zero. An id-0 marked row makes the two diverge, so the reason function would
+    // read `state.user_msg_id != active_user_message_id` and misfire
+    // `OwnerInflightReplaced` on a turn that is still LIVE, stealing it once aged past
+    // 120s. `classify_reclaimable_mailbox_owner` must refuse id-0 rows outright — the
+    // consumption-site half of the invariant that `readopted_ledger_record_allowed`
+    // enforces at the recovery site.
+    #[tokio::test(flavor = "current_thread")]
+    async fn readopted_from_inflight_id0_row_is_never_reclaimed() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_070);
+        let tmux = "AgentDesk-claude-4370-id0";
+        let real_id = MessageId::new(4_370_170);
+        let synth_id = MessageId::new(4_370_270);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+
+        // A LIVE re-adopted row that carries the marker but has `user_msg_id == 0`
+        // (an injected / task-notification shape). Aged well past the 120s gate.
+        let mut state = real_user_inflight_state(channel_id, real_id, tmux, false);
+        state.readopted_from_inflight = true;
+        state.user_msg_id = 0;
+        state.injected_prompt_message_id = Some(real_id.get());
+        inflight::save_inflight_state(&state).expect("save id-0 re-adopted inflight");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "an id-0 re-adopted row must never be reclaimed — `Replaced` would misfire on a live turn (#4370)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
+    // Negative (narrow scoping): a real-user owner WITHOUT the `readopted_from_inflight`
+    // marker is never reclaimable — even when committed and aged. Only turns this
+    // process re-adopted from disk after a restart are eligible; an ordinary
+    // freshly-started real-user turn stays untouched.
+    #[tokio::test(flavor = "current_thread")]
+    async fn real_owner_without_readopted_marker_is_never_reclaimed() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_070);
+        let tmux = "AgentDesk-claude-4370-unmarked";
+        let real_id = MessageId::new(4_370_170);
+        let synth_id = MessageId::new(4_370_270);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        // committed + aged, but readopted_from_inflight stays false.
+        let state = real_user_inflight_state(channel_id, real_id, tmux, true);
+        assert!(!state.readopted_from_inflight);
+        inflight::save_inflight_state(&state).expect("save unmarked real inflight");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "an unmarked real-user owner must never be reclaimable (#4370 narrow scoping)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
+    // Integration (REQUIRED): re-adopt an in-flight real-user turn across a
+    // simulated dcserver restart via the production
+    // `reregister_active_turn_from_inflight`, then drive BOTH an injection turn
+    // and a task-notification turn, asserting each acquires relay ownership
+    // (zero loss). Assertions are on the mailbox-ownership transition
+    // (real user → synthetic relay owner), not a string match. A 24% drop
+    // (#4018 recurrence on the restart path) is caught here because the
+    // synthetic claim would fail — the mailbox would stay owned by the stale
+    // real-user turn — and `active_request_owner` would never transition.
+    #[tokio::test(flavor = "current_thread")]
+    async fn readopted_from_inflight_turn_yields_mailbox_to_injection_and_task_notification() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        // Two independent channels stand in for the two lost turn classes in the
+        // incident: an injection (/loop heartbeat) turn and a task-notification
+        // turn. Both are blocked by a restart-re-adopted real-user turn.
+        for (label, channel_id, real_id, synth_id, tmux) in [
+            (
+                "injection",
+                ChannelId::new(4_370_010),
+                MessageId::new(4_370_110),
+                MessageId::new(4_370_210),
+                "AgentDesk-claude-4370-inject",
+            ),
+            (
+                "task_notification",
+                ChannelId::new(4_370_020),
+                MessageId::new(4_370_120),
+                MessageId::new(4_370_220),
+                "AgentDesk-claude-4370-tasknote",
+            ),
+        ] {
+            // Pre-restart: a live real-user turn, marker NOT yet set.
+            let pre = real_user_inflight_state(channel_id, real_id, tmux, false);
+            assert!(
+                !pre.readopted_from_inflight,
+                "{label}: marker must be absent before re-adopt"
+            );
+            inflight::save_inflight_state(&pre).expect("seed pre-restart inflight");
+
+            // Simulated restart: fresh (empty) in-memory mailbox, re-adopt the
+            // real turn via the production entrypoint.
+            let readopted =
+                crate::services::discord::recovery::reregister_active_turn_from_inflight(
+                    &shared, &pre,
+                )
+                .await;
+            assert!(readopted, "{label}: restart must re-adopt the live turn");
+
+            // Transition #1: the REAL user owns the mailbox post-restart.
+            let snap = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+            assert_eq!(
+                snap.active_request_owner,
+                Some(real_owner()),
+                "{label}: re-adopted turn owns the mailbox"
+            );
+            assert_eq!(snap.active_user_message_id, Some(real_id));
+
+            // reregister must persist the marker (not our builder), and must NOT
+            // mute the re-adopted turn like a relay-ownership-only note.
+            let reloaded = inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("re-adopted row survives on disk");
+            assert!(
+                reloaded.readopted_from_inflight,
+                "{label}: reregister must stamp readopted_from_inflight (#4370)"
+            );
+            assert!(
+                !reloaded.relay_ownership_only,
+                "{label}: re-adopted real turn keeps its own completion lifecycle"
+            );
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+
+            // The re-adopted turn finishes (terminal delivery commits) — but the
+            // mailbox is not released (the #4370 defect).
+            let mut committed = reloaded;
+            committed.terminal_delivery_committed = true;
+            inflight::save_inflight_state(&committed).expect("commit re-adopted turn");
+
+            // A starved synthetic relay turn arrives and reclaims the stale
+            // mailbox.
+            let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+                &shared,
+                &provider,
+                channel_id,
+                tmux,
+                real_id,
+                snap.active_request_owner,
+                snap.active_turn_kind,
+                snap.turn_started_at,
+                synth_id,
+            )
+            .await;
+            assert!(
+                reclaimed,
+                "{label}: committed re-adopted owner must yield the mailbox (#4370)"
+            );
+
+            // Transition #2: relay ownership passes real user → synthetic. This
+            // is the zero-loss proof — the synthetic turn now owns the relay.
+            let synth_claimed = mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                synthetic_owner(),
+                synth_id,
+                ActiveTurnKind::Background,
+            )
+            .await;
+            assert!(
+                synth_claimed,
+                "{label}: synthetic relay turn must acquire the freed mailbox"
+            );
+            let after = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+            assert_eq!(
+                after.active_request_owner,
+                Some(synthetic_owner()),
+                "{label}: relay ownership transitioned real→synthetic"
+            );
+            assert_eq!(after.active_user_message_id, Some(synth_id));
+        }
+    }
+
+    // ===================================================================
+    // #4370 F6 — Path B: the ROW-ABSENT stuck-mailbox shape (the #4370
+    // reproduction). The on-disk row was cleared (e.g. the watcher's
+    // identity-guarded clear succeeded) but the mailbox slot stayed stuck owned
+    // by the re-adopted real user, so `load_inflight_state` returns `None`. There
+    // is no row / on-disk marker to inspect, so eligibility is decided ENTIRELY by
+    // the in-memory `readopted_mailbox_ledger`.
+    // ===================================================================
+
+    /// Path B positive (#4370 R3-7 — drives the PRODUCTION record path): re-adopt a
+    /// real-user turn through `reregister_active_turn_from_inflight`, reproduce the
+    /// watcher terminal-commit transition (stamp the ledger `finished`, then clear
+    /// the durable row), and prove the resulting ABSENT-row + `finished` + aged
+    /// mailbox IS reclaimed and its ledger entry evicted. Seeding the ledger via
+    /// the real re-adopt (not a bare `record_readopted_mailbox_owner`) means a
+    /// broken production record path would leave the ledger empty and fail this
+    /// reclaim — the exact regression a direct-seed test would miss.
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_b_absent_row_in_ledger_aged_reclaims_and_evicts() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_080);
+        let tmux = "AgentDesk-claude-4370-pathb";
+        let real_id = MessageId::new(4_370_180);
+        let synth_id = MessageId::new(4_370_280);
+
+        // Re-adopt the live real-user turn through the production entrypoint. This
+        // records the ledger (finished == false) AND starts the mailbox turn.
+        let pre = real_user_inflight_state(channel_id, real_id, tmux, false);
+        inflight::save_inflight_state(&pre).expect("seed pre-restart inflight");
+        let readopted =
+            crate::services::discord::recovery::reregister_active_turn_from_inflight(&shared, &pre)
+                .await;
+        assert!(readopted, "restart must re-adopt the live turn");
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        // Capture the mailbox cancel token the re-adopt bound, to prove the reclaim
+        // cancels it.
+        let real_token = crate::services::discord::mailbox_snapshot(&shared, channel_id)
+            .await
+            .cancel_token
+            .expect("re-adopted mailbox holds a cancel token");
+
+        // The re-adopted turn's terminal delivery commits (watcher path): the SAME
+        // `SharedData::mark_readopted_mailbox_owner_finished` the terminal-commit
+        // epilogue calls, then the durable row is cleared → the ABSENT-row shape.
+        shared.mark_readopted_mailbox_owner_finished(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            real_id.get(),
+        );
+        assert!(
+            inflight::clear_inflight_state(&provider, channel_id.get()),
+            "the terminal-commit clear removes the durable row"
+        );
+        assert!(
+            inflight::load_inflight_state(&provider, channel_id.get()).is_none(),
+            "Path B precondition: the durable row is ABSENT after the commit clear"
+        );
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            reclaimed,
+            "an aged, ledger-FINISHED re-adopted owner with an ABSENT row must be reclaimable (#4370 Path B)"
+        );
+        assert!(real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            0,
+            "the finalize must decrement global_active"
+        );
+        assert!(
+            !shared.is_readopted_mailbox_owner(
+                &provider,
+                channel_id.get(),
+                real_owner().get(),
+                real_id.get()
+            ),
+            "the ledger entry must be evicted after a successful reclaim"
+        );
+    }
+
+    /// Path B negative (narrow scoping): row ABSENT and the owner is NOT in the
+    /// ledger → never reclaimed. This is the conservative bail — without a ledger
+    /// record we cannot prove this mailbox is a re-adopted turn, so we must not
+    /// steal what might be a genuinely live turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_b_absent_row_not_in_ledger_is_never_reclaimed() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_081);
+        let tmux = "AgentDesk-claude-4370-pathb-noledger";
+        let real_id = MessageId::new(4_370_181);
+        let synth_id = MessageId::new(4_370_281);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        // No ledger record, no on-disk row.
+        assert!(inflight::load_inflight_state(&provider, channel_id.get()).is_none());
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "an ABSENT row for a real owner NOT in the ledger must never be reclaimed (#4370 Path B conservative bail)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
+    /// Path B negative (age gate): row ABSENT, owner IS in the ledger, but the
+    /// owner is younger than the 120s positive-staleness gate → not reclaimed.
+    /// The `OwnerInflightAbsent` reason keeps its `requires_positive_owner_age`
+    /// gate for the re-adopted class, exactly as for the #4018 synthetic class.
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_b_absent_row_in_ledger_young_is_not_reclaimed() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_082);
+        let tmux = "AgentDesk-claude-4370-pathb-young";
+        let real_id = MessageId::new(4_370_182);
+        let synth_id = MessageId::new(4_370_282);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        shared.record_readopted_mailbox_owner(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            real_id.get(),
+        );
+        // Mark FINISHED so the ONLY thing blocking reclaim is the age gate — this
+        // test isolates the `>= 120s` gate, not R3-1's `finished` liveness gate
+        // (covered by `path_b_absent_row_ledger_live_not_finished_is_never_stolen`).
+        shared.mark_readopted_mailbox_owner_finished(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            real_id.get(),
+        );
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            young_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "a ledger-recorded re-adopted owner younger than 120s must not be reclaimed (#4370 Path B age gate)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        // The ledger entry is untouched (no reclaim happened) — a later aged
+        // attempt can still fire.
+        assert!(shared.is_readopted_mailbox_owner(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            real_id.get()
+        ));
+    }
+
+    /// Path B negative (LIVE-TURN THEFT GUARD): row ABSENT, a ledger entry exists
+    /// for a PRIOR re-adopted turn, but a DIFFERENT `user_msg_id` now owns the
+    /// mailbox (a live successor turn). The exact-id match fails, so the stale
+    /// ledger entry can NEVER authorize stealing the live successor.
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_b_absent_row_ledger_different_user_msg_id_is_never_stolen() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_083);
+        let tmux = "AgentDesk-claude-4370-pathb-theft";
+        let stale_ledger_id = MessageId::new(4_370_183);
+        let live_successor_id = MessageId::new(4_370_193);
+        let synth_id = MessageId::new(4_370_283);
+        // The mailbox is owned by the LIVE successor turn (a different id).
+        let live_token = seed_real_owner_mailbox(&shared, channel_id, live_successor_id).await;
+        // The ledger still records the PRIOR re-adopted turn's id, marked FINISHED
+        // (its terminal delivery had committed) — so the ONLY guard rejecting the
+        // reclaim here is the exact-id mismatch against the live successor, not the
+        // `finished` gate.
+        shared.record_readopted_mailbox_owner(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            stale_ledger_id.get(),
+        );
+        shared.mark_readopted_mailbox_owner_finished(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            stale_ledger_id.get(),
+        );
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            live_successor_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "a stale ledger entry (different user_msg_id) must never steal a live successor turn (#4370 Path B theft guard)"
+        );
+        assert!(!live_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
+    /// Path B negative (#4370 R3-1 LIVENESS GUARD): row ABSENT, the owner IS in the
+    /// ledger with the EXACT `(owner, active_user_message_id)`, and aged past the
+    /// 120s gate — but the entry is NOT `finished` (a genuinely LIVE re-adopted turn
+    /// whose durable row merely happens to be absent, e.g. a not-yet-committed turn
+    /// whose row was transiently cleared). Absence + exact-id + age ALONE must NOT
+    /// reclaim it; only a `finished` entry (a committed terminal delivery) is
+    /// reclaimable. Before R3-1 this shape had no liveness signal at all and could
+    /// have been stolen — this is the test that pins the enforced invariant.
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_b_absent_row_ledger_live_not_finished_is_never_stolen() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_084);
+        let tmux = "AgentDesk-claude-4370-pathb-live";
+        let real_id = MessageId::new(4_370_184);
+        let synth_id = MessageId::new(4_370_284);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        // Ledger records the re-adopted owner but the entry is LIVE: a fresh
+        // `record_readopted_mailbox_owner` seeds `finished == false`, and no
+        // terminal commit has stamped it finished.
+        shared.record_readopted_mailbox_owner(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            real_id.get(),
+        );
+        assert!(
+            inflight::load_inflight_state(&provider, channel_id.get()).is_none(),
+            "Path B precondition: the durable row is ABSENT"
+        );
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            // AGED — isolates the `finished` gate from the age gate: age is
+            // satisfied, so a reclaim would fire if `finished` were not required.
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "an ABSENT-row re-adopted owner that has NOT committed terminal delivery (finished == false) must NEVER be reclaimed, even aged with an exact-id ledger match (#4370 R3-1 liveness guard)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+
+        let synth_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            synth_id,
+            ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(
+            !synth_claimed,
+            "the live (not-finished) re-adopted turn must keep the mailbox slot"
+        );
+    }
+
+    /// #4370 F3(b): a `Finalized` reclaim of a re-adopted REAL-user owner does NOT
+    /// suppress that turn's completion footer / ✅ reaction / analytics.
+    ///
+    /// Evidence chain (see the #4370 review): a real turn's `⏳→✅` reaction,
+    /// completion footer, and transcript/analytics are all emitted INLINE by the
+    /// tmux watcher in the SAME pass that sets `terminal_delivery_committed = true`
+    /// — BEFORE any finalizer handoff (the #4106 pre-panel early-release finalizes
+    /// the turn *before* the footer edit, proving the finalizer never owns the
+    /// footer/✅). The Finalized reclaim below only runs because
+    /// `terminal_delivery_committed == true`, i.e. AFTER that UI already rendered.
+    ///
+    /// The reclaim submits `TerminalEvent::Cancel` through
+    /// `FinalizeContext::watcher()`. The only reaction hook,
+    /// `finalized_reaction_lifecycle`, strips `⏳` / withholds `✅` ONLY for a
+    /// *backstop-cleanup* context (`clear_inflight && kickoff_queue`). `watcher()`
+    /// is NOT that shape, so the reclaim schedules NO reaction change and cannot
+    /// suppress the already-rendered footer/✅. This test pins both the invariant
+    /// (context shape) and the behaviour (reclaim finalizes cleanly).
+    #[tokio::test(flavor = "current_thread")]
+    async fn finalized_reclaim_of_readopted_real_owner_does_not_suppress_completion_footer() {
+        // #4370 R3-3: assert the REAL context the reclaim submits — read from the
+        // SAME `reclaim_finalize_context()` source `finalize_stale_mailbox_owner_if_current`
+        // passes, NOT a re-fabricated `FinalizeContext::watcher()`. If the production
+        // call site is re-pointed at a backstop-cleanup context, THIS breaks (the
+        // old test asserted a standalone `watcher()` and would have stayed green).
+        let ctx = stale_reclaim::reclaim_finalize_context();
+        // The exact `backstop_cleanup` predicate from `finalized_reaction_lifecycle`
+        // (turn_finalizer/cleanup.rs:54-57) — the only shape that schedules a
+        // reaction change on a Cancel.
+        let backstop_cleanup = ctx.clear_inflight
+            && ctx.kickoff_queue
+            && !ctx.allow_completion_cleanup
+            && !ctx.drain_voice;
+        assert!(
+            !backstop_cleanup,
+            "the reclaim finalize context must not be a backstop-cleanup shape — that is the only shape that strips ⏳ / withholds ✅ on a Cancel (#4370 F3b)"
+        );
+
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_090);
+        let tmux = "AgentDesk-claude-4370-footer";
+        // REAL Discord snowflake ids (>= 1e14): required so the reclaim's Cancel
+        // actually reaches the reaction gate in `finalized_reaction_lifecycle`
+        // (it early-returns on non-real ids), making the "no reaction scheduled"
+        // assertion below a genuine test of the context gate, not of the id filter.
+        let real_id = MessageId::new(1_437_009_000_000_190);
+        let synth_id = MessageId::new(1_437_009_000_000_290);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        // Committed (footer/✅ already rendered pre-restart) + marked re-adopted.
+        let mut state = real_user_inflight_state(channel_id, real_id, tmux, true);
+        state.readopted_from_inflight = true;
+        inflight::save_inflight_state(&state).expect("save committed re-adopted inflight");
+
+        // Observe the ACTUAL finalizer-scheduled reactions. In test builds
+        // `schedule_reaction_cleanup` records synchronously into a global the
+        // recorder captures; this and the finalizer's own reaction tests all
+        // serialize on `shared_test_env_lock` (held above), so the recorder cannot
+        // race. An empty record set proves the reclaim scheduled NO reaction change
+        // and therefore cannot suppress the already-pending completion footer / ✅.
+        crate::services::discord::turn_finalizer::cleanup::begin_reaction_cleanup_recording();
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            young_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            reclaimed,
+            "a committed re-adopted owner must yield the stuck mailbox (Finalized, no age gate) (#4370 F3b)"
+        );
+        // The reclaim scheduled NO reaction change — the behavioural proof that it
+        // cannot suppress the re-adopted turn's already-rendered/pending chrome.
+        let reaction_records =
+            crate::services::discord::turn_finalizer::cleanup::take_reaction_cleanup_records();
+        assert!(
+            reaction_records.is_empty(),
+            "the stale-owner reclaim must schedule NO reaction change (would suppress the completion footer / ✅); got {reaction_records:?} (#4370 F3b)"
+        );
+        // The finalize released the mailbox cleanly (token cancelled, global_active
+        // decremented) WITHOUT re-touching the already-rendered completion UI.
+        assert!(real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    }
 }
 
 // ===========================================================================
