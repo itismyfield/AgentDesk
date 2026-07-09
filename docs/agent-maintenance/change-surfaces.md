@@ -152,7 +152,13 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1613 lines; -17 from #4151 removing
+  - `src/services/discord/tmux.rs` (1624 lines; +11 from #4380 broadening the
+    watcher-yield escape hatch (`watcher_should_yield_to_inflight_state`) to honour
+    the `readopted_from_inflight` crash re-adopt marker via
+    `crash_resume_guard::crash_readopt_live_relay_resume_required`, so a
+    crash-recovered live turn resumes relay instead of yielding to the now-dead
+    bridge (the escape-hatch body + tests; predicate lives in the non-giant
+    `crash_resume_guard.rs`); -17 from #4151 removing
     `format_monitor_suppressed_body` — its only caller was the unreachable #1009
     MonitorAutoTurn suppressed-body replacement in tmux_watcher.rs (dead since
     #1708; #4144 r2 closed the None-kind Edit path); -8 from #4198 routing the restored-watcher release D-section through the shared `turn_finalizer::cleanup` helpers (`snapshot_role_override` / `clear_watchdog_and_kick_thread_parents_after_turn_release` / `remove_owned_role_override`); +32 from #4105 adding

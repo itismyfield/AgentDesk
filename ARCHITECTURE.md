@@ -777,6 +777,7 @@ src/
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── catch_up.rs
+│   │   ├── crash_resume_guard.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
 │   │   ├── destructive_cancel_gate.rs
