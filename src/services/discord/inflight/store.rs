@@ -348,3 +348,55 @@ pub(super) fn persist_under_lock_preserving_updated_at(
 ) -> Result<(), String> {
     persist_under_lock_inner(root, path, state, caller, false)
 }
+
+#[cfg(test)]
+mod relay_state_contract_refs {
+    //! #4268 — relay-state contract symbol anchors for the `inflight`
+    //! state/store (compiler-checked existence).
+    //!
+    //! Every statement below is a real reference that fails to COMPILE if its
+    //! symbol is renamed, moved, or removed, so `cargo check --workspace
+    //! --all-targets` (a required CI gate) is the source of truth for whether
+    //! each contract symbol still exists.
+    //! `scripts/check_contract_symbol_refs.py` parses the anchor SET from these
+    //! reference expressions — never from comments — and checks it equals the
+    //! `sym:` anchors in `docs/relay-state-contract.md`.
+    //!
+    //! There are deliberately no `// sym:` labels: the anchor name is derived
+    //! from the reference the compiler checks (`use` path / field expression), so
+    //! commenting out or `use super::*;`-replacing a reference removes its anchor
+    //! and the set comparison fails — no comment can name a symbol the code does
+    //! not actually reference. The block cfg gate and the attributes inside are
+    //! byte-exact whitelists in the checker (no cfg parser): the gate must be
+    //! `#[cfg(test)]` or `#[cfg(all(test, unix))]` (the latter for a `#[cfg(unix)]`
+    //! symbol — see the watchdog block), and the only attribute allowed inside is
+    //! `#[test]`. This blocks a feature/non-ubuntu block gate AND an item-level
+    //! cfg on a reference, either of which would drop a symbol from the required
+    //! compile and silently disable the proof.
+    //!
+    //! Hosted here (not in `inflight.rs`) because several referenced items are
+    //! `pub(super)` within the `inflight` subtree and are only nameable from
+    //! inside it, while `inflight.rs` is a frozen test-residue file whose ceiling
+    //! must not grow (#4269). This whole module is `#[cfg(test)]`, so it is test
+    //! LoC and adds no production surface.
+    #[test]
+    fn contract_symbols_exist() {
+        let _ = |s: &super::super::model::InflightTurnState| {
+            let _ = &s.response_sent_offset;
+        };
+        let _ = |s: &super::super::model::InflightTurnState| {
+            let _ = &s.current_msg_id;
+        };
+        let _ = |s: &super::super::model::InflightTurnState| {
+            let _ = &s.last_offset;
+        };
+        let _ = |s: &super::super::model::InflightTurnState| {
+            let _ = &s.last_watcher_relayed_offset;
+        };
+        let _ = super::super::model::InflightTurnState::effective_relay_owner_kind;
+        use super::super::clear_store::refresh_inflight_last_offset_if_matches_identity as _;
+        use super::super::clear_store::refresh_inflight_last_offset_if_matches_identity_in_root as _;
+        use super::super::save_store::save_inflight_state as _;
+        use super::validate_inflight_state_for_save as _;
+    }
+}

@@ -664,3 +664,31 @@ fn user_message_prompt_text(message: &serde_json::Value) -> Option<String> {
 fn non_empty_prompt_text(text: &str) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.to_string())
 }
+
+#[cfg(test)]
+mod relay_state_contract_refs {
+    //! #4268 — relay-state contract symbol anchors for the watcher/`tmux` sites
+    //! (compiler-checked existence). These live here because several of the fns
+    //! are `pub(super)` to `tmux_watcher` and are only nameable from within that
+    //! subtree. See the header on `inflight::store::relay_state_contract_refs`
+    //! for the contract, the CI wiring, and why there are no `// sym:` labels.
+    #[test]
+    fn contract_symbols_exist() {
+        use super::super::loop_poll_prologue::poll_watcher_output_or_continue as _;
+        use super::super::tmux_output_watcher_with_restore as _;
+        use super::reacquire_watcher_inflight_for_active_stream as _;
+        use crate::services::discord::tmux::advance_watcher_confirmed_end as _;
+        // I5 turn_delivered producer: the watcher terminal-commit epilogue path.
+        use super::super::terminal_commit_epilogue::run_terminal_commit_epilogue as _;
+        // I5 duplicate-suppression handshake fields on TmuxWatcherHandle.
+        let _ = |h: &crate::services::discord::TmuxWatcherHandle| {
+            let _ = &h.turn_delivered;
+        };
+        let _ = |h: &crate::services::discord::TmuxWatcherHandle| {
+            let _ = &h.resume_offset;
+        };
+        let _ = |h: &crate::services::discord::TmuxWatcherHandle| {
+            let _ = &h.pause_epoch;
+        };
+    }
+}

@@ -163,6 +163,20 @@ echo "=== API docs coverage gate (#3719) ==="
 "$PYTHON" scripts/check_api_docs_coverage.py
 "$PYTHON" -m unittest tests.test_api_docs_coverage
 
+echo "=== Contract symbol-ref doc<->code sync gate (#4268) ==="
+# docs/relay-state-contract.md anchors code with `sym:` symbol paths. This check
+# verifies the doc's `sym:` anchors exactly match the references PARSED FROM THE
+# CODE in the relay_state_contract_refs blocks (use / field / assoc-fn forms,
+# never comments) — it does NOT judge whether a symbol exists. Symbol EXISTENCE
+# is proven by the compiler: those reference blocks fail
+# `cargo check --workspace --all-targets` (a required gate) if a symbol is
+# renamed/moved/removed. Splitting it this way is what killed the regex-bypass
+# game (raw strings / macros / cfg can't fool a real compile), and deriving the
+# anchor set from the compiled code (not `// sym:` comments) is what killed the
+# r3 comment-decoupling bypass.
+"$PYTHON" scripts/check_contract_symbol_refs.py
+"$PYTHON" -m unittest tests.test_contract_symbol_refs
+
 echo "=== Agent maintenance freshness gate (warn, #1432; LoC hard-gate, #3036) ==="
 # --warning-only keeps the #1432 freshness/touch rollout non-fatal, while
 # --line-count-gate hard-fails on change-surfaces.md production-LoC drift, ghost

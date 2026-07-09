@@ -956,6 +956,33 @@ fn attach_paused_turn_watcher_inner(
     watcher_owner_channel_id
 }
 
+#[cfg(all(test, unix))]
+mod relay_state_contract_refs {
+    //! #4268 — relay-state contract symbol anchor for the `pause_epoch` producer
+    //! (compiler-checked existence). `attach_paused_turn_watcher_inner` is the
+    //! sole production writer of `TmuxWatcherHandle::pause_epoch` (invariant I5),
+    //! and it is a private fn nameable only from within `watchdog`, so its anchor
+    //! lives here rather than in the central blocks.
+    //!
+    //! Gated `all(test, unix)` (not plain `test`): `attach_paused_turn_watcher_inner`
+    //! is itself `#[cfg(unix)]`, so on windows test builds it is compiled out and
+    //! a plain `#[cfg(test)]` anchor referencing it fails to compile (E0432,
+    //! #4268 r3 / #4394). Matching its platform gate makes the anchor and the
+    //! symbol appear/disappear together. `unix` is true on the required ubuntu
+    //! `check_fast` compile, so that required job still compiles this block and
+    //! proves the symbol exists. `#[cfg(all(test, unix))]` is one of the two
+    //! byte-exact cfg spellings the checker whitelists (the other is
+    //! `#[cfg(test)]`); a windows-only gate is rejected because no required job
+    //! compiles it.
+    //!
+    //! See the header on `inflight::store::relay_state_contract_refs` for the
+    //! contract, the CI wiring, and why there are no `// sym:` labels.
+    #[test]
+    fn contract_symbols_exist() {
+        use super::attach_paused_turn_watcher_inner as _;
+    }
+}
+
 #[cfg(test)]
 mod timeout_notice_tests {
     use super::*;

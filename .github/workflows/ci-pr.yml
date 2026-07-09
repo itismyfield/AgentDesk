@@ -43,6 +43,12 @@ jobs:
       pg_db: ${{ steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
+      # True when a relay-state-contract anchor file, the contract doc, or the
+      # sync gate itself changed. Used to run the compile-existence half
+      # (`check_fast`, which compiles the `relay_state_contract_refs` blocks) even
+      # on a `ci_relax_safe` branch — the doc<->code anchor binding must never be
+      # accepted on a relax branch without the compiler having verified it (#4268).
+      relay_contract: ${{ steps.filter.outputs.relay_contract }}
       # True when a Rust-compile change touches paths OUTSIDE the relay
       # stabilization surface, i.e. it actually needs cross-OS verification.
       # Relay-only PRs (src/services/discord/**, tests/e2e/**) leave this
@@ -142,6 +148,23 @@ jobs:
               # (src/services/routines/loader.rs); adding/removing/renaming
               # a routine script can break the asserted file list.
               - 'routines/**'
+            # relay_contract: the doc<->code binding surface for the #4268
+            # contract symbol-ref gate. When any of these change, the
+            # compile-existence half (check_fast, which compiles the
+            # `relay_state_contract_refs` blocks so a renamed/removed contract
+            # symbol fails to compile) MUST run regardless of `ci_relax_safe` —
+            # otherwise a relax branch (the one most likely to move relay code)
+            # could edit the anchors/doc and merge with the compiler proof off.
+            # Keep this list in sync with REFERENCE_SOURCE_MODULES in
+            # scripts/check_contract_symbol_refs.py.
+            relay_contract:
+              - 'docs/relay-state-contract.md'
+              - 'scripts/check_contract_symbol_refs.py'
+              - 'tests/test_contract_symbol_refs.py'
+              - 'src/services/discord/inflight/store.rs'
+              - 'src/services/discord/turn_bridge/terminal_delivery.rs'
+              - 'src/services/discord/tmux_watcher/liveness.rs'
+              - 'src/services/discord/router/message_handler/watchdog.rs'
             # rust_compile is a narrower subset of rust_or_policy: only paths
             # whose change can plausibly alter Rust binary output (and therefore
             # require cross-OS verification on macOS/Windows). Pure JS policy,
@@ -253,10 +276,17 @@ jobs:
   # Ubuntu Rust lane: canonical fast check. Gated on the broad rust_or_policy
   # filter so a `policies/*.js`, `scripts/*.sh`, `.github/workflows/**`, or
   # Node package change still gets a Rust check on Linux.
+  #
+  # The `relay_contract == 'true'` OR-clause forces this lane to run even on a
+  # `ci_relax_safe` branch when a #4268 contract anchor file, the contract doc,
+  # or the sync gate changed: this job compiles the `relay_state_contract_refs`
+  # blocks, which is the ONLY thing that proves each contract symbol still
+  # exists. A relax branch must not be able to edit those anchors and merge with
+  # the compiler proof skipped. Unrelated relax PRs keep the speedup.
   check_fast:
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.rust_or_policy == 'true' && needs.changes.outputs.ci_relax_safe != 'true'
+    if: (needs.changes.outputs.rust_or_policy == 'true' && needs.changes.outputs.ci_relax_safe != 'true') || needs.changes.outputs.relay_contract == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -439,8 +469,22 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.check_fast.result }}
         run: ./scripts/required-check-mirror.sh
 
+      # On a relax branch that touched the relay-contract binding surface,
+      # check_fast was forced to run (see its `if`). Its result MUST gate the
+      # merge here — otherwise the relax echo below would swallow a real
+      # compile-existence failure (#4268).
+      - name: Relay-contract fast check mirror (always, #4268)
+        if: ${{ needs.changes.outputs.ci_relax_safe == 'true' && needs.changes.outputs.relay_contract == 'true' }}
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: relay_contract
+          FILTER_OUTPUT: ${{ needs.changes.outputs.relay_contract }}
+          UPSTREAM_JOB_NAME: check_fast
+          UPSTREAM_RESULT: ${{ needs.check_fast.result }}
+        run: ./scripts/required-check-mirror.sh
+
       - name: Relaxed fast check mirror for TUI relay stabilization
-        if: ${{ needs.changes.outputs.ci_relax_safe == 'true' }}
+        if: ${{ needs.changes.outputs.ci_relax_safe == 'true' && needs.changes.outputs.relay_contract != 'true' }}
         run: echo "PR Rust CI temporarily relaxed for TUI relay stabilization; verify locally on macOS before merge."
 
   fast_targeted_tests_required_context:
@@ -758,6 +802,24 @@ jobs:
       # the monotonic blind-write ceiling in force for every branch, no skip gate.
       - name: Inflight blind-save ratchet (always, #4259)
         run: python3 scripts/check_inflight_blind_save_ratchet.py
+
+      # Contract symbol-ref doc<->code sync check (#4268) runs UNCONDITIONALLY,
+      # same as the ratchets above: it must NOT inherit the `ci_relax_safe` skip
+      # on "Run script checks". It verifies that docs/relay-state-contract.md's
+      # `sym:` anchors exactly match the references parsed from the
+      # `relay_state_contract_refs` blocks that `cargo check --all-targets`
+      # compiles to prove those symbols exist. The `tui-relay-stabilization`
+      # branch is the one most likely to move that relay code, i.e. exactly when
+      # a stale anchor is most dangerous, so this sync check stays in force for
+      # every branch. Its COMPILE-EXISTENCE counterpart (the `check_fast` job) is
+      # NOT unconditional on its own — it inherits the `ci_relax_safe` skip — so
+      # the `relay_contract` path filter force-runs `check_fast` whenever any
+      # anchor file / the contract doc / this gate changes, closing that gap on
+      # relax branches. Both halves are therefore in force together.
+      - name: Contract symbol-ref sync gate (always, #4268)
+        run: |
+          python3 scripts/check_contract_symbol_refs.py
+          python3 -m unittest tests.test_contract_symbol_refs
 
       - name: Upload maintainability audit artifact
         if: always()
