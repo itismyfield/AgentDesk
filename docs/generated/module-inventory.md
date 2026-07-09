@@ -712,7 +712,7 @@
 | `services::discord::tmux_watcher::streaming_status_tick` | `src/services/discord/tmux_watcher/streaming_status_tick.rs` | 963 | 963 | 0 |  |
 | `services::discord::tmux_watcher::supervisor_relay` | `src/services/discord/tmux_watcher/supervisor_relay.rs` | 619 | 619 | 0 |  |
 | `services::discord::tmux_watcher::terminal_abort_exits` | `src/services/discord/tmux_watcher/terminal_abort_exits.rs` | 537 | 537 | 0 |  |
-| `services::discord::tmux_watcher::terminal_commit_epilogue` | `src/services/discord/tmux_watcher/terminal_commit_epilogue.rs` | 489 | 489 | 0 |  |
+| `services::discord::tmux_watcher::terminal_commit_epilogue` | `src/services/discord/tmux_watcher/terminal_commit_epilogue.rs` | 526 | 526 | 0 |  |
 | `services::discord::tmux_watcher::terminal_direct_fallback` | `src/services/discord/tmux_watcher/terminal_direct_fallback.rs` | 614 | 614 | 0 |  |
 | `services::discord::tmux_watcher::terminal_long_chunks` | `src/services/discord/tmux_watcher/terminal_long_chunks.rs` | 303 | 303 | 0 |  |
 | `services::discord::tmux_watcher::terminal_readiness` | `src/services/discord/tmux_watcher/terminal_readiness.rs` | 625 | 579 | 46 |  |
