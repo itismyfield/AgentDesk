@@ -361,11 +361,20 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// live, progressing re-adopted turn (matching `user_msg_id`, not committed)
     /// still yields reclaim-reason `None`.
     ///
-    /// NOTE (#4370): on a DrainRestart-preserved row this on-disk marker cannot be
-    /// persisted — the identity-gated save refuses rows that still carry
-    /// `restart_mode` (see `inflight/save_store/identity_gate.rs`). The ROW-ABSENT
-    /// reclaim decision therefore does NOT depend on this field: it consults the
-    /// in-memory `SharedData::readopted_mailbox_ledger` instead. This field is the
+    /// NOTE (#4370): this marker IS persisted on a DrainRestart-preserved row. The
+    /// BROAD identity-refresh save (`save_inflight_state_if_identity_unchanged`)
+    /// refuses any row still carrying `restart_mode`, which is precisely why the
+    /// marker is written through the NARROW single-field patch
+    /// `mark_readopted_from_inflight_if_identity_unchanged`
+    /// (`inflight/save_store/identity_gate.rs`) instead: it re-reads under the
+    /// sidecar flock, pins the turn identity, flips only this additive bit, and
+    /// preserves `restart_mode`. Test `readopted_marker_lands_on_restart_preserved_row_and_never_resurrects`
+    /// pins that behavior. So the present-row (Path A) reclaim DOES cover
+    /// restart-preserved rows.
+    ///
+    /// The ROW-ABSENT reclaim (Path B) still does not consult this field — there is
+    /// no row left to read — and uses the in-memory
+    /// `SharedData::readopted_mailbox_ledger` instead. This field is the
     /// present-row companion signal.
     ///
     /// Additive `#[serde(default)]` field — legacy rows deserialize as `false`

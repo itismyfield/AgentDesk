@@ -489,7 +489,7 @@
 | `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store/mod.rs` | 873 | 873 | 0 |  |
 | `services::discord::inflight::clear_store::abandon` | `src/services/discord/inflight/clear_store/abandon.rs` | 253 | 253 | 0 |  |
 | `services::discord::inflight::finalizer_identity` | `src/services/discord/inflight/finalizer_identity.rs` | 56 | 56 | 0 |  |
-| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1222 | 906 | 316 |  |
+| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1231 | 915 | 316 |  |
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 821 | 307 | 514 |  |
 | `services::discord::inflight::ownership_ops` | `src/services/discord/inflight/ownership_ops.rs` | 329 | 329 | 0 |  |
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 810 | 810 | 0 |  |
