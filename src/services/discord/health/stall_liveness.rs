@@ -60,6 +60,19 @@ pub(super) const STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS: u8 = 20;
 /// so the watchdog alone still guarantees a finite ceiling even if the process
 /// ceiling is overridden away.
 pub(super) const STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS: u64 = 4 * 3600;
+/// #4400 (a): dedicated freshness budget for the `open_tool_execution_recent`
+/// evidence. During a long-running tool call the provider transcript goes
+/// silent, so every 120s-fresh signal (transcript mtime, offsets, outbound
+/// activity) expires SIMULTANEOUSLY for the same underlying cause and the
+/// watchdog force-cleans a live turn (the 2026-07-07 16:32:19 false positive:
+/// inflight only 616s old, pane alive, an unresolved tool recorded on the row).
+/// A row whose persisted tool fields show an unresolved tool execution AND
+/// whose tmux pane is alive gets this longer budget measured against
+/// `inflight.updated_at` — invariant I4: a live pane with an open tool is never
+/// force-cleaned inside 30 minutes. The 4h absolute backstop (#3671) still
+/// applies unconditionally (invariant I5), and a dead pane never earns this
+/// evidence so dead-pane cleanup timing is unchanged (invariant I6).
+pub(super) const STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS: u64 = 1800;
 pub(super) const STALL_LIVENESS_STATE_TTL_SECS: u64 = 1800;
 pub(super) const STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS: u64 = 180;
 
@@ -112,6 +125,15 @@ struct CaptureOffsetWatchdogState {
     /// force-clean timing so genuine hangs are still cleaned promptly.
     observed_advancing_before: bool,
     consecutive_non_advancing_ticks: u8,
+    /// #4400 (a): unix seconds of the most recent tick on which the capture
+    /// offset was observed to ADVANCE. Unlike `OFFSET_OBSERVATIONS` (which is
+    /// only fed inside `evaluate_stall_watchdog_liveness`, i.e. only once
+    /// `should_clean` already fired), this map is fed EVERY watchdog tick via
+    /// `stall_watchdog_capture_offset_advancing` (recovery.rs), so it carries
+    /// pre-threshold advance history. Used as the fallback source for
+    /// `pane_offset_advanced_age_secs`, removing the structural one-tick
+    /// blindness on the first post-threshold evaluation (previous == None).
+    advanced_at_unix_secs: Option<i64>,
     last_updated_unix_secs: i64,
 }
 
@@ -170,6 +192,12 @@ pub(super) struct StallWatchdogLivenessEvidence {
     pub(super) background_synthetic_activity_age_secs: Option<u64>,
     pub(super) background_synthetic_kind: Option<String>,
     pub(super) has_undelivered_backlog: bool,
+    /// #4400 (a): age of `inflight.updated_at`, populated ONLY when the row's
+    /// persisted tool fields witness an unresolved tool execution AND the tmux
+    /// pane is confirmed alive (`tmux_session_alive == Some(true)`). Judged
+    /// against the dedicated `STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS` budget,
+    /// not the caller's 120s freshness.
+    pub(super) open_tool_execution_age_secs: Option<u64>,
 }
 
 impl StallWatchdogLivenessEvidence {
@@ -195,6 +223,18 @@ impl StallWatchdogLivenessEvidence {
         }
         if self.has_undelivered_backlog {
             reasons.push("has_undelivered_backlog");
+        }
+        // #4400 (a): tool-phase evidence carries its own 30-minute budget —
+        // deliberately NOT the caller's `freshness_secs` (120s), because a
+        // long-running tool keeps the transcript silent far past 120s while
+        // the turn is demonstrably alive (I4). Bounded by the 4h absolute
+        // backstop in `evaluate_stall_watchdog_liveness` like every other
+        // positive-liveness reason (I5).
+        if is_recent_age(
+            self.open_tool_execution_age_secs,
+            STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS,
+        ) {
+            reasons.push("open_tool_execution_recent");
         }
         reasons
     }
@@ -360,12 +400,23 @@ fn capture_offset_advancing(
             .unwrap_or(0)
             .saturating_add(1)
     };
+    // #4400 (a): stamp the advance instant on the advancing tick, carry it
+    // forward otherwise, so the every-tick caller accumulates cross-tick
+    // advance history usable before `evaluate_stall_watchdog_liveness` ever ran.
+    let advanced_at_unix_secs = if observed_advancing {
+        Some(now_unix_secs)
+    } else {
+        previous
+            .as_ref()
+            .and_then(|state| state.advanced_at_unix_secs)
+    };
     CAPTURE_OFFSET_WATCHDOG_STATE.insert(
         key.clone(),
         CaptureOffsetWatchdogState {
             last_seen_capture_offset: current_capture_offset,
             observed_advancing_before,
             consecutive_non_advancing_ticks,
+            advanced_at_unix_secs,
             last_updated_unix_secs: now_unix_secs,
         },
     );
@@ -494,6 +545,7 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
         background_synthetic_activity_age_secs = ?decision.evidence.background_synthetic_activity_age_secs,
         background_synthetic_kind = ?decision.evidence.background_synthetic_kind,
         has_undelivered_backlog = decision.evidence.has_undelivered_backlog,
+        open_tool_execution_age_secs = ?decision.evidence.open_tool_execution_age_secs,
         deferral_count = ?decision.deferral_count(),
         max_deferrals = decision.max_deferrals,
         "  [{ts}] 🌱 STALL-WATCHDOG: deferred forced cleanup for desynced channel {} (provider={}) due to positive liveness evidence",
@@ -558,6 +610,7 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         outbound_activity_age_secs = ?decision.map(|decision| decision.evidence.outbound_activity_age_secs),
         relay_offset_advanced_age_secs = ?decision.and_then(|decision| decision.evidence.relay_offset_advanced_age_secs),
         has_undelivered_backlog = decision.is_some_and(|decision| decision.evidence.has_undelivered_backlog),
+        open_tool_execution_age_secs = ?decision.and_then(|decision| decision.evidence.open_tool_execution_age_secs),
         deferral_count = ?decision.and_then(StallWatchdogLivenessDecision::deferral_count),
         max_deferrals = decision.map(|decision| decision.max_deferrals).unwrap_or(0),
         "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for desynced channel {}",
@@ -626,7 +679,14 @@ impl StallWatchdogLivenessEvidence {
         Self {
             pane_offset_current: snapshot.last_capture_offset,
             pane_offset_previous: pane_observation.previous_offset,
-            pane_offset_advanced_age_secs: pane_observation.advanced_age_secs,
+            // #4400 (a): `observe_pane_offset` needs a prior observation, but it
+            // is only fed once `should_clean` fires — so the FIRST evaluation of
+            // a stalled channel is structurally blind (previous == None) even if
+            // the pane advanced seconds ago. Fall back to the advance history
+            // the every-tick capture watchdog recorded.
+            pane_offset_advanced_age_secs: pane_observation
+                .advanced_age_secs
+                .or_else(|| capture_watchdog_advanced_age_secs(key, now_unix_secs)),
             relay_offset_current: Some(snapshot.last_relay_offset),
             relay_offset_previous: relay_observation.previous_offset,
             relay_offset_advanced_age_secs: relay_observation.advanced_age_secs,
@@ -641,8 +701,56 @@ impl StallWatchdogLivenessEvidence {
                 .map(|(_, age)| *age),
             background_synthetic_kind: background_synthetic.map(|(kind, _)| kind),
             has_undelivered_backlog: has_undelivered_backlog(snapshot, &relay_observation),
+            open_tool_execution_age_secs: open_tool_execution_age_secs(
+                snapshot,
+                inflight,
+                now_unix_secs,
+            ),
         }
     }
+}
+
+/// #4400 (a): fallback pane-advance age sourced from the capture watchdog map,
+/// which is updated EVERY tick (recovery.rs) rather than only after
+/// `should_clean` fires. `None` when the channel has never been observed to
+/// advance (dead-on-arrival keeps pre-#4400 timing).
+fn capture_watchdog_advanced_age_secs(key: &StallLivenessKey, now_unix_secs: i64) -> Option<u64> {
+    CAPTURE_OFFSET_WATCHDOG_STATE
+        .get(key)
+        .and_then(|state| state.advanced_at_unix_secs)
+        .map(|advanced_at| saturating_age_secs(advanced_at, now_unix_secs))
+}
+
+/// #4400 (a): age of `inflight.updated_at` while the row witnesses an
+/// UNRESOLVED tool execution on a live pane; `None` otherwise.
+///
+/// Tool witness, matching what the two writers actually persist:
+/// - `current_tool_line.is_some()` — the watcher path persists this on every
+///   committed streaming edit (`WatcherStreamProgressPatch`, watcher_state.rs),
+///   including TUI-direct zero-id synthetic rows;
+/// - `last_tool_name.is_some() && !has_post_tool_text` — the bridge path
+///   (turn_bridge/stream_tick.rs) persists `last_tool_name`, and
+///   `has_post_tool_text == false` means no assistant text landed after the
+///   last tool call, i.e. the tool phase is still open.
+///
+/// The `tmux_session_alive == Some(true)` gate is invariant I6: a dead pane
+/// never earns this evidence, so dead-turn cleanup timing is unchanged.
+fn open_tool_execution_age_secs(
+    snapshot: &WatcherStateSnapshot,
+    inflight: Option<&InflightTurnState>,
+    now_unix_secs: i64,
+) -> Option<u64> {
+    if snapshot.tmux_session_alive != Some(true) {
+        return None;
+    }
+    let state = inflight?;
+    let open_tool = state.current_tool_line.is_some()
+        || (state.last_tool_name.is_some() && !state.has_post_tool_text);
+    if !open_tool {
+        return None;
+    }
+    crate::services::discord::inflight::parse_updated_at_unix(&state.updated_at)
+        .map(|updated_at| saturating_age_secs(updated_at, now_unix_secs))
 }
 
 fn observe_pane_offset(
@@ -1993,5 +2101,281 @@ mod tests {
         assert!(!liveness_state_present(&old_key));
         assert!(liveness_state_present(&fresh_key));
         clear_stall_watchdog_liveness_state(&provider, fresh_channel, Some(fresh_tmux_session));
+    }
+
+    /// #4400 (a): local-clock string in the on-disk `updated_at`/`started_at`
+    /// format, `age_secs` in the past relative to `now_unix_secs`.
+    fn local_time_string_ago(now_unix_secs: i64, age_secs: i64) -> String {
+        chrono::Local
+            .timestamp_opt(now_unix_secs - age_secs, 0)
+            .earliest()
+            .expect("valid local timestamp")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    /// #4400 (a): a TUI-direct zero-id synthetic row whose persisted tool
+    /// fields witness an unresolved tool execution, `updated_at` aged as given.
+    fn open_tool_inflight(
+        channel_id: u64,
+        tmux_session: &str,
+        output_path: Option<String>,
+        now_unix_secs: i64,
+        updated_age_secs: i64,
+    ) -> InflightTurnState {
+        let mut inflight = inflight_with_output(channel_id, tmux_session, output_path);
+        // Zero-id synthetic row, as minted by the TUI-direct watcher path and
+        // the #3107 self-heal re-acquire.
+        inflight.user_msg_id = 0;
+        // Watcher-persisted witness (`WatcherStreamProgressPatch`): tool line
+        // set, no assistant text after the last tool call.
+        inflight.current_tool_line = Some("⚙ Bash: cargo build --release".to_string());
+        inflight.has_post_tool_text = false;
+        inflight.updated_at = local_time_string_ago(now_unix_secs, updated_age_secs);
+        inflight
+    }
+
+    /// #4400 (a): replay of the 2026-07-07 16:32:19 false positive. The turn
+    /// was 616s old, the transcript mtime was 123s (3s past the 120s freshness,
+    /// so EVERY legacy signal expired simultaneously for the same cause — a
+    /// silent long-running tool), the pane was alive, and the row's persisted
+    /// tool fields witnessed the unresolved tool. Invariant I4: this must
+    /// DEFER via the dedicated 30-minute tool budget.
+    ///
+    /// Mutation proof: removing the open-tool evidence (its collection, the
+    /// reason-code check, or the pane-alive predicate's `is_some` arm) flips
+    /// the decision to `ProceedNoEvidence` and this test FAILS.
+    #[test]
+    fn open_tool_execution_defers_1632_snapshot_replay() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_400_001);
+        let tmux_session = "AgentDesk-codex-4400-tool-phase-replay";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let now = chrono::Utc::now().timestamp();
+
+        let transcript = tempfile::NamedTempFile::new().expect("temp transcript");
+        transcript
+            .as_file()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(123))
+            .expect("set transcript mtime 123s into the past");
+        let inflight = open_tool_inflight(
+            channel.get(),
+            tmux_session,
+            Some(transcript.path().display().to_string()),
+            now,
+            616,
+        );
+        let mut snap = snapshot(channel.get(), tmux_session, Some(20));
+        snap.unread_bytes = Some(0);
+        snap.relay_health.unread_bytes = Some(0);
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(616),
+        );
+        assert_eq!(decision.evidence.open_tool_execution_age_secs, Some(616));
+        // The tool budget must be the ONLY surviving reason: the 123s transcript
+        // mtime and every offset/outbound signal are already stale at 16:32:19.
+        assert_eq!(
+            decision
+                .evidence
+                .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+            "open_tool_execution_recent"
+        );
+        assert!(
+            decision.should_defer(),
+            "live pane + unresolved tool at 616s must defer (I4): {decision:?}"
+        );
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #4400 (a) invariant I6: a DEAD pane never earns the tool-phase budget —
+    /// the same row that defers in the 16:32:19 replay proceeds at the exact
+    /// same tick once `tmux_session_alive != Some(true)`, preserving pre-#4400
+    /// dead-turn cleanup timing (no over-suppression).
+    #[test]
+    fn dead_pane_open_tool_keeps_existing_force_clean_timing() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_400_002);
+        let tmux_session = "AgentDesk-codex-4400-tool-phase-dead-pane";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let now = chrono::Utc::now().timestamp();
+
+        let inflight = open_tool_inflight(channel.get(), tmux_session, None, now, 616);
+        let mut snap = snapshot(channel.get(), tmux_session, Some(20));
+        snap.unread_bytes = Some(0);
+        snap.relay_health.unread_bytes = Some(0);
+        snap.tmux_session_alive = Some(false);
+        snap.relay_health.tmux_alive = Some(false);
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(616),
+        );
+        assert_eq!(
+            decision.evidence.open_tool_execution_age_secs, None,
+            "dead pane must not earn tool-phase evidence (I6)"
+        );
+        assert_eq!(
+            decision.action,
+            StallWatchdogLivenessAction::ProceedNoEvidence
+        );
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #4400 (a): once `updated_at` ages past the 30-minute tool budget the
+    /// evidence stops firing and the first eligible tick proceeds — the budget
+    /// is finite, not an indefinite tool-phase amnesty.
+    #[test]
+    fn open_tool_execution_past_30min_budget_proceeds() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_400_003);
+        let tmux_session = "AgentDesk-codex-4400-tool-phase-budget";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let now = chrono::Utc::now().timestamp();
+        let over_budget = STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS as i64 + 200;
+
+        let inflight = open_tool_inflight(channel.get(), tmux_session, None, now, over_budget);
+        let mut snap = snapshot(channel.get(), tmux_session, Some(20));
+        snap.unread_bytes = Some(0);
+        snap.relay_health.unread_bytes = Some(0);
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(over_budget as u64),
+        );
+        assert_eq!(
+            decision.evidence.open_tool_execution_age_secs,
+            Some(over_budget as u64),
+            "evidence age is still reported past budget for observability"
+        );
+        assert_eq!(
+            decision.action,
+            StallWatchdogLivenessAction::ProceedNoEvidence,
+            "tool budget exhausted must proceed: {decision:?}"
+        );
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #4400 (a) invariant I5: the tool-phase evidence stays SUBORDINATE to the
+    /// #3671 age-based absolute backstop — a turn at the 4h ceiling is cleaned
+    /// even while the tool budget is still fresh.
+    #[test]
+    fn open_tool_execution_stays_subordinate_to_absolute_backstop() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_400_004);
+        let tmux_session = "AgentDesk-codex-4400-tool-phase-backstop";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let now = chrono::Utc::now().timestamp();
+
+        let inflight = open_tool_inflight(channel.get(), tmux_session, None, now, 616);
+        let mut snap = snapshot(channel.get(), tmux_session, Some(20));
+        snap.unread_bytes = Some(0);
+        snap.relay_health.unread_bytes = Some(0);
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS),
+        );
+        assert!(
+            matches!(
+                decision.action,
+                StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop { .. }
+            ),
+            "4h backstop must dominate the tool budget (I5): {decision:?}"
+        );
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #4400 (a): the first liveness evaluation of a stalled channel has no
+    /// prior `OFFSET_OBSERVATIONS` pane entry (it is only fed once
+    /// `should_clean` fires), so the legacy pane-advance signal was
+    /// structurally blind for exactly the tick that decides the cleanup. The
+    /// every-tick capture watchdog's `advanced_at_unix_secs` history must cover
+    /// that first tick.
+    ///
+    /// Mutation proof: removing the `capture_watchdog_advanced_age_secs`
+    /// fallback in `StallWatchdogLivenessEvidence::collect` leaves
+    /// `pane_offset_advanced_age_secs == None` and flips this to Proceed.
+    #[test]
+    fn capture_advance_history_defers_on_threshold_first_tick() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_400_005);
+        let tmux_session = "AgentDesk-codex-4400-first-tick-fallback";
+        let _root = isolated_runtime_root();
+        let key = liveness_key(&provider, channel, tmux_session);
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let now = chrono::Utc::now().timestamp();
+
+        // Pre-threshold ticks: the every-tick capture watchdog records an
+        // advance 60s ago, then the two-tick grace is exhausted so the
+        // `should_clean` gate stops being blocked by `capture_offset_advancing`.
+        assert!(!capture_offset_advancing(&key, Some(100), now - 90));
+        assert!(capture_offset_advancing(&key, Some(200), now - 60));
+        capture_offset_advancing(&key, Some(200), now - 45);
+        capture_offset_advancing(&key, Some(200), now - 30);
+        assert!(!capture_offset_advancing(&key, Some(200), now - 15));
+
+        let inflight = inflight_with_output(channel.get(), tmux_session, None);
+        let mut snap = snapshot(channel.get(), tmux_session, Some(200));
+        snap.unread_bytes = Some(0);
+        snap.relay_health.unread_bytes = Some(0);
+
+        // FIRST-ever evaluation: no pane previous in OFFSET_OBSERVATIONS.
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(616),
+        );
+        assert_eq!(
+            decision.evidence.pane_offset_previous, None,
+            "precondition: the legacy cross-tick pane signal is blind this tick"
+        );
+        assert_eq!(
+            decision.evidence.pane_offset_advanced_age_secs,
+            Some(60),
+            "advance history must backfill the first-tick blindness"
+        );
+        assert_eq!(
+            decision
+                .evidence
+                .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+            "pane_offset_advanced_recently"
+        );
+        assert!(decision.should_defer(), "{decision:?}");
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
     }
 }
