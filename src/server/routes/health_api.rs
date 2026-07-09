@@ -534,6 +534,44 @@ fn delivery_record_rollout_health_json() -> serde_json::Value {
     outbound::delivery_record_rollout_health_json()
 }
 
+/// #4382 / #4386-review defect 1: `degraded_reasons` embeds `provider:<name>:...`
+/// where `<name>` can be an ARBITRARY, operator-chosen string — a legacy
+/// `bot_settings.json` `provider` field is parsed via
+/// `ProviderKind::from_str_or_unsupported`, which preserves the raw value as
+/// `Unsupported(_)` and re-emits it verbatim. Copying reasons unredacted onto the
+/// UNAUTHENTICATED public `/api/health` would leak internal identifiers/hostnames
+/// (e.g. `provider:prod-mini-01:disconnected`), breaking the allowlist guarantee
+/// the public projection is documented to uphold. Rewrite any `provider:<name>:`
+/// whose `<name>` is not a known, supported provider id to
+/// `provider:unsupported:` while preserving the reason classification (which may
+/// itself contain `:` separators). `/api/health/detail` (authenticated) keeps the
+/// verbatim reasons. The rewrite is 1:1 so the `degraded <=> non-empty` invariant
+/// is preserved.
+fn sanitize_public_degraded_reasons(reasons: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Array(items) = reasons else {
+        return serde_json::json!([]);
+    };
+    let supported = crate::services::provider::supported_provider_ids();
+    let sanitized: Vec<serde_json::Value> = items
+        .into_iter()
+        .map(|item| {
+            let Some(reason) = item.as_str() else {
+                return item;
+            };
+            match reason
+                .strip_prefix("provider:")
+                .and_then(|r| r.split_once(':'))
+            {
+                Some((name, tail)) if !supported.contains(&name) => {
+                    serde_json::Value::String(format!("provider:unsupported:{tail}"))
+                }
+                _ => serde_json::Value::String(reason.to_string()),
+            }
+        })
+        .collect();
+    serde_json::Value::Array(sanitized)
+}
+
 fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let status = json
         .get("status")
@@ -582,10 +620,13 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     // public-only consumers stop misattributing the cause to the unrelated
     // `startup_degraded_reasons`. Always present (empty array when absent) so the
     // `degraded <=> degraded_reasons non-empty` invariant holds on the public shape.
-    let degraded_reasons = json
-        .get("degraded_reasons")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
+    // Sanitized to strip operator-chosen provider ids before public exposure
+    // (#4386-review defect 1); see `sanitize_public_degraded_reasons`.
+    let degraded_reasons = sanitize_public_degraded_reasons(
+        json.get("degraded_reasons")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    );
     let mut public = serde_json::json!({
         "ok": !degraded,
         "status": status,
@@ -2254,6 +2295,58 @@ mod tests {
             public["degraded_reasons"],
             public["startup_degraded_reasons"]
         );
+    }
+
+    /// #4386-review defect 1 (P0 security): an operator-chosen provider id (a
+    /// legacy `bot_settings.json` `provider` value preserved verbatim as
+    /// `Unsupported(_)`) must NOT leak on the unauthenticated public
+    /// `/api/health`. `public_health_json` rewrites `provider:<unknown>:<reason>`
+    /// to `provider:unsupported:<reason>`; known providers and non-provider
+    /// reasons are preserved. The detail path (the raw snapshot json) keeps the
+    /// value verbatim — proving the asymmetry the fix relies on.
+    #[test]
+    fn public_health_json_sanitizes_unknown_provider_id_in_reasons() {
+        let full = json!({
+            "status": "unhealthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "degraded_reasons": [
+                "provider:prod-mini-01:disconnected",
+                "provider:codex:pending_queue_depth:2",
+                "provider:claude:deferred_hooks_backlog:3",
+                "db_unavailable"
+            ],
+        });
+        // The detail endpoint serializes the raw snapshot json verbatim — the
+        // internal id is (legitimately) present on the authenticated path.
+        assert!(
+            full.to_string().contains("prod-mini-01"),
+            "detail/raw snapshot must retain the verbatim reason"
+        );
+
+        let public = public_health_json(full);
+        let text = public.to_string();
+        // The operator-chosen id must not appear anywhere in the public body.
+        assert!(
+            !text.contains("prod-mini-01"),
+            "internal provider id leaked on public health: {text}"
+        );
+        // Unknown id replaced by the `unsupported` placeholder (reason kept);
+        // known providers and non-provider reasons pass through untouched.
+        assert_eq!(
+            public["degraded_reasons"],
+            json!([
+                "provider:unsupported:disconnected",
+                "provider:codex:pending_queue_depth:2",
+                "provider:claude:deferred_hooks_backlog:3",
+                "db_unavailable"
+            ])
+        );
+        // Sanitization is 1:1, so the degraded<=>non-empty invariant still holds.
+        assert_eq!(public["degraded"], json!(true));
+        assert_eq!(public["degraded_reasons"].as_array().unwrap().len(), 4);
     }
 
     /// [TEST-003] public health omits the per-server OpenCode warm_servers
