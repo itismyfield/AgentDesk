@@ -1,8 +1,9 @@
 //! #4367: LIVE status-panel `Subagents` section rendering, split out of
 //! `status_panel.rs` to keep that file within the placeholder_live_events
 //! namespace size cap (mirrors what `task_panel.rs` does for the Tasks section
-//! after #4093). Owns the subagent-slot render helper and the in-progress-only
-//! live filter; the `SubagentSlot` model and its lifecycle state machine stay in
+//! after #4093). Owns the subagent-slot render helper, the in-progress-only
+//! live filter, and (#4396) the pure `SubagentEnd` fallback slot-matching
+//! queries; the `SubagentSlot` model and its lifecycle state machine stay in
 //! `status_panel.rs`, and the completion footer keeps its own terminal-aware
 //! subagent rendering.
 
@@ -101,4 +102,71 @@ pub(super) fn render_live_subagents_section(subagents: &[SubagentSlot]) -> Optio
 
 fn sanitize_label(raw: &str) -> String {
     sanitized_tool_name(raw).unwrap_or_else(|| "Task".to_string())
+}
+
+/// #4177: conservative auxiliary pairing for a genuine `SubagentEnd` that missed
+/// its exact `tool_use_id` match (or, #4396, carries no id at all): the UNIQUE
+/// unfinished slot with the same agent_id, else the UNIQUE unfinished slot with
+/// the same desc. Zero or ambiguous candidates match nothing — the caller drops
+/// the event rather than guess.
+pub(super) fn match_subagent_end_fallback(
+    slots: &[SubagentSlot],
+    agent_id: Option<&str>,
+    desc: Option<&str>,
+) -> Option<usize> {
+    if let Some(agent_id) = clean_match_key(agent_id) {
+        match unique_unfinished_subagent(slots, |slot| slot.agent_id.as_deref() == Some(agent_id)) {
+            Ok(Some(index)) => return Some(index),
+            Err(()) => return None,
+            Ok(None) => {}
+        }
+    }
+    let desc = clean_match_key(desc)?;
+    unique_unfinished_subagent(slots, |slot| slot.desc == desc).ok()?
+}
+
+fn unique_unfinished_subagent(
+    slots: &[SubagentSlot],
+    mut matches: impl FnMut(&SubagentSlot) -> bool,
+) -> Result<Option<usize>, ()> {
+    let mut found = None;
+    for (index, slot) in slots.iter().enumerate().rev() {
+        if slot.finished.is_none() && matches(slot) {
+            if found.is_some() {
+                return Err(());
+            }
+            found = Some(index);
+        }
+    }
+    Ok(found)
+}
+
+pub(super) fn clean_match_key(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// #4396 point 2: match-basis observability for an id-less terminal end — which
+/// slot a unique agent_id/desc match closed, or that the event was dropped.
+pub(super) fn log_idless_terminal_fallback(
+    slots: &[SubagentSlot],
+    matched: Option<usize>,
+    agent_id: Option<&str>,
+    desc: Option<&str>,
+) {
+    match matched {
+        Some(index) => tracing::info!(
+            target: "agentdesk::discord::live_panel",
+            agent_id = agent_id.unwrap_or(""),
+            desc = desc.unwrap_or(""),
+            slot_tool_use_id = slots[index].tool_use_id.as_deref().unwrap_or(""),
+            slot_ordinal = slots[index].ordinal,
+            "#4396: id-less terminal subagent end closed its unique agent_id/desc-matched slot"
+        ),
+        None => tracing::info!(
+            target: "agentdesk::discord::live_panel",
+            agent_id = agent_id.unwrap_or(""),
+            desc = desc.unwrap_or(""),
+            "#4396: id-less terminal subagent end dropped (zero or ambiguous slot match)"
+        ),
+    }
 }

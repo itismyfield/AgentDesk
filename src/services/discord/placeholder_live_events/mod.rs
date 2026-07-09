@@ -550,10 +550,21 @@ impl PlaceholderLiveEvents {
             .status_by_channel
             .get(&channel_id)
             .map(|entry| {
-                entry
+                let mut guard = entry
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // #4396 point 2: the #4177 stuck-subagent TTL sweep used to run
+                // only at turn-boundary resets, which a long single turn never
+                // crosses — sweep on the periodic panel render tick too, so a
+                // stuck background subagent slot is bounded by its silence TTL
+                // instead of by turn length. Slot activity refreshes the TTL
+                // clock (see `SubagentSlot::started_at`), so a live noisy slot
+                // is never force-aborted here.
+                status_panel::force_abort_stuck_subagent_slots(
+                    &mut guard.subagents,
+                    Instant::now(),
+                );
+                guard.clone()
             })
             .unwrap_or_default();
         // #4093 + #4367 후속: the #3404 live-panel terminal-slot compaction (and

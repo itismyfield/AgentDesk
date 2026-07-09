@@ -8,7 +8,10 @@ use super::common::{
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
-use super::subagent_panel::render_live_subagents_section;
+use super::subagent_panel::{
+    clean_match_key, log_idless_terminal_fallback, match_subagent_end_fallback,
+    render_live_subagents_section,
+};
 use super::task_panel::{
     STUCK_BACKGROUND_TASK_TTL, TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot,
     force_abort_stuck_background_task_slots, render_live_tasks_section, render_task_panel_line,
@@ -31,7 +34,8 @@ pub(super) struct SubagentSlot {
     /// #3084: Task tool-use id that opened this slot, so `SubagentEnd` closes the
     /// exact slot among parallels instead of the first unfinished one.
     pub(super) tool_use_id: Option<String>,
-    agent_id: Option<String>,
+    // #4177/#4396: read by `subagent_panel::match_subagent_end_fallback`.
+    pub(super) agent_id: Option<String>,
     /// #3086: TUI-parity accounting from the finishing `SubagentEnd`; drives the
     /// `Done (N tools · M tokens · Xs)` summary on the render line.
     // #4367: read by the extracted `subagent_panel::render_subagent_slot`.
@@ -41,9 +45,12 @@ pub(super) struct SubagentSlot {
     background: bool,
     /// #3391: monotonic, never-reused per-entry slot id (mirrors
     /// `TaskToolSlot::ordinal`) backing slot-identity subagent eviction.
-    ordinal: u64,
-    /// #4177: monotonic creation instant. Turn-boundary reconciliation force-aborts
-    /// a stuck background subagent older than `STUCK_BACKGROUND_TASK_TTL`.
+    // #4396: read by `subagent_panel::log_idless_terminal_fallback`.
+    pub(super) ordinal: u64,
+    /// #4177: monotonic creation instant, refreshed on observed slot activity
+    /// (#4396 — so the TTL measures SILENCE, not lifetime). The stuck-slot sweep
+    /// (turn boundary + periodic render tick) force-aborts a background subagent
+    /// silent longer than `STUCK_BACKGROUND_TASK_TTL`.
     pub(super) started_at: std::time::Instant,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -275,6 +282,7 @@ impl StatusPanelState {
                     .find(|slot| slot.finished.is_none())
                 {
                     slot.recent = Some(normalize_summary(&summary));
+                    slot.started_at = std::time::Instant::now(); // #4396: alive — reset the TTL clock.
                     self.status = DerivedStatus::SubagentRunning {
                         desc: slot.desc.clone(),
                     };
@@ -320,6 +328,29 @@ impl StatusPanelState {
                         .subagents
                         .iter()
                         .rposition(|slot| slot.finished.is_none() && slot.tool_use_id.is_none()),
+                    // #4396 point 2: an id-less GENUINE end that carries a match
+                    // key (async task-notification without `<tool-use-id>`) closes
+                    // ONLY a uniquely agent_id/desc-matched slot — zero/ambiguous
+                    // matches drop the event (a stale running slot beats
+                    // finalizing/evicting the wrong one). Key-LESS id-less ends
+                    // below keep the legacy last-unfinished fallback (`system`
+                    // stream path / failed id-less launches).
+                    None if clean_match_key(agent_id.as_deref()).is_some()
+                        || clean_match_key(desc.as_deref()).is_some() =>
+                    {
+                        let matched = match_subagent_end_fallback(
+                            &self.subagents,
+                            agent_id.as_deref(),
+                            desc.as_deref(),
+                        );
+                        log_idless_terminal_fallback(
+                            &self.subagents,
+                            matched,
+                            agent_id.as_deref(),
+                            desc.as_deref(),
+                        );
+                        matched
+                    }
                     None => self
                         .subagents
                         .iter()
@@ -498,6 +529,7 @@ impl StatusPanelState {
             if !summary.trim().is_empty() {
                 slot.recent = Some(summary);
             }
+            slot.started_at = std::time::Instant::now(); // #4396: alive — reset the TTL clock.
         }
     }
 
@@ -674,10 +706,13 @@ impl SubagentSlot {
     }
 }
 
-/// #4177: at a turn boundary, force any background subagent slot that is still
-/// unfinished AND older than `STUCK_BACKGROUND_TASK_TTL` to terminal failed. Its
-/// terminal notification never arrived, so it would otherwise survive every
-/// residual-preserving reset as a ghost running entry. Returns the number swept.
+/// #4177: force any background subagent slot that is still unfinished AND silent
+/// longer than `STUCK_BACKGROUND_TASK_TTL` to terminal failed. Its terminal
+/// notification never arrived, so it would otherwise survive every
+/// residual-preserving reset as a ghost running entry. Runs at turn boundaries
+/// and (#4396 point 2) on the periodic panel render tick, so a long single turn
+/// bounds a stuck slot by the TTL instead of by turn length. Returns the number
+/// swept.
 pub(super) fn force_abort_stuck_subagent_slots(
     slots: &mut [SubagentSlot],
     now: std::time::Instant,
@@ -700,42 +735,6 @@ pub(super) fn force_abort_stuck_subagent_slots(
         );
     }
     swept
-}
-
-fn match_subagent_end_fallback(
-    slots: &[SubagentSlot],
-    agent_id: Option<&str>,
-    desc: Option<&str>,
-) -> Option<usize> {
-    if let Some(agent_id) = clean_match_key(agent_id) {
-        match unique_unfinished_subagent(slots, |slot| slot.agent_id.as_deref() == Some(agent_id)) {
-            Ok(Some(index)) => return Some(index),
-            Err(()) => return None,
-            Ok(None) => {}
-        }
-    }
-    let desc = clean_match_key(desc)?;
-    unique_unfinished_subagent(slots, |slot| slot.desc == desc).ok()?
-}
-
-fn unique_unfinished_subagent(
-    slots: &[SubagentSlot],
-    mut matches: impl FnMut(&SubagentSlot) -> bool,
-) -> Result<Option<usize>, ()> {
-    let mut found = None;
-    for (index, slot) in slots.iter().enumerate().rev() {
-        if slot.finished.is_none() && matches(slot) {
-            if found.is_some() {
-                return Err(());
-            }
-            found = Some(index);
-        }
-    }
-    Ok(found)
-}
-
-fn clean_match_key(raw: Option<&str>) -> Option<&str> {
-    raw.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn trim_subagents(slots: &mut Vec<SubagentSlot>) {

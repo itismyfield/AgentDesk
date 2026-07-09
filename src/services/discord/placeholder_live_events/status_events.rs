@@ -282,11 +282,13 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
         parsed.tool_use_id.as_deref(),
         agent_id,
     );
-    // #3393 finding 1 (XML-scoped): drop an id-less terminal `SubagentEnd` — it
-    // would fall back in the panel to "the last unfinished slot" and flip/evict
-    // the WRONG one (permanently, post-#3391). A missing id → no terminal effect
-    // (heartbeat/activity kept). The `system` path keeps its id-less fallback.
-    events.into_iter().filter(idful_subagent_or_other).collect()
+    // #3393 finding 1 (XML-scoped), narrowed by #4396 point 2: drop an id-less
+    // terminal `SubagentEnd` only when it ALSO carries no fallback key. With an
+    // agent_id/desc key the panel closes ONLY a uniquely matching slot (zero or
+    // ambiguous matches are dropped there — see `StatusPanelState::apply`), so
+    // async completions whose notification omits `<tool-use-id>` still land
+    // without ever guessing "the last unfinished slot" (the pre-#3393 bug).
+    events.into_iter().filter(keyed_subagent_or_other).collect()
 }
 
 /// #4097: `kind=background` XML task-notification cards are noisy lifecycle
@@ -304,9 +306,19 @@ fn background_task_notification_xml_status_transition(kind: &str, status: Option
     kind == "background" && status.is_some_and(|value| !value.trim().is_empty())
 }
 
-/// #3393 finding 1 XML-bridge drop predicate: `false` for an id-less `SubagentEnd`.
-fn idful_subagent_or_other(event: &StatusEvent) -> bool {
-    !matches!(event, StatusEvent::SubagentEnd { tool_use_id, .. } if tool_use_id.is_none())
+/// #3393/#4396 XML-bridge drop predicate: `false` only for an id-less
+/// `SubagentEnd` with NO fallback match key (agent_id and desc both absent —
+/// both are emitted pre-cleaned, `Some` iff non-empty).
+fn keyed_subagent_or_other(event: &StatusEvent) -> bool {
+    !matches!(
+        event,
+        StatusEvent::SubagentEnd {
+            tool_use_id: None,
+            agent_id: None,
+            desc: None,
+            ..
+        }
+    )
 }
 
 pub(in crate::services::discord) fn status_events_from_json(value: &Value) -> Vec<StatusEvent> {
