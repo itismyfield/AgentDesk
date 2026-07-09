@@ -6,9 +6,9 @@
 
 Automated audit of giant files, route SRP violations, direct Discord sends, service-to-server backflow, manual JSON row mapping, limit/days clamp duplication, git subprocess callsites, legacy SQLite references, source-of-truth alias writes, and namespace size caps. See `scripts/audit_maintainability.py` (#1282).
 
-Hard-gating is **enabled** for 8 checks: `giant_files`, `giant_file_ratchet`, `namespace_size_caps`, `direct_discord_sends`, `manual_json_row_mapping`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
+Hard-gating is **enabled** for 10 checks: `giant_files`, `giant_file_ratchet`, `namespace_size_caps`, `direct_discord_sends`, `direct_discord_reactions`, `footer_view_writes`, `manual_json_row_mapping`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
 
-Baseline no-regression gates are **enabled** for 2 checks: `route_srp_violations`, `service_server_backflow`.
+Baseline no-regression gates are **enabled** for 3 checks: `parent_test_residue`, `route_srp_violations`, `service_server_backflow`.
 
 ## Summary
 
@@ -16,10 +16,13 @@ Baseline no-regression gates are **enabled** for 2 checks: `route_srp_violations
 |---|---:|:--:|:--:|
 | `giant_files` | 0 | YES | no |
 | `giant_file_ratchet` | 0 | YES | no |
+| `parent_test_residue` | 6 | no | YES |
 | `namespace_size_caps` | 0 | YES | no |
-| `route_srp_violations` | 12 | no | YES |
+| `route_srp_violations` | 10 | no | YES |
 | `service_server_backflow` | 0 | no | YES |
 | `direct_discord_sends` | 0 | YES | no |
+| `direct_discord_reactions` | 0 | YES | no |
+| `footer_view_writes` | 0 | YES | no |
 | `manual_json_row_mapping` | 0 | YES | no |
 | `limit_clamp_duplication` | 0 | no | no |
 | `git_subprocess_callsites` | 0 | YES | no |
@@ -38,6 +41,19 @@ Production giants listed in scripts/audit_maintainability_giant_baseline.toml mu
 
 _No findings._
 
+## Parent test residue (`parent_test_residue`)
+
+Decomposition parents whose inline test LoC exceeds 3x their production LoC (files >= 500 raw lines). Migrate stranded tests with the production code; frozen offenders are baselined in scripts/audit_maintainability_config.toml.
+
+| Severity | File | Line | Message |
+|---|---|---:|---|
+| warn | `src/services/discord/inflight.rs` |  | 5451 test LoC vs 590 prod LoC (ratio 9.24x > 3x, 6041 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/inflight/save_store.rs` |  | 730 test LoC vs 235 prod LoC (ratio 3.11x > 3x, 965 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs` |  | 711 test LoC vs 233 prod LoC (ratio 3.05x > 3x, 944 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` |  | 450 test LoC vs 131 prod LoC (ratio 3.44x > 3x, 581 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_finalizer.rs` |  | 3992 test LoC vs 1048 prod LoC (ratio 3.81x > 3x, 5040 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_finalizer/delivery_lease.rs` |  | 428 test LoC vs 87 prod LoC (ratio 4.92x > 3x, 515 raw); migrate the stranded tests with the decomposed production code |
+
 ## Namespace size caps (`namespace_size_caps`)
 
 Production Rust files under configured namespaces must stay within their per-namespace caps from scripts/audit_maintainability_config.toml.
@@ -53,17 +69,12 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 | warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (40), json!() (77), and crate::services calls (7) |
 | warn | `src/server/routes/agents_setup.rs` |  | route file mixes SQL (7), json!() (12), and crate::services calls (2) |
 | warn | `src/server/routes/cron_api.rs` |  | route file mixes SQL (2), json!() (12), and crate::services calls (1) |
-| warn | `src/server/routes/dispatches/thread_reuse.rs` |  | route file mixes SQL (12), json!() (22), and crate::services calls (2) |
 | warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (24), json!() (24), and crate::services calls (3) |
-| warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (30), and crate::services calls (5) |
-| warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (34), and crate::services calls (5) |
-| warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (30), json!() (103), and crate::services calls (15) |
-| warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (30), json!() (106), and crate::services calls (17) |
-| warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (8), json!() (16), and crate::services calls (8) |
+| warn | `src/server/routes/github.rs` |  | route file mixes SQL (6), json!() (44), and crate::services calls (1) |
 | warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (17), json!() (18), and crate::services calls (7) |
 | warn | `src/server/routes/provider_cli_api.rs` |  | route file mixes SQL (3), json!() (12), and crate::services calls (6) |
 | warn | `src/server/routes/queue_api.rs` |  | route file mixes SQL (4), json!() (15), and crate::services calls (3) |
-| warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (19), and crate::services calls (5) |
+| warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (20), and crate::services calls (5) |
 | warn | `src/server/routes/stats.rs` |  | route file mixes SQL (32), json!() (10), and crate::services calls (2) |
 
 ## Service/server backflow (`service_server_backflow`)
@@ -75,6 +86,18 @@ _No findings._
 ## Direct Discord send/edit (`direct_discord_sends`)
 
 Direct serenity send_message/edit_message/reply calls outside the outbound queue (src/services/discord/outbound/, message_outbox.rs).
+
+_No findings._
+
+## Direct Discord reactions (`direct_discord_reactions`)
+
+Direct serenity create_reaction/delete_reaction or raw reaction wrapper calls outside reaction_lifecycle.rs and turn_view_reconciler*.
+
+_No findings._
+
+## Footer view writes (`footer_view_writes`)
+
+Completion-footer registry/write calls outside footer_view_reconciler, plus live footer/status-panel write paths that must be allowlisted until S4-b2.
 
 _No findings._
 
@@ -107,3 +130,4 @@ _No findings._
 File-write callsites that touch alias paths listed in docs/source-of-truth.md. Writes should target the canonical path.
 
 _No findings._
+
