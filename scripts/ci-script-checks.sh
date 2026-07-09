@@ -168,6 +168,23 @@ echo "=== Agent maintenance freshness gate (warn, #1432; LoC hard-gate, #3036) =
 # freeze entries, and decomposition regressions.
 "$PYTHON" scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate
 
+echo "=== Shell test suites (tests/*.sh) ==="
+# #4255: these suites existed but NOTHING executed them — `tests/**` appears in
+# ci-pr.yml only as a path filter that triggers the Rust jobs. Their assertions
+# had therefore never run on CI, so a shell guard could regress (or ship broken)
+# while every required check stayed green. Run them here, in the job that already
+# owns script-level gates.
+SHELL_TESTS_FAILED=0
+for shell_test in tests/*.sh; do
+  [ -f "$shell_test" ] || continue
+  echo "--- $shell_test"
+  bash "$shell_test" || SHELL_TESTS_FAILED=1
+done
+if [ "$SHELL_TESTS_FAILED" -ne 0 ]; then
+  echo "one or more tests/*.sh suites failed" >&2
+  exit 1
+fi
+
 echo "=== Agent maintenance freshness tests ==="
 "$PYTHON" -m unittest tests.test_agent_maintenance_docs
 
