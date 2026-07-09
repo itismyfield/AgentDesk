@@ -13,17 +13,23 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
+import scripts.relay_watchdog as relay_watchdog
 from scripts.relay_watchdog import (
     STATE_GAP,
     STATE_LAGGING,
     STATE_OK,
+    ChannelConfig,
+    Config,
     ConfigError,
+    Runtime,
     assistant_blocks_from_lines,
     channel_project_dirs,
     delivered,
@@ -36,6 +42,7 @@ from scripts.relay_watchdog import (
     parse_transcript_ts,
     project_slug,
     save_state,
+    tick_channel,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -356,6 +363,267 @@ class StateTests(unittest.TestCase):
             self.assertEqual(load_state(Path(tmp) / "missing.json"), {})
 
 
+TICK_CHANNEL = ChannelConfig(
+    channel_id="999",
+    sendmessage_key="k",
+    worktree_root=WORKTREE_ROOT,
+)
+
+
+class FakeRuntime(Runtime):
+    """Runtime with every subprocess/network edge stubbed; tick_channel logic
+    (including the REAL in_deploy_window file check) runs unmodified."""
+
+    def __init__(self, cfg: Config, root: Path) -> None:
+        super().__init__(cfg, root)
+        self.alerts: list[tuple[str, bool]] = []
+        self.log_lines: list[str] = []
+        self.haystack: str | None = ""
+        self.issue_calls = 0
+
+    def log(self, msg: str) -> None:
+        self.log_lines.append(msg)
+
+    def discord_haystack(self, channel_id: str) -> str | None:
+        return self.haystack
+
+    def dcserver_snapshot(self) -> str:
+        return "stub-snapshot"
+
+    def alert(self, ch, body: str, trigger_turn: bool = True) -> None:
+        self.alerts.append((body, trigger_turn))
+
+    def file_github_issue(self, ch, gap_min: int, lost: int) -> str:
+        self.issue_calls += 1
+        return f"https://example.test/issues/{self.issue_calls}"
+
+
+class TickChannelTests(unittest.TestCase):
+    """Orchestration-level behavior: suppression windows, cooldown, recovery,
+    issue dedup, read-failure escalation. These exercise tick_channel itself —
+    the pure-judgment tests above cannot catch a broken wiring of it (adversarial
+    review finding on PR #4399: neutering in_deploy_window left 35/35 green)."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "logs").mkdir()
+        self.projects = self.root / "projects"
+        self.proj_dir = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260709-140500"
+        )
+        self.proj_dir.mkdir(parents=True)
+        env = mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECTS_ROOT": str(self.projects)}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.now = time.time()
+
+    def write_transcript(self, blocks: list[tuple[float, str]]) -> None:
+        lines = []
+        for epoch, text in blocks:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": ts,
+                        "message": {"content": [{"type": "text", "text": text}]},
+                    }
+                )
+            )
+        (self.proj_dir / "s.jsonl").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+    def make_rt(self, **cfg_overrides) -> FakeRuntime:
+        cfg = Config(channels=(TICK_CHANNEL,), **cfg_overrides)
+        return FakeRuntime(cfg, self.root)
+
+    def gap_rt(self, **cfg_overrides) -> FakeRuntime:
+        # One stale undelivered block, nothing ever delivered → GAP verdict.
+        self.write_transcript([(self.now - 2000, "never delivered block")])
+        rt = self.make_rt(**cfg_overrides)
+        rt.haystack = ""
+        return rt
+
+    # (a) deploy-window suppression — REAL in_deploy_window runs against a real
+    # marker file, so replacing it with `return False` fails this test.
+    def test_fresh_deploy_marker_suppresses_gap_alert(self):
+        rt = self.gap_rt()
+        # Positive control first: without a marker the same scenario alerts.
+        tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        self.assertEqual(len(rt.alerts), 1, "control: gap must alert sans marker")
+
+        rt2 = self.gap_rt()
+        rt2.deploy_marker.touch()
+        state: dict = {}
+        tick_channel(rt2, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt2.alerts, [], "fresh deploy marker must suppress alerts")
+        self.assertTrue(any("deploy window" in l for l in rt2.log_lines))
+        self.assertNotIn("last_alert", state.get("999", {}))
+
+    def test_stale_deploy_marker_does_not_suppress(self):
+        rt = self.gap_rt()
+        rt.deploy_marker.touch()
+        old = self.now - rt.cfg.deploy_quiet_secs - 1
+        os.utime(rt.deploy_marker, (old, old))
+        tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        self.assertEqual(len(rt.alerts), 1)
+
+    # (b) cooldown / re-alert boundary
+    def test_cooldown_suppresses_realert_until_boundary(self):
+        rt = self.gap_rt()
+        state = {"999": {"last_alert": self.now - (rt.cfg.realert_secs - 1)}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        self.assertTrue(any("cooldown" in l for l in rt.log_lines))
+
+        rt2 = self.gap_rt()
+        state2 = {"999": {"last_alert": self.now - rt2.cfg.realert_secs}}
+        tick_channel(rt2, TICK_CHANNEL, state2, self.now)
+        self.assertEqual(len(rt2.alerts), 1)
+        self.assertEqual(state2["999"]["last_alert"], self.now)
+        self.assertTrue(state2["999"]["alerting"])
+
+    # (c) recovery auto-clear
+    def test_recovery_sends_notice_and_clears_alert_state(self):
+        self.write_transcript([(self.now - 2000, "landed fine in discord")])
+        rt = self.make_rt()
+        rt.haystack = norm("landed fine in discord")
+        state = {
+            "999": {
+                "alerting": True,
+                "gap_since": self.now - 3000,
+                "issue_url": "https://example.test/issues/7",
+                "last_alert": self.now - 60,
+            }
+        }
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(len(rt.alerts), 1)
+        body, trigger_turn = rt.alerts[0]
+        self.assertIn("해소", body)
+        self.assertIn("https://example.test/issues/7", body)
+        self.assertFalse(trigger_turn, "recovery notice must not trigger a turn")
+        for cleared in ("alerting", "gap_since", "issue_url"):
+            self.assertNotIn(cleared, state["999"])
+
+    def test_ok_without_prior_alert_sends_nothing(self):
+        self.write_transcript([(self.now - 2000, "landed fine in discord")])
+        rt = self.make_rt()
+        rt.haystack = norm("landed fine in discord")
+        tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        self.assertEqual(rt.alerts, [])
+
+    # (d) persistent-gap issue auto-filing is deduplicated
+    def test_persistent_gap_files_issue_exactly_once(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        state = {"999": {"gap_since": self.now - rt.cfg.issue_after_secs - 1}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.issue_calls, 1)
+        self.assertEqual(state["999"]["issue_url"], "https://example.test/issues/1")
+        self.assertIn("https://example.test/issues/1", rt.alerts[0][0])
+
+        # Second tick, gap still open: issue_url in state must prevent a dupe.
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(rt.issue_calls, 1, "issue must be filed exactly once")
+
+    def test_no_github_repo_configured_files_nothing(self):
+        rt = self.gap_rt()  # github_repo defaults to ""
+        state = {"999": {"gap_since": self.now - rt.cfg.issue_after_secs - 1}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.issue_calls, 0)
+
+    # (e) consecutive discord-read failures escalate to an alert
+    def test_read_failure_threshold_escalates(self):
+        self.write_transcript([(self.now - 60, "fresh block")])
+        rt = self.make_rt()
+        rt.haystack = None  # discord read failing
+        state = {"999": {"read_failures": rt.cfg.read_fail_alert_after - 2}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [], "below threshold must only log")
+        self.assertEqual(
+            state["999"]["read_failures"], rt.cfg.read_fail_alert_after - 1
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(len(rt.alerts), 1, "threshold reached must alert")
+        self.assertIn("연속 실패", rt.alerts[0][0])
+        self.assertEqual(state["999"]["last_alert"], self.now)
+
+    def test_read_success_resets_failure_counter(self):
+        self.write_transcript([(self.now - 60, "fresh block")])
+        rt = self.make_rt()
+        rt.haystack = norm("fresh block")
+        state = {"999": {"read_failures": 4}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(state["999"]["read_failures"], 0)
+
+
+class AlertFallbackTests(unittest.TestCase):
+    """(f) Runtime.alert delivery chain: announce-bot primary, bot-token
+    fallback. The fallback is the only path proven to survive the 07-09 outage;
+    a broken handoff would silently swallow the alert."""
+
+    CH = ChannelConfig(
+        channel_id="999",
+        sendmessage_key="key123",
+        worktree_root=WORKTREE_ROOT,
+        announce_to="project-agentdesk",
+    )
+
+    def _run_alert(self, announce_rc: int) -> list[list[str]]:
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            rc = announce_rc if "send-to-agent" in argv else 0
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(Config(channels=(self.CH,)), Path(tmp))
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                rt.alert(self.CH, "alert body")
+        return calls
+
+    def test_announce_failure_falls_back_to_sendmessage(self):
+        calls = self._run_alert(announce_rc=1)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("send-to-agent", calls[0])
+        # The unfulfillable-contract guard: --expect-reply must be false.
+        self.assertIn("--expect-reply", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--expect-reply") + 1], "false")
+        self.assertIn("discord-sendmessage", calls[1])
+        self.assertIn("key123", calls[1])
+
+    def test_announce_success_skips_fallback(self):
+        calls = self._run_alert(announce_rc=0)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("send-to-agent", calls[0])
+
+    def test_no_announce_target_goes_straight_to_sendmessage(self):
+        ch = ChannelConfig(
+            channel_id="999", sendmessage_key="key123", worktree_root=WORKTREE_ROOT
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(Config(channels=(ch,)), Path(tmp))
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                rt.alert(ch, "alert body")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("discord-sendmessage", calls[0])
+
+
 class DeploymentWiringTests(unittest.TestCase):
     """#4372 lesson: a test that CI never runs is a graveyard, and a script the
     deploy never ships evaporates (the 06-29 relay-gap-watch, the 07-09
@@ -373,6 +641,11 @@ class DeploymentWiringTests(unittest.TestCase):
         )
         self.assertIn("scripts/relay_watchdog.py", deploy)
         self.assertIn("com.agentdesk.relay-watchdog", deploy)
+        # Fail-open invariant (adversarial review, PR #4399): the watchdog block
+        # runs after DEPLOY_OK, so a plist write failure must warn and continue
+        # — never abort a healthy deploy or skip manifest/peer propagation.
+        self.assertIn("_install_relay_watchdog_plist", deploy)
+        self.assertIn("Relay watchdog plist write FAILED", deploy)
         # Deploy-window suppression contract: deploy must touch the marker the
         # watchdog checks before restarting dcserver.
         self.assertIn("relay-watchdog.deploy-marker", deploy)

@@ -1707,8 +1707,16 @@ echo "▸ Installing out-of-band relay watchdog (#4381)..."
 if install -m 0755 "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
     if [ -f "$WATCHDOG_CONFIG" ]; then
         WATCHDOG_PYTHON="$(command -v python3 || echo /usr/bin/python3)"
-        mkdir -p "$HOME/Library/LaunchAgents"
-        cat > "$WATCHDOG_PLIST_PATH" <<PLIST_EOF
+        # INVARIANT: the ENTIRE watchdog block is fail-open. We are past
+        # DEPLOY_OK, so any failure here (permissions, full disk, launchd)
+        # must degrade to a loud ⚠ warning and let the script continue —
+        # aborting would poison the exit code of a HEALTHY deploy and skip
+        # _write_release_source_manifest / _deploy_to_all_peers below.
+        # The function body runs from an `if` guard, so `set -e` is suspended
+        # inside it; every step therefore carries its own `|| return 1`.
+        _install_relay_watchdog_plist() {
+            mkdir -p "$HOME/Library/LaunchAgents" || return 1
+            cat > "$WATCHDOG_PLIST_PATH.tmp" <<PLIST_EOF || return 1
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1729,13 +1737,23 @@ if install -m 0755 "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
 </dict>
 </plist>
 PLIST_EOF
-        xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
-        # bootout+bootstrap (not kickstart) so a script/plist change is picked up.
-        launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
-        if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
-            echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
+            # Atomic publish: launchd never sees a half-written plist, and an
+            # interrupted write leaves only the .tmp (cleaned by the caller).
+            mv -f "$WATCHDOG_PLIST_PATH.tmp" "$WATCHDOG_PLIST_PATH" || return 1
+        }
+        if _install_relay_watchdog_plist; then
+            xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
+            # bootout+bootstrap (not kickstart) so a script/plist change is picked up.
+            launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
+            if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+                echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
+            else
+                echo "⚠ Relay watchdog bootstrap FAILED — relay gaps will go unwatched"
+            fi
         else
-            echo "⚠ Relay watchdog bootstrap FAILED — relay gaps will go unwatched"
+            rm -f "$WATCHDOG_PLIST_PATH.tmp" 2>/dev/null || true
+            echo "⚠ Relay watchdog plist write FAILED ($WATCHDOG_PLIST_PATH) — not armed"
+            echo "  Deploy continues (fail-open): fix permissions/disk space and redeploy."
         fi
     else
         echo "⚠ Relay watchdog config missing: $WATCHDOG_CONFIG"
