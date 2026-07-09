@@ -444,8 +444,41 @@ class DiscordHaystackShapeTests(unittest.TestCase):
             '[null, 7, {"author": {"bot": true}, "content": "hello  world"}]'
         )
         self.assertEqual(out, "hello world")
-        self.assertIn("skipped 2 non-object message entries", log)
+        self.assertIn("skipped 2 malformed message entries", log)
         self.assertIn("schema drift", log)
+
+    # r6 review (PR #4399): entries that ARE dicts but carry a non-dict
+    # `author` (`{"author": "bot"}` → AttributeError) or a non-string
+    # `content` (TypeError at join) used to raise instead of classifying —
+    # a generic tick error that bypassed the read_failures escalation, the
+    # same failure class r4/r5 closed for non-dict shapes.
+    def test_all_malformed_dict_entries_is_read_failure_not_exception(self):
+        for stdout in (
+            '[{"author": "bot", "content": "x"}]',
+            '[{"author": {"bot": true}, "content": [1, 2]}]',
+            '[{"author": "bot"}, {"author": {"bot": true}, "content": 7}]',
+        ):
+            with self.subTest(stdout=stdout):
+                self.assertIsNone(self._haystack_for(stdout))
+
+    def test_malformed_dict_entry_mixed_with_valid_is_skipped_with_trace(self):
+        out, log = self._probe(
+            '[{"author": "bot", "content": "bad"},'
+            ' {"author": {"bot": true}, "content": "good"}]'
+        )
+        self.assertEqual(out, "good")
+        self.assertIn("skipped 1 malformed message entries", log)
+        self.assertIn("schema drift", log)
+
+    def test_absent_author_and_absent_content_stay_well_formed(self):
+        # A dict entry missing `author`/`content` was always tolerated (a
+        # non-bot or empty message) — r6 must not reclassify it as drift.
+        out, log = self._probe(
+            '[{}, {"author": {"bot": true}, "content": "ok"},'
+            ' {"author": {"bot": true}}]'
+        )
+        self.assertEqual(out, "ok")
+        self.assertNotIn("schema drift", log)
 
     def test_valid_shapes_still_parse(self):
         self.assertEqual(

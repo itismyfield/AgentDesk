@@ -442,23 +442,39 @@ class Runtime:
             return None
         if not isinstance(msgs, list):
             return None
-        dict_msgs = [m for m in msgs if isinstance(m, dict)]
-        if msgs and not dict_msgs:
+        def well_formed(m: object) -> bool:
+            # A parseable entry is a dict whose `author` is a dict (or absent)
+            # and whose `content` is a string (or absent). Malformed dicts
+            # (`{"author": "bot"}`, non-string content) would raise
+            # AttributeError/TypeError below — surfacing as a generic tick
+            # error that BYPASSES the read_failures escalation, the exact
+            # failure class r4/r5 closed for non-dict shapes (r6 review,
+            # PR #4399).
+            if not isinstance(m, dict):
+                return False
+            author = m.get("author")
+            if author is not None and not isinstance(author, dict):
+                return False
+            content = m.get("content")
+            return content is None or isinstance(content, str)
+
+        ok_msgs = [m for m in msgs if well_formed(m)]
+        if msgs and not ok_msgs:
             # A NON-EMPTY payload with ZERO parseable entries is schema drift,
             # not an empty channel: silently skipping them all would yield ''
             # — a "successful" read that never increments read_failures and
             # bypasses the watchdog-blind escalation (r5 review, PR #4399).
             # An empty list ([]) stays a normal empty channel.
             return None
-        skipped = len(msgs) - len(dict_msgs)
+        skipped = len(msgs) - len(ok_msgs)
         if skipped:
             # Mixed payload: partial data beats blindness, but schema drift
             # must still leave a trace.
             self.log(
-                f"discord read: skipped {skipped} non-object message "
+                f"discord read: skipped {skipped} malformed message "
                 f"entries (schema drift?)"
             )
-        bot = [m for m in dict_msgs if (m.get("author") or {}).get("bot")]
+        bot = [m for m in ok_msgs if (m.get("author") or {}).get("bot")]
         return norm(" ".join((m.get("content") or "") for m in bot))
 
     def dcserver_snapshot(self) -> str:
