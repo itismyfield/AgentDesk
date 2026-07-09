@@ -44,9 +44,18 @@ use crate::services::provider::ProviderKind;
 /// The structural shape of a re-adopted **real-user** bridge turn that a **crash**
 /// left still live (uncommitted) and still bridge-owned (the now-dead bridge) —
 /// independent of whether the `readopted_from_inflight` marker durably persisted.
-/// This is EXACTLY the yield-gate black-hole condition: every clause below mirrors a
-/// gate check, so the "would be black-holed" set (this predicate) and the "resume /
-/// dead-letter" decisions can never diverge.
+///
+/// This is the real-user, crash-only **subset** of the yield-gate black-hole set,
+/// NOT an exact mirror: the gate itself does not check `rebind_origin` / owner id /
+/// `user_msg_id` (it only inspects `relay_owner_kind`, the turn range, `restart_mode`
+/// and `terminal_delivery_committed`). This predicate narrows further ON PURPOSE so
+/// the backstop never dead-letters a row the gate actually resumes. The narrowing is
+/// safe (never misses a genuine black-hole) because every row it drops is not one:
+/// id-0 / owner-0 / synthetic-owner rows are not real-user turns (out of #4380 scope
+/// — handled by the synthetic reclaim paths), `rebind_origin` rows are owned by the
+/// rebind API, and planned-restart rows are resumed by the gate's own
+/// `restart_mode.is_some()` hatch — none is a `None`-owner crash turn the recovered
+/// watcher would silently drop.
 ///
 /// Excludes, each closing a concrete false-positive:
 ///   - `rebind_origin` rows — owned by the rebind API, not this path.
