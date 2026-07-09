@@ -1099,9 +1099,10 @@ EOF
 # `cargo`/`rustc`) can never be mistaken for a concurrent builder on the cluster
 # path. The one process the gate must NEVER refuse on is this node's release
 # dcserver — the deploy restarts it, so a busy target is the subject of the
-# deploy, not contention to wait out. It is exempted by launchd PID / exact
-# executable path (never by basename, which a dev-tree build would also match).
-# See #4255.
+# deploy, not contention to wait out. It is exempted by launchd PID, or by exact
+# executable path AND a `dcserver` argv subcommand: never by basename (a dev-tree
+# build would match) and never by path alone (the release binary is multi-command,
+# so `agentdesk codex-tmux-wrapper` shares that path). See #4255.
 
 _preflight_cpu_count() {
   # Logical CPU count, used to scale the default load-average ceiling so one
@@ -1289,12 +1290,38 @@ _preflight_deploy_target_pids() {
     || true
 }
 
+_preflight_process_is_release_dcserver() {
+  # True when <pid>'s argv is the release binary running the `dcserver`
+  # subcommand. The release binary is MULTI-COMMAND (`agentdesk dcserver`,
+  # `agentdesk codex-tmux-wrapper`, …) and `ps -o comm=` reports the SAME
+  # executable path for every subcommand, so the path alone must never grant the
+  # deploy-target exemption — a runaway `agentdesk codex-tmux-wrapper` would ride
+  # in on it and starve the build (#4255 review round 4). `-ww` defeats ps's
+  # terminal-width argv truncation. Fails CLOSED (return 1 = not the target) on
+  # any unreadable argv: a process we cannot identify never earns the exemption.
+  local pid="$1" rel_binary="$2" args argv0 rest sub
+  [ -n "$pid" ] && [ -n "$rel_binary" ] || return 1
+  command -v ps >/dev/null 2>&1 || return 1
+  args="$(ps -ww -o args= -p "$pid" 2>/dev/null || true)"
+  [ -n "$args" ] || return 1
+  argv0="${args%% *}"
+  [ "$argv0" = "$rel_binary" ] || return 1
+  rest="${args#* }"
+  [ "$rest" != "$args" ] || return 1   # no argument → no subcommand → not dcserver
+  sub="${rest%% *}"
+  [ "$sub" = "dcserver" ]
+}
+
 _preflight_is_deploy_target() {
   # _preflight_is_deploy_target <pid> <comm> <target_pids_newline_list> <rel_binary>
-  # True when the hot process IS the release dcserver being deployed, matched by
-  # launchd PID or by EXACT executable path. Both are narrow on purpose (#4255
-  # review round 3): the old code hard-refused on the release daemon itself, so a
-  # busy dcserver locked out its own deploy on every node.
+  # True when the hot process IS the release dcserver being deployed. Two narrow
+  # matchers (#4255 review r3 self-lock, tightened in r4):
+  #   (a) the launchd job's PID — launchd only ever runs the dcserver job;
+  #   (b) exact executable path AND an argv whose subcommand is `dcserver` —
+  #       covers a tmux-fallback dcserver launchd does not own, without
+  #       exempting the binary's other subcommands.
+  # Never `pgrep -x agentdesk`: that matches basename only and would also
+  # whitelist a dev-tree build.
   local pid="$1" comm="$2" target_pids="$3" rel_binary="$4" tp
   [ -n "$pid" ] || return 1
   if [ -n "$target_pids" ]; then
@@ -1310,7 +1337,9 @@ $target_pids
 EOF
   fi
   if [ -n "$rel_binary" ] && [ "$comm" = "$rel_binary" ]; then
-    return 0
+    if _preflight_process_is_release_dcserver "$pid" "$rel_binary"; then
+      return 0
+    fi
   fi
   return 1
 }

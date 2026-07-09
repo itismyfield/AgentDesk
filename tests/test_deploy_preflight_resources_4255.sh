@@ -356,18 +356,42 @@ reset_clean_stubs
 STUB_NCPU=14; STUB_LOADAVG="1.00"; STUB_PRESSURE="1"   # no system pressure at all
 TARGET_BIN="/tmp/adk-preflight-test-release/bin/agentdesk"
 
-# (a) matched by the launchd job PID (comm may be anything).
+# `ps -ww -o args= -p <pid>` shim: the release binary is MULTI-COMMAND, so argv —
+# not the executable path — decides whether a pid is the dcserver.
+ps() {
+  # `${*##* }` would strip the prefix from EACH positional param, not the joined
+  # string — take the last argument (the pid) explicitly.
+  local pid=""
+  while [ "$#" -gt 0 ]; do pid="$1"; shift; done
+  case "$pid" in
+    94068|77777) printf '%s dcserver\n' "$TARGET_BIN" ;;
+    66666)       printf '%s codex-tmux-wrapper\n' "$TARGET_BIN" ;;  # same path, NOT the dcserver
+    31337)       printf '/Users/someone/.adk/dev/bin/agentdesk dcserver\n' ;;
+    *)           return 1 ;;
+  esac
+}
+
+# (a) matched by the launchd job PID (argv need not be consulted).
 STUB_TARGET_PIDS="94068"
 STUB_HIGHCPU="$(printf '94068\t99.0\t12:00\t11:50\t%s' "$TARGET_BIN")"
 assert_rc "deploy target matched by launchd PID → proceed" 0 _preflight_resource_contention
 assert_out_contains "target surfaced as advisory, not a refusal" "DEPLOY TARGET" _preflight_resource_contention
 reset_clean_stubs
 
-# (b) matched by EXACT executable path when launchctl yields no PID
-# (job loaded-but-not-running, or a tmux-fallback dcserver launchd does not own).
+# (b) matched by EXACT executable path + `dcserver` argv when launchctl yields no
+# PID (job loaded-but-not-running, or a tmux-fallback dcserver launchd does not own).
 STUB_NCPU=14; STUB_LOADAVG="1.00"; STUB_PRESSURE="1"
 STUB_HIGHCPU="$(printf '77777\t99.0\t12:00\t11:50\t%s' "$TARGET_BIN")"
-assert_rc "deploy target matched by exact executable path → proceed" 0 _preflight_resource_contention
+assert_rc "deploy target matched by exact path + dcserver argv → proceed" 0 _preflight_resource_contention
+reset_clean_stubs
+
+# (b2) MULTI-COMMAND GUARD (#4255 review r4): a sustained runaway launched from the
+# SAME release binary path but running a different subcommand is NOT the deploy
+# target — the deploy does not restart it, so it must still hard-refuse.
+STUB_NCPU=14; STUB_LOADAVG="1.00"; STUB_PRESSURE="1"
+STUB_HIGHCPU="$(printf '66666\t99.0\t12:00\t11:50\t%s' "$TARGET_BIN")"
+assert_rc "same release binary, non-dcserver subcommand → still refuse" 1 _preflight_resource_contention
+assert_out_contains "non-dcserver subcommand refusal says SUSTAINED" "SUSTAINED" _preflight_resource_contention
 reset_clean_stubs
 
 # (c) OVER-MATCH GUARD: a dev-tree binary with the SAME basename `agentdesk` at a
@@ -411,11 +435,24 @@ assert_eq "unknown label → empty (launchctl rc!=0)" "" "$(AGENTDESK_DCSERVER_L
 unset -f launchctl
 assert_eq "release binary path honors ADK_REL" "/tmp/adk-preflight-test-release/bin/agentdesk" \
   "$(ADK_REL=/tmp/adk-preflight-test-release _preflight_release_binary)"
-# Exact-match predicate: pid hit, path hit, and neither.
-assert_rc "_preflight_is_deploy_target: pid match"   0 _preflight_is_deploy_target "94068" "whatever" "$(printf '111\n94068\n')" "/rel/bin/agentdesk"
-assert_rc "_preflight_is_deploy_target: path match"  0 _preflight_is_deploy_target "77777" "/rel/bin/agentdesk" "" "/rel/bin/agentdesk"
-assert_rc "_preflight_is_deploy_target: basename-only is NOT a match" 1 _preflight_is_deploy_target "31337" "/dev/bin/agentdesk" "" "/rel/bin/agentdesk"
-assert_rc "_preflight_is_deploy_target: empty pid → no match" 1 _preflight_is_deploy_target "" "/rel/bin/agentdesk" "" "/rel/bin/agentdesk"
+# Exact-match predicate, against the real helpers + the `ps` argv shim above.
+assert_rc "_preflight_is_deploy_target: launchd pid match (argv not consulted)" 0 \
+  _preflight_is_deploy_target "94068" "whatever" "$(printf '111\n94068\n')" "$TARGET_BIN"
+assert_rc "_preflight_is_deploy_target: path + dcserver argv match" 0 \
+  _preflight_is_deploy_target "77777" "$TARGET_BIN" "" "$TARGET_BIN"
+assert_rc "_preflight_is_deploy_target: same path, other subcommand → no match" 1 \
+  _preflight_is_deploy_target "66666" "$TARGET_BIN" "" "$TARGET_BIN"
+assert_rc "_preflight_is_deploy_target: basename-only is NOT a match" 1 \
+  _preflight_is_deploy_target "31337" "/Users/someone/.adk/dev/bin/agentdesk" "" "$TARGET_BIN"
+assert_rc "_preflight_is_deploy_target: empty pid → no match" 1 \
+  _preflight_is_deploy_target "" "$TARGET_BIN" "" "$TARGET_BIN"
+assert_rc "_preflight_is_deploy_target: unreadable argv → fails CLOSED" 1 \
+  _preflight_is_deploy_target "424242" "$TARGET_BIN" "" "$TARGET_BIN"
+# argv predicate in isolation.
+assert_rc "_preflight_process_is_release_dcserver: dcserver argv" 0 _preflight_process_is_release_dcserver "77777" "$TARGET_BIN"
+assert_rc "_preflight_process_is_release_dcserver: wrapper subcommand" 1 _preflight_process_is_release_dcserver "66666" "$TARGET_BIN"
+assert_rc "_preflight_process_is_release_dcserver: other binary" 1 _preflight_process_is_release_dcserver "31337" "$TARGET_BIN"
+unset -f ps
 reset_clean_stubs
 
 echo
