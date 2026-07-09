@@ -50,7 +50,92 @@ fn json_cli_error_line(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
 }
 
-pub(crate) fn execute(command: Commands) -> Result<()> {
+/// Whether `command` has a JSON output path — either it always emits JSON
+/// (the JSON-only commands and every `direct::run_command` action, which print
+/// via `print_json`) or it accepts a `--json` toggle (the dual-mode commands).
+/// Text-only / operational commands return `false`, and [`execute`] rejects a
+/// global `--json` for them (#4372 r2) instead of silently emitting text with
+/// no machine-readable signal.
+///
+/// The match is intentionally exhaustive with **no wildcard**: adding a new
+/// `Commands` variant will fail to compile here until it is classified, so the
+/// flag's acceptance can never silently drift out of sync with its support.
+fn command_supports_json(command: &Commands) -> bool {
+    match command {
+        // JSON emitters (always print structured JSON) + dual-mode commands
+        // that honour a `--json` toggle.
+        Commands::Send { .. }
+        | Commands::SendToAgent { .. }
+        | Commands::ReviewVerdict { .. }
+        | Commands::ReviewDecision { .. }
+        | Commands::ReviewRecoverTarget { .. }
+        | Commands::Docs { .. }
+        | Commands::AutoQueue { .. }
+        | Commands::ForceKill { .. }
+        | Commands::GithubSync { .. }
+        | Commands::Monitoring { .. }
+        | Commands::Discord { .. }
+        | Commands::Card { .. }
+        | Commands::CherryMerge { .. }
+        | Commands::Status
+        | Commands::Cards { .. }
+        | Commands::Dispatch(..)
+        | Commands::Resume { .. }
+        | Commands::Advance { .. }
+        | Commands::Queue
+        | Commands::Query { .. }
+        | Commands::Phase { .. }
+        | Commands::Agents
+        | Commands::Diag { .. }
+        | Commands::Config { .. }
+        | Commands::Api { .. }
+        | Commands::Terminations { .. }
+        | Commands::Doctor { .. }
+        | Commands::ProviderCli(..)
+        | Commands::Health
+        | Commands::MachineCompare
+        | Commands::Activity { .. } => true,
+
+        // Text-only / operational commands — no JSON output path.
+        Commands::Dcserver { .. }
+        | Commands::Init
+        | Commands::Reconfigure
+        | Commands::EmitLaunchdPlist(..)
+        | Commands::RestartDcserver { .. }
+        | Commands::DiscordSendfile { .. }
+        | Commands::DiscordSendmessage { .. }
+        | Commands::DiscordSenddm { .. }
+        | Commands::IntakeOutbox { .. }
+        | Commands::ClaudeHookRelay { .. }
+        | Commands::CodexHookRelay { .. }
+        | Commands::ResetTmux
+        | Commands::Ismcptool { .. }
+        | Commands::Addmcptool { .. }
+        | Commands::InstallMementoSessionHook { .. }
+        | Commands::Deploy
+        | Commands::Migrate { .. }
+        | Commands::Show { .. } => false,
+
+        #[cfg(unix)]
+        Commands::TmuxWrapper { .. }
+        | Commands::CodexTmuxWrapper { .. }
+        | Commands::QwenTmuxWrapper { .. } => false,
+    }
+}
+
+pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
+    // Global `--json` is accepted by clap on every command, so reject it up
+    // front for commands that have no JSON output path — otherwise a script
+    // passing `--json` would get plain text and exit 0 with no signal (#4372
+    // r2). Reported as `{"error":…}` on stderr + nonzero exit, matching the
+    // JSON-mode failure contract.
+    if json && !command_supports_json(&command) {
+        return exit_for_json_cli(Err(
+            "--json is not supported by this command: it has no JSON output path. \
+             Re-run without --json."
+                .to_string(),
+        ));
+    }
     match command {
         Commands::Dcserver { token } => {
             let token = token.or_else(|| std::env::var("AGENTDESK_TOKEN").ok());
@@ -213,9 +298,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         Commands::ForceKill { session_key, retry } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_force_kill(&session_key, retry),
         )),
-        Commands::Diag { identifier, json } => {
-            exit_for_cli(super::client::cmd_diag(&identifier, json))
-        }
+        Commands::Diag { identifier } => exit_for_cli(super::client::cmd_diag(&identifier, json)),
         Commands::GithubSync { repo } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_github_sync(repo.as_deref()),
         )),
@@ -437,8 +520,22 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             uninstall,
         )
         .map_err(anyhow::Error::msg),
-        Commands::Status => exit_for_cli(super::client::cmd_status()),
-        Commands::Cards { status } => exit_for_cli(super::client::cmd_cards(status.as_deref())),
+        Commands::Status => {
+            let invoke = super::client::cmd_status(json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
+        Commands::Cards { status } => {
+            let invoke = super::client::cmd_cards(status.as_deref(), json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Dispatch(args) => exit_for_cli(match args.action {
             Some(DispatchAction::List) => super::client::cmd_dispatch_list(),
             Some(DispatchAction::Retry { card_id }) => {
@@ -467,12 +564,23 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         )),
         Commands::Agents => exit_for_cli(super::client::cmd_agents()),
         Commands::Advance { issue_number } => {
-            exit_for_cli(super::client::cmd_advance(&issue_number))
+            let invoke = super::client::cmd_advance(&issue_number, json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
         }
-        Commands::Queue => exit_for_cli(super::client::cmd_queue()),
+        Commands::Queue => {
+            let invoke = super::client::cmd_queue(json);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Query {
             action,
-            json,
             filters,
             agent,
             limit,
@@ -494,11 +602,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 exit_for_cli(invoke)
             }
         }
-        Commands::Phase {
-            action,
-            json,
-            detailed,
-        } => {
+        Commands::Phase { action, detailed } => {
             // Default + explicit `status` are identical for now; PhaseAction
             // is left as a Subcommand so future verbs (`watch`, `clear`) can
             // attach without breaking call sites.
@@ -525,19 +629,26 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             dispatch_id,
             session,
             limit,
-        } => exit_for_cli(super::client::cmd_terminations(
-            card_id.as_deref(),
-            dispatch_id.as_deref(),
-            session.as_deref(),
-            limit,
-        )),
+        } => {
+            let invoke = super::client::cmd_terminations(
+                card_id.as_deref(),
+                dispatch_id.as_deref(),
+                session.as_deref(),
+                limit,
+                json,
+            );
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Doctor {
             fix,
             allow_restart,
             repair_sqlite_cache,
             allow_remote,
             profile,
-            json,
         } => {
             let profile = match profile {
                 Some(DoctorProfileArg::Quick) => {
@@ -570,13 +681,12 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         }),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
-        Commands::Health { json } => exit_for_cli(super::client::cmd_health(json)),
-        Commands::MachineCompare { json } => exit_for_cli(super::client::cmd_machine_compare(json)),
+        Commands::Health => exit_for_cli(super::client::cmd_health(json)),
+        Commands::MachineCompare => exit_for_cli(super::client::cmd_machine_compare(json)),
         Commands::Activity {
             since,
             until,
             repo,
-            json,
             no_agentdesk,
         } => exit_for_cli(super::client::cmd_activity(
             &since,
@@ -696,5 +806,30 @@ mod exit_json_tests {
         // Round-trips back to the original message.
         let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(parsed["error"], raw);
+    }
+
+    #[test]
+    fn command_supports_json_accepts_json_commands() {
+        // The 5 dual-mode commands.
+        assert!(command_supports_json(&Commands::Status));
+        assert!(command_supports_json(&Commands::Queue));
+        assert!(command_supports_json(&Commands::Advance {
+            issue_number: "42".to_string(),
+        }));
+        // A representative always-JSON command.
+        assert!(command_supports_json(&Commands::Agents));
+    }
+
+    #[test]
+    fn command_supports_json_rejects_text_only_commands() {
+        // The reviewer's repro: `show session-name … --json` printed text.
+        assert!(!command_supports_json(&Commands::Show {
+            action: ShowAction::SessionName {
+                channel: "review-cdx".to_string(),
+                provider: None,
+            },
+        }));
+        assert!(!command_supports_json(&Commands::Deploy));
+        assert!(!command_supports_json(&Commands::ResetTmux));
     }
 }

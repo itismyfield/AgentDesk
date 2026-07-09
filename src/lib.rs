@@ -153,7 +153,7 @@ use anyhow::{Context, Result};
 
 pub fn run_from_args() -> Result<()> {
     match cli::args::parse() {
-        cli::args::ParseOutcome::Command(command) => cli::execute(command),
+        cli::args::ParseOutcome::Command { command, json } => cli::execute(command, json),
         cli::args::ParseOutcome::RunServer => {
             let state = bootstrap::initialize().context("Bootstrap failed")?;
             launch::run(state).context("Launch failed")

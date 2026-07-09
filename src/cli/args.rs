@@ -5,6 +5,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Parser)]
 #[command(name = "agentdesk", version = env!("CARGO_PKG_VERSION"), about = "AI agent orchestration platform")]
 struct Cli {
+    /// Emit machine-readable JSON instead of the human-readable text output.
+    /// Accepted globally — before or after the subcommand. Commands that only
+    /// ever emit JSON treat this as a no-op (never a double-encode).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -417,9 +422,6 @@ pub(crate) enum Commands {
     Query {
         #[command(subcommand)]
         action: Option<QueryAction>,
-        /// Emit machine-readable JSON instead of the text summary.
-        #[arg(long, global = true)]
-        json: bool,
         /// Filter result rows. Repeatable. Format: `key:value`
         /// (e.g. `--filter status:pending`, `--filter dispatch_type:review`).
         #[arg(long = "filter", global = true)]
@@ -439,9 +441,6 @@ pub(crate) enum Commands {
     Phase {
         #[command(subcommand)]
         action: Option<PhaseAction>,
-        /// Emit machine-readable JSON instead of text.
-        #[arg(long, global = true)]
-        json: bool,
         /// Show full per-entry detail.
         #[arg(long, global = true)]
         detailed: bool,
@@ -454,9 +453,6 @@ pub(crate) enum Commands {
     Diag {
         /// Agent ID or Discord channel ID
         identifier: String,
-        /// Emit machine-readable JSON output
-        #[arg(long)]
-        json: bool,
     },
     /// Runtime config get/set
     Config {
@@ -504,9 +500,6 @@ pub(crate) enum Commands {
         /// Restrict checks to a profile
         #[arg(long, value_enum)]
         profile: Option<DoctorProfileArg>,
-        /// Emit machine-readable JSON output for agent parsing
-        #[arg(long)]
-        json: bool,
     },
     /// Migration helpers
     Migrate {
@@ -522,19 +515,11 @@ pub(crate) enum Commands {
     },
     /// Show consolidated health snapshot of the current node (server status,
     /// dcserver pid, last deploy time, queue lag, Discord/disk/outbox).
-    Health {
-        /// Emit machine-readable JSON instead of a text table.
-        #[arg(long)]
-        json: bool,
-    },
+    Health,
     /// Compare release/main/dev state across every registered worker node
     /// (`mac-mini`, `mac-book`, …). Renders a side-by-side table with
     /// dcserver pid, last deploy, queue lag, and a `diff` column.
-    MachineCompare {
-        /// Emit machine-readable JSON instead of a text table.
-        #[arg(long)]
-        json: bool,
-    },
+    MachineCompare,
     /// Time-windowed activity report: commits / closed issues / merged PRs /
     /// deploys / incidents in a single table. Uses gh + git + AgentDesk API.
     Activity {
@@ -550,9 +535,6 @@ pub(crate) enum Commands {
         /// repo's `origin` remote when omitted.
         #[arg(long)]
         repo: Option<String>,
-        /// Emit machine-readable JSON instead of a text table.
-        #[arg(long)]
-        json: bool,
         /// Skip the AgentDesk-side deploy / incident lookup (useful when
         /// the local API is offline). Pure git + gh report.
         #[arg(long = "no-agentdesk")]
@@ -930,7 +912,7 @@ pub(crate) enum FeatureStateArg {
 
 pub(crate) enum ParseOutcome {
     RunServer,
-    Command(Commands),
+    Command { command: Commands, json: bool },
 }
 
 fn rewrite_legacy_args(mut args: Vec<String>) -> Vec<String> {
@@ -947,7 +929,10 @@ fn rewrite_legacy_args(mut args: Vec<String>) -> Vec<String> {
 pub(crate) fn parse() -> ParseOutcome {
     match Cli::try_parse_from(rewrite_legacy_args(std::env::args().collect())) {
         Ok(cli) => match cli.command {
-            Some(command) => ParseOutcome::Command(command),
+            Some(command) => ParseOutcome::Command {
+                command,
+                json: cli.json,
+            },
             None => ParseOutcome::RunServer,
         },
         Err(error) => {
@@ -1033,5 +1018,65 @@ mod tests {
             Commands::SendToAgent { expect_reply, .. } => assert!(!expect_reply),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn provider_cli_status_coexists_with_global_json() {
+        // provider-cli status carries its own nested `json`; the global flag
+        // must coexist without a clap arg-id conflict (clap builds this arg
+        // subtree only when parsing descends into it, so a shallow parse of an
+        // unrelated command would not surface a conflict).
+        let cli = Cli::try_parse_from(["agentdesk", "provider-cli", "status", "--json"])
+            .expect("provider-cli status --json parses");
+        assert!(cli.json);
+    }
+
+    #[test]
+    fn global_json_defaults_false() {
+        let cli = Cli::try_parse_from(["agentdesk", "status"]).expect("status parses");
+        assert!(!cli.json);
+        assert!(matches!(cli.command, Some(Commands::Status)));
+    }
+
+    #[test]
+    fn global_json_accepted_after_subcommand() {
+        let cli =
+            Cli::try_parse_from(["agentdesk", "status", "--json"]).expect("status --json parses");
+        assert!(cli.json);
+    }
+
+    #[test]
+    fn global_json_accepted_before_subcommand() {
+        let cli =
+            Cli::try_parse_from(["agentdesk", "--json", "status"]).expect("--json status parses");
+        assert!(cli.json);
+    }
+
+    #[test]
+    fn global_json_reaches_text_only_commands() {
+        for verb in ["cards", "queue", "terminations"] {
+            let cli = Cli::try_parse_from(["agentdesk", verb, "--json"])
+                .unwrap_or_else(|err| panic!("{verb} --json should parse: {err}"));
+            assert!(cli.json, "{verb} --json did not set the global flag");
+        }
+        let advance = Cli::try_parse_from(["agentdesk", "advance", "42", "--json"])
+            .expect("advance <n> --json parses");
+        assert!(advance.json);
+    }
+
+    #[test]
+    fn global_json_unifies_previously_local_json_commands() {
+        // These commands used to declare their own `--json`; the flag is now
+        // the single global one. Both positions must still parse.
+        let health =
+            Cli::try_parse_from(["agentdesk", "health", "--json"]).expect("health --json parses");
+        assert!(health.json);
+        let diag = Cli::try_parse_from(["agentdesk", "--json", "diag", "chan-1"])
+            .expect("--json diag parses");
+        assert!(diag.json);
+        // Nested subcommand still accepts the global flag after the leaf verb.
+        let query = Cli::try_parse_from(["agentdesk", "query", "queue", "--json"])
+            .expect("query queue --json parses");
+        assert!(query.json);
     }
 }
