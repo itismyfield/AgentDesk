@@ -956,7 +956,7 @@
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 1046 | 870 | 176 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 133 | 64 | 69 |  |
 | `services::routines::session_control` | `src/services/routines/session_control.rs` | 1065 | 899 | 166 |  |
-| `services::routines::store` | `src/services/routines/store.rs` | 4428 | 3684 | 744 | giant-file |
+| `services::routines::store` | `src/services/routines/store.rs` | 4431 | 3687 | 744 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 | 1 | 0 |  |
 | `services::session_activity` | `src/services/session_activity.rs` | 354 | 275 | 79 |  |
 | `services::session_backend` | `src/services/session_backend.rs` | 1078 | 667 | 411 |  |

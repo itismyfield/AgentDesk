@@ -909,6 +909,7 @@ impl RoutineStore {
             r#"
             UPDATE routines
             SET status = 'enabled',
+                pause_reason = NULL,
                 updated_at = NOW()
             WHERE id = $1
               AND status = 'paused'
@@ -2605,6 +2606,7 @@ impl RoutineStore {
                     r#"
                     UPDATE routines
                     SET status = 'enabled',
+                        pause_reason = NULL,
                         updated_at = NOW()
                     WHERE id = $1
                       AND status = 'paused'
@@ -2623,6 +2625,7 @@ impl RoutineStore {
                 r#"
                 UPDATE routines
                 SET status = 'enabled',
+                    pause_reason = NULL,
                     next_due_at = $2,
                     updated_at = NOW()
                 WHERE id = $1
