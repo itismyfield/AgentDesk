@@ -587,7 +587,7 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
     let record_summary = if any_block_aggregate {
         None
     } else {
-        subagent_completion_from_record(value)
+        super::subagent_rollout::subagent_completion_from_record(value)
     };
     let record_summary_owner_idx = record_summary.as_ref().and_then(|_| {
         blocks.iter().position(|block| {
@@ -621,7 +621,7 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
             // This block's OWN aggregate (batched case), keyed by THIS block's
             // tool_use_id; else the legacy record-level aggregate on the first
             // id-bearing block.
-            let block_completion = subagent_completion_from_record(block);
+            let block_completion = super::subagent_rollout::subagent_completion_from_record(block);
             let completion = block_completion.or_else(|| {
                 if Some(idx) == record_summary_owner_idx {
                     record_summary.clone()
@@ -652,26 +652,12 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                 ];
             }
 
-            status_events_from_tool_result(None, is_error)
+            // #4396: an id-bearing block with NO aggregate still closes an
+            // exactly-id-matched subagent slot (see the helper's docs).
+            super::subagent_rollout::idful_tool_result_close_events(block, is_error)
+                .unwrap_or_else(|| status_events_from_tool_result(None, is_error))
         })
         .collect()
-}
-
-/// Builds the subagent [`SubagentSummary`](crate::services::agent_protocol::SubagentSummary)
-/// from a JSON object's `toolUseResult` aggregate — an individual `tool_result`
-/// block (batched) or the whole `user` record (legacy single). `None` for
-/// ordinary results. #3086 P1: live hot path — in-stream aggregate only (no disk
-/// IO); the prior synchronous rollout `read_to_string` was removed.
-fn subagent_completion_from_record(
-    value: &Value,
-) -> Option<(
-    crate::services::agent_protocol::SubagentSummary,
-    Option<String>,
-    Option<String>,
-)> {
-    let (summary, agent_id) = super::subagent_rollout::summary_from_tool_use_result(value)?;
-    let desc = super::subagent_rollout::description_from_tool_use_result(value);
-    Some((summary, agent_id, desc))
 }
 
 fn system_status_events(value: &Value) -> Vec<StatusEvent> {

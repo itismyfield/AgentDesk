@@ -4515,6 +4515,93 @@ fn status_panel_batched_multi_subagent_summaries_land_on_own_slots() {
     );
 }
 
+// #4396: a single batched `user` record may complete N parallel subagents while
+// carrying only ONE record-level `toolUseResult` aggregate (no per-block
+// aggregates). The aggregate is owned by the FIRST id-bearing block; the other
+// Task results must STILL close their slots (summary-less `SubagentEnd`), not
+// fall through to a bare `ToolEnd` that leaves them permanently unfinished —
+// the exact #4396 symptom: no footer ✓/✗ and the #4367 live filter never hides
+// them. An unrelated ordinary tool result batched into the same record must
+// stay a no-op (its id matches no subagent slot).
+#[test]
+fn status_panel_batched_record_level_aggregate_closes_all_parallel_subagents() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4396);
+
+    // Three subagents launched in parallel.
+    for (subagent_type, desc, id) in [
+        ("alpha", "Scout A", "toolu_4396_a"),
+        ("beta", "Scout B", "toolu_4396_b"),
+        ("gamma", "Scout C", "toolu_4396_c"),
+    ] {
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use_with_id(
+                "Task",
+                &json!({"subagent_type": subagent_type, "description": desc}).to_string(),
+                Some(id),
+            ),
+        );
+    }
+
+    // ONE `user` record batches ALL THREE Task results (plus an unrelated
+    // ordinary tool result) with only a RECORD-level aggregate.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_4396_a", "is_error": false },
+                    { "type": "tool_result", "tool_use_id": "toolu_4396_b", "is_error": false },
+                    { "type": "tool_result", "tool_use_id": "toolu_4396_c", "is_error": false },
+                    { "type": "tool_result", "tool_use_id": "toolu_4396_bash", "is_error": false }
+                ]
+            },
+            "toolUseResult": {
+                "agentId": "aalpha4396000000",
+                "totalToolUseCount": 7,
+                "totalTokens": 4200,
+                "totalDurationMs": 21_000
+            }
+        })),
+    );
+
+    // Every parallel subagent is terminal: the completion footer marks ALL
+    // THREE ✓ (the record aggregate's Done summary belongs to the first
+    // id-bearing block only).
+    let footer = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = footer
+        .block
+        .expect("completed subagents should render in the completion footer");
+    for needle in ["alpha Scout A", "beta Scout B", "gamma Scout C"] {
+        let line = footer_line_containing(&block, needle);
+        assert!(
+            line.contains('✓'),
+            "every batched parallel subagent must be marked done, got: {line}"
+        );
+    }
+    assert!(
+        footer_line_containing(&block, "alpha Scout A").contains("Done (7 tools"),
+        "record-level aggregate belongs to the first id-bearing block, got: {block}"
+    );
+    // The unrelated ordinary tool result must not fabricate a subagent entry.
+    assert_eq!(
+        block.matches('✓').count(),
+        3,
+        "exactly the three launched subagents close — no ghost from the \
+         unrelated tool result, got: {block}"
+    );
+
+    // #4367 live filter: all three are terminal, so the live panel hides the
+    // whole Subagents section (this is what stayed stuck before the fix).
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        !rendered.contains("Subagents"),
+        "all-terminal subagents must vanish from the live panel, got: {rendered}"
+    );
+}
+
 // #3086 P1 #1: a summary-bearing `SubagentEnd` whose `tool_use_id` matches NO
 // tracked slot must be dropped, not mis-routed to the last unfinished slot.
 #[test]

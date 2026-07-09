@@ -100,6 +100,56 @@ pub(super) fn description_from_tool_use_result(value: &Value) -> Option<String> 
         .map(str::to_string)
 }
 
+/// Builds the subagent [`SubagentSummary`] `(summary, agent_id, desc)` triple
+/// from a JSON object's `toolUseResult` aggregate — an individual `tool_result`
+/// block (batched) or the whole `user` record (legacy single). `None` for
+/// ordinary results. #3086 P1: live hot path — in-stream aggregate only (no disk
+/// IO); the prior synchronous rollout `read_to_string` was removed.
+pub(super) fn subagent_completion_from_record(
+    value: &Value,
+) -> Option<(SubagentSummary, Option<String>, Option<String>)> {
+    let (summary, agent_id) = summary_from_tool_use_result(value)?;
+    let desc = description_from_tool_use_result(value);
+    Some((summary, agent_id, desc))
+}
+
+/// #4396: terminal events for an id-bearing `tool_result` block that carries NO
+/// aggregate; `None` for an id-less block (the caller's plain-`ToolEnd` path).
+///
+/// A batched record carries ONE record-level `toolUseResult` aggregate, owned
+/// by the first id-bearing block — the OTHER parallel Tasks' results used to
+/// fall through to a bare `ToolEnd`, leaving their slots permanently unfinished
+/// (no footer ✓/✗, and the #4367 live filter never hides them). The record does
+/// not name the block's tool, so emit a summary-less id-bearing `SubagentEnd`
+/// and let the panel decide: it applies an id-bearing end ONLY on an exact
+/// `tool_use_id` match against a slot a real Task launch opened (agent_id/desc
+/// are `None`, so the #4177 fallback cannot fire) — an ordinary tool's result
+/// id matches no subagent slot and is a no-op. `ack_only: !is_error` mirrors
+/// `status_events_from_tool_result_with_id`: a successful BACKGROUND launch ack
+/// must not finalize its still-running slot, while a foreground completion (or
+/// a failed launch) finalizes.
+pub(super) fn idful_tool_result_close_events(
+    block: &Value,
+    is_error: bool,
+) -> Option<Vec<StatusEvent>> {
+    let id = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    Some(vec![
+        StatusEvent::ToolEnd { success: !is_error },
+        StatusEvent::SubagentEnd {
+            success: !is_error,
+            agent_id: None,
+            desc: None,
+            tool_use_id: Some(id.to_string()),
+            summary: None,
+            ack_only: !is_error,
+        },
+    ])
+}
+
 /// #3920: `true` when a parent-transcript `tool_result`/`user` record (or a
 /// batched per-block `tool_result`) is an ASYNC subagent LAUNCH acknowledgment
 /// — `toolUseResult.isAsync == true` or `toolUseResult.status == "async_launched"`.
