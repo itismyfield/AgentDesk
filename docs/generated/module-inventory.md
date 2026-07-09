@@ -55,8 +55,8 @@
 | `app_state` | `src/app_state.rs` | 47 | 47 | 0 |  |
 | `bootstrap` | `src/bootstrap.rs` | 93 | 93 | 0 |  |
 | `cli` | `src/cli/mod.rs` | 22 | 22 | 0 |  |
-| `cli::args` | `src/cli/args.rs` | 1071 | 954 | 117 |  |
-| `cli::client` | `src/cli/client.rs` | 2699 | 2456 | 243 | giant-file |
+| `cli::args` | `src/cli/args.rs` | 1082 | 954 | 128 |  |
+| `cli::client` | `src/cli/client.rs` | 2732 | 2474 | 258 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1633 | 1633 | 0 | giant-file |
 | `cli::direct` | `src/cli/direct.rs` | 1812 | 1812 | 0 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 | 123 | 0 |  |
@@ -67,7 +67,7 @@
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4498 | 4381 | 117 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 623 | 553 | 70 |  |
 | `cli::init` | `src/cli/init.rs` | 1520 | 1444 | 76 | giant-file |
-| `cli::json_output` | `src/cli/json_output.rs` | 436 | 264 | 172 |  |
+| `cli::json_output` | `src/cli/json_output.rs` | 452 | 272 | 180 |  |
 | `cli::migrate` | `src/cli/migrate.rs` | 317 | 317 | 0 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3237 | 3237 | 0 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | 1513 | 0 | giant-file |
@@ -75,7 +75,7 @@
 | `cli::monitoring` | `src/cli/monitoring.rs` | 127 | 127 | 0 |  |
 | `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 1039 | 1039 | 0 | giant-file |
 | `cli::query` | `src/cli/query.rs` | 462 | 379 | 83 |  |
-| `cli::run` | `src/cli/run.rs` | 725 | 703 | 22 |  |
+| `cli::run` | `src/cli/run.rs` | 835 | 788 | 47 |  |
 | `cli::utils` | `src/cli/utils.rs` | 581 | 473 | 108 |  |
 | `compat` | `src/compat/mod.rs` | 39 | 39 | 0 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 | 12 | 0 |  |

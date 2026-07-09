@@ -1021,6 +1021,17 @@ mod tests {
     }
 
     #[test]
+    fn provider_cli_status_coexists_with_global_json() {
+        // provider-cli status carries its own nested `json`; the global flag
+        // must coexist without a clap arg-id conflict (clap builds this arg
+        // subtree only when parsing descends into it, so a shallow parse of an
+        // unrelated command would not surface a conflict).
+        let cli = Cli::try_parse_from(["agentdesk", "provider-cli", "status", "--json"])
+            .expect("provider-cli status --json parses");
+        assert!(cli.json);
+    }
+
+    #[test]
     fn global_json_defaults_false() {
         let cli = Cli::try_parse_from(["agentdesk", "status"]).expect("status parses");
         assert!(!cli.json);

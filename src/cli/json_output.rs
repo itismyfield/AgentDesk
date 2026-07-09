@@ -232,8 +232,16 @@ pub(crate) fn advance(
     review_dispatch_id: &str,
     completed_dispatch_id: Option<&str>,
 ) -> Value {
+    // `issue_number` is validated as an integer upstream (find_card_for_issue),
+    // so emit it as a JSON number for consistency with the `github_issue_number`
+    // fields the other shapes carry (#4372 r3). Fall back to a string only if a
+    // non-numeric value ever reaches here.
+    let issue_value = issue_number
+        .parse::<i64>()
+        .map(Value::from)
+        .unwrap_or_else(|_| Value::String(issue_number.to_string()));
     json!({
-        "issue_number": issue_number,
+        "issue_number": issue_value,
         "card_id": card_id,
         "outcome": outcome,
         "review_dispatch_id": review_dispatch_id,
@@ -400,7 +408,9 @@ mod tests {
             "rev-1",
             Some("disp-1"),
         );
-        assert_eq!(advanced["issue_number"], "42");
+        // issue_number is emitted numerically (#4372 r3), not as a string.
+        assert_eq!(advanced["issue_number"], json!(42));
+        assert!(advanced["issue_number"].is_number());
         assert_eq!(advanced["card_id"], "card-1");
         assert_eq!(advanced["outcome"], "advanced_to_review");
         assert_eq!(advanced["review_dispatch_id"], "rev-1");
@@ -409,6 +419,12 @@ mod tests {
         let already = advance("42", "card-1", "already_in_review", "rev-9", None);
         assert_eq!(already["outcome"], "already_in_review");
         assert_eq!(already["completed_dispatch_id"], Value::Null);
+    }
+
+    #[test]
+    fn advance_issue_number_falls_back_to_string_when_non_numeric() {
+        let out = advance("not-a-number", "c", "advanced_to_review", "r", None);
+        assert_eq!(out["issue_number"], "not-a-number");
     }
 
     #[test]

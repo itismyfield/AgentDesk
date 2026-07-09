@@ -651,10 +651,28 @@ fn render_auto_queue_status_lines(queue_summary: &str, entries: &[Value]) -> Vec
 // ── Subcommand handlers ──────────────────────────────────────
 
 /// `agentdesk status` — server health + auto-queue status
+/// Ensure a `status` API response carries the arrays both the text and JSON
+/// renderers depend on. Shared by both modes so a malformed/missing payload
+/// fails identically (#4372 r1) instead of the JSON path silently masking
+/// server garbage as zero counts and exiting 0.
+fn validate_status_payload(sessions: &Value, queue: &Value) -> Result<(), String> {
+    if sessions.get("sessions").and_then(Value::as_array).is_none() {
+        return Err("invalid /api/dispatched-sessions response".to_string());
+    }
+    if queue.get("entries").and_then(Value::as_array).is_none() {
+        return Err("invalid /api/queue/status response".to_string());
+    }
+    Ok(())
+}
+
 pub fn cmd_status(json: bool) -> Result<(), String> {
     let health = get_json("/api/health")?;
     let sessions = get_json("/api/dispatched-sessions?include_merged=1")?;
     let queue = get_json("/api/queue/status")?;
+
+    // Validate shape up front so `--json` fails on a malformed payload exactly
+    // as text mode does — never mask it as an all-zero success (#4372 r1).
+    validate_status_payload(&sessions, &queue)?;
 
     if json {
         print_json(&super::json_output::status(
@@ -2611,6 +2629,21 @@ mod health_compare_tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn validate_status_payload_rejects_missing_arrays() {
+        let sessions = json!({"sessions": []});
+        let queue = json!({"entries": []});
+        // Well-formed payload passes in both modes.
+        assert!(validate_status_payload(&sessions, &queue).is_ok());
+        // Missing `sessions` array → error (so `status --json` fails, exits
+        // nonzero via exit_for_json_cli, instead of masking it as zero counts).
+        let err = validate_status_payload(&json!({}), &queue).unwrap_err();
+        assert!(err.contains("dispatched-sessions"), "got: {err}");
+        // Non-array `entries` → error.
+        let err = validate_status_payload(&sessions, &json!({"entries": "nope"})).unwrap_err();
+        assert!(err.contains("queue/status"), "got: {err}");
+    }
 
     #[test]
     fn human_age_seconds_buckets_match_expected_units() {
