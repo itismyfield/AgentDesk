@@ -18,6 +18,7 @@ mod session_panel;
 mod slot_rehydration;
 mod status_events;
 mod status_panel;
+mod subagent_panel;
 mod subagent_rollout;
 mod subagent_summary;
 mod task_panel;
@@ -84,10 +85,6 @@ pub(in crate::services::discord) struct PlaceholderLiveEvents {
     // age here, so the rendered text stays byte-identical across heartbeat ticks
     // (no needless re-edit) while Discord shows the localized live age client-side.
     last_recent_event_unix: dashmap::DashMap<ChannelId, i64>,
-    // #3404 (codex r1): last logged live-panel compaction counts per channel —
-    // the INFO line fires on count CHANGE only, not every render tick, so the
-    // log stays usable as a compaction event counter for the relay scan.
-    compaction_log_counts: dashmap::DashMap<ChannelId, (usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +98,6 @@ impl PlaceholderLiveEvents {
     pub(in crate::services::discord) fn clear_channel(&self, channel_id: ChannelId) {
         self.by_channel.remove(&channel_id);
         self.status_by_channel.remove(&channel_id);
-        self.compaction_log_counts.remove(&channel_id);
         self.last_recent_event_at.remove(&channel_id);
         self.last_recent_event_unix.remove(&channel_id); // #3812: drop the freshness anchor too.
     }
@@ -115,9 +111,6 @@ impl PlaceholderLiveEvents {
         // stale — drop it with the ring so the next turn starts un-fresh.
         self.last_recent_event_at.remove(&channel_id);
         self.last_recent_event_unix.remove(&channel_id); // #3812: reset the freshness anchor.
-        // #3404 (codex r2): a turn reset starts a new compaction episode — re-arm
-        // the count-change log gate even when footer residuals survive.
-        self.compaction_log_counts.remove(&channel_id);
         let keep_entry = self
             .status_by_channel
             .get(&channel_id)
@@ -544,23 +537,6 @@ impl PlaceholderLiveEvents {
         )
     }
 
-    // True when the live-panel compaction counts for this channel differ from
-    // the last logged pair. Zero counts re-arm the gate (the next compaction
-    // episode logs again) and never log themselves.
-    fn compaction_counts_changed(
-        &self,
-        channel_id: ChannelId,
-        evicted_tasks: usize,
-        evicted_subagents: usize,
-    ) -> bool {
-        if evicted_tasks == 0 && evicted_subagents == 0 {
-            self.compaction_log_counts.remove(&channel_id);
-            return false;
-        }
-        let counts = (evicted_tasks, evicted_subagents);
-        self.compaction_log_counts.insert(channel_id, counts) != Some(counts)
-    }
-
     fn render_status_panel_with_heartbeat(
         &self,
         channel_id: ChannelId,
@@ -580,21 +556,9 @@ impl PlaceholderLiveEvents {
                     .clone()
             })
             .unwrap_or_default();
-        // #3404: observability — log when completed Tasks/Subagents are compacted
-        // out of the live panel (the live-side analogue of the completion-footer
-        // eviction log), gated on count CHANGE so a long over-cap turn does not
-        // repeat the same line every render tick (codex r1).
-        let (evicted_tasks, evicted_subagents) =
-            completion_footer::live_panel_compaction_counts(&snapshot, provider);
-        if self.compaction_counts_changed(channel_id, evicted_tasks, evicted_subagents) {
-            tracing::info!(
-                target: "agentdesk::discord::live_panel",
-                channel_id = channel_id.get(),
-                evicted_tasks,
-                evicted_subagents,
-                "#3404: compacted delivered terminal slots from the live status panel"
-            );
-        }
+        // #4093 + #4367 후속: the #3404 live-panel terminal-slot compaction (and
+        // its count-change INFO log) is retired — terminal Tasks/Subagents are now
+        // hidden from the live panel outright, so nothing is ever compacted out.
         let turn_trigger_line = self.request_anchor_line(channel_id, &snapshot);
         let time_line = self.panel_time_line(channel_id, started_at_unix);
         render_status_panel(snapshot, provider, time_line, turn_trigger_line)

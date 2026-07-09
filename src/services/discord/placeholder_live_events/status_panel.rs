@@ -2,15 +2,13 @@ use crate::services::agent_protocol::{StatusEvent, StatusTodoItem, SubagentSumma
 use crate::services::provider::ProviderKind;
 
 use super::common::{
-    EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS, STATUS_PANEL_SUBAGENT_LIMIT,
-    STATUS_PANEL_TODO_LIMIT, STATUS_PANEL_WORKFLOW_LIMIT, escape_status_panel_markdown,
-    normalize_summary, sanitized_tool_name, truncate_chars, truncate_chars_with_marker,
+    STATUS_PANEL_MAX_CHARS, STATUS_PANEL_SUBAGENT_LIMIT, STATUS_PANEL_TODO_LIMIT,
+    STATUS_PANEL_WORKFLOW_LIMIT, escape_status_panel_markdown, normalize_summary, truncate_chars,
 };
-use super::completion_footer::compact_live_panel_terminal_lines;
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
-use super::subagent_summary::render_subagent_done_summary;
+use super::subagent_panel::render_live_subagents_section;
 use super::task_panel::{
     STUCK_BACKGROUND_TASK_TTL, TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot,
     force_abort_stuck_background_task_slots, render_live_tasks_section, render_task_panel_line,
@@ -24,9 +22,11 @@ use super::workflow_panel::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SubagentSlot {
-    subagent_type: String,
+    // #4367: read by the extracted `subagent_panel::render_subagent_slot`.
+    pub(super) subagent_type: String,
     pub(super) desc: String,
-    recent: Option<String>,
+    // #4367: read by the extracted `subagent_panel::render_subagent_slot`.
+    pub(super) recent: Option<String>,
     pub(super) finished: Option<bool>,
     /// #3084: Task tool-use id that opened this slot, so `SubagentEnd` closes the
     /// exact slot among parallels instead of the first unfinished one.
@@ -34,7 +34,8 @@ pub(super) struct SubagentSlot {
     agent_id: Option<String>,
     /// #3086: TUI-parity accounting from the finishing `SubagentEnd`; drives the
     /// `Done (N tools · M tokens · Xs)` summary on the render line.
-    summary: Option<SubagentSummary>,
+    // #4367: read by the extracted `subagent_panel::render_subagent_slot`.
+    pub(super) summary: Option<SubagentSummary>,
     /// `true` when launched with `run_in_background`: an ack-only `SubagentEnd`
     /// must NOT mark it ✓ (only a genuine completion finalizes it).
     background: bool,
@@ -595,16 +596,13 @@ pub(super) fn render_status_panel(
         sections.push(section);
     }
 
-    if !matches!(provider, ProviderKind::Codex) && !snapshot.subagents.is_empty() {
-        let lines = snapshot
-            .subagents
-            .iter()
-            .rev()
-            .take(STATUS_PANEL_SUBAGENT_LIMIT)
-            .map(render_subagent_slot)
-            .collect::<Vec<_>>();
-        let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out); // #3404 cap
-        sections.push(format!("Subagents\n{}", lines.join("\n")));
+    // #4367: the in-progress-only Subagents section (filter + #3404 compaction +
+    // empty-section guard) lives in `subagent_panel::render_live_subagents_section`,
+    // mirroring #4093's Tasks extraction. The Codex suppression stays here.
+    if !matches!(provider, ProviderKind::Codex)
+        && let Some(section) = render_live_subagents_section(&snapshot.subagents)
+    {
+        sections.push(section);
     }
 
     if !matches!(provider, ProviderKind::Codex) && !snapshot.workflows.is_empty() {
@@ -650,38 +648,6 @@ pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> Strin
         return repair_fence_parity(&joined);
     }
     repair_fence_parity(&truncate_chars(&joined, STATUS_PANEL_MAX_CHARS))
-}
-
-pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
-    let mut line = format!(
-        "└ {} {}",
-        sanitize_label(&slot.subagent_type),
-        escape_status_panel_markdown(&normalize_summary(&slot.desc))
-    );
-    if let Some(recent) = slot
-        .recent
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        line.push_str(" — ");
-        line.push_str(&escape_status_panel_markdown(&normalize_summary(recent)));
-    }
-    // #3086: append the TUI-parity Done summary on finished slots with accounting.
-    if let Some(summary) = slot
-        .summary
-        .as_ref()
-        .filter(|_| matches!(slot.finished, Some(true)))
-        .filter(|summary| !summary.is_empty())
-        && let Some(done) = render_subagent_done_summary(summary)
-    {
-        line.push_str(" — ");
-        line.push_str(&done);
-    }
-    // #3391: reserve marker width so a finished line always ENDS WITH its ✓/✗.
-    match slot.terminal_marker() {
-        Some(marker) => truncate_chars_with_marker(&line, marker, EVENT_LINE_MAX_CHARS),
-        None => truncate_chars(&line, EVENT_LINE_MAX_CHARS),
-    }
 }
 
 impl SubagentSlot {
@@ -770,10 +736,6 @@ fn unique_unfinished_subagent(
 
 fn clean_match_key(raw: Option<&str>) -> Option<&str> {
     raw.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn sanitize_label(raw: &str) -> String {
-    sanitized_tool_name(raw).unwrap_or_else(|| "Task".to_string())
 }
 
 fn trim_subagents(slots: &mut Vec<SubagentSlot>) {

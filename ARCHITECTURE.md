@@ -512,6 +512,7 @@ src/
 │   │   │   ├── slot_rehydration.rs
 │   │   │   ├── status_events.rs
 │   │   │   ├── status_panel.rs
+│   │   │   ├── subagent_panel.rs
 │   │   │   ├── subagent_rollout.rs
 │   │   │   ├── subagent_summary.rs
 │   │   │   ├── task_panel.rs
