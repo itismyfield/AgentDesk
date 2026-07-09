@@ -45,6 +45,33 @@ fn reseed_watcher_owned_finalizer_ledger(
     );
 }
 
+/// #4370: stamp the persisted inflight row as restart-re-adopted so the
+/// TUI-direct synthetic `stale_reclaim` path recognises this real-user mailbox
+/// owner as reclaimable-when-stale (generalising #4018's synthetic-owner-only
+/// reclaim to the restart-resume path). Idempotent — a re-load that already
+/// carries the marker is a no-op. Never resurrects a row that was concurrently
+/// cleared (only rewrites an on-disk row that still exists). This does NOT touch
+/// the completion lifecycle: the re-adopted turn's own `✅`/footer + analytics
+/// still fire (see the `restart_readopted` field doc for why it is DISTINCT from
+/// `relay_ownership_only`).
+fn mark_inflight_restart_readopted(provider: &ProviderKind, channel_id: ChannelId) {
+    let Some(mut row) = inflight::load_inflight_state(provider, channel_id.get()) else {
+        return;
+    };
+    if row.restart_readopted {
+        return;
+    }
+    row.restart_readopted = true;
+    if let Err(error) = inflight::save_inflight_state(&row) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            error = %error,
+            "failed to persist restart-readopted marker on re-adopted turn (#4370)"
+        );
+    }
+}
+
 pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
@@ -96,6 +123,10 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
         let restored = snapshot.active_user_message_id == Some(finalizer_msg_id);
         if restored {
             reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
+            // #4370: a real-user turn re-bound to the mailbox across a restart.
+            if state.request_owner_user_id != 0 {
+                mark_inflight_restart_readopted(&provider, channel_id);
+            }
         }
         return restored;
     }
@@ -123,6 +154,13 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     .await;
     if started {
         reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
+        // #4370: the mailbox now carries a restart-re-adopted REAL user turn
+        // (owner == request_owner_user_id, reached only when it is non-zero).
+        // Mark the persisted row so a later starved injection / task-notification
+        // synthetic turn can reclaim this mailbox once the re-adopted turn is
+        // stale — without this, #4018's synthetic-owner-only reclaim can never
+        // free it and the follow-up relay text is silently dropped.
+        mark_inflight_restart_readopted(&provider, channel_id);
     }
     started
 }

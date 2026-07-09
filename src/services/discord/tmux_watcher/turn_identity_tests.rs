@@ -69,6 +69,7 @@ fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnStat
         rebind_origin_deadline_secs: None,
         rebind_origin_birth_generation: None,
         relay_ownership_only: false,
+        restart_readopted: false,
         long_running_placeholder_active: false,
         watcher_owns_live_relay: false,
         relay_owner_kind: crate::services::discord::inflight::RelayOwnerKind::None,

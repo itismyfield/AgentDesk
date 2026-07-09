@@ -1196,6 +1196,25 @@
   per-node mailbox/inflight/relay-owner surface; no leader election, PG lease,
   PG schema, cross-node read, or singleton assumption is introduced. The
   watchdog observe_only/force-clean behavior remains a follow-up audit item.
+- #4370 restart-resume stale mailbox (generalises #4018 to the restart path) -
+  **Worker-local relay lifecycle, no PG lease/schema**: #4018 keyed its stale
+  reclaim on the synthetic relay owner, but a dcserver restart re-adopts the REAL
+  user turn (`recovery_engine/runtime.rs::reregister_active_turn_from_inflight`,
+  mailbox owner == `request_owner_user_id`), so the synthetic-owner-only reclaim
+  could never free that mailbox and follow-up injection / task-notification
+  synthetic turns starved for relay ownership. The fix (a) stamps an additive
+  node-local inflight-row marker `restart_readopted` (`inflight/model.rs`,
+  `#[serde(default)]`, legacy rows deserialize `false`; no `INFLIGHT_STATE_VERSION`
+  bump) at the restart re-adopt site, and (b) widens the
+  `synthetic_start/stale_reclaim.rs` eligibility to a restart-re-adopted real-user
+  owner reusing the EXISTING absent/replaced/`terminal_delivery_committed`
+  predicate and the `age >= 120s` positive-staleness gate. All touched state is the
+  same per-node mailbox / inflight / relay-owner surface #4018 used; the marker is
+  DELIBERATELY DISTINCT from `relay_ownership_only` so the re-adopted turn's own
+  `✅`/footer + analytics/transcript still fire. No leader election, PG lease, PG
+  schema, cross-node read, or singleton assumption is introduced. The core-4 serial
+  hotfiles (`turn_bridge/mod.rs`, `tmux_watcher.rs`, `session_relay_sink.rs`,
+  `turn_finalizer.rs`) are untouched, as in #4018.
 - #3805 P2 PR-A (two-message model scaffolding — worker-local UI flag): adds the
   additive `two_message_panel_enabled` flag to `PlaceholderConfig` and threads it
   through the per-node UI plumbing (`runtime_bootstrap.rs` RunBotContext /

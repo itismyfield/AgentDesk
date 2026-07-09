@@ -333,6 +333,36 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// synthetic birth site.
     #[serde(default)]
     pub relay_ownership_only: bool,
+    /// #4370: `true` when this turn was re-adopted across a dcserver restart by
+    /// `recovery_engine::reregister_active_turn_from_inflight` — i.e. a REAL user
+    /// turn (mailbox owner == `request_owner_user_id`, NOT the synthetic relay
+    /// owner) whose mailbox slot was reseeded from persisted inflight state
+    /// instead of being born through the normal turn loop or a synthetic
+    /// compact-resume note.
+    ///
+    /// DELIBERATELY DISTINCT FROM `relay_ownership_only`: that marker means "this
+    /// turn does not own the user-turn lifecycle" and its guards SUPPRESS the
+    /// completion lifecycle (`watcher_completion_lifecycle_applies`,
+    /// `inflight_skips_tui_completion_observation`, the early/late TUI completion
+    /// gates, the `⏳ → ✅` reaction + `session_transcripts` / `turn_analytics`
+    /// persistence). A restart-re-adopted turn DOES still own its user's turn, so
+    /// its own `✅`/footer + analytics/transcript must STILL fire — reusing
+    /// `relay_ownership_only` would wrongly mute the very prose this fix protects.
+    ///
+    /// This marker therefore feeds EXACTLY ONE guard: TUI-direct synthetic
+    /// `stale_reclaim` eligibility. It lets a later starved injection /
+    /// task-notification synthetic turn reclaim the mailbox of a restart-re-adopted
+    /// real-user owner once that owner is stale (absent/replaced/
+    /// `terminal_delivery_committed`, past the `age >= 120s` positive-staleness
+    /// gate) — closing the #4018 regression on the restart-resume path, where the
+    /// synthetic-owner-only reclaim could never free a real-user mailbox (#4370).
+    /// It NEVER by itself triggers a reclaim; a live, progressing re-adopted turn
+    /// (matching `user_msg_id`, not committed) still yields reclaim-reason `None`.
+    /// Additive `#[serde(default)]` field — legacy rows deserialize as `false`
+    /// (no `INFLIGHT_STATE_VERSION` bump, #2235 compat convention); set only at
+    /// the restart re-adopt site.
+    #[serde(default)]
+    pub restart_readopted: bool,
     /// #1255 codex round-2 P2: `true` while a long-running tool placeholder
     /// (`Monitor` / background `Bash`/`Task`/`Agent`) owns `current_msg_id`.
     /// `placeholder_sweeper` skips inflights whose `full_response` is non-empty
@@ -909,6 +939,8 @@ impl InflightTurnState {
             rebind_origin_birth_generation: None,
             // #4002: only the SystemContinuation synthetic birth site sets this.
             relay_ownership_only: false,
+            // #4370: only the restart re-adopt site sets this.
+            restart_readopted: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
             relay_owner_kind: RelayOwnerKind::None,
