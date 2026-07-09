@@ -572,17 +572,17 @@
 | `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 814 | 312 | 502 |  |
 | `services::discord::recovery_engine::crash_resume_guard` | `src/services/discord/recovery_engine/crash_resume_guard.rs` | 368 | 176 | 192 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
-| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 919 | 785 | 134 |  |
+| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1049 | 786 | 263 |  |
 | `services::discord::recovery_engine::manual_rebind::adoption` | `src/services/discord/recovery_engine/manual_rebind/adoption.rs` | 286 | 77 | 209 |  |
 | `services::discord::recovery_engine::manual_rebind::codex_tui_replay` | `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs` | 944 | 233 | 711 |  |
 | `services::discord::recovery_engine::manual_rebind_output_path` | `src/services/discord/recovery_engine/manual_rebind_output_path.rs` | 539 | 348 | 191 |  |
 | `services::discord::recovery_engine::output_path_detect` | `src/services/discord/recovery_engine/output_path_detect.rs` | 177 | 177 | 0 |  |
-| `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 210 | 138 | 72 |  |
+| `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 368 | 177 | 191 |  |
 | `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 2091 | 972 | 1119 |  |
 | `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2404 | 2313 | 91 | giant-file |
 | `services::discord::recovery_engine::restore_persist_outcome` | `src/services/discord/recovery_engine/restore_persist_outcome.rs` | 102 | 102 | 0 |  |
 | `services::discord::recovery_engine::routing_orphan` | `src/services/discord/recovery_engine/routing_orphan.rs` | 218 | 146 | 72 |  |
-| `services::discord::recovery_engine::runtime` | `src/services/discord/recovery_engine/runtime.rs` | 518 | 265 | 253 |  |
+| `services::discord::recovery_engine::runtime` | `src/services/discord/recovery_engine/runtime.rs` | 558 | 265 | 293 |  |
 | `services::discord::recovery_engine::state_extractors` | `src/services/discord/recovery_engine/state_extractors.rs` | 220 | 220 | 0 |  |
 | `services::discord::recovery_engine::status_panel` | `src/services/discord/recovery_engine/status_panel.rs` | 71 | 55 | 16 |  |
 | `services::discord::recovery_engine::status_panel_completion_producer` | `src/services/discord/recovery_engine/status_panel_completion_producer.rs` | 64 | 64 | 0 |  |

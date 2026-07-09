@@ -449,6 +449,46 @@ mod reregister_ledger_reseed_tests {
         ));
     }
 
+    /// #4400 (b) implementation gate: the adopted orphan row (zero
+    /// `request_owner_user_id` / `user_msg_id`, Watcher-owned — the #3107
+    /// self-heal shape) reaches `reregister_active_turn_from_inflight` through
+    /// the manual-rebind resume path. It must NOT seize the channel mailbox:
+    /// `mailbox_try_start_turn` is only reachable for rows with a real request
+    /// owner (the `request_owner_user_id == 0` early return), so a zero-id
+    /// adoption can never block the next real turn's intake. It DOES re-seed
+    /// the Watcher-owned finalizer ledger entry (under the synthetic finalizer
+    /// id) so the respawned watcher can finalize the adopted turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn adopted_zero_owner_orphan_row_does_not_seize_the_mailbox() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let ch = ChannelId::new(52_484);
+        let mut state = active_turn_state(ch.get(), 0);
+        state.request_owner_user_id = 0;
+        state.user_msg_id = 0;
+        state.current_msg_id = 0;
+        state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+
+        let restored = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        assert!(
+            !restored,
+            "a zero-owner row must not report a mailbox re-registration"
+        );
+
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, ch).await;
+        assert!(
+            snapshot.cancel_token.is_none() && snapshot.active_user_message_id.is_none(),
+            "#4400 gate: adopting a zero-id orphan must leave the mailbox ownerless — \
+             seizing it would block the next real turn's intake"
+        );
+        assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(ch, shared.restart.current_generation)
+                .await,
+            "the adopted orphan still re-seeds a Watcher-owned finalizer ledger entry"
+        );
+    }
+
     // #3089 A0 — characterization of the recovery probe-classified outcome
     // (design §5 A0 item 3, signal #5 of 5). `RecoveryCompletionOutcome` is the
     // recovery engine's terminal-completion signal. Pinned inline in this

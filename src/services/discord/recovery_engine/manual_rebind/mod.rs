@@ -917,3 +917,133 @@ mod post_work_evidence_tests {
         assert!(state.rebind_origin);
     }
 }
+
+#[cfg(test)]
+mod stall_watchdog_respawn_deadlock_tests {
+    //! #4400 (b): the 16:32Z self-deadlock — force-clean deleted the row, the
+    //! dying watcher's last poll re-minted a zero-id synthetic row via the
+    //! #3107 self-heal, and every subsequent watchdog respawn tick died on this
+    //! module's preflight with `InflightAlreadyExists` because that shape
+    //! classified as `Pending`. These tests pin both the adoption fix and the
+    //! untouched row-absent (07-07) create-new path.
+    use super::*;
+    use crate::services::provider::ProviderKind;
+
+    /// 16:32Z incident reproduction: with the re-minted orphan row persisted,
+    /// the respawn preflight must route onto the `InflightRestore` resume arm
+    /// (no 409 — invariant I1) and the resume machinery must start the watcher
+    /// at the row's committed offset so the backlog written while the watcher
+    /// was dead (the 16:30~16:37Z window) is still relayed (invariant I3).
+    /// Mutation kill: reverting the `can_adopt_orphaned_synthetic_watcher_row`
+    /// arm classifies this row `Pending` and the first assert fails.
+    #[test]
+    fn respawn_preflight_adopts_reacquired_orphan_row_instead_of_409() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 1_479_671_298_497_183_835_u64;
+        let output_path = tmp.path().join("claude-transcript.jsonl");
+        let output_path_str = output_path.display().to_string();
+        // 8_192 committed bytes plus 4_096 backlog bytes produced while the
+        // watcher was dead — resume must start AT the committed offset, not at
+        // EOF (which would drop the backlog) and not at 0 (rebase).
+        std::fs::write(&output_path, vec![b'x'; 12_288]).expect("write transcript");
+
+        // The row exactly as `reacquire_watcher_inflight_for_active_stream`
+        // (#3107 self-heal) re-mints it after force-clean deleted the real row,
+        // persisted through the same atomic if-absent path the self-heal uses.
+        let mut orphan = super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            None,
+            0,                         // request_owner_user_id — headless re-acquire
+            0,                         // user_msg_id
+            1_518_888_000_000_000_001, // current_msg_id — surviving placeholder message
+            String::new(),
+            None,
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some(output_path_str.clone()),
+            None,
+            8_192,
+        );
+        orphan.turn_source = super::inflight::TurnSource::ExternalInput;
+        orphan.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+        assert!(
+            super::inflight::save_inflight_state_if_absent(&orphan).expect("persist orphan row"),
+            "the self-heal if-absent write must land on an empty store"
+        );
+
+        let existing = super::inflight::load_inflight_state(&provider, channel_id)
+            .expect("re-minted orphan row must load");
+        assert_eq!(
+            recovery_phase_for_existing_inflight_rebind(&existing),
+            RecoveryPhase::InflightRestore,
+            "respawn must adopt the re-minted orphan row onto the resume path instead of \
+             returning InflightAlreadyExists on every watchdog tick (I1)"
+        );
+
+        let (resume_offset, current_len, truncated) =
+            recovery_watcher_start_offset_for_state(&output_path_str, &existing);
+        assert_eq!(
+            resume_offset, 8_192,
+            "resume must preserve the row's committed offset — the dead-window backlog \
+             (bytes 8_192..12_288) stays relayable (I3)"
+        );
+        assert_eq!(current_len, 12_288);
+        assert!(!truncated, "a grown live file is not a truncation restart");
+    }
+
+    /// 07-07 regression pin: when force-clean actually deleted the row and no
+    /// self-heal re-minted one (row ABSENT at respawn), the preflight finds no
+    /// existing inflight and the synthetic rebind-origin birth path must still
+    /// create the row atomically — the adoption fix only reroutes rows that
+    /// exist.
+    #[test]
+    fn respawn_with_absent_row_still_creates_new_synthetic_inflight() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 1_479_671_298_497_184_007_u64;
+        assert!(
+            super::inflight::load_inflight_state(&provider, channel_id).is_none(),
+            "preflight must observe no existing inflight (the 07-07 shape)"
+        );
+
+        // Birth-site mirror of the `existing_inflight = None` branch of
+        // `rebind_inflight_for_channel`.
+        let mut state = super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("adk-cc".to_string()),
+            0,
+            0,
+            0,
+            String::from("/api/inflight/rebind"),
+            None,
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.rebind_origin = true;
+        state.turn_source = super::inflight::TurnSource::ExternalAdopted;
+        state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+
+        assert!(
+            super::inflight::save_inflight_state_create_new(&state).is_ok(),
+            "row-absent respawn must keep succeeding through the atomic create-new path"
+        );
+        assert!(
+            super::inflight::load_inflight_state(&provider, channel_id).is_some(),
+            "the synthetic rebind-origin row must be persisted"
+        );
+    }
+}
