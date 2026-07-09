@@ -394,7 +394,9 @@ class DiscordHaystackShapeTests(unittest.TestCase):
     — read_failures never incremented, so the 'watchdog blind' escalation was
     silently skipped. Such shapes must join the read-failure path (None)."""
 
-    def _haystack_for(self, stdout: str) -> "str | None":
+    def _probe(self, stdout: str) -> "tuple[str | None, str]":
+        """Returns (haystack result, watchdog log contents)."""
+
         def fake_run(argv, **kwargs):
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
@@ -403,7 +405,15 @@ class DiscordHaystackShapeTests(unittest.TestCase):
             with mock.patch.object(
                 relay_watchdog.subprocess, "run", side_effect=fake_run
             ):
-                return rt.discord_haystack("999")
+                out = rt.discord_haystack("999")
+            try:
+                log = rt.log_path.read_text(encoding="utf-8")
+            except OSError:
+                log = ""
+        return out, log
+
+    def _haystack_for(self, stdout: str) -> "str | None":
+        return self._probe(stdout)[0]
 
     def test_valid_but_non_collection_json_is_read_failure(self):
         for stdout in ("null", "123", '"str"'):
@@ -413,11 +423,29 @@ class DiscordHaystackShapeTests(unittest.TestCase):
     def test_dict_with_non_list_messages_is_read_failure(self):
         self.assertIsNone(self._haystack_for('{"messages": 5}'))
 
-    def test_non_dict_entries_are_skipped_not_fatal(self):
-        out = self._haystack_for(
+    # r5 review (PR #4399): a NON-EMPTY list with zero dict entries used to
+    # collapse to '' — a "successful" empty read that never incremented
+    # read_failures, bypassing the watchdog-blind escalation. It must be a
+    # read failure (None).
+    def test_all_malformed_entries_is_read_failure(self):
+        self.assertIsNone(self._haystack_for("[null, 7]"))
+
+    def test_all_malformed_entries_in_dict_wrapper_is_read_failure(self):
+        self.assertIsNone(self._haystack_for('{"messages": [null, 7]}'))
+
+    def test_empty_list_is_a_normal_empty_channel(self):
+        out, log = self._probe("[]")
+        self.assertEqual(out, "")
+        self.assertNotIn("schema drift", log)
+
+    def test_mixed_entries_parse_dicts_and_log_schema_drift(self):
+        # Partial data beats blindness, but the drift must leave a trace.
+        out, log = self._probe(
             '[null, 7, {"author": {"bot": true}, "content": "hello  world"}]'
         )
         self.assertEqual(out, "hello world")
+        self.assertIn("skipped 2 non-object message entries", log)
+        self.assertIn("schema drift", log)
 
     def test_valid_shapes_still_parse(self):
         self.assertEqual(

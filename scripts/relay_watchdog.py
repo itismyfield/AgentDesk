@@ -442,11 +442,23 @@ class Runtime:
             return None
         if not isinstance(msgs, list):
             return None
-        bot = [
-            m
-            for m in msgs
-            if isinstance(m, dict) and (m.get("author") or {}).get("bot")
-        ]
+        dict_msgs = [m for m in msgs if isinstance(m, dict)]
+        if msgs and not dict_msgs:
+            # A NON-EMPTY payload with ZERO parseable entries is schema drift,
+            # not an empty channel: silently skipping them all would yield ''
+            # — a "successful" read that never increments read_failures and
+            # bypasses the watchdog-blind escalation (r5 review, PR #4399).
+            # An empty list ([]) stays a normal empty channel.
+            return None
+        skipped = len(msgs) - len(dict_msgs)
+        if skipped:
+            # Mixed payload: partial data beats blindness, but schema drift
+            # must still leave a trace.
+            self.log(
+                f"discord read: skipped {skipped} non-object message "
+                f"entries (schema drift?)"
+            )
+        bot = [m for m in dict_msgs if (m.get("author") or {}).get("bot")]
         return norm(" ".join((m.get("content") or "") for m in bot))
 
     def dcserver_snapshot(self) -> str:
