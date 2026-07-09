@@ -128,7 +128,7 @@
 | `db::prompt_manifests::repository` | `src/db/prompt_manifests/repository.rs` | 268 | 268 | 0 |  |
 | `db::prompt_manifests::retention` | `src/db/prompt_manifests/retention.rs` | 96 | 96 | 0 |  |
 | `db::prompt_manifests::storage_stats` | `src/db/prompt_manifests/storage_stats.rs` | 122 | 122 | 0 |  |
-| `db::relay_dead_letter` | `src/db/relay_dead_letter.rs` | 242 | 125 | 117 |  |
+| `db::relay_dead_letter` | `src/db/relay_dead_letter.rs` | 250 | 133 | 117 |  |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 304 | 278 | 26 |  |
 | `db::session_observability` | `src/db/session_observability.rs` | 216 | 216 | 0 |  |
 | `db::session_status` | `src/db/session_status.rs` | 78 | 78 | 0 |  |
