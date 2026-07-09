@@ -15,6 +15,7 @@ diff edit and should carry justification — it is not the normal path.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,8 +36,35 @@ BASELINE = 53  # +16 (#4091 r7 batch-4): crate-wide test env-lock isolation swee
 ALLOW_RE = re.compile(r"#\[allow\([^)]*\bclippy::await_holding_lock\b")
 
 
+def _tracked_rs_files(repo_root: Path) -> list[Path]:
+    """Return the repo's git-tracked `*.rs` files (as absolute paths).
+
+    Enumerating with `git ls-files` instead of `repo_root.rglob("*.rs")` is what
+    keeps the count independent of the developer's local checkout (#4376). A
+    worktree-based dev environment leaves gitignored `.claude/worktrees/<id>/`
+    clones — each a full `src/` copy — sitting in the repo root. A raw rglob
+    walks into them and counts every suppression site once per nested worktree,
+    so a developer with active worktrees is always locally red (e.g. 1027 vs
+    baseline 53) while CI (a fresh, worktree-free checkout) stays green. Tracked
+    files are exactly what CI sees; `target/`, `node_modules/`, and the worktree
+    clones are gitignored/untracked and drop out automatically, so the old
+    `"target" in rel.parts` special-case is no longer needed.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", "*.rs"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [repo_root / rel for rel in result.stdout.split("\0") if rel]
+
+
 def count_allows(repo_root: Path) -> tuple[int, list[str]]:
     """Count real `#[allow(clippy::await_holding_lock)]` attributes.
+
+    Only git-tracked `*.rs` files are scanned (see `_tracked_rs_files`), so the
+    result matches CI regardless of local worktree clones (#4376).
 
     Best-effort source scan: full-line comments are skipped and trailing line
     comments are stripped so prose mentioning the lint (e.g. lib.rs guidance)
@@ -47,10 +75,8 @@ def count_allows(repo_root: Path) -> tuple[int, list[str]]:
     """
     total = 0
     locations: list[str] = []
-    for path in sorted(repo_root.rglob("*.rs")):
+    for path in sorted(_tracked_rs_files(repo_root)):
         rel = path.relative_to(repo_root)
-        if "target" in rel.parts:
-            continue
         for lineno, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
