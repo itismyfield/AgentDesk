@@ -433,102 +433,14 @@ fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
     }
 }
 
-// ===========================================================================
-// #3404: live (turn-in-progress) status-panel terminal-slot compaction.
-//
-// The completion-footer path above evicts delivered terminal slots from STATE,
-// but only at turn end, Ok-gated. During a LONG turn the LIVE panel re-renders
-// the SAME `StatusPanelState` every status tick, so completed Tasks/Subagents
-// kept piling up in the RENDER, ate the 600-byte footer budget, and truncated
-// the whole Subagents section to `…`.
-//
-// The live edit fires in #3016-frozen code (`tmux_watcher.rs`,
-// `turn_bridge/mod.rs`) that DISCARDS the edit `Result`, so the post-edit `Ok`
-// hook the footer path uses is unreachable at the live edit site. A render-time
-// eviction-from-state gated on "the NEXT render" is NOT a safe substitute: a
-// failed live edit on the tick a slot first turns terminal, followed by an
-// edit-skipping tick, would drop the ✓ from state before any successful edit
-// ever showed it (a ✓ vanishes unseen). So the live path does NOT mutate state.
-//
-// Instead it COMPACTS the render only: completed (terminal) slots are CAPPED to
-// the most recent few and the rest collapsed into a `… (+N completed)` summary
-// line, while EVERY in-flight slot is always kept. This relieves the 600-byte
-// pressure (the Subagents header + its running entries survive) without ever
-// removing a slot from state — the slot's ✓ stays renderable, and the
-// authoritative confirmed-delivery eviction still runs at turn end through the
-// completion-footer registry. A capped-out terminal slot was already SHOWN on
-// the ticks before newer completions pushed it past the cap, preserving the
-// #3391 "✓ shown" intent without the unsafe state mutation.
-// ===========================================================================
-
-/// Max completed (terminal) Tasks/Subagents entries the LIVE panel renders per
-/// section before collapsing the remainder into a summary line. In-flight slots
-/// are never capped. Small enough that completed entries cannot starve the
-/// 600-byte footer budget, large enough to keep recent context visible.
-pub(in crate::services::discord) const LIVE_PANEL_TERMINAL_RENDER_CAP: usize = 3;
-
-/// #3404: compacts a fully rendered live section's lines (already
-/// `EVENT_LINE_MAX_CHARS`-truncated). The live panel renders slots NEWEST-FIRST
-/// (`.rev()`), so the first `LIVE_PANEL_TERMINAL_RENDER_CAP` terminal (✓/✗) lines
-/// are the most recent completions and are KEPT; the older terminal lines after
-/// them collapse into a single `… (+N completed)` line at the position of the
-/// first collapsed entry. EVERY in-flight line (and any non-slot line) passes
-/// through untouched and keeps its position, so a long backlog of completed
-/// entries can never starve the running entries or the section header out of the
-/// 600-byte footer budget. Returns `None` when nothing was compacted so the
-/// caller renders the original section verbatim.
-pub(in crate::services::discord) fn compact_live_panel_terminal_lines(
-    lines: &[String],
-) -> Option<(Vec<String>, usize)> {
-    let terminal_total = lines
-        .iter()
-        .filter(|line| line_is_terminal_slot(line))
-        .count();
-    if terminal_total <= LIVE_PANEL_TERMINAL_RENDER_CAP {
-        return None;
-    }
-    let collapsed = terminal_total - LIVE_PANEL_TERMINAL_RENDER_CAP;
-    let mut seen_terminal = 0usize;
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    let mut summary_emitted = false;
-    for line in lines {
-        if line_is_terminal_slot(line) {
-            seen_terminal += 1;
-            // Keep the most recent `cap` completions; collapse the older rest.
-            if seen_terminal > LIVE_PANEL_TERMINAL_RENDER_CAP {
-                if !summary_emitted {
-                    out.push(format!("… (+{collapsed} completed)"));
-                    summary_emitted = true;
-                }
-                continue;
-            }
-        }
-        out.push(line.clone());
-    }
-    Some((out, collapsed))
-}
-
-/// A rendered slot line is terminal iff it ends with a ✓/✗ mark (the marker is
-/// truncation-proof per #3391, so a finished slot's line always ends with it).
-fn line_is_terminal_slot(line: &str) -> bool {
-    line.ends_with('✓') || line.ends_with('✗')
-}
-
-/// #3404: how many completed Tasks / Subagents entries the live render would
-/// COLLAPSE for `snapshot` under `provider` (mirrors the render's reverse order +
-/// `STATUS_PANEL_*_LIMIT` window + per-section cap). Drives the one-line INFO
-/// observability log without re-deriving the rendered section strings.
-pub(in crate::services::discord) fn live_panel_compaction_counts(
-    _snapshot: &StatusPanelState,
-    _provider: &ProviderKind,
-) -> (usize, usize) {
-    // #4093 + #4367: the live render now hides terminal (completed/failed) task
-    // AND subagent slots entirely, so no terminal line ever reaches the live
-    // compaction — neither section can be collapsed anymore. Both counts are
-    // therefore always 0; the function is kept (not deleted) as a stable
-    // observability hook so the caller's #3404 compaction INFO log and its
-    // count-change gate survive, mirroring how #4093 zeroed the Tasks side.
-    let tasks_collapsed = 0;
-    let subagents_collapsed = 0;
-    (tasks_collapsed, subagents_collapsed)
-}
+// #3404's live (turn-in-progress) terminal-slot compaction is retired by
+// #4093 + #4367. It capped how many completed (terminal ✓/✗) Tasks/Subagents the
+// LIVE panel rendered, collapsing the rest into a `… (+N completed)` summary, to
+// keep the running entries and section header inside the footer budget. #4093
+// (Tasks) and #4367 (Subagents) instead hide terminal slots from the live panel
+// outright — a completed slot never renders live at all — so capping the terminal
+// render count is moot, and the text-based classifier
+// (`line.ends_with('✓'|'✗')`) could only ever false-positive on a running slot
+// whose text happens to end with a ✓/✗ glyph. The completion-footer rendering
+// above legitimately renders terminal slots (#3391/#3086) and never used that
+// compactor.

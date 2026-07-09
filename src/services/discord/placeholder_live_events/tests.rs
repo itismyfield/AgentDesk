@@ -6608,23 +6608,28 @@ fn rehydration_bound_skips_records_before_compact_boundary() {
 }
 
 // ===========================================================================
-// #3404: live (turn-in-progress) status-panel terminal-slot compaction.
+// #4093 + #4367: the live (turn-in-progress) status panel HIDES completed
+// Tasks/Subagents outright (superseding #3404's terminal-slot compaction, now
+// removed — see completion_footer.rs).
 // ===========================================================================
 
-const LIVE_CAP: usize = super::completion_footer::LIVE_PANEL_TERMINAL_RENDER_CAP;
+// Representative "several completed" backlog size for the hide-completed tests.
+// (Formerly aliased the removed #3404 `LIVE_PANEL_TERMINAL_RENDER_CAP`; the live
+// panel no longer caps terminal rows, so this is now just an arbitrary count.)
+const COMPLETED_SAMPLE: usize = 3;
 
 // #4093 (supersedes #3404 for the Tasks section): during a long turn the LIVE
-// panel used to accumulate completed Tasks — #3404 capped the display at
-// `LIVE_CAP` completions plus a `… (+N completed)` summary. #4093 goes further:
-// completed Task slots are hidden from the live panel entirely so they can never
-// mask or crowd out in-progress work, while every running entry and the section
-// header stay. (The completion footer still renders the ✓ result summary, and
-// the #3404 compaction primitive still governs the Subagents section.)
+// panel used to accumulate completed Tasks — #3404 capped the display at a few
+// completions plus a `… (+N completed)` summary. #4093 goes further: completed
+// Task slots are hidden from the live panel entirely so they can never mask or
+// crowd out in-progress work, while every running entry and the section header
+// stay. (The completion footer still renders the ✓ result summary.) #4093 후속
+// removed the #3404 compactor outright — see completion_footer.rs.
 #[test]
 fn live_panel_hides_completed_tasks_keeping_running_and_header() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_404_001);
-    let completed = LIVE_CAP + 4;
+    let completed = COMPLETED_SAMPLE + 4;
     for i in 0..completed {
         let id = format!("toolu_3404_done_{i:02}");
         push_background_bash_task(&events, channel_id, &format!("Completed job {i:02}"), &id);
@@ -6655,7 +6660,7 @@ fn live_panel_hides_completed_tasks_keeping_running_and_header() {
 
 // #4367 (supersedes #3404 for the Subagents section, mirroring #4093 for Tasks):
 // during a long turn the LIVE panel used to accumulate completed Subagents —
-// #3404 capped the display at `LIVE_CAP` completions plus a `… (+N completed)`
+// #3404 capped the display at a few completions plus a `… (+N completed)`
 // summary. #4367 goes further: completed subagent slots are hidden from the live
 // panel entirely so they can never mask or crowd out in-progress work, while the
 // running entry and the section header stay. (The completion footer still renders
@@ -6664,7 +6669,7 @@ fn live_panel_hides_completed_tasks_keeping_running_and_header() {
 fn live_panel_hides_completed_subagents_keeping_running_and_header() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_404_002);
-    for i in 0..(LIVE_CAP + 5) {
+    for i in 0..(COMPLETED_SAMPLE + 5) {
         let id = format!("toolu_3404_sub_{i:02}");
         events.push_status_event(
             channel_id,
@@ -6723,16 +6728,16 @@ fn live_panel_hides_completed_subagents_keeping_running_and_header() {
     );
 }
 
-// #3404 SAFETY: the live path must NEVER mutate slot state — a ✓ that the live
-// edit dropped from the RENDER must still be in state so the Ok-gated
-// completion-footer eviction (#3391) remains authoritative and no ✓ is lost
-// unseen. After a compacted live render, the completion footer still sees and
-// can deliver every completed slot.
+// #3404 SAFETY (still holds after #4093 + #4367): the live path must NEVER mutate
+// slot state — hiding a completed slot from the live RENDER must leave it in state
+// so the Ok-gated completion-footer eviction (#3391) stays authoritative and no ✓
+// is lost unseen. After a live render that hides every completed slot, the
+// completion footer still sees and can deliver every one of them.
 #[test]
-fn live_panel_compaction_preserves_state_for_footer_eviction() {
+fn live_panel_render_preserves_state_for_footer_eviction() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_404_003);
-    let completed = LIVE_CAP + 3;
+    let completed = COMPLETED_SAMPLE + 3;
     let mut ids = Vec::new();
     for i in 0..completed {
         let id = format!("toolu_3404_state_{i:02}");
@@ -6741,7 +6746,7 @@ fn live_panel_compaction_preserves_state_for_footer_eviction() {
         ids.push(id);
     }
 
-    // Live render compacts the display but must not touch state.
+    // The live render hides the completed slots but must not touch state.
     let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
     // The completion footer (separate render) still reports EVERY completed slot
@@ -6750,7 +6755,7 @@ fn live_panel_compaction_preserves_state_for_footer_eviction() {
     assert_eq!(
         footer.delivered_terminal_ids.len(),
         completed,
-        "live compaction must not remove slots from state: {:?}",
+        "live render must not remove slots from state: {:?}",
         footer.delivered_terminal_ids
     );
 }
@@ -6762,7 +6767,7 @@ fn live_panel_compaction_preserves_state_for_footer_eviction() {
 fn live_panel_hides_completed_tasks_even_under_cap() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_404_004);
-    for i in 0..LIVE_CAP {
+    for i in 0..COMPLETED_SAMPLE {
         let id = format!("toolu_3404_small_{i:02}");
         push_background_bash_task(&events, channel_id, &format!("Job {i:02}"), &id);
         complete_background_bash_task(&events, channel_id, &id);
@@ -6776,78 +6781,6 @@ fn live_panel_hides_completed_tasks_even_under_cap() {
     assert!(
         !panel.contains("completed)"),
         "no summary when completed tasks are hidden: {panel}"
-    );
-}
-
-// #3404 unit: the compaction primitive keeps the newest `cap` terminal lines,
-// preserves every in-flight line in place, and emits one summary for the rest.
-#[test]
-fn compact_live_panel_terminal_lines_caps_and_preserves_inflight() {
-    use super::completion_footer::compact_live_panel_terminal_lines;
-    // Newest-first order (the live panel renders `.rev()`).
-    let lines: Vec<String> = vec![
-        "└ Bash running A ⠸".to_string(),
-        "└ Bash done 5 ✓".to_string(),
-        "└ Bash done 4 ✓".to_string(),
-        "└ Bash done 3 ✓".to_string(),
-        "└ Bash done 2 ✗".to_string(),
-        "└ Bash done 1 ✓".to_string(),
-    ];
-    let (out, collapsed) =
-        compact_live_panel_terminal_lines(&lines).expect("over-cap input must compact");
-    assert_eq!(collapsed, 5 - LIVE_CAP);
-    // Running line preserved in position.
-    assert_eq!(out[0], "└ Bash running A ⠸");
-    // Exactly `cap` terminal lines survive (the newest), plus one summary line.
-    assert_eq!(
-        out.iter()
-            .filter(|l| l.ends_with('✓') || l.ends_with('✗'))
-            .count(),
-        LIVE_CAP
-    );
-    assert_eq!(out.iter().filter(|l| l.contains("completed)")).count(), 1);
-    assert!(out.iter().any(|l| l.contains("done 5")));
-    assert!(!out.iter().any(|l| l.contains("done 1")));
-    // Under-cap input is left untouched.
-    assert!(compact_live_panel_terminal_lines(&lines[..2].to_vec()).is_none());
-}
-
-// #3404 codex r1 — the compaction INFO log is count-change gated: same counts
-// across render ticks must not re-log; zero counts re-arm the gate so the next
-// compaction episode logs again.
-#[test]
-fn compaction_log_gate_fires_on_change_only() {
-    let events = PlaceholderLiveEvents::default();
-    let channel_id = ChannelId::new(3_404_100);
-    assert!(
-        events.compaction_counts_changed(channel_id, 4, 0),
-        "first over-cap render logs"
-    );
-    assert!(
-        !events.compaction_counts_changed(channel_id, 4, 0),
-        "same counts stay silent"
-    );
-    assert!(
-        events.compaction_counts_changed(channel_id, 5, 1),
-        "count growth logs"
-    );
-    assert!(
-        !events.compaction_counts_changed(channel_id, 5, 1),
-        "steady state stays silent"
-    );
-    assert!(
-        !events.compaction_counts_changed(channel_id, 0, 0),
-        "zero never logs"
-    );
-    assert!(
-        events.compaction_counts_changed(channel_id, 5, 1),
-        "zero re-arms the next episode"
-    );
-    // codex r2: a turn reset (even residual-preserving) re-arms the gate.
-    events.clear_channel_preserving_footer_residuals(channel_id);
-    assert!(
-        events.compaction_counts_changed(channel_id, 5, 1),
-        "turn reset re-arms the gate without an interleaved zero render"
     );
 }
 

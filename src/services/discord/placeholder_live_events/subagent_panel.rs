@@ -10,7 +10,6 @@ use super::common::{
     EVENT_LINE_MAX_CHARS, STATUS_PANEL_SUBAGENT_LIMIT, escape_status_panel_markdown,
     normalize_summary, sanitized_tool_name, truncate_chars, truncate_chars_with_marker,
 };
-use super::completion_footer::compact_live_panel_terminal_lines;
 use super::status_panel::SubagentSlot;
 use super::subagent_summary::render_subagent_done_summary;
 
@@ -71,19 +70,21 @@ pub(super) fn subagent_slot_is_in_progress(slot: &SubagentSlot) -> bool {
 /// #4367: renders the LIVE status panel's `Subagents` section for `subagents`, or
 /// `None` when nothing should render. Only in-progress slots are shown (completed
 /// / failed rows are hidden so they can never mask active work), newest first,
-/// capped at `STATUS_PANEL_SUBAGENT_LIMIT` over the FILTERED set, then run through
-/// the #3404 terminal-slot compaction. Returns `None` when no in-progress
-/// subagent survives so the caller emits no dangling `Subagents` header. The
-/// Codex-provider suppression stays with the caller (Codex never renders
-/// subagents). Colocated here (mirroring `task_panel::render_live_tasks_section`)
-/// so subagent-slot rendering lives with the subagent-slot render helper.
+/// capped at `STATUS_PANEL_SUBAGENT_LIMIT` over the FILTERED set. Returns `None`
+/// when no in-progress subagent survives so the caller emits no dangling
+/// `Subagents` header. The Codex-provider suppression stays with the caller (Codex
+/// never renders subagents). Colocated here (mirroring
+/// `task_panel::render_live_tasks_section`) so subagent-slot rendering lives with
+/// the subagent-slot render helper.
 ///
-/// The #3404 `compact_live_panel_terminal_lines` call is kept verbatim from the
-/// pre-#4367 render for exact parity, but it is now effectively a no-op for this
-/// section: the filter above drops every terminal slot, so no ✓/✗ line ever
-/// reaches compaction and there is nothing left to collapse. It is retained (not
-/// deleted) so a future non-terminal render addition still flows through the same
-/// clamp, matching how #4093 left it in `render_live_tasks_section`.
+/// No #3404 live terminal-slot compaction runs here (nor in the Tasks section
+/// after #4093 후속). `compact_live_panel_terminal_lines` classified a line as
+/// terminal by TEXT (`ends_with('✓'|'✗')`); once this section is filtered to
+/// in-progress slots, no genuine terminal line can reach it, so its only possible
+/// matches would be FALSE POSITIVES — a running subagent whose desc/recent text
+/// happens to end with a ✓/✗ glyph — which would wrongly hide in-progress rows
+/// behind a `… (+N completed)` summary (the #4367 bug inverted). Terminals are
+/// hidden outright now, so capping how many terminal rows render is moot.
 pub(super) fn render_live_subagents_section(subagents: &[SubagentSlot]) -> Option<String> {
     if subagents.is_empty() {
         return None;
@@ -95,7 +96,6 @@ pub(super) fn render_live_subagents_section(subagents: &[SubagentSlot]) -> Optio
         .take(STATUS_PANEL_SUBAGENT_LIMIT)
         .map(render_subagent_slot)
         .collect::<Vec<_>>();
-    let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out); // #3404 cap
     (!lines.is_empty()).then(|| format!("Subagents\n{}", lines.join("\n")))
 }
 
