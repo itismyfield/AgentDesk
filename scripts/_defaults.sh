@@ -1097,7 +1097,11 @@ EOF
 # deadlock that never cleared. Exact-name matching also means the ssh client,
 # sshd, and a peer's remote deploy shell (all `ssh`/`sshd`/`bash`, never
 # `cargo`/`rustc`) can never be mistaken for a concurrent builder on the cluster
-# path. See #4255.
+# path. The one process the gate must NEVER refuse on is this node's release
+# dcserver — the deploy restarts it, so a busy target is the subject of the
+# deploy, not contention to wait out. It is exempted by launchd PID / exact
+# executable path (never by basename, which a dev-tree build would also match).
+# See #4255.
 
 _preflight_cpu_count() {
   # Logical CPU count, used to scale the default load-average ceiling so one
@@ -1259,6 +1263,58 @@ _preflight_is_sustained_runaway() {
   awk -v c="$cpu" -v e="$elapsed" -v r="$ratio" 'BEGIN { exit !((e + 0) > 0 && (c + 0) >= (r + 0) * (e + 0)) }'
 }
 
+_preflight_release_binary() {
+  # Absolute path of the release dcserver binary this deploy is about to replace.
+  # Mirrors deploy-release.sh's ADK_REL derivation (which is already set by the
+  # time the gate runs, but recompute so the helper stands alone in tests).
+  local rel_root="${ADK_REL:-${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}}"
+  printf '%s' "${rel_root}/bin/agentdesk"
+}
+
+_preflight_deploy_target_pids() {
+  # Newline-separated PIDs of the release dcserver — the process this deploy
+  # RESTARTS. A busy deploy target is not contention to refuse; it is the target.
+  # Authoritative source: the launchd job's own PID, so a dev-tree `agentdesk`
+  # (same basename, different path) is never mistaken for the release daemon.
+  # `pgrep -x agentdesk` matches basename ONLY and would whitelist that dev
+  # build, so it is deliberately NOT used here. Prints nothing when launchctl is
+  # unavailable or the job is loaded-but-not-running ("PID" absent) — the caller
+  # then falls back to the exact executable-path match, and if that also misses,
+  # the guard keeps its pre-existing behavior (no silent widening).
+  command -v launchctl >/dev/null 2>&1 || return 0
+  local label="${AGENTDESK_DCSERVER_LABEL:-${AGENTDESK_PLIST_REL:-com.agentdesk.release}}"
+  # `launchctl list <label>` emits a plist dump containing `"PID" = 1234;`.
+  launchctl list "$label" 2>/dev/null \
+    | awk -F'= *' '/"PID"[[:space:]]*=/ { gsub(/[^0-9]/, "", $2); if ($2 != "") print $2 }' \
+    || true
+}
+
+_preflight_is_deploy_target() {
+  # _preflight_is_deploy_target <pid> <comm> <target_pids_newline_list> <rel_binary>
+  # True when the hot process IS the release dcserver being deployed, matched by
+  # launchd PID or by EXACT executable path. Both are narrow on purpose (#4255
+  # review round 3): the old code hard-refused on the release daemon itself, so a
+  # busy dcserver locked out its own deploy on every node.
+  local pid="$1" comm="$2" target_pids="$3" rel_binary="$4" tp
+  [ -n "$pid" ] || return 1
+  if [ -n "$target_pids" ]; then
+    # Heredoc, not a pipe: a pipe would run the loop in a subshell where `return`
+    # cannot escape the function.
+    while IFS= read -r tp; do
+      [ -n "$tp" ] || continue
+      if [ "$tp" = "$pid" ]; then
+        return 0
+      fi
+    done <<EOF
+$target_pids
+EOF
+  fi
+  if [ -n "$rel_binary" ] && [ "$comm" = "$rel_binary" ]; then
+    return 0
+  fi
+  return 1
+}
+
 _preflight_resource_contention() {
   # #4255: refuse an expensive release build when the machine is already under
   # resource contention that has twice killed a mid-flight deploy. Prints every
@@ -1278,6 +1334,7 @@ _preflight_resource_contention() {
   local -a advisory_hot=()
   local name pids loadavg pressure ncpu
   local hpid hcpu hetime hcputime hcomm hp f desc
+  local rel_binary target_pids
 
   case "$max_pressure" in ''|*[!0-9]*) max_pressure=4 ;; esac
   case "$high_cpu_pct" in ''|*[!0-9.]*) high_cpu_pct=90 ;; esac
@@ -1323,6 +1380,12 @@ _preflight_resource_contention() {
 
   # (4) Other high-CPU processes (own process group excluded). Per process, a
   # hot (%CPU >= ceiling) NON-builder is classified:
+  #   • THE DEPLOY TARGET (this node's release dcserver) → ADVISORY, never a
+  #     refuse. The deploy restarts that very process, so its load is the thing
+  #     being replaced, not contention to wait out. Refusing on it self-locked
+  #     every deploy from a busy node: a dcserver whose cumulative CPU time (summed
+  #     over its threads) exceeds 0.8× its elapsed wall time trips the sustained-
+  #     runaway ratio without any machine-wide pressure at all (#4255 review r3).
   #   • SUSTAINED RUNAWAY → HARD refuse on its own, no corroboration needed. A
   #     process CPU-pegged for its ENTIRE long life (cpu-time/elapsed >= ratio
   #     AND elapsed >= min_elapsed) is the 07-07 zombie-ugrep shape: a single-
@@ -1335,10 +1398,14 @@ _preflight_resource_contention() {
   #     a low lifetime ratio) must never block a deploy (#4255 review round 2).
   # The min-elapsed floor is what spares a just-started legitimate burst whose
   # short life makes the ratio trivially ~1.
+  rel_binary="$(_preflight_release_binary)"
+  target_pids="$(_preflight_deploy_target_pids || true)"
   while IFS="$(printf '\t')" read -r hpid hcpu hetime hcputime hcomm; do
     [ -n "$hpid" ] || continue
     desc="high-CPU process '${hcomm}' (pid ${hpid}, ${hcpu}% ps-avg, elapsed ${hetime}, cpu-time ${hcputime})"
-    if _preflight_is_sustained_runaway "$hetime" "$hcputime" "$runaway_ratio" "$runaway_min_elapsed"; then
+    if _preflight_is_deploy_target "$hpid" "$hcomm" "$target_pids" "$rel_binary"; then
+      advisory_hot+=("${desc} — DEPLOY TARGET (release dcserver); this deploy restarts it, so its load never blocks (#4255)")
+    elif _preflight_is_sustained_runaway "$hetime" "$hcputime" "$runaway_ratio" "$runaway_min_elapsed"; then
       findings+=("${desc} — SUSTAINED runaway: CPU-pegged for >=${runaway_min_elapsed}s at >=${runaway_ratio}× of its lifetime (07-07 zombie shape)")
     elif [ "$system_pressured" = "1" ]; then
       findings+=("${desc} — contending while the machine is under system-wide load/memory pressure")

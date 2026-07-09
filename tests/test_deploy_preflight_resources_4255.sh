@@ -95,14 +95,21 @@ reset_clean_stubs() {
   PGREP_MATCH=""
   PGREP_LOG=""
   STUB_NCPU=8
-  unset STUB_LOADAVG STUB_PRESSURE STUB_HIGHCPU 2>/dev/null || true
+  unset STUB_LOADAVG STUB_PRESSURE STUB_HIGHCPU STUB_TARGET_PIDS 2>/dev/null || true
   unset AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT \
         AGENTDESK_DEPLOY_MAX_LOADAVG \
         AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL \
         AGENTDESK_DEPLOY_HIGH_CPU_PCT 2>/dev/null || true
+  # Fixed release root so _preflight_release_binary is deterministic and never
+  # collides with the operator's real ~/.adk/release path. Read by
+  # _preflight_release_binary in the sourced _defaults.sh, not by this file.
+  # shellcheck disable=SC2034
+  ADK_REL="/tmp/adk-preflight-test-release"
   _preflight_cpu_count() { printf '%s' "${STUB_NCPU:-8}"; }
   _preflight_loadavg_1min() { printf '%s' "${STUB_LOADAVG:-1.00}"; }
   _preflight_mem_pressure_level() { printf '%s' "${STUB_PRESSURE:-1}"; }
+  # Deterministic: never shell out to the host's real launchctl.
+  _preflight_deploy_target_pids() { [ -n "${STUB_TARGET_PIDS:-}" ] && printf '%s\n' "$STUB_TARGET_PIDS"; return 0; }
   _preflight_high_cpu_processes() {
     if [ -n "${STUB_HIGHCPU:-}" ]; then
       printf '%s\n' "$STUB_HIGHCPU"
@@ -336,6 +343,79 @@ echo "== No false positive from the deploy script's own process name =="
 reset_clean_stubs
 PGREP_MATCH="bash deploy-release.sh ssh sshd"
 assert_rc "deploy-script / ssh / sshd names present but not build tools → pass" 0 _preflight_resource_contention
+reset_clean_stubs
+
+echo "== Deploy target (release dcserver) never refuses its own deploy (#4255 review r3) =="
+# SELF-LOCK REGRESSION. The dcserver is multi-threaded: `ps` cumulative CPU time
+# is summed across threads, so a merely busy daemon reaches cpu-time >= 0.8 ×
+# elapsed with NO machine-wide load/memory pressure — indistinguishable, to the
+# ratio test, from the 07-07 single-core zombie. The old code hard-refused there,
+# so a busy release dcserver locked out its own deploy on every node. The deploy
+# RESTARTS that process; its load is the thing being replaced, not contention.
+reset_clean_stubs
+STUB_NCPU=14; STUB_LOADAVG="1.00"; STUB_PRESSURE="1"   # no system pressure at all
+TARGET_BIN="/tmp/adk-preflight-test-release/bin/agentdesk"
+
+# (a) matched by the launchd job PID (comm may be anything).
+STUB_TARGET_PIDS="94068"
+STUB_HIGHCPU="$(printf '94068\t99.0\t12:00\t11:50\t%s' "$TARGET_BIN")"
+assert_rc "deploy target matched by launchd PID → proceed" 0 _preflight_resource_contention
+assert_out_contains "target surfaced as advisory, not a refusal" "DEPLOY TARGET" _preflight_resource_contention
+reset_clean_stubs
+
+# (b) matched by EXACT executable path when launchctl yields no PID
+# (job loaded-but-not-running, or a tmux-fallback dcserver launchd does not own).
+STUB_NCPU=14; STUB_LOADAVG="1.00"; STUB_PRESSURE="1"
+STUB_HIGHCPU="$(printf '77777\t99.0\t12:00\t11:50\t%s' "$TARGET_BIN")"
+assert_rc "deploy target matched by exact executable path → proceed" 0 _preflight_resource_contention
+reset_clean_stubs
+
+# (c) OVER-MATCH GUARD: a dev-tree binary with the SAME basename `agentdesk` at a
+# DIFFERENT path is NOT the deploy target and must still hard-refuse. This is why
+# the whitelist keys on launchd PID / full path and never on `pgrep -x agentdesk`.
+STUB_NCPU=14; STUB_LOADAVG="1.00"; STUB_PRESSURE="1"
+STUB_HIGHCPU="$(printf '31337\t99.0\t12:00\t11:50\t/Users/someone/.adk/dev/bin/agentdesk')"
+assert_rc "dev-tree agentdesk (same basename, other path) → still refuse" 1 _preflight_resource_contention
+assert_out_contains "dev-tree agentdesk refusal says SUSTAINED" "SUSTAINED" _preflight_resource_contention
+reset_clean_stubs
+
+# (d) The whitelist exempts ONLY the target — a foreign runaway alongside it still refuses.
+STUB_NCPU=14; STUB_LOADAVG="1.00"; STUB_PRESSURE="1"
+STUB_HIGHCPU="$(printf '77777\t99.0\t12:00\t11:50\t%s\n99999\t95.0\t04:00:00\t03:59:00\tugrep' "$TARGET_BIN")"
+assert_rc "deploy target + foreign sustained runaway → refuse" 1 _preflight_resource_contention
+assert_out_contains "refusal names the foreign runaway, not the target" "ugrep" _preflight_resource_contention
+reset_clean_stubs
+
+# (e) The whitelist must NOT mask machine-wide signals: load over ceiling still refuses.
+STUB_NCPU=14; STUB_LOADAVG="25.00"; STUB_PRESSURE="1"   # 25.00 > default 21.00 ceiling
+STUB_HIGHCPU="$(printf '77777\t99.0\t12:00\t11:50\t%s' "$TARGET_BIN")"
+assert_rc "deploy target hot + machine-wide load over ceiling → still refuse" 1 _preflight_resource_contention
+assert_out_contains "machine-wide refusal cites load average" "load average" _preflight_resource_contention
+reset_clean_stubs
+
+echo "== Real launchd PID parser (launchctl shim) =="
+# Restore the REAL _preflight_deploy_target_pids, then feed it a `launchctl` shim
+# emitting the plist dump shape that `launchctl list <label>` actually prints.
+# shellcheck source=/dev/null
+. "$DEFAULTS_SH"
+launchctl() {
+  case "$*" in
+    *"list com.agentdesk.release"*) printf '{\n\t"LimitLoadToSessionType" = "Aqua";\n\t"PID" = 94068;\n\t"LastExitStatus" = 0;\n}\n' ;;
+    *"list com.agentdesk.loaded-not-running"*) printf '{\n\t"LastExitStatus" = 0;\n}\n' ;;
+    *) return 1 ;;
+  esac
+}
+assert_eq "launchd PID parsed from plist dump" "94068" "$(AGENTDESK_DCSERVER_LABEL=com.agentdesk.release _preflight_deploy_target_pids)"
+assert_eq "loaded-but-not-running → empty (no PID key)" "" "$(AGENTDESK_DCSERVER_LABEL=com.agentdesk.loaded-not-running _preflight_deploy_target_pids)"
+assert_eq "unknown label → empty (launchctl rc!=0)" "" "$(AGENTDESK_DCSERVER_LABEL=com.agentdesk.nope _preflight_deploy_target_pids)"
+unset -f launchctl
+assert_eq "release binary path honors ADK_REL" "/tmp/adk-preflight-test-release/bin/agentdesk" \
+  "$(ADK_REL=/tmp/adk-preflight-test-release _preflight_release_binary)"
+# Exact-match predicate: pid hit, path hit, and neither.
+assert_rc "_preflight_is_deploy_target: pid match"   0 _preflight_is_deploy_target "94068" "whatever" "$(printf '111\n94068\n')" "/rel/bin/agentdesk"
+assert_rc "_preflight_is_deploy_target: path match"  0 _preflight_is_deploy_target "77777" "/rel/bin/agentdesk" "" "/rel/bin/agentdesk"
+assert_rc "_preflight_is_deploy_target: basename-only is NOT a match" 1 _preflight_is_deploy_target "31337" "/dev/bin/agentdesk" "" "/rel/bin/agentdesk"
+assert_rc "_preflight_is_deploy_target: empty pid → no match" 1 _preflight_is_deploy_target "" "/rel/bin/agentdesk" "" "/rel/bin/agentdesk"
 reset_clean_stubs
 
 echo
