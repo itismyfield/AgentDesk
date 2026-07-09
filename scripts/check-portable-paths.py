@@ -25,6 +25,7 @@ DEFAULT_PATTERNS = (
     "scripts/launchd-migrated/*.sh",
     "scripts/launchd-migrated/*.py",
     "scripts/check-portable-paths.py",
+    "scripts/relay_watchdog.py",
     "scripts/operator-init-portable.py",
     "scripts/portable-operator-migration-dry-run.py",
     "policies/**/*",
