@@ -1068,9 +1068,11 @@ mod stall_watchdog_respawn_deadlock_tests {
     /// carries (`shared.pg_pool` is `None` in tests); the saved-output-path
     /// `Keep` decision it produces is identical to the incident's.
     #[cfg(unix)]
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn rebind_full_path_adopts_orphan_row_and_resumes_at_committed_offset() {
+    #[test]
+    fn rebind_full_path_adopts_orphan_row_and_resumes_at_committed_offset() {
+        // Sync `#[test]` + `block_on` (the `tmux_watcher/tests.rs` precedent)
+        // so the env-lock guard is never held across an `.await` inside an
+        // async fn — keeps the `await_holding_lock` ratchet baseline intact.
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1139,17 +1141,20 @@ mod stall_watchdog_respawn_deadlock_tests {
 
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = std::sync::Arc::new(serenity::Http::new("Bot test-token"));
-        let result = rebind_inflight_for_channel(
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let result = runtime.block_on(rebind_inflight_for_channel(
             &http,
             &shared,
             &provider,
             channel_id,
             Some(tmux_session.clone()),
-        )
-        .await;
+        ));
 
-        // Synchronous assertion window: current_thread flavor means the
-        // spawned watcher task cannot run until this future yields, so the
+        // Synchronous assertion window: on a current-thread runtime the
+        // spawned watcher task cannot run once `block_on` returns, so the
         // persisted row below is exactly what the rebind path wrote.
         let row = super::inflight::load_inflight_state(&provider, channel_id);
         let watcher_entry = shared.tmux_watchers.remove(&discord_channel);
