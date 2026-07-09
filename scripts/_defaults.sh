@@ -1188,24 +1188,75 @@ _preflight_self_pgid() {
 }
 
 _preflight_high_cpu_processes() {
-  # Emit "pid<TAB>cpu<TAB>comm" for each process whose ps %CPU (a ~1-minute
-  # decaying average on macOS, so a runaway/stuck process such as the 07-07
-  # ugrep still reads high) is >= the threshold, EXCLUDING this deploy's own
-  # process group so neither the deploy script, its lock wrapper, nor a peer's
-  # ssh-invoked shell is ever counted as contention (#4255).
+  # Emit "pid<TAB>cpu<TAB>etime<TAB>time<TAB>comm" for each process whose ps %CPU
+  # (a ~1-minute decaying average on macOS) is >= the threshold, EXCLUDING this
+  # deploy's own process group so neither the deploy script, its lock wrapper,
+  # nor a peer's ssh-invoked shell is ever counted as contention. etime (wall
+  # ELAPSED) and time (cumulative CPU) let the caller tell a sustained runaway
+  # (the 07-07 zombie ugrep, pegged for its whole life) from a legitimate burst
+  # (#4255 review round 2). Neither duration contains spaces, so comm — which
+  # may be a path with spaces — stays the final, greedily-joined column.
   local threshold="$1"
   case "$threshold" in ''|*[!0-9.]*) return 0 ;; esac
   command -v ps >/dev/null 2>&1 || return 0
   local self_pgid
   self_pgid="$(_preflight_self_pgid)"
-  ps -Ao pid=,pgid=,%cpu=,comm= 2>/dev/null | awk -v thr="$threshold" -v spg="$self_pgid" '
+  ps -Ao pid=,pgid=,%cpu=,etime=,time=,comm= 2>/dev/null | awk -v thr="$threshold" -v spg="$self_pgid" '
     {
-      pid = $1; pgid = $2; cpu = $3;
-      comm = $4;
-      for (i = 5; i <= NF; i++) comm = comm " " $i;
+      pid = $1; pgid = $2; cpu = $3; etime = $4; cputime = $5;
+      comm = $6;
+      for (i = 7; i <= NF; i++) comm = comm " " $i;
       if (spg != "" && pgid == spg) next;
-      if ((cpu + 0) >= (thr + 0)) printf "%s\t%s\t%s\n", pid, cpu, comm;
+      if ((cpu + 0) >= (thr + 0)) printf "%s\t%s\t%s\t%s\t%s\n", pid, cpu, etime, cputime, comm;
     }' || true
+}
+
+_preflight_ps_duration_to_seconds() {
+  # Convert a ps etime/time duration ("[[DD-]HH:]MM:SS[.frac]") to whole seconds.
+  # Prints NOTHING on an unparseable value so the caller SKIPS the probe (fail
+  # OPEN — never synthesize a default; #4255 review). etime looks like
+  # "MM:SS" / "HH:MM:SS" / "DD-HH:MM:SS"; time looks like "MM:SS.CC" / "HH:MM:SS".
+  local raw="$1" days=0 rest a b c extra hh=0 mm=0 ss=0 field
+  raw="$(_trim_whitespace "$raw")"
+  [ -n "$raw" ] || return 0
+  case "$raw" in
+    *-*) days="${raw%%-*}"; rest="${raw#*-}" ;;
+    *)   rest="$raw" ;;
+  esac
+  case "$days" in ''|*[!0-9]*) return 0 ;; esac
+  rest="${rest%%.*}"   # drop fractional seconds — sub-second precision is moot
+  IFS=':' read -r a b c extra <<EOF
+$rest
+EOF
+  [ -z "$extra" ] || return 0   # more than three colon fields → malformed
+  if [ -n "$c" ]; then
+    hh="$a"; mm="$b"; ss="$c"
+  elif [ -n "$b" ]; then
+    mm="$a"; ss="$b"
+  else
+    ss="$a"
+  fi
+  for field in "$hh" "$mm" "$ss"; do
+    case "$field" in ''|*[!0-9]*) return 0 ;; esac
+  done
+  printf '%s' "$(( 10#$days * 86400 + 10#$hh * 3600 + 10#$mm * 60 + 10#$ss ))"
+}
+
+_preflight_is_sustained_runaway() {
+  # Returns 0 when a hot process has been CPU-pegged for its ENTIRE (long) life —
+  # cumulative-CPU / elapsed >= ratio AND elapsed >= min_elapsed. That is the
+  # zombie/runaway signature (spins its whole life on one core, so it never moves
+  # loadavg on a many-core box) as opposed to a legitimate burst (mdworker, a
+  # fresh rust-analyzer reindex). Fails OPEN (return 1 = not classified) on any
+  # unparseable/missing duration — never hard-refuse on data we cannot trust.
+  local etime="$1" cputime="$2" ratio="$3" min_elapsed="$4"
+  local elapsed cpu
+  elapsed="$(_preflight_ps_duration_to_seconds "$etime")"
+  cpu="$(_preflight_ps_duration_to_seconds "$cputime")"
+  [ -n "$elapsed" ] && [ -n "$cpu" ] || return 1
+  case "$min_elapsed" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$elapsed" -ge "$min_elapsed" ] 2>/dev/null || return 1
+  awk -v c="$cpu" -v e="$elapsed" -v r="$ratio" 'BEGIN { exit !((e + 0) > 0 && (c + 0) >= (r + 0) * (e + 0)) }'
 }
 
 _preflight_resource_contention() {
@@ -1220,14 +1271,18 @@ _preflight_resource_contention() {
   local max_load="${AGENTDESK_DEPLOY_MAX_LOADAVG:-}"
   local max_pressure="${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-4}"
   local high_cpu_pct="${AGENTDESK_DEPLOY_HIGH_CPU_PCT:-90}"
+  local runaway_ratio="${AGENTDESK_DEPLOY_RUNAWAY_CPU_RATIO:-0.8}"
+  local runaway_min_elapsed="${AGENTDESK_DEPLOY_RUNAWAY_MIN_ELAPSED:-600}"
   local load_is_override=0 system_pressured=0
   local -a findings=()
-  local -a hot_procs=()
+  local -a advisory_hot=()
   local name pids loadavg pressure ncpu
-  local hpid hcpu hcomm hp f
+  local hpid hcpu hetime hcputime hcomm hp f desc
 
   case "$max_pressure" in ''|*[!0-9]*) max_pressure=4 ;; esac
   case "$high_cpu_pct" in ''|*[!0-9.]*) high_cpu_pct=90 ;; esac
+  case "$runaway_ratio" in ''|*[!0-9.]*) runaway_ratio=0.8 ;; esac
+  case "$runaway_min_elapsed" in ''|*[!0-9]*) runaway_min_elapsed=600 ;; esac
   if [ -n "$max_load" ]; then
     load_is_override=1
   else
@@ -1266,32 +1321,39 @@ _preflight_resource_contention() {
     system_pressured=1
   fi
 
-  # (4) Other high-CPU processes (own process group excluded). A LONE hot
-  # process does NOT refuse: one saturated core on a 14-core host is routine
-  # (rust-analyzer / mdworker / an encode / a browser tab / a busy agentdesk)
-  # and a guard that cries wolf just gets force-hatched around. It becomes a
-  # HARD cause ONLY when CORROBORATED by a system-wide signal — load over the
-  # ceiling OR memory pressure at/above the block level — which is exactly the
-  # 07-07 runaway-ugrep shape (it pegged CPU AND drove real load/pressure).
-  # Uncorroborated, it is surfaced as advisory and the deploy proceeds
-  # (#4255 review finding 1).
-  while IFS="$(printf '\t')" read -r hpid hcpu hcomm; do
+  # (4) Other high-CPU processes (own process group excluded). Per process, a
+  # hot (%CPU >= ceiling) NON-builder is classified:
+  #   • SUSTAINED RUNAWAY → HARD refuse on its own, no corroboration needed. A
+  #     process CPU-pegged for its ENTIRE long life (cpu-time/elapsed >= ratio
+  #     AND elapsed >= min_elapsed) is the 07-07 zombie-ugrep shape: a single-
+  #     core spinner never moves loadavg on a 14-core box, so the old
+  #     load/memory corroboration MISSED the very incident this guard exists for.
+  #   • hot AND system-pressured (load over ceiling OR memory at/above block
+  #     level) → HARD refuse — catches multi-process saturation.
+  #   • otherwise → ADVISORY (warn, proceed): a legitimate burst (a fresh
+  #     rust-analyzer reindex below the min-elapsed floor, a bursty mdworker with
+  #     a low lifetime ratio) must never block a deploy (#4255 review round 2).
+  # The min-elapsed floor is what spares a just-started legitimate burst whose
+  # short life makes the ratio trivially ~1.
+  while IFS="$(printf '\t')" read -r hpid hcpu hetime hcputime hcomm; do
     [ -n "$hpid" ] || continue
-    hot_procs+=("high-CPU process '${hcomm}' (pid ${hpid}, ${hcpu}% ps-avg) >= ${high_cpu_pct}% (AGENTDESK_DEPLOY_HIGH_CPU_PCT)")
+    desc="high-CPU process '${hcomm}' (pid ${hpid}, ${hcpu}% ps-avg, elapsed ${hetime}, cpu-time ${hcputime})"
+    if _preflight_is_sustained_runaway "$hetime" "$hcputime" "$runaway_ratio" "$runaway_min_elapsed"; then
+      findings+=("${desc} — SUSTAINED runaway: CPU-pegged for >=${runaway_min_elapsed}s at >=${runaway_ratio}× of its lifetime (07-07 zombie shape)")
+    elif [ "$system_pressured" = "1" ]; then
+      findings+=("${desc} — contending while the machine is under system-wide load/memory pressure")
+    else
+      advisory_hot+=("${desc} >= ${high_cpu_pct}% (AGENTDESK_DEPLOY_HIGH_CPU_PCT)")
+    fi
   done <<EOF
 $(_preflight_high_cpu_processes "$high_cpu_pct")
 EOF
-  if [ "${#hot_procs[@]}" -gt 0 ] && [ "$system_pressured" = "1" ]; then
-    for hp in "${hot_procs[@]}"; do
-      findings+=("${hp} — contending while the machine is under system-wide load/memory pressure")
-    done
-  fi
 
   if [ "${#findings[@]}" -eq 0 ]; then
-    # Uncorroborated hot process(es): advisory only — surface, but PROCEED.
-    if [ "${#hot_procs[@]}" -gt 0 ]; then
-      echo "⚠ [gate] high-CPU process(es) noted but no corroborating load/memory pressure — advisory, proceeding:" >&2
-      for hp in "${hot_procs[@]}"; do
+    # Uncorroborated, non-runaway hot process(es): advisory only — but PROCEED.
+    if [ "${#advisory_hot[@]}" -gt 0 ]; then
+      echo "⚠ [gate] high-CPU process(es) noted but not a sustained runaway and no corroborating load/memory pressure — advisory, proceeding:" >&2
+      for hp in "${advisory_hot[@]}"; do
         echo "    - $hp" >&2
       done
     fi

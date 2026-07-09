@@ -130,6 +130,17 @@ _preflight_cpu_count() { return 0; }
 assert_eq "default ceiling is empty when CPU count is unreadable" "" "$(_preflight_default_max_loadavg)"
 reset_clean_stubs
 
+echo "== ps duration parser (_preflight_ps_duration_to_seconds) — fails open =="
+assert_eq "MM:SS 5:03 → 303"                    "303"    "$(_preflight_ps_duration_to_seconds '5:03')"
+assert_eq "HH:MM:SS 1:05:03 → 3903"             "3903"   "$(_preflight_ps_duration_to_seconds '1:05:03')"
+assert_eq "DD-HH:MM:SS 2-03:04:05 → 183845"     "183845" "$(_preflight_ps_duration_to_seconds '2-03:04:05')"
+assert_eq "SS-only 45 → 45"                     "45"     "$(_preflight_ps_duration_to_seconds '45')"
+assert_eq "fractional 9:52.81 → 592 (frac dropped)" "592" "$(_preflight_ps_duration_to_seconds '9:52.81')"
+assert_eq "octal-safe leading zeros 00:08 → 8"  "8"      "$(_preflight_ps_duration_to_seconds '00:08')"
+assert_eq "malformed 'abc' → empty (fail open)" ""       "$(_preflight_ps_duration_to_seconds 'abc')"
+assert_eq "malformed 4-field 1:2:3:4 → empty"   ""       "$(_preflight_ps_duration_to_seconds '1:2:3:4')"
+assert_eq "empty input → empty"                 ""       "$(_preflight_ps_duration_to_seconds '')"
+
 echo "== Real load-average parse (sysctl shim) =="
 # Restore the REAL parsers, then feed them a low-level `sysctl` shim.
 # shellcheck source=/dev/null
@@ -152,12 +163,13 @@ echo "== Real high-CPU scan (ps shim) — threshold filter + self-pgid exclusion
 # Restore the REAL scanner, then feed it a low-level `ps` shim + fixed self pgid.
 # shellcheck source=/dev/null
 . "$DEFAULTS_SH"
-# Row 2 shares the deploy's own pgid (24835) and MUST be excluded even at 99.9%.
-STUB_PS_ROWS="$(printf '100 100 95.0 /usr/bin/ugrep\n200 24835 99.9 cargo\n300 300 10.0 /usr/bin/idle')"
+# Columns: pid pgid %cpu etime time comm. Row 2 shares the deploy's own pgid
+# (24835) and MUST be excluded even at 99.9%.
+STUB_PS_ROWS="$(printf '100 100 95.0 04:00:00 03:59:00 /usr/bin/ugrep\n200 24835 99.9 01:00 00:59 cargo\n300 300 10.0 10:00 00:30 /usr/bin/idle')"
 ps() { printf '%s\n' "$STUB_PS_ROWS"; }
 _preflight_self_pgid() { printf '%s' "24835"; }
-assert_eq "high-CPU@90 → only the non-self hot proc (ugrep) reported" \
-  "100	95.0	/usr/bin/ugrep" "$(_preflight_high_cpu_processes 90)"
+assert_eq "high-CPU@90 → only the non-self hot proc (ugrep) with durations" \
+  "100	95.0	04:00:00	03:59:00	/usr/bin/ugrep" "$(_preflight_high_cpu_processes 90)"
 assert_eq "high-CPU@99 → 95%% proc below threshold → empty" \
   "" "$(_preflight_high_cpu_processes 99)"
 unset -f ps _preflight_self_pgid
@@ -243,31 +255,68 @@ export AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL="5"
 assert_rc "mem pressure 4 < overridden ceiling 5 → pass" 0 _preflight_resource_contention
 reset_clean_stubs
 
-echo "== High-CPU process needs CORROBORATION (no lone-hot-core false positive) =="
-# A lone hot process on an otherwise-idle machine is ADVISORY only — proceed.
+echo "== SUSTAINED runaway → HARD refuse ON ITS OWN (faithful 07-07, no pressure) =="
+# 07-07: a zombie/runaway ugrep pegging ONE core. On a 14-core host that is
+# loadavg ~1 (nowhere near the 21.00 ceiling) and memory is fine — NO system
+# pressure. It refuses purely because it has been CPU-pegged for its whole long
+# life (elapsed 4h, cpu-time ~4h → ratio ~1). This is the shape the old
+# corroboration rule MISSED.
 reset_clean_stubs
-STUB_HIGHCPU="$(printf '4242\t97.0\trust-analyzer')"
-assert_rc "lone high-CPU proc, no load/mem pressure → advisory, proceeds" 0 _preflight_resource_contention
-assert_out_contains "lone high-CPU proc surfaced as advisory" "advisory" _preflight_resource_contention
-assert_out_contains "advisory still names the process" "rust-analyzer" _preflight_resource_contention
-reset_clean_stubs
-
-# 07-07 historical incident: a runaway/zombie ugrep that pegged CPU AND drove the
-# machine into real contention. Corroborated by LOAD over ceiling → refuse, named.
-export AGENTDESK_DEPLOY_MAX_LOADAVG="10"
-STUB_LOADAVG="25.0"
-STUB_HIGHCPU="$(printf '99999\t95.0\tugrep')"
-assert_rc "INCIDENT 07-07: runaway ugrep + load over ceiling → refuse" 1 _preflight_resource_contention
+STUB_NCPU=14                # default ceiling 21.00; load 1.00 is far under it
+STUB_LOADAVG="1.00"        # NO load pressure
+STUB_PRESSURE="1"          # NO memory pressure
+STUB_HIGHCPU="$(printf '99999\t95.0\t04:00:00\t03:59:00\tugrep')"
+assert_rc "INCIDENT 07-07: sustained ugrep, no system pressure → refuse" 1 _preflight_resource_contention
 assert_out_contains "07-07 refusal names ugrep" "ugrep" _preflight_resource_contention
 assert_out_contains "07-07 refusal names the pid" "99999" _preflight_resource_contention
-assert_out_contains "07-07 refusal cites the corroborating load" "load average" _preflight_resource_contention
+assert_out_contains "07-07 refusal says SUSTAINED runaway" "SUSTAINED" _preflight_resource_contention
 reset_clean_stubs
 
-# Same hot process corroborated by MEMORY pressure (critical) instead → refuse.
+echo "== Legitimate long encode (ffmpeg) — JUDGEMENT CALL: SHOULD block =="
+# A 30-min ffmpeg pegged at 99% (ratio 0.9) is a sustained runaway by the rule.
+# CALL: it SHOULD refuse — it will contend for the entire build; the operator
+# can force through if they judge a single-thread encode harmless.
+reset_clean_stubs
+STUB_HIGHCPU="$(printf '888\t99.0\t30:00\t27:00\tffmpeg')"
+assert_rc "ffmpeg 99%% 30min ratio 0.9 (sustained) → refuse" 1 _preflight_resource_contention
+assert_out_contains "ffmpeg refusal names the process" "ffmpeg" _preflight_resource_contention
+assert_out_contains "ffmpeg refusal says SUSTAINED" "SUSTAINED" _preflight_resource_contention
+reset_clean_stubs
+
+echo "== False-positive guards — must PROCEED (rc 0, advisory only) =="
+# (a) fresh rust-analyzer reindex: high ratio but BELOW the min-elapsed floor.
+reset_clean_stubs
+STUB_HIGHCPU="$(printf '4242\t97.0\t01:30\t01:29\trust-analyzer')"
+assert_rc "fresh rust-analyzer (90s, ratio ~1, below min-elapsed) → proceed" 0 _preflight_resource_contention
+assert_out_contains "rust-analyzer surfaced as advisory" "advisory" _preflight_resource_contention
+assert_out_contains "advisory names rust-analyzer" "rust-analyzer" _preflight_resource_contention
+reset_clean_stubs
+# (b) long-lived but BURSTY mdworker: 2h elapsed, only 6m CPU → ratio 0.05.
+STUB_HIGHCPU="$(printf '777\t95.0\t02:00:00\t06:00\tmdworker')"
+assert_rc "bursty mdworker (2h elapsed, ratio 0.05) → proceed" 0 _preflight_resource_contention
+assert_out_contains "mdworker surfaced as advisory" "advisory" _preflight_resource_contention
+reset_clean_stubs
+# Unparseable durations → cannot classify as runaway → fail OPEN (advisory).
+STUB_HIGHCPU="$(printf '555\t95.0\tabc\txyz\tmystery')"
+assert_rc "unparseable etime/time + no pressure → proceed (fail open)" 0 _preflight_resource_contention
+assert_out_contains "unparseable-duration proc surfaced as advisory" "advisory" _preflight_resource_contention
+reset_clean_stubs
+
+echo "== Corroboration path preserved: hot+BURSTY still refuses under system pressure =="
+# A BURSTY hot process (ratio 0.1, NOT a sustained runaway) refuses only when the
+# machine is under system-wide pressure — proving the multi-process saturation
+# path still fires independently of the runaway rule.
+export AGENTDESK_DEPLOY_MAX_LOADAVG="10"
+STUB_LOADAVG="25.0"
+STUB_HIGHCPU="$(printf '4321\t95.0\t02:00:00\t12:00\tbursty-hog')"
+assert_rc "bursty hot proc + load over ceiling → refuse" 1 _preflight_resource_contention
+assert_out_contains "load-corroborated refusal names the proc" "bursty-hog" _preflight_resource_contention
+assert_out_contains "load-corroborated refusal cites system pressure" "system-wide" _preflight_resource_contention
+reset_clean_stubs
 STUB_PRESSURE="4"
-STUB_HIGHCPU="$(printf '99999\t95.0\tugrep')"
-assert_rc "runaway ugrep + critical memory pressure → refuse" 1 _preflight_resource_contention
-assert_out_contains "mem-corroborated refusal names ugrep" "ugrep" _preflight_resource_contention
+STUB_HIGHCPU="$(printf '4321\t95.0\t02:00:00\t12:00\tbursty-hog')"
+assert_rc "bursty hot proc + critical memory pressure → refuse" 1 _preflight_resource_contention
+assert_out_contains "mem-corroborated refusal names the proc" "bursty-hog" _preflight_resource_contention
 reset_clean_stubs
 
 echo "== Force escape hatch → proceed past a real finding (still warns) =="
