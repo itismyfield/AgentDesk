@@ -117,14 +117,46 @@ fn sanitize_label(raw: &str) -> String {
 /// end belongs to, so it is an ownership conflict: drop, never finalize the
 /// live slot, and never fall through from a conflicted agent_id to the weaker
 /// desc key.
+///
+/// #4396 r4 (codex review): the agent_id branch must consult the tombstone ring
+/// on BOTH carried keys, symmetric with the desc branch — not only on its own
+/// agent_id key. A late id-bearing async `<task-notification>` end carries a
+/// `<task-id>` (=agent_id) AND a desc; r3 only tombstone-checked whichever
+/// single key each branch matched on, so an end whose agent_id was NEVER
+/// tombstoned — its departed owner A was id-less and left the state with only a
+/// DESC tombstone — still uniquely agent_id-matched a same-desc live respawn B
+/// and wrong-killed it. A fresh tombstone hit on EITHER carried key is the same
+/// ownership conflict → conservative drop. Any true residual is ✗-finalized by
+/// the 30-min silence TTL sweep (this PR's "residue over wrong-kill" invariant).
+///
+/// Intended, documented tradeoff: a respawn B that reuses A's agent_id inherits
+/// A's own agent_id tombstone (eviction pushes agent_id + desc keys per slot, so
+/// B's agent_id key == the tombstoned A agent_id key). B's OWN genuine id-less
+/// fallback end is therefore also dropped for the tombstone TTL. Residue over
+/// wrong-kill, deliberately — the exact `tool_use_id` match still closes B when
+/// its end carries the id (that path runs before this fallback, so id-bearing
+/// EXACT completions are unaffected by this guard).
 pub(super) fn match_subagent_end_fallback(
     slots: &[SubagentSlot],
     tombstones: &SubagentKeyTombstones,
     agent_id: Option<&str>,
     desc: Option<&str>,
 ) -> Option<usize> {
+    let now = std::time::Instant::now();
     if let Some(agent_id) = clean_match_key(agent_id) {
-        match unique_live_owner(slots, tombstones, "agent_id", agent_id, |slot| {
+        // #4396 r4: cross-key tombstone guard — the carried desc may be
+        // tombstoned even when the agent_id is not (id-less departed owner).
+        if let Some(desc) = clean_match_key(desc)
+            && tombstones.contains_fresh(desc, now)
+        {
+            log_live_owner_conflict(
+                "desc",
+                desc,
+                "a recently evicted slot shares the carried desc (tombstone)",
+            );
+            return None;
+        }
+        match unique_live_owner(slots, tombstones, "agent_id", agent_id, now, |slot| {
             slot.agent_id.as_deref() == Some(agent_id)
         }) {
             Ok(Some(index)) => return Some(index),
@@ -133,7 +165,10 @@ pub(super) fn match_subagent_end_fallback(
         }
     }
     let desc = clean_match_key(desc)?;
-    unique_live_owner(slots, tombstones, "desc", desc, |slot| slot.desc == desc).ok()?
+    unique_live_owner(slots, tombstones, "desc", desc, now, |slot| {
+        slot.desc == desc
+    })
+    .ok()?
 }
 
 /// `Ok(Some)` iff exactly one slot — finished or not — matches the key and that
@@ -147,9 +182,10 @@ fn unique_live_owner(
     tombstones: &SubagentKeyTombstones,
     key_kind: &'static str,
     key: &str,
+    now: std::time::Instant,
     mut matches: impl FnMut(&SubagentSlot) -> bool,
 ) -> Result<Option<usize>, ()> {
-    if tombstones.contains_fresh(key, std::time::Instant::now()) {
+    if tombstones.contains_fresh(key, now) {
         log_live_owner_conflict(
             key_kind,
             key,

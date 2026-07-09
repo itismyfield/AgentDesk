@@ -6716,6 +6716,98 @@ fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
     );
 }
 
+// #4396 r4 (codex review repro): r3's tombstone guard was asymmetric — each
+// fallback branch only tombstone-checked the SINGLE key it matched on. Here A is
+// id-less (desc-only), so its eviction leaves only a DESC tombstone. B respawns
+// live carrying an agent_id, and A's late completion arrives as an id-BEARING
+// task-notification whose `<task-id>` equals B's agent_id (the harness resume
+// contract: a resumed task re-notifies under the same task-id). The agent_id was
+// never tombstoned, so an agent_id-first matcher uniquely matches live B and
+// wrong-kills it. r4 makes the agent_id branch consult the carried DESC
+// tombstone too → the same-desc tombstone drops the end and leaves B running.
+// Removing that cross-key tombstone check closes B and fails this test.
+#[test]
+fn idless_end_after_eviction_with_new_agent_id_still_respects_desc_tombstone() {
+    use super::completion_footer::{SlotKey, TerminalSlotId};
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_396_010);
+    let shared_desc = "research foo";
+    let reused_agent_id = "a4396r3lateid";
+
+    // A left the state before its task-notification arrived. The panel never
+    // learned A's agent id, so eviction can only tombstone its desc.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some(shared_desc.to_string()),
+            agent_id: None,
+            tool_use_id: Some("toolu_4396_r3_desc_only_a".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: false,
+            agent_id: None,
+            desc: None,
+            tool_use_id: Some("toolu_4396_r3_desc_only_a".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+    events.evict_delivered_terminal_footer_tasks(
+        channel_id,
+        &[TerminalSlotId::Subagent(SlotKey::ToolUseId(
+            "toolu_4396_r3_desc_only_a".to_string(),
+        ))],
+    );
+
+    // B is a live same-desc respawn. It has the agent id that A's late XML will
+    // carry, so an agent_id-first matcher must still notice the desc tombstone.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some(shared_desc.to_string()),
+            agent_id: Some(reused_agent_id.to_string()),
+            tool_use_id: Some("toolu_4396_r3_desc_only_b".to_string()),
+            background: true,
+        },
+    );
+
+    let raw = format!(
+        "<task-notification>\n\
+        <task-id>{reused_agent_id}</task-id>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"{shared_desc}\" completed</summary>\n\
+        </task-notification>"
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_xml_for_footer_mode(&raw, true),
+    );
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot_b = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_4396_r3_desc_only_b"))
+        .expect("live respawn B");
+    assert_eq!(
+        slot_b.finished, None,
+        "same-desc tombstone must prevent an agent_id-first wrong-kill"
+    );
+}
+
 // #3393 finding 3: a workflow `<task-notification>` XML with a NON-terminal
 // status (e.g. running) must NOT emit `WorkflowEnd`; terminal statuses still map
 // success via `!is_error`, consistent with the subagent/background arms.
