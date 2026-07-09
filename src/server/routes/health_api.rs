@@ -577,6 +577,15 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         })
     });
     let degraded = status.as_str().is_some_and(|status| status != "healthy");
+    // #4382: carry the live `degraded_reasons` (the axis that actually decides
+    // `degraded`/`status`) into the public object instead of dropping it, so
+    // public-only consumers stop misattributing the cause to the unrelated
+    // `startup_degraded_reasons`. Always present (empty array when absent) so the
+    // `degraded <=> degraded_reasons non-empty` invariant holds on the public shape.
+    let degraded_reasons = json
+        .get("degraded_reasons")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     let mut public = serde_json::json!({
         "ok": !degraded,
         "status": status,
@@ -587,6 +596,7 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         "fully_recovered": fully_recovered,
         "cluster_standby": cluster_standby,
         "degraded": degraded,
+        "degraded_reasons": degraded_reasons,
     });
     if let Some(startup_status) = startup_status {
         public["startup_status"] = startup_status;
@@ -2150,9 +2160,100 @@ mod tests {
         assert!(public.get("providers").is_none());
         assert!(public.get("mailboxes").is_none());
         assert!(public.get("config_audit").is_none());
-        assert!(public.get("degraded_reasons").is_none());
+        // #4382: the live `degraded_reasons` that DECIDES `degraded` must now be
+        // carried into public health verbatim (was dropped, forcing consumers to
+        // misattribute the cause to the unrelated `startup_degraded_reasons`).
+        assert_eq!(
+            public["degraded_reasons"],
+            json!(["provider:codex:pending_queue_depth:2"])
+        );
         // TEST-004: the detail-only audit block is dropped from public health.
         assert!(public.get("active_session_audit").is_none());
+    }
+
+    /// #4382 invariant: on the PUBLIC projection, `degraded` is true IFF
+    /// `degraded_reasons` is present and non-empty (both directions). A degraded
+    /// health with no reasons, or a healthy one carrying reasons, is unreachable
+    /// through this projection contract.
+    #[test]
+    fn public_health_json_degraded_iff_reasons_nonempty() {
+        // degraded => reasons present AND non-empty.
+        let degraded = public_health_json(json!({
+            "status": "degraded",
+            "version": "0.1.2",
+            "db": false,
+            "dashboard": true,
+            "server_up": true,
+            "degraded_reasons": ["db_unavailable", "provider:claude:pending_queue_depth:1"],
+        }));
+        assert_eq!(degraded["degraded"], json!(true));
+        let degraded_reasons = degraded["degraded_reasons"]
+            .as_array()
+            .expect("degraded_reasons is an array on public health");
+        assert!(
+            !degraded_reasons.is_empty(),
+            "degraded health must carry non-empty degraded_reasons"
+        );
+        assert_eq!(
+            degraded["degraded_reasons"],
+            json!(["db_unavailable", "provider:claude:pending_queue_depth:1"])
+        );
+
+        // healthy => reasons present but EMPTY, and degraded is false.
+        let healthy = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "degraded_reasons": [],
+        }));
+        assert_eq!(healthy["degraded"], json!(false));
+        assert_eq!(healthy["degraded_reasons"], json!([]));
+
+        // absent upstream array => still present as [] (the invariant never sees
+        // a missing key), and healthy stays not-degraded.
+        let absent = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+        }));
+        assert_eq!(absent["degraded"], json!(false));
+        assert_eq!(absent["degraded_reasons"], json!([]));
+    }
+
+    /// #4382 regression: `degraded_reasons` (the live axis that decides
+    /// `degraded`) and `startup_degraded_reasons` (a startup-only axis that does
+    /// NOT decide `degraded`) must surface as two DISTINCT public fields so a
+    /// consumer can no longer misattribute a runtime-degraded cause to startup.
+    #[test]
+    fn public_health_json_keeps_degraded_and_startup_reasons_distinct() {
+        let public = public_health_json(json!({
+            "status": "degraded",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "degraded_reasons": ["provider:codex:disconnected"],
+            "startup_degraded": true,
+            "startup_degraded_reasons": ["startup_doctor:disk_check:warned"],
+        }));
+        assert_eq!(public["degraded"], json!(true));
+        assert_eq!(
+            public["degraded_reasons"],
+            json!(["provider:codex:disconnected"])
+        );
+        assert_eq!(
+            public["startup_degraded_reasons"],
+            json!(["startup_doctor:disk_check:warned"])
+        );
+        // The two axes are genuinely different values, not aliases.
+        assert_ne!(
+            public["degraded_reasons"],
+            public["startup_degraded_reasons"]
+        );
     }
 
     /// [TEST-003] public health omits the per-server OpenCode warm_servers

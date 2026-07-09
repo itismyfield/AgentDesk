@@ -52,6 +52,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 },
                 "db": true,
                 "dashboard": true,
+                "degraded": false,
+                "degraded_reasons": [],
                 "deferred_hooks": 0,
                 "queue_depth": 0,
                 "watcher_count": 0,
@@ -62,7 +64,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_error_example(
             503,
             json!({}),
-            json!({"status": "degraded", "server_up": true, "fully_recovered": false, "db": false, "error": "db connection failing"}),
+            json!({"status": "degraded", "server_up": true, "fully_recovered": false, "db": false, "degraded": true, "degraded_reasons": ["db_unavailable"], "error": "db connection failing"}),
         )
         .with_curl("curl http://localhost:8787/api/health"),
         ep(
