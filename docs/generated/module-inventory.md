@@ -572,7 +572,7 @@
 | `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 814 | 312 | 502 |  |
 | `services::discord::recovery_engine::crash_resume_guard` | `src/services/discord/recovery_engine/crash_resume_guard.rs` | 368 | 176 | 192 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
-| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1205 | 786 | 419 |  |
+| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1210 | 786 | 424 |  |
 | `services::discord::recovery_engine::manual_rebind::adoption` | `src/services/discord/recovery_engine/manual_rebind/adoption.rs` | 304 | 95 | 209 |  |
 | `services::discord::recovery_engine::manual_rebind::codex_tui_replay` | `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs` | 944 | 233 | 711 |  |
 | `services::discord::recovery_engine::manual_rebind_output_path` | `src/services/discord/recovery_engine/manual_rebind_output_path.rs` | 539 | 348 | 191 |  |
