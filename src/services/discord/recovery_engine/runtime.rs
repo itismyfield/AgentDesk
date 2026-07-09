@@ -45,6 +45,32 @@ fn reseed_watcher_owned_finalizer_ledger(
     );
 }
 
+/// #4370 (review r3): may THIS re-adopted row own a ledger entry / on-disk marker?
+///
+/// Only a REAL user turn carrying a REAL message id. Each exclusion closes a
+/// concrete live-turn-theft or dead-weight path, BY CONSTRUCTION rather than by
+/// an undocumented invariant about which turn classes can carry id 0:
+///
+///   - `request_owner_user_id == 0` — no owner, nothing to reclaim from.
+///   - `request_owner_user_id == TUI_DIRECT_SYNTHETIC_OWNER_USER_ID` — the #4018
+///     synthetic relay owner. `classify_reclaimable_mailbox_owner` short-circuits
+///     that owner to `Synthetic` before it ever reads the marker or the ledger, so
+///     recording it is inert dead weight (fresh-Claude r3 #4).
+///   - `user_msg_id == 0` — an injected / task-notification row.
+///     `effective_finalizer_turn_id()` then falls back to a value that is NOT
+///     `user_msg_id`, so `stale_synthetic_mailbox_owner_reclaim_reason` would read
+///     `state.user_msg_id != active_user_message_id` and misfire
+///     `OwnerInflightReplaced` on a turn that is still LIVE, reclaiming it once it
+///     aged past 120s (fresh-Claude r3 #1). It is also the shape codex r3 #1 needed
+///     for its trailing-output theft chain. Excluding it here makes BOTH unreachable
+///     at the source.
+fn readopted_ledger_record_allowed(state: &inflight::InflightTurnState) -> bool {
+    state.request_owner_user_id != 0
+        && state.request_owner_user_id
+            != crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+        && state.user_msg_id != 0
+}
+
 /// #4370: mark this mailbox slot as re-adopted-from-inflight so the TUI-direct
 /// synthetic `stale_reclaim` path recognises this real-user mailbox owner as
 /// reclaimable-when-stale (generalising #4018's synthetic-owner-only reclaim to
@@ -171,7 +197,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
         if restored {
             reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
             // #4370: a real-user turn re-bound to the mailbox across a restart.
-            if state.request_owner_user_id != 0 {
+            if readopted_ledger_record_allowed(state) {
                 mark_readopted_from_inflight(shared, &provider, channel_id, state);
             }
         }
@@ -202,13 +228,14 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     if started {
         reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
         // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
-        // (owner == request_owner_user_id, reached only when it is non-zero).
-        // Record it in the ledger + on-disk marker so a later starved injection /
-        // task-notification synthetic turn can reclaim this mailbox once the
-        // re-adopted turn is stale — without this, #4018's synthetic-owner-only
-        // reclaim can never free it and the follow-up relay text is silently
-        // dropped.
-        mark_readopted_from_inflight(shared, &provider, channel_id, state);
+        // (owner == request_owner_user_id). Record it in the ledger + on-disk
+        // marker so a later starved injection / task-notification synthetic turn
+        // can reclaim this mailbox once the re-adopted turn is stale — without
+        // this, #4018's synthetic-owner-only reclaim can never free it and the
+        // follow-up relay text is silently dropped.
+        if readopted_ledger_record_allowed(state) {
+            mark_readopted_from_inflight(shared, &provider, channel_id, state);
+        }
     }
     started
 }
@@ -423,5 +450,55 @@ mod reregister_ledger_reseed_tests {
                 "Emitted proceeds"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod readopted_ledger_record_gate_tests {
+    use super::{inflight, readopted_ledger_record_allowed};
+    use crate::services::provider::ProviderKind;
+
+    fn row(request_owner_user_id: u64, user_msg_id: u64) -> inflight::InflightTurnState {
+        inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4_370_000,
+            Some("adk-cc".to_string()),
+            request_owner_user_id,
+            user_msg_id,
+            user_msg_id,
+            "user prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            128,
+        )
+    }
+
+    // #4370 (review r3): only a REAL user turn with a REAL message id may own a
+    // re-adopt ledger entry / on-disk marker. Both exclusions are load-bearing:
+    //   * owner 1 (`TUI_DIRECT_SYNTHETIC_OWNER_USER_ID`) is short-circuited to
+    //     `Synthetic` by `classify_reclaimable_mailbox_owner` before the marker or
+    //     ledger is read, so a record is inert dead weight.
+    //   * `user_msg_id == 0` makes `effective_finalizer_turn_id()` diverge from
+    //     `user_msg_id`, which would misfire `OwnerInflightReplaced` on a LIVE turn.
+    #[test]
+    fn only_real_owner_with_real_message_id_is_recorded() {
+        assert!(
+            readopted_ledger_record_allowed(&row(343_742_347_365_974_026, 4_370_160)),
+            "a real user turn with a real message id must be recorded"
+        );
+        assert!(
+            !readopted_ledger_record_allowed(&row(0, 4_370_160)),
+            "an ownerless row has nothing to reclaim from"
+        );
+        assert!(
+            !readopted_ledger_record_allowed(&row(1, 4_370_160)),
+            "the #4018 synthetic relay owner is classified before the marker is read"
+        );
+        assert!(
+            !readopted_ledger_record_allowed(&row(343_742_347_365_974_026, 0)),
+            "an id-0 (injected / task-notification) row would misfire OwnerInflightReplaced on a live turn"
+        );
     }
 }

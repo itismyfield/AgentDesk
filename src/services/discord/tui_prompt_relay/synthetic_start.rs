@@ -1068,6 +1068,57 @@ mod tests {
         );
     }
 
+    // #4370 (fresh-Claude r3 #1). The mailbox's `active_user_message_id` is the turn's
+    // `effective_finalizer_turn_id()`, which equals `user_msg_id` only when that id is
+    // NON-zero. An id-0 marked row makes the two diverge, so the reason function would
+    // read `state.user_msg_id != active_user_message_id` and misfire
+    // `OwnerInflightReplaced` on a turn that is still LIVE, stealing it once aged past
+    // 120s. `classify_reclaimable_mailbox_owner` must refuse id-0 rows outright — the
+    // consumption-site half of the invariant that `readopted_ledger_record_allowed`
+    // enforces at the recovery site.
+    #[tokio::test(flavor = "current_thread")]
+    async fn readopted_from_inflight_id0_row_is_never_reclaimed() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_070);
+        let tmux = "AgentDesk-claude-4370-id0";
+        let real_id = MessageId::new(4_370_170);
+        let synth_id = MessageId::new(4_370_270);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+
+        // A LIVE re-adopted row that carries the marker but has `user_msg_id == 0`
+        // (an injected / task-notification shape). Aged well past the 120s gate.
+        let mut state = real_user_inflight_state(channel_id, real_id, tmux, false);
+        state.readopted_from_inflight = true;
+        state.user_msg_id = 0;
+        state.injected_prompt_message_id = Some(real_id.get());
+        inflight::save_inflight_state(&state).expect("save id-0 re-adopted inflight");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "an id-0 re-adopted row must never be reclaimed — `Replaced` would misfire on a live turn (#4370)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
     // Negative (narrow scoping): a real-user owner WITHOUT the `readopted_from_inflight`
     // marker is never reclaimable — even when committed and aged. Only turns this
     // process re-adopted from disk after a restart are eligible; an ordinary
