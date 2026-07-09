@@ -1100,8 +1100,12 @@ EOF
 # path. See #4255.
 
 _preflight_cpu_count() {
-  # Logical CPU count — used to scale the default load-average ceiling so one
+  # Logical CPU count, used to scale the default load-average ceiling so one
   # default is sane on both the mac-mini (more cores) and the mac-book (fewer).
+  # Prints NOTHING when the count is unreadable — it must NEVER fabricate a value,
+  # because a guessed count fed into the load ceiling would fail CLOSED and
+  # falsely block a high-core host whose hw.ncpu happens to be unreadable. The
+  # load probe skips itself instead when no count is available (#4255 review).
   local n=""
   if command -v sysctl >/dev/null 2>&1; then
     n="$(sysctl -n hw.ncpu 2>/dev/null || true)"
@@ -1110,7 +1114,7 @@ _preflight_cpu_count() {
     n="$(nproc 2>/dev/null || true)"
   fi
   case "$n" in
-    ''|*[!0-9]*) n=8 ;;   # conservative fallback when the count is unreadable
+    ''|*[!0-9]*) return 0 ;;   # unreadable → print nothing so the caller skips
   esac
   printf '%s' "$n"
 }
@@ -1119,8 +1123,11 @@ _preflight_default_max_loadavg() {
   # Default 1-min load-average ceiling = 1.5 × logical CPUs. Before OUR build
   # starts the machine should be near-idle, so a load already at 1.5× core count
   # means other work is saturating it (the 07-05 concurrent-UE-build incident).
+  # Prints NOTHING when the CPU count is unreadable, so the load probe is skipped
+  # rather than evaluated against a fabricated ceiling (#4255 review finding 2).
   local ncpu
   ncpu="$(_preflight_cpu_count)"
+  [ -n "$ncpu" ] || return 0
   awk -v n="$ncpu" 'BEGIN { printf "%.2f", (n + 0) * 1.5 }'
 }
 
@@ -1213,18 +1220,26 @@ _preflight_resource_contention() {
   local max_load="${AGENTDESK_DEPLOY_MAX_LOADAVG:-}"
   local max_pressure="${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-4}"
   local high_cpu_pct="${AGENTDESK_DEPLOY_HIGH_CPU_PCT:-90}"
+  local load_is_override=0 system_pressured=0
   local -a findings=()
+  local -a hot_procs=()
   local name pids loadavg pressure ncpu
-  local hpid hcpu hcomm
+  local hpid hcpu hcomm hp f
 
   case "$max_pressure" in ''|*[!0-9]*) max_pressure=4 ;; esac
   case "$high_cpu_pct" in ''|*[!0-9.]*) high_cpu_pct=90 ;; esac
-  if [ -z "$max_load" ]; then
+  if [ -n "$max_load" ]; then
+    load_is_override=1
+  else
+    # Empty when the CPU count is unreadable → the load probe skips itself below
+    # (fail OPEN), never blocking on a fabricated core count (#4255 review #2).
     max_load="$(_preflight_default_max_loadavg)"
   fi
   ncpu="$(_preflight_cpu_count)"
 
-  # (1) Concurrent build tools — EXACT-name match only (never `pgrep -f`).
+  # (1) Concurrent build tools — EXACT-name match only (never `pgrep -f`). These
+  # are the known deploy-killers (07-05 concurrent UE build) and stay a HARD
+  # refuse on their own — a builder is unambiguous, machine-wide contention.
   for name in cargo rustc UnrealEditor UnrealEditor-Cmd UnrealBuildTool ShaderCompileWorker; do
     pids="$(_preflight_builder_pids "$name" || true)"
     if [ -n "$pids" ]; then
@@ -1232,32 +1247,58 @@ _preflight_resource_contention() {
     fi
   done
 
-  # (2) Load average vs ceiling.
+  # (2) Load average vs ceiling. SKIPPED entirely when the ceiling is unknown
+  # (unreadable CPU count AND no explicit override) — fail OPEN (#4255 review #2).
   loadavg="$(_preflight_loadavg_1min || true)"
-  if [ -n "$loadavg" ] && _preflight_num_gt "$loadavg" "$max_load"; then
-    findings+=("1-min load average ${loadavg} exceeds ceiling ${max_load} (AGENTDESK_DEPLOY_MAX_LOADAVG; default 1.5×${ncpu} cores)")
+  if [ -n "$loadavg" ] && [ -n "$max_load" ] && _preflight_num_gt "$loadavg" "$max_load"; then
+    if [ "$load_is_override" = "1" ]; then
+      findings+=("1-min load average ${loadavg} exceeds ceiling ${max_load} (AGENTDESK_DEPLOY_MAX_LOADAVG override)")
+    else
+      findings+=("1-min load average ${loadavg} exceeds ceiling ${max_load} (default 1.5×${ncpu} cores; set AGENTDESK_DEPLOY_MAX_LOADAVG)")
+    fi
+    system_pressured=1
   fi
 
   # (3) Memory pressure vs ceiling (macOS kern.memorystatus_vm_pressure_level).
   pressure="$(_preflight_mem_pressure_level || true)"
   if [ -n "$pressure" ] && [ "$pressure" -ge "$max_pressure" ] 2>/dev/null; then
     findings+=("memory pressure level ${pressure} >= ceiling ${max_pressure} (1=normal 2=warn 4=critical; AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL)")
+    system_pressured=1
   fi
 
-  # (4) Other high-CPU processes (own process group excluded).
+  # (4) Other high-CPU processes (own process group excluded). A LONE hot
+  # process does NOT refuse: one saturated core on a 14-core host is routine
+  # (rust-analyzer / mdworker / an encode / a browser tab / a busy agentdesk)
+  # and a guard that cries wolf just gets force-hatched around. It becomes a
+  # HARD cause ONLY when CORROBORATED by a system-wide signal — load over the
+  # ceiling OR memory pressure at/above the block level — which is exactly the
+  # 07-07 runaway-ugrep shape (it pegged CPU AND drove real load/pressure).
+  # Uncorroborated, it is surfaced as advisory and the deploy proceeds
+  # (#4255 review finding 1).
   while IFS="$(printf '\t')" read -r hpid hcpu hcomm; do
     [ -n "$hpid" ] || continue
-    findings+=("high-CPU process '${hcomm}' (pid ${hpid}, ${hcpu}% ps-avg) >= ${high_cpu_pct}% (AGENTDESK_DEPLOY_HIGH_CPU_PCT)")
+    hot_procs+=("high-CPU process '${hcomm}' (pid ${hpid}, ${hcpu}% ps-avg) >= ${high_cpu_pct}% (AGENTDESK_DEPLOY_HIGH_CPU_PCT)")
   done <<EOF
 $(_preflight_high_cpu_processes "$high_cpu_pct")
 EOF
+  if [ "${#hot_procs[@]}" -gt 0 ] && [ "$system_pressured" = "1" ]; then
+    for hp in "${hot_procs[@]}"; do
+      findings+=("${hp} — contending while the machine is under system-wide load/memory pressure")
+    done
+  fi
 
   if [ "${#findings[@]}" -eq 0 ]; then
-    echo "▸ [gate] Resource pre-flight clear (load=${loadavg:-n/a}/${max_load}, mem-pressure=${pressure:-n/a}/${max_pressure})"
+    # Uncorroborated hot process(es): advisory only — surface, but PROCEED.
+    if [ "${#hot_procs[@]}" -gt 0 ]; then
+      echo "⚠ [gate] high-CPU process(es) noted but no corroborating load/memory pressure — advisory, proceeding:" >&2
+      for hp in "${hot_procs[@]}"; do
+        echo "    - $hp" >&2
+      done
+    fi
+    echo "▸ [gate] Resource pre-flight clear (load=${loadavg:-n/a}/${max_load:-skipped}, mem-pressure=${pressure:-n/a}/${max_pressure})"
     return 0
   fi
 
-  local f
   if [ "$force" = "1" ]; then
     echo "⚠ [gate] Resource contention detected but AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1 — proceeding anyway:" >&2
     for f in "${findings[@]}"; do

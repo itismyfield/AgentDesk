@@ -120,11 +120,14 @@ assert_rc "_preflight_num_gt 21.00 > 21.00 (equal) → false" 1 _preflight_num_g
 assert_rc "_preflight_num_gt abc > 21 (non-numeric) → false" 1 _preflight_num_gt "abc" "21"
 assert_rc "_preflight_num_gt 25 > '' (empty) → false"   1 _preflight_num_gt "25" ""
 
-echo "== Default load ceiling = 1.5 × logical CPUs =="
+echo "== Default load ceiling = 1.5 × logical CPUs (empty when count unreadable) =="
 STUB_NCPU=8
 assert_eq "default max loadavg for 8 cores" "12.00" "$(_preflight_default_max_loadavg)"
 STUB_NCPU=14
 assert_eq "default max loadavg for 14 cores" "21.00" "$(_preflight_default_max_loadavg)"
+# Unreadable CPU count → NO fabricated ceiling (fail-open, #4255 review #2).
+_preflight_cpu_count() { return 0; }
+assert_eq "default ceiling is empty when CPU count is unreadable" "" "$(_preflight_default_max_loadavg)"
 reset_clean_stubs
 
 echo "== Real load-average parse (sysctl shim) =="
@@ -200,6 +203,12 @@ PGREP_MATCH="rustc"
 assert_rc "rustc present → refuse" 1 _preflight_resource_contention
 assert_out_contains "rustc refusal names the tool" "rustc" _preflight_resource_contention
 reset_clean_stubs
+# 07-05 historical incident: a concurrent Unreal Engine build. The exact-name
+# builder gate refuses it on its own, independent of load/memory corroboration.
+PGREP_MATCH="UnrealEditor"
+assert_rc "INCIDENT 07-05: UnrealEditor build present → refuse" 1 _preflight_resource_contention
+assert_out_contains "07-05 refusal names UnrealEditor" "UnrealEditor" _preflight_resource_contention
+reset_clean_stubs
 
 echo "== Load-average gate + env-var threshold override =="
 reset_clean_stubs
@@ -209,6 +218,17 @@ assert_rc "loadavg 25 > ceiling 10 → refuse" 1 _preflight_resource_contention
 assert_out_contains "loadavg refusal names the metric" "load average" _preflight_resource_contention
 export AGENTDESK_DEPLOY_MAX_LOADAVG="100"
 assert_rc "loadavg 25 <= overridden ceiling 100 → pass" 0 _preflight_resource_contention
+reset_clean_stubs
+
+echo "== Fail-OPEN: unreadable CPU count SKIPS the load probe (never blocks) =="
+reset_clean_stubs
+_preflight_cpu_count() { return 0; }   # simulate unreadable hw.ncpu / nproc
+STUB_LOADAVG="99.0"                     # very high load, but no ceiling to compare
+assert_rc "unreadable ncpu + high load + no override → probe skipped, proceeds" 0 _preflight_resource_contention
+assert_out_contains "clear line marks the load ceiling skipped" "skipped" _preflight_resource_contention
+# An explicit operator ceiling needs no core count → the gate STILL evaluates.
+export AGENTDESK_DEPLOY_MAX_LOADAVG="10"
+assert_rc "unreadable ncpu + explicit ceiling 10 + load 99 → refuse" 1 _preflight_resource_contention
 reset_clean_stubs
 
 echo "== Memory-pressure gate + env-var threshold override =="
@@ -223,12 +243,31 @@ export AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL="5"
 assert_rc "mem pressure 4 < overridden ceiling 5 → pass" 0 _preflight_resource_contention
 reset_clean_stubs
 
-echo "== Other high-CPU process (07-07 ugrep style) → REFUSE, reported by pid/name =="
+echo "== High-CPU process needs CORROBORATION (no lone-hot-core false positive) =="
+# A lone hot process on an otherwise-idle machine is ADVISORY only — proceed.
 reset_clean_stubs
+STUB_HIGHCPU="$(printf '4242\t97.0\trust-analyzer')"
+assert_rc "lone high-CPU proc, no load/mem pressure → advisory, proceeds" 0 _preflight_resource_contention
+assert_out_contains "lone high-CPU proc surfaced as advisory" "advisory" _preflight_resource_contention
+assert_out_contains "advisory still names the process" "rust-analyzer" _preflight_resource_contention
+reset_clean_stubs
+
+# 07-07 historical incident: a runaway/zombie ugrep that pegged CPU AND drove the
+# machine into real contention. Corroborated by LOAD over ceiling → refuse, named.
+export AGENTDESK_DEPLOY_MAX_LOADAVG="10"
+STUB_LOADAVG="25.0"
 STUB_HIGHCPU="$(printf '99999\t95.0\tugrep')"
-assert_rc "high-CPU process present → refuse" 1 _preflight_resource_contention
-assert_out_contains "high-CPU refusal names the process" "ugrep" _preflight_resource_contention
-assert_out_contains "high-CPU refusal names the pid" "99999" _preflight_resource_contention
+assert_rc "INCIDENT 07-07: runaway ugrep + load over ceiling → refuse" 1 _preflight_resource_contention
+assert_out_contains "07-07 refusal names ugrep" "ugrep" _preflight_resource_contention
+assert_out_contains "07-07 refusal names the pid" "99999" _preflight_resource_contention
+assert_out_contains "07-07 refusal cites the corroborating load" "load average" _preflight_resource_contention
+reset_clean_stubs
+
+# Same hot process corroborated by MEMORY pressure (critical) instead → refuse.
+STUB_PRESSURE="4"
+STUB_HIGHCPU="$(printf '99999\t95.0\tugrep')"
+assert_rc "runaway ugrep + critical memory pressure → refuse" 1 _preflight_resource_contention
+assert_out_contains "mem-corroborated refusal names ugrep" "ugrep" _preflight_resource_contention
 reset_clean_stubs
 
 echo "== Force escape hatch → proceed past a real finding (still warns) =="

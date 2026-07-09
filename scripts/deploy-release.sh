@@ -30,13 +30,20 @@ set -euo pipefail
 #   AGENTDESK_DEPLOY_MAX_LOADAVG           1-min load-average ceiling; over it the
 #                                          deploy refuses. Default: 1.5 × logical
 #                                          CPU count (e.g. 21.0 on a 14-core box).
+#                                          The load probe is SKIPPED (fail-open) if
+#                                          the CPU count is unreadable and no
+#                                          explicit ceiling is set.
 #   AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL macOS memory-pressure ceiling
 #                                          (kern.memorystatus_vm_pressure_level:
 #                                          1=normal 2=warn 4=critical). Refuse when
 #                                          the level is >= this. Default: 4.
-#   AGENTDESK_DEPLOY_HIGH_CPU_PCT           any non-deploy process at or above this
-#                                          ps %CPU (own process group excluded) is
-#                                          reported by pid/name and refuses.
+#   AGENTDESK_DEPLOY_HIGH_CPU_PCT           ps %CPU at/above which a non-deploy
+#                                          process (own process group excluded) is
+#                                          flagged by pid/name. A LONE hot process
+#                                          is advisory only; it refuses ONLY when
+#                                          corroborated by load-over-ceiling or
+#                                          memory pressure at/above the block level
+#                                          (avoids one-hot-core false positives).
 #                                          Default: 90.
 #   AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1
 #                                          escape hatch — proceed past a failed
