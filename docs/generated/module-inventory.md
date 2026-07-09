@@ -411,7 +411,7 @@
 | `services::discord` | `src/services/discord/mod.rs` | 5549 | 4165 | 1384 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 981 | 855 | 126 |  |
-| `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 928 | 574 | 354 |  |
+| `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1079 | 652 | 427 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1083 | 982 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
 | `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 2961 | 1691 | 1270 | giant-file |

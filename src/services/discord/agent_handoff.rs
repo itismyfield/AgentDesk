@@ -193,29 +193,78 @@ impl AgentHandoffError {
     }
 }
 
+/// How the receiver can reach the requester when a reply is required (#4383).
+///
+/// Watchdogs and routines hand off under pseudo-source ids (`system`) that carry
+/// no Discord channel binding. Telling their receiver to run `send-to-agent --to
+/// system` yields `agent not found: system`, so the contract must route those
+/// replies back to the channel the handoff landed on instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplyRoute {
+    /// Requester resolves to a mailbox — reply via `send-to-agent`.
+    Mailbox,
+    /// Requester has no mailbox — report into the handoff's own channel.
+    ChannelOnly,
+}
+
+/// Whether `agent_id` is a routable reply target: registered *and* resolving to
+/// at least one Discord mailbox. Mirrors the reachability predicate
+/// [`send_agent_handoff`] applies to `to_agent_id`, so a contract that promises
+/// `send-to-agent` only ever names an id that command can actually deliver to.
+///
+/// A query failure propagates rather than defaulting to a route: both callers
+/// have already proven the pool healthy by loading `to_agent_id`'s bindings, so
+/// an error here is a real anomaly, and guessing would reintroduce the very
+/// class of bug this check exists to prevent — a contract that misdirects.
+async fn resolve_reply_route(
+    pg_pool: &PgPool,
+    agent_id: &str,
+) -> Result<ReplyRoute, AgentHandoffError> {
+    let routable = crate::db::agents::load_agent_channel_bindings_pg(pg_pool, agent_id.trim())
+        .await
+        .map_err(|error| {
+            AgentHandoffError::internal(format!("query reply-target channels: {error}"))
+        })?
+        .and_then(|bindings| bindings.primary_channel())
+        .is_some();
+    Ok(if routable {
+        ReplyRoute::Mailbox
+    } else {
+        ReplyRoute::ChannelOnly
+    })
+}
+
 /// Reply-expectation contract (#3620 follow-up) appended to the end of a handoff
 /// body. `true` → 회신 필수 (the receiver must report back to the requester),
 /// `false` → 회신 불필요 (no callback expected). Kept aligned with the role
 /// response-contract: replies follow the request's callback info + channel rules.
-fn reply_expectation_contract(from_agent_id: &str, expect_reply: bool) -> String {
-    if expect_reply {
-        format!(
+fn reply_expectation_contract(
+    from_agent_id: &str,
+    expect_reply: bool,
+    reply_route: ReplyRoute,
+) -> String {
+    match (expect_reply, reply_route) {
+        (true, ReplyRoute::Mailbox) => format!(
             "──────────\n📨 **회신 필수 계약**: 이 핸드오프는 회신을 요구합니다. 작업/검토를 마치면 결과·결론을 요청자 `{from_agent_id}`에게 반드시 회신하세요. 회신은 `agentdesk send-to-agent --from <self> --to {from_agent_id} --message \"...\" --expect-reply false` 로 보냅니다(현재 요청의 callback 정보·채널 규칙 우선)."
-        )
-    } else {
-        "──────────\n📭 **회신 불필요 계약**: 이 핸드오프는 회신을 요구하지 않습니다. 별도 보고 없이 처리하세요(중대한 이슈를 발견한 경우에만 자율적으로 회신).".to_string()
+        ),
+        (true, ReplyRoute::ChannelOnly) => format!(
+            "──────────\n📨 **회신 필수 계약**: 이 핸드오프는 회신을 요구합니다. 작업/검토를 마치면 결과·결론을 반드시 보고하세요. 단 요청자 `{from_agent_id}`는 메일박스가 없어 `send-to-agent`로 회신할 수 없습니다 — 이 핸드오프가 도착한 채널에 결과를 보고하세요."
+        ),
+        (false, _) => "──────────\n📭 **회신 불필요 계약**: 이 핸드오프는 회신을 요구하지 않습니다. 별도 보고 없이 처리하세요(중대한 이슈를 발견한 경우에만 자율적으로 회신).".to_string(),
     }
 }
 
 /// Build the handoff body. When `expect_reply` is `Some`, a reply-expectation
 /// contract is appended to the end of the message; `None` keeps the legacy
-/// behavior (no contract) for backward compatibility.
+/// behavior (no contract) for backward compatibility. `reply_route` decides how
+/// a required reply is addressed and is ignored otherwise.
 pub(crate) fn build_agent_handoff_content(
     from_agent_id: &str,
     to_agent_id: &str,
     message: &str,
     prefix: bool,
     expect_reply: Option<bool>,
+    reply_route: ReplyRoute,
 ) -> String {
     let mut content = if prefix {
         format!("[{from_agent_id} → {to_agent_id} 핸드오프]\n\n{message}")
@@ -224,7 +273,11 @@ pub(crate) fn build_agent_handoff_content(
     };
     if let Some(expect_reply) = expect_reply {
         content.push_str("\n\n");
-        content.push_str(&reply_expectation_contract(from_agent_id, expect_reply));
+        content.push_str(&reply_expectation_contract(
+            from_agent_id,
+            expect_reply,
+            reply_route,
+        ));
     }
     content
 }
@@ -272,8 +325,19 @@ pub(crate) async fn send_agent_handoff(
         ));
     };
 
-    let content =
-        build_agent_handoff_content(from_agent_id, to_agent_id, message, prefix, expect_reply);
+    let reply_route = if expect_reply == Some(true) {
+        resolve_reply_route(pg_pool, from_agent_id).await?
+    } else {
+        ReplyRoute::Mailbox
+    };
+    let content = build_agent_handoff_content(
+        from_agent_id,
+        to_agent_id,
+        message,
+        prefix,
+        expect_reply,
+        reply_route,
+    );
     let target = format!("channel:{channel_id}");
     let (status, response_body) = health::send_message_with_backends(
         registry,
@@ -365,6 +429,7 @@ fn resolve_agent_handoff_turn_target(
     channel_kind: AgentHandoffChannelKind,
     prefix: bool,
     expect_reply: Option<bool>,
+    reply_route: ReplyRoute,
 ) -> Result<AgentHandoffTurnTarget, AgentHandoffError> {
     let from_agent_id = from_agent_id.trim();
     if from_agent_id.is_empty() {
@@ -410,8 +475,14 @@ fn resolve_agent_handoff_turn_target(
         )));
     };
 
-    let content =
-        build_agent_handoff_content(from_agent_id, to_agent_id, prompt, prefix, expect_reply);
+    let content = build_agent_handoff_content(
+        from_agent_id,
+        to_agent_id,
+        prompt,
+        prefix,
+        expect_reply,
+        reply_route,
+    );
 
     Ok(AgentHandoffTurnTarget {
         to_agent_id: to_agent_id.to_string(),
@@ -469,6 +540,12 @@ pub(crate) async fn start_agent_handoff_turn(
         .map_err(|error| AgentHandoffError::internal(format!("query agent channels: {error}")))?
         .ok_or_else(|| AgentHandoffError::agent_not_found(to_agent_id_trimmed))?;
 
+    let reply_route = if expect_reply == Some(true) {
+        resolve_reply_route(pg_pool, from_agent_id).await?
+    } else {
+        ReplyRoute::Mailbox
+    };
+
     let target = resolve_agent_handoff_turn_target(
         &bindings,
         from_agent_id,
@@ -477,6 +554,7 @@ pub(crate) async fn start_agent_handoff_turn(
         channel_kind,
         prefix,
         expect_reply,
+        reply_route,
     )?;
 
     let result = health::start_headless_agent_turn(
@@ -602,11 +680,25 @@ mod tests {
     #[test]
     fn handoff_prefix_can_be_enabled_or_disabled() {
         assert_eq!(
-            build_agent_handoff_content("project-agentdesk", "adk-dashboard", "hello", true, None),
+            build_agent_handoff_content(
+                "project-agentdesk",
+                "adk-dashboard",
+                "hello",
+                true,
+                None,
+                ReplyRoute::Mailbox
+            ),
             "[project-agentdesk → adk-dashboard 핸드오프]\n\nhello"
         );
         assert_eq!(
-            build_agent_handoff_content("project-agentdesk", "adk-dashboard", "hello", false, None),
+            build_agent_handoff_content(
+                "project-agentdesk",
+                "adk-dashboard",
+                "hello",
+                false,
+                None,
+                ReplyRoute::Mailbox
+            ),
             "hello"
         );
     }
@@ -615,22 +707,72 @@ mod tests {
     fn handoff_reply_expectation_appends_contract() {
         // None → no contract (backward compatible).
         assert_eq!(
-            build_agent_handoff_content("a", "b", "hi", false, None),
+            build_agent_handoff_content("a", "b", "hi", false, None, ReplyRoute::Mailbox),
             "hi"
         );
         // Some(true) → 회신 필수 contract referencing the requester.
-        let required = build_agent_handoff_content("a", "b", "hi", false, Some(true));
+        let required =
+            build_agent_handoff_content("a", "b", "hi", false, Some(true), ReplyRoute::Mailbox);
         assert!(required.starts_with("hi\n\n"));
         assert!(required.contains("회신 필수 계약"));
         assert!(required.contains("`a`"));
         // Some(false) → 회신 불필요 contract.
-        let not_required = build_agent_handoff_content("a", "b", "hi", false, Some(false));
+        let not_required =
+            build_agent_handoff_content("a", "b", "hi", false, Some(false), ReplyRoute::Mailbox);
         assert!(not_required.starts_with("hi\n\n"));
         assert!(not_required.contains("회신 불필요 계약"));
         // Contract appends after the prefix envelope too.
-        let prefixed = build_agent_handoff_content("a", "b", "hi", true, Some(true));
+        let prefixed =
+            build_agent_handoff_content("a", "b", "hi", true, Some(true), ReplyRoute::Mailbox);
         assert!(prefixed.starts_with("[a → b 핸드오프]\n\nhi\n\n"));
         assert!(prefixed.contains("회신 필수 계약"));
+    }
+
+    /// #4383: a pseudo-source requester (`system`) has no mailbox, so the
+    /// required-reply contract must never emit `send-to-agent --to system` —
+    /// running it yields `agent not found: system`.
+    #[test]
+    fn required_reply_to_unroutable_requester_avoids_send_to_agent() {
+        let contract = build_agent_handoff_content(
+            "system",
+            "project-agentdesk",
+            "check the relay",
+            false,
+            Some(true),
+            ReplyRoute::ChannelOnly,
+        );
+        assert!(contract.contains("회신 필수 계약"));
+        assert!(contract.contains("`system`"));
+        // The contract may *name* send-to-agent to explain why it is unusable,
+        // but must never hand the receiver a runnable `--to system` command.
+        assert!(!contract.contains("--to system"));
+        assert!(!contract.contains("--expect-reply"));
+        assert!(contract.contains("이 핸드오프가 도착한 채널"));
+    }
+
+    /// A routable requester keeps the executable `send-to-agent` instruction.
+    #[test]
+    fn required_reply_to_routable_requester_keeps_send_to_agent() {
+        let contract = build_agent_handoff_content(
+            "project-agentdesk",
+            "adk-dashboard",
+            "review this",
+            false,
+            Some(true),
+            ReplyRoute::Mailbox,
+        );
+        assert!(contract.contains("--to project-agentdesk"));
+        assert!(contract.contains("--expect-reply false"));
+    }
+
+    /// `expect_reply=false` renders the same 회신 불필요 contract regardless of
+    /// how the requester would have been reached.
+    #[test]
+    fn reply_route_is_ignored_when_reply_not_expected() {
+        let mailbox = reply_expectation_contract("system", false, ReplyRoute::Mailbox);
+        let channel_only = reply_expectation_contract("system", false, ReplyRoute::ChannelOnly);
+        assert_eq!(mailbox, channel_only);
+        assert!(mailbox.contains("회신 불필요 계약"));
     }
 
     #[test]
@@ -695,6 +837,7 @@ mod tests {
             AgentHandoffChannelKind::Cdx,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .expect("cdx binding resolves");
         assert_eq!(target.to_agent_id, "adk-dashboard");
@@ -718,6 +861,7 @@ mod tests {
             AgentHandoffChannelKind::Cc,
             false,
             None,
+            ReplyRoute::Mailbox,
         )
         .expect("cc binding resolves");
         assert_eq!(target.content, "raw prompt");
@@ -736,6 +880,7 @@ mod tests {
             AgentHandoffChannelKind::Cc,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .expect("falls back to the agent's primary channel");
         assert_eq!(target.channel_id, "222");
@@ -762,6 +907,7 @@ mod tests {
             AgentHandoffChannelKind::Cc,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .expect("codex primary-only binding resolves");
         assert_eq!(target.channel_id, "1495040912361914399");
@@ -786,6 +932,7 @@ mod tests {
             AgentHandoffChannelKind::Cdx,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .expect("explicit cc-only fallback resolves via Claude");
         assert_eq!(target.channel_id, "1495040912361914400");
@@ -810,6 +957,7 @@ mod tests {
             AgentHandoffChannelKind::Cdx,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .expect("opencode mailbox resolves via primary channel");
         assert_eq!(target.channel_id, "1495040912361914398");
@@ -827,6 +975,7 @@ mod tests {
             AgentHandoffChannelKind::Cc,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .unwrap_err();
         assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -842,6 +991,7 @@ mod tests {
             AgentHandoffChannelKind::Cc,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -858,6 +1008,7 @@ mod tests {
             AgentHandoffChannelKind::Cc,
             true,
             None,
+            ReplyRoute::Mailbox,
         )
         .unwrap_err();
         assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
