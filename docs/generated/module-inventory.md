@@ -159,7 +159,7 @@
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 364 | 364 | 0 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 376 | 376 | 0 |  |
 | `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 616 | 439 | 177 |  |
-| `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 599 | 366 | 233 |  |
+| `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 718 | 379 | 339 |  |
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 1540 | 942 | 598 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 202 | 202 | 0 |  |
 | `engine::ops::log_ops` | `src/engine/ops/log_ops.rs` | 76 | 60 | 16 |  |

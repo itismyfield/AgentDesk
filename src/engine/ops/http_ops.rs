@@ -150,6 +150,16 @@ fn loopback_http_post_inner(
         .next()
         .ok_or_else(|| format!("no socket address for {authority}"))?;
 
+    // Total-deadline anchor: the per-read socket timeout below bounds each
+    // `read` syscall, NOT the whole exchange — a peer dribbling one byte per
+    // read window would extend the call indefinitely. Checking elapsed time
+    // against this deadline before every read bounds the worst case at
+    // `timeout + one read window` (≤ 2×timeout) without re-arming
+    // `set_read_timeout` mid-stream, which is the exact syscall-after-peer-
+    // close that EINVALs on macOS (see the #4251 note on
+    // `loopback_http_post`).
+    let deadline = std::time::Instant::now() + timeout;
+
     let mut stream =
         TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
 
@@ -197,6 +207,9 @@ fn loopback_http_post_inner(
             if raw.len() >= he.saturating_add(cl) {
                 return build_response(&raw, he, Some(cl));
             }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("response deadline exceeded".to_string());
         }
         match stream.read(&mut buf) {
             Ok(0) => break,
@@ -452,6 +465,112 @@ mod tests {
             elapsed < Duration::from_millis(800),
             "Content-Length early-exit guard missing: waited {elapsed:?} for the server to close \
              instead of returning once the declared body arrived; out={out}"
+        );
+    }
+
+    /// Accept one connection, send headers declaring a large body, then
+    /// dribble one byte per `gap` for up to `lifetime`, then drop. Each gap is
+    /// far below the per-read socket timeout, so only a TOTAL deadline stops
+    /// the exchange early.
+    fn spawn_dribble_server(gap: Duration, lifetime: Duration) -> u16 {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral dribble server");
+        let port = listener.local_addr().expect("dribble server addr").port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n");
+                let _ = sock.flush();
+                let start = Instant::now();
+                while start.elapsed() < lifetime {
+                    if sock.write_all(b"x").and_then(|()| sock.flush()).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(gap);
+                }
+            }
+        });
+        port
+    }
+
+    /// MUTATION GUARD (total deadline). The per-read socket timeout only
+    /// bounds each `read` syscall; a peer dribbling a byte per 50ms never
+    /// trips it. Remove the `deadline` check in the read loop and this call
+    /// runs for the server's whole 3s lifetime instead of erroring at ~400ms,
+    /// blowing both asserts below.
+    #[test]
+    fn loopback_http_post_enforces_total_deadline_against_dribbling_peer() {
+        let port = spawn_dribble_server(Duration::from_millis(50), Duration::from_secs(3));
+        let url = url::Url::parse(&format!(
+            "http://127.0.0.1:{port}/api/sessions/claude%2Fh%3As/idle-recap"
+        ))
+        .expect("test url");
+        let start = Instant::now();
+        let result = loopback_http_post_inner(&url, "{}", Duration::from_millis(400));
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(&result, Err(message) if message.contains("deadline exceeded")),
+            "expected total-deadline error, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "total deadline missing: dribbling peer held the call for {elapsed:?}"
+        );
+    }
+
+    /// MUTATION GUARD (streaming response cap). The 8 MiB cap is enforced
+    /// while the body streams in, so an oversized reply is cut off mid-flight:
+    /// the client errors and closes, and the peer cannot deliver its full
+    /// payload. Remove the in-loop cap check and the client buffers all 64 MiB
+    /// to EOF, failing both asserts.
+    #[test]
+    fn loopback_http_post_caps_oversized_response_while_streaming() {
+        let total: usize = 64 * 1024 * 1024;
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sent_in_server = sent.clone();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral cap server");
+        let port = listener.local_addr().expect("cap server addr").port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {total}\r\n\r\n");
+                if sock.write_all(head.as_bytes()).is_err() {
+                    return;
+                }
+                let chunk = vec![b'x'; 256 * 1024];
+                let mut written = 0usize;
+                while written < total {
+                    let n = chunk.len().min(total - written);
+                    if sock.write_all(&chunk[..n]).is_err() {
+                        break;
+                    }
+                    written += n;
+                    sent_in_server.store(written, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        let url = url::Url::parse(&format!(
+            "http://127.0.0.1:{port}/api/sessions/claude%2Fh%3As/idle-recap"
+        ))
+        .expect("test url");
+        let result = loopback_http_post_inner(&url, "{}", Duration::from_secs(10));
+        assert!(
+            matches!(&result, Err(message) if message.contains("exceeds 8 MiB cap")),
+            "expected streaming cap error, got truncated-or-ok result: {:?}",
+            result.as_ref().map(|s| s.len())
+        );
+        // Give the server thread a beat to observe the closed socket, then
+        // require that the early abort stopped it well short of the full body.
+        std::thread::sleep(Duration::from_millis(300));
+        let delivered = sent.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            delivered < total,
+            "client kept reading to EOF: server pushed all {total} bytes"
         );
     }
 
