@@ -106,37 +106,65 @@ fn sanitize_label(raw: &str) -> String {
 
 /// #4177: conservative auxiliary pairing for a genuine `SubagentEnd` that missed
 /// its exact `tool_use_id` match (or, #4396, carries no id at all): the UNIQUE
-/// unfinished slot with the same agent_id, else the UNIQUE unfinished slot with
-/// the same desc. Zero or ambiguous candidates match nothing — the caller drops
-/// the event rather than guess.
+/// key-matched slot — by agent_id, else by desc — and only when that unique
+/// owner is still unfinished. Zero or ambiguous candidates match nothing — the
+/// caller drops the event rather than guess.
+///
+/// #4396 r2 (opus review): the uniqueness scan spans FINISHED slots too. A
+/// finished slot sharing the key — e.g. a TTL-swept instance A beside a
+/// same-desc respawned live B — means the key cannot prove which instance this
+/// end belongs to, so it is an ownership conflict: drop, never finalize the
+/// live slot, and never fall through from a conflicted agent_id to the weaker
+/// desc key.
 pub(super) fn match_subagent_end_fallback(
     slots: &[SubagentSlot],
     agent_id: Option<&str>,
     desc: Option<&str>,
 ) -> Option<usize> {
     if let Some(agent_id) = clean_match_key(agent_id) {
-        match unique_unfinished_subagent(slots, |slot| slot.agent_id.as_deref() == Some(agent_id)) {
+        match unique_live_owner(slots, "agent_id", agent_id, |slot| {
+            slot.agent_id.as_deref() == Some(agent_id)
+        }) {
             Ok(Some(index)) => return Some(index),
             Err(()) => return None,
             Ok(None) => {}
         }
     }
     let desc = clean_match_key(desc)?;
-    unique_unfinished_subagent(slots, |slot| slot.desc == desc).ok()?
+    unique_live_owner(slots, "desc", desc, |slot| slot.desc == desc).ok()?
 }
 
-fn unique_unfinished_subagent(
+/// `Ok(Some)` iff exactly one slot — finished or not — matches the key and that
+/// sole owner is unfinished. Any finished match (a sole one is a late duplicate
+/// for an already-closed slot; beside a live one it is the #4396 r2
+/// finished/live ownership conflict) and any second live match bail with `Err`,
+/// logging the key that failed to identify a unique live owner.
+fn unique_live_owner(
     slots: &[SubagentSlot],
+    key_kind: &'static str,
+    key: &str,
     mut matches: impl FnMut(&SubagentSlot) -> bool,
 ) -> Result<Option<usize>, ()> {
     let mut found = None;
     for (index, slot) in slots.iter().enumerate().rev() {
-        if slot.finished.is_none() && matches(slot) {
-            if found.is_some() {
-                return Err(());
-            }
-            found = Some(index);
+        if !matches(slot) {
+            continue;
         }
+        if slot.finished.is_some() || found.is_some() {
+            tracing::info!(
+                target: "agentdesk::discord::live_panel",
+                key_kind,
+                key,
+                conflict = if slot.finished.is_some() {
+                    "a finished slot shares the key"
+                } else {
+                    "multiple live matches"
+                },
+                "#4396: subagent end fallback dropped — key does not identify a unique live owner"
+            );
+            return Err(());
+        }
+        found = Some(index);
     }
     Ok(found)
 }

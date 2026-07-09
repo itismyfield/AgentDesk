@@ -6407,6 +6407,168 @@ fn task_notification_xml_keyless_idless_terminal_still_dropped_at_bridge() {
     );
 }
 
+// #4396 r2 (opus review repro): instance A is force-aborted by the render-tick
+// TTL sweep, a SAME-desc instance B respawns live, then A's REAL completion
+// arrives late as an id-less desc-keyed end. Among unfinished slots B is the
+// unique desc match — but the end belongs to A. The matcher must treat the
+// finished same-key slot as an ownership conflict and DROP: live B stays
+// running and swept A keeps its ✗. Reverting the matcher to scan only
+// unfinished slots closes B and fails this test.
+#[test]
+fn idless_end_with_desc_shared_by_finished_slot_never_closes_the_live_respawn() {
+    use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_396_006);
+    // Instance A: background, then force-aborted by the periodic render-tick
+    // sweep (the exact precondition the sweep itself creates).
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("research foo".to_string()),
+            agent_id: None,
+            tool_use_id: Some("toolu_4396_r2_a".to_string()),
+            background: true,
+        },
+    );
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.subagents[0].started_at = std::time::Instant::now()
+            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
+            .expect("monotonic clock far enough past origin");
+    }
+    let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    // Instance B: respawned with the SAME desc, live.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("research foo".to_string()),
+            agent_id: None,
+            tool_use_id: Some("toolu_4396_r2_b".to_string()),
+            background: true,
+        },
+    );
+
+    // A's real completion, late: id-less, desc is the only key.
+    let raw = "<task-notification>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"research foo\" completed</summary>\n\
+        </task-notification>";
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_xml_for_footer_mode(raw, true),
+    );
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot_a = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_4396_r2_a"))
+        .expect("swept instance A");
+    assert_eq!(
+        slot_a.finished,
+        Some(false),
+        "swept instance A keeps its forced ✗ (the late end is dropped, not re-routed)"
+    );
+    let slot_b = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_4396_r2_b"))
+        .expect("live respawn B");
+    assert_eq!(
+        slot_b.finished, None,
+        "the live same-desc respawn must NOT be closed by A's late completion"
+    );
+}
+
+// #4396 r2: the agent_id branch has the same finished/live ownership hole — a
+// finished slot sharing the agent_id (A closed, B a live re-launch reusing the
+// id, e.g. a resumed agent) makes an id-less agent_id-keyed end ambiguous. It
+// must drop without closing B and without falling through to the desc key.
+#[test]
+fn idless_end_with_agent_id_shared_by_finished_slot_never_closes_the_live_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_396_007);
+    let agent_id = "a4396r2shared";
+    // Instance A: closed by its exact-id genuine completion.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("first run".to_string()),
+            agent_id: Some(agent_id.to_string()),
+            tool_use_id: Some("toolu_4396_r2_id_a".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            agent_id: None,
+            desc: None,
+            tool_use_id: Some("toolu_4396_r2_id_a".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+    // Instance B: live, same agent_id.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some("second run".to_string()),
+            agent_id: Some(agent_id.to_string()),
+            tool_use_id: Some("toolu_4396_r2_id_b".to_string()),
+            background: true,
+        },
+    );
+
+    let raw = format!(
+        "<task-notification>\n\
+        <task-id>{agent_id}</task-id>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"second run\" completed</summary>\n\
+        </task-notification>"
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_xml_for_footer_mode(&raw, true),
+    );
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot_b = guard
+        .subagents
+        .iter()
+        .find(|slot| slot.tool_use_id.as_deref() == Some("toolu_4396_r2_id_b"))
+        .expect("live slot B");
+    assert_eq!(
+        slot_b.finished, None,
+        "an agent_id shared with a finished slot must drop the end (no close, no desc fallthrough)"
+    );
+}
+
 // #3393 finding 3: a workflow `<task-notification>` XML with a NON-terminal
 // status (e.g. running) must NOT emit `WorkflowEnd`; terminal statuses still map
 // success via `!is_error`, consistent with the subagent/background arms.

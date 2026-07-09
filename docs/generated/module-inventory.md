@@ -545,7 +545,7 @@
 | `services::discord::placeholder_live_events::slot_rehydration` | `src/services/discord/placeholder_live_events/slot_rehydration.rs` | 525 | 447 | 78 |  |
 | `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 792 | 792 | 0 |  |
 | `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 748 | 748 | 0 |  |
-| `services::discord::placeholder_live_events::subagent_panel` | `src/services/discord/placeholder_live_events/subagent_panel.rs` | 172 | 172 | 0 |  |
+| `services::discord::placeholder_live_events::subagent_panel` | `src/services/discord/placeholder_live_events/subagent_panel.rs` | 200 | 200 | 0 |  |
 | `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 531 | 356 | 175 |  |
 | `services::discord::placeholder_live_events::subagent_summary` | `src/services/discord/placeholder_live_events/subagent_summary.rs` | 69 | 69 | 0 |  |
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 399 | 399 | 0 |  |
