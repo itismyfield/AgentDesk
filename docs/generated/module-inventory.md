@@ -568,7 +568,7 @@
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 502 | 446 | 56 |  |
 | `services::discord::recovery_engine::analytics_transcript` | `src/services/discord/recovery_engine/analytics_transcript.rs` | 110 | 110 | 0 |  |
 | `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 814 | 312 | 502 |  |
-| `services::discord::recovery_engine::crash_resume_guard` | `src/services/discord/recovery_engine/crash_resume_guard.rs` | 267 | 141 | 126 |  |
+| `services::discord::recovery_engine::crash_resume_guard` | `src/services/discord/recovery_engine/crash_resume_guard.rs` | 359 | 167 | 192 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
 | `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 919 | 785 | 134 |  |
 | `services::discord::recovery_engine::manual_rebind::adoption` | `src/services/discord/recovery_engine/manual_rebind/adoption.rs` | 286 | 77 | 209 |  |
@@ -580,7 +580,7 @@
 | `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2404 | 2313 | 91 | giant-file |
 | `services::discord::recovery_engine::restore_persist_outcome` | `src/services/discord/recovery_engine/restore_persist_outcome.rs` | 102 | 102 | 0 |  |
 | `services::discord::recovery_engine::routing_orphan` | `src/services/discord/recovery_engine/routing_orphan.rs` | 218 | 146 | 72 |  |
-| `services::discord::recovery_engine::runtime` | `src/services/discord/recovery_engine/runtime.rs` | 504 | 251 | 253 |  |
+| `services::discord::recovery_engine::runtime` | `src/services/discord/recovery_engine/runtime.rs` | 518 | 265 | 253 |  |
 | `services::discord::recovery_engine::state_extractors` | `src/services/discord/recovery_engine/state_extractors.rs` | 220 | 220 | 0 |  |
 | `services::discord::recovery_engine::status_panel` | `src/services/discord/recovery_engine/status_panel.rs` | 71 | 55 | 16 |  |
 | `services::discord::recovery_engine::status_panel_completion_producer` | `src/services/discord/recovery_engine/status_panel_completion_producer.rs` | 64 | 64 | 0 |  |
