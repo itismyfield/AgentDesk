@@ -65,6 +65,20 @@ fn reseed_watcher_owned_finalizer_ledger(
 ///     for its trailing-output theft chain. Excluding it here makes BOTH unreachable
 ///     at the source.
 fn readopted_ledger_record_allowed(state: &inflight::InflightTurnState) -> bool {
+    readopt_marker_eligible_real_user(state)
+}
+
+/// The single definition of "a real-user turn eligible for the
+/// `readopted_from_inflight` marker": a real, non-synthetic owner carrying a real
+/// anchored `user_msg_id`. Shared verbatim by the #4370 marker-WRITE gate
+/// (`readopted_ledger_record_allowed`, above) and the #4380 crash-resume DLQ
+/// backstop (`crash_resume_guard::crash_readopt_real_user_live_turn`), so the two
+/// sites can never disagree on which rows carry the marker — the exact divergence
+/// class that let the #4380 root bug (and its review defect 2) slip in: a doc/gate
+/// claiming id-0 rows are excluded while the code only checked the owner id.
+pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
+    state: &inflight::InflightTurnState,
+) -> bool {
     state.request_owner_user_id != 0
         && state.request_owner_user_id
             != crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID

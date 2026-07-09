@@ -26,6 +26,22 @@ use sqlx::PgPool;
 /// sites and tests share one spelling.
 pub(crate) const KIND_CATCH_UP_TOO_OLD: &str = "catch_up_too_old";
 pub(crate) const KIND_QUEUE_OVERFLOW: &str = "queue_overflow";
+/// #4380: a crash restart re-adopted a still-live real-user bridge turn, but the
+/// `readopted_from_inflight` relay-resume marker did not durably persist, so the
+/// recovered watcher will yield to the dead bridge and silently drop the turn's
+/// remaining output. Recording the undelivered body here ends the 30-minute silent
+/// wedge (the recurring `.stuck-manual-*` hand-recovery) with an observable,
+/// recoverable row. The root fix (watcher-yield escape hatch) resumes relay on the
+/// normal path; this KIND only fires on the marker-write-failure residual.
+///
+/// Declared unconditionally like the sibling `KIND_*` discriminators (a DB `kind`
+/// string is platform-independent), but its sole consumer
+/// (`crash_resume_guard::record_readopt_relay_black_hole_dead_letter`) is
+/// `#[cfg(unix)]`, so a Windows build sees it unused — allow that on non-unix rather
+/// than making a schema value platform-specific (which would break a future non-unix
+/// writer).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) const KIND_READOPT_RELAY_STUCK: &str = "readopt_relay_stuck";
 
 /// Self-maintenance horizon: rows older than this are pruned opportunistically
 /// after each successful insert.

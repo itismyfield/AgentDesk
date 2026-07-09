@@ -1644,6 +1644,17 @@ fn watcher_should_yield_to_inflight_state(
         return false;
     }
 
+    // #4380: a CRASH restart (no graceful drain → no `restart_report`, so
+    // `restart_mode == None`) re-adopts a still-live bridge turn whose bridge died
+    // mid-stream WITHOUT a Watcher handoff, so the row keeps `relay_owner_kind ==
+    // None`. The recovery path stamps `readopted_from_inflight` before spawning the
+    // recovery watcher — honour it exactly like the planned-restart hatch below,
+    // otherwise the recovered watcher yields to the DEAD bridge and black-holes
+    // 100% of the turn's remaining output (the recurring `.stuck-manual-*` wedge).
+    if super::recovery_engine::crash_readopt_live_relay_resume_required(state) {
+        return false;
+    }
+
     // After a planned dcserver restart the old bridge owner is gone. If the
     // terminal body has not been durably committed, yielding here black-holes the
     // recovered watcher output instead of preventing a duplicate.
@@ -1761,6 +1772,48 @@ mod active_bridge_turn_guard_tests {
     fn session_bound_relay_owner_still_suppresses_watcher_duplicate() {
         with_ownerless_codex_tui_state(|mut state| {
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+
+            assert!(watcher_should_yield_to_inflight_state(
+                Some(&state),
+                "AgentDesk-codex-adk-cdx",
+                0,
+                2_019_364,
+            ));
+        });
+    }
+
+    // #4380 reproduction: a CRASH restart (no `restart_report` → `restart_mode ==
+    // None`) re-adopts a still-live real-user bridge turn (`relay_owner_kind ==
+    // None`) and stamps `readopted_from_inflight`. The recovered watcher MUST resume
+    // relay, not yield to the dead bridge. Before the fix this yielded → 100% silent
+    // loss. Removing the `crash_readopt_live_relay_resume_required` escape branch in
+    // `watcher_should_yield_to_inflight_state` makes this assert FAIL (the fn returns
+    // `true` again), which is the mutation proof.
+    #[test]
+    fn crash_readopt_ownerless_uncommitted_turn_does_not_yield_to_dead_bridge() {
+        with_ownerless_codex_tui_state(|mut state| {
+            state.readopted_from_inflight = true; // restart_mode stays None (crash)
+
+            assert!(
+                !watcher_should_yield_to_inflight_state(
+                    Some(&state),
+                    "AgentDesk-codex-adk-cdx",
+                    0,
+                    2_019_364,
+                ),
+                "a crash-re-adopted uncommitted live turn must resume relay, not yield to the dead bridge (#4380)"
+            );
+        });
+    }
+
+    // The crash escape hatch is scoped to LIVE turns: once terminal delivery is
+    // committed a watcher relay would be a duplicate, so a committed re-adopt still
+    // yields. This guards the `!terminal_delivery_committed` clause of the predicate.
+    #[test]
+    fn crash_readopt_after_terminal_commit_may_still_yield_as_duplicate() {
+        with_ownerless_codex_tui_state(|mut state| {
+            state.readopted_from_inflight = true;
+            state.terminal_delivery_committed = true;
 
             assert!(watcher_should_yield_to_inflight_state(
                 Some(&state),

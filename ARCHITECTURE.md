@@ -535,6 +535,7 @@ src/
 │   │   │   │   └── mod.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
+│   │   │   ├── crash_resume_guard.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── output_path_detect.rs
