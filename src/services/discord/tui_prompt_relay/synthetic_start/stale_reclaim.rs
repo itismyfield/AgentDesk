@@ -1,10 +1,53 @@
 use super::*;
 
+/// #4370 R3-4 — the positive-staleness age gate, and the timing tradeoff it buys.
+///
+/// Which stuck-mailbox shape a starved follow-up frees, and WHEN:
+///   - PRESENT row + `terminal_delivery_committed` → `OwnerInflightFinalized`,
+///     reclaimed IMMEDIATELY (no age gate). This is the shape the #4370 incident
+///     took, so the sub-120s follow-up loss (the ~79s task-notification drop) is
+///     freed at once.
+///   - ABSENT row + ledger `finished` (#4370 R3-1) → `OwnerInflightAbsent`,
+///     reclaimed only after `>= 120s`.
+///
+/// Note a re-adopted turn's `turn_started_at` is RESET to the re-adopt time
+/// (`turn_orchestrator.rs`), so this gate measures age-since-re-adopt, not the
+/// turn's true wall age — a follow-up arriving <120s after re-adopt does not free
+/// an ABSENT-row mailbox. That is acceptable because the incident shape is the
+/// PRESENT-row `Finalized` path above, which has no gate.
+///
+/// Why the ABSENT-row path keeps the gate even though R3-1's `finished` bit now
+/// makes it a POSITIVE liveness proof (so the gate is, strictly, no longer
+/// required for correctness — a `finished` absent row is as safe to reclaim as a
+/// present `Finalized` row): we keep it as DEFENSE-IN-DEPTH. The `finished` bit is
+/// a brand-new invariant set on one production path (the watcher terminal-commit
+/// clear); until it has soaked, the age gate is a cheap second barrier against a
+/// mis-set bit stealing a live turn (safety > speed). The cost is at most 120s of
+/// extra latency on the RARE absent-row-finished shape — and never on the incident
+/// shape, which the present-row `Finalized` path already frees immediately. If the
+/// `finished` invariant proves out, a later change may drop this gate for a
+/// `finished` absent row (matching the present-row `Finalized` rule) and cite this
+/// note.
 pub(super) const STALE_SYNTHETIC_MAILBOX_OWNER_MIN_AGE_SECS: i64 = 120;
 
 #[derive(Clone, Copy)]
 struct StaleMailboxRelease {
     had_pending_queue: bool,
+}
+
+/// #4370 R3-3: the SINGLE finalize context the stale-owner reclaim submits.
+/// Production (`finalize_stale_mailbox_owner_if_current`) and the F3(b)
+/// chrome-survival test both read THIS, so the test observes the context the
+/// reclaim ACTUALLY passes instead of re-fabricating a standalone `watcher()`
+/// (which would pass even if the production call site were re-pointed at a
+/// backstop-cleanup context). Its shape — `clear_inflight == false`,
+/// `kickoff_queue == false` — is exactly what makes `finalized_reaction_lifecycle`'s
+/// `backstop_cleanup` false (`turn_finalizer/cleanup.rs:54-62`), so a `Cancel`
+/// reclaim schedules NO reaction change and cannot suppress the re-adopted turn's
+/// already-pending completion footer / `✅`.
+pub(super) fn reclaim_finalize_context() -> crate::services::discord::turn_finalizer::FinalizeContext
+{
+    crate::services::discord::turn_finalizer::FinalizeContext::watcher()
 }
 
 async fn finalize_stale_mailbox_owner_if_current(
@@ -23,7 +66,7 @@ async fn finalize_stale_mailbox_owner_if_current(
             ),
             provider.clone(),
             super::super::super::turn_finalizer::TerminalEvent::Cancel,
-            super::super::super::turn_finalizer::FinalizeContext::watcher(),
+            reclaim_finalize_context(),
             shared.clone(),
         )
         .await;
@@ -161,20 +204,36 @@ fn stale_synthetic_mailbox_owner_reclaim_reason(
 /// The two classes share the SAME reclaim reasons and the SAME positive-staleness
 /// gate, but note precisely how the gate applies per reason:
 ///   - `OwnerInflightAbsent`   — age `>= 120s` REQUIRED (`requires_positive_owner_age`).
-///     This is the row-ABSENT reclaim: liveness is uncertain (no row to inspect),
-///     so we only steal a long-stuck mailbox. For a real owner, an absent row is
-///     reclaimable ONLY when the in-memory ledger records this exact re-adopted
-///     mailbox (owner + `active_user_message_id`) — see
-///     `classify_reclaimable_mailbox_owner`.
+///     This is the row-ABSENT reclaim: with no row to inspect, liveness is proven
+///     ONLY by the in-memory ledger. For a real owner an absent row is reclaimable
+///     ONLY when the ledger records this exact re-adopted mailbox (owner +
+///     `active_user_message_id`) AND that entry is `finished` — i.e. the turn's
+///     terminal delivery committed (#4370 R3-1; stamped at the watcher
+///     terminal-commit clear in `tmux_watcher/terminal_commit_epilogue.rs`, the
+///     same production path that produces the absent-row shape). The `finished`
+///     bit is the row-ABSENT analogue of the present row's
+///     `terminal_delivery_committed`, so this arm can no longer steal a LIVE
+///     re-adopted turn whose row is merely absent. The `>= 120s` gate is kept on
+///     top as defense-in-depth (see R3-4) — `classify_reclaimable_mailbox_owner`.
 ///   - `OwnerInflightFinalized` — NO age gate, reclaimed immediately. The reason
-///     requires `terminal_delivery_committed == true`, which means the owner's
-///     prose AND its completion UI (`⏳→✅` reaction, footer, transcript/analytics)
-///     were ALREADY emitted by the watcher terminal-commit pass — before any
-///     finalizer handoff — so reclaiming (releasing) the stuck mailbox cannot lose
-///     output or suppress the footer. (The reclaim submits `Cancel` through
-///     `FinalizeContext::watcher()`, whose `backstop_cleanup` is false, so it
-///     schedules no reaction change; #4370 F3(b).) A 120s gate here would defeat
-///     the fix — the observed task-notification loss occurred ~79s after restart.
+///     requires `terminal_delivery_committed == true`, which means ONLY that the
+///     owner's assistant PROSE was already relayed. It does NOT mean the completion
+///     CHROME has rendered: the watcher stamps `terminal_delivery_committed`
+///     (`tmux_watcher.rs:2352`) BEFORE it edits the completion footer / status
+///     panel (`tmux_watcher.rs:2628`) and BEFORE it emits the `✅` reaction +
+///     transcript + analytics (`tmux_watcher.rs:3102`), so a reclaim CAN fire in
+///     the window between the commit and that chrome. It still cannot SUPPRESS the
+///     chrome: the reclaim submits `Cancel` through the shared
+///     `reclaim_finalize_context()` (== `FinalizeContext::watcher()`,
+///     `finalize_context.rs:60-68`, with `clear_inflight:false` +
+///     `kickoff_queue:false`), so in `finalized_reaction_lifecycle`
+///     (`turn_finalizer/cleanup.rs:54-62`) `backstop_cleanup` is false and — the
+///     owner being Watcher-kind, not `StandbyRelay` — the helper early-returns
+///     without scheduling ANY reaction change; the still-pending footer / `✅`
+///     render on the watcher's own pass (#4370 F3(b)). A 120s gate here would
+///     defeat the fix — the observed task-notification loss occurred ~79s after
+///     restart (this present-row `Finalized` shape is what covers the sub-120s
+///     follow-up loss; see R3-4).
 ///   - `OwnerInflightReplaced`  — age `>= 120s` REQUIRED. NOTE (#4370 F5): this
 ///     reason is UNREACHABLE for a re-adopted real owner. A superseding turn writes
 ///     a FRESH row (marker `false`, and it is not in the ledger under this id), so
@@ -205,14 +264,17 @@ impl ReclaimableMailboxOwner {
 ///       * PRESENT row → the on-disk `readopted_from_inflight` marker AND a request
 ///         owner matching the live mailbox owner.
 ///       * ABSENT row (Path B) → the in-memory `readopted_mailbox_ledger` records
-///         THIS `(provider, channel_id)` as re-adopted with the SAME owner AND the
-///         SAME `active_user_message_id`. The on-disk marker cannot be used here
+///         THIS `(provider, channel_id)` as re-adopted with the SAME owner, the
+///         SAME `active_user_message_id`, AND `finished == true` (its terminal
+///         delivery committed; #4370 R3-1). The on-disk marker cannot be used here
 ///         (the row is gone, and on a DrainRestart row it may never have persisted
 ///         — the identity-refresh save refuses `restart_mode` rows), so the ledger
-///         is the authority. A NEW/live turn owns a different `active_user_message_id`
-///         and therefore can never match the ledger entry — the live-turn-theft
-///         guard — and the resulting `OwnerInflightAbsent` reason still enforces the
-///         `>= 120s` age gate.
+///         is the authority. Two independent guards keep this from stealing a live
+///         turn: a NEW/live turn owns a different `active_user_message_id` and can
+///         never match the entry, and a re-adopted turn that is still LIVE (terminal
+///         delivery not committed) is `finished == false` and is refused. The
+///         resulting `OwnerInflightAbsent` reason then still enforces the `>= 120s`
+///         age gate on top.
 ///
 /// An arbitrary real-user turn (no marker, not in the ledger) is NEVER reclaimable.
 fn classify_reclaimable_mailbox_owner(

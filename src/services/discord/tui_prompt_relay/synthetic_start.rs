@@ -956,7 +956,7 @@ mod tests {
     // now reachable for a real owner. This is the transition that lets the
     // starved injection / task-notification turn win relay ownership.
     #[tokio::test(flavor = "current_thread")]
-    async fn restart_readopted_real_owner_committed_row_reclaims_for_starved_synthetic() {
+    async fn readopted_from_inflight_real_owner_committed_row_reclaims_for_starved_synthetic() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .expect("shared env lock poisoned");
@@ -1017,7 +1017,7 @@ mod tests {
     // widened eligibility gate cannot cancel it. This is the guard against the
     // fix regressing into a live-turn thief.
     #[tokio::test(flavor = "current_thread")]
-    async fn restart_readopted_real_owner_live_turn_is_never_stolen() {
+    async fn readopted_from_inflight_real_owner_live_turn_is_never_stolen() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .expect("shared env lock poisoned");
@@ -1121,7 +1121,7 @@ mod tests {
     // synthetic claim would fail — the mailbox would stay owned by the stale
     // real-user turn — and `active_request_owner` would never transition.
     #[tokio::test(flavor = "current_thread")]
-    async fn restart_readopted_turn_yields_mailbox_to_injection_and_task_notification() {
+    async fn readopted_from_inflight_turn_yields_mailbox_to_injection_and_task_notification() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .expect("shared env lock poisoned");
@@ -1248,9 +1248,14 @@ mod tests {
     // the in-memory `readopted_mailbox_ledger`.
     // ===================================================================
 
-    /// Path B positive: row ABSENT, the re-adopted owner is in the ledger with a
-    /// matching `(owner, active_user_message_id)`, aged past the 120s gate → the
-    /// stuck mailbox IS reclaimed, and the ledger entry is evicted afterwards.
+    /// Path B positive (#4370 R3-7 — drives the PRODUCTION record path): re-adopt a
+    /// real-user turn through `reregister_active_turn_from_inflight`, reproduce the
+    /// watcher terminal-commit transition (stamp the ledger `finished`, then clear
+    /// the durable row), and prove the resulting ABSENT-row + `finished` + aged
+    /// mailbox IS reclaimed and its ledger entry evicted. Seeding the ledger via
+    /// the real re-adopt (not a bare `record_readopted_mailbox_owner`) means a
+    /// broken production record path would leave the ledger empty and fail this
+    /// reclaim — the exact regression a direct-seed test would miss.
     #[tokio::test(flavor = "current_thread")]
     async fn path_b_absent_row_in_ledger_aged_reclaims_and_evicts() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1264,18 +1269,39 @@ mod tests {
         let tmux = "AgentDesk-claude-4370-pathb";
         let real_id = MessageId::new(4_370_180);
         let synth_id = MessageId::new(4_370_280);
-        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
-        // The re-adopt recorded the ledger; the on-disk row was subsequently
-        // CLEARED (Path B), so there is nothing on disk to load.
-        shared.record_readopted_mailbox_owner(
+
+        // Re-adopt the live real-user turn through the production entrypoint. This
+        // records the ledger (finished == false) AND starts the mailbox turn.
+        let pre = real_user_inflight_state(channel_id, real_id, tmux, false);
+        inflight::save_inflight_state(&pre).expect("seed pre-restart inflight");
+        let readopted =
+            crate::services::discord::recovery::reregister_active_turn_from_inflight(&shared, &pre)
+                .await;
+        assert!(readopted, "restart must re-adopt the live turn");
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        // Capture the mailbox cancel token the re-adopt bound, to prove the reclaim
+        // cancels it.
+        let real_token = crate::services::discord::mailbox_snapshot(&shared, channel_id)
+            .await
+            .cancel_token
+            .expect("re-adopted mailbox holds a cancel token");
+
+        // The re-adopted turn's terminal delivery commits (watcher path): the SAME
+        // `SharedData::mark_readopted_mailbox_owner_finished` the terminal-commit
+        // epilogue calls, then the durable row is cleared → the ABSENT-row shape.
+        shared.mark_readopted_mailbox_owner_finished(
             &provider,
             channel_id.get(),
             real_owner().get(),
             real_id.get(),
         );
         assert!(
+            inflight::clear_inflight_state(&provider, channel_id.get()),
+            "the terminal-commit clear removes the durable row"
+        );
+        assert!(
             inflight::load_inflight_state(&provider, channel_id.get()).is_none(),
-            "Path B precondition: the durable row is ABSENT"
+            "Path B precondition: the durable row is ABSENT after the commit clear"
         );
 
         let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
@@ -1292,7 +1318,7 @@ mod tests {
         .await;
         assert!(
             reclaimed,
-            "an aged, ledger-recorded re-adopted owner with an ABSENT row must be reclaimable (#4370 Path B)"
+            "an aged, ledger-FINISHED re-adopted owner with an ABSENT row must be reclaimable (#4370 Path B)"
         );
         assert!(real_token.cancelled.load(Ordering::Relaxed));
         assert_eq!(
@@ -1376,6 +1402,15 @@ mod tests {
             real_owner().get(),
             real_id.get(),
         );
+        // Mark FINISHED so the ONLY thing blocking reclaim is the age gate — this
+        // test isolates the `>= 120s` gate, not R3-1's `finished` liveness gate
+        // (covered by `path_b_absent_row_ledger_live_not_finished_is_never_stolen`).
+        shared.mark_readopted_mailbox_owner_finished(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            real_id.get(),
+        );
 
         let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
             &shared,
@@ -1424,8 +1459,17 @@ mod tests {
         let synth_id = MessageId::new(4_370_283);
         // The mailbox is owned by the LIVE successor turn (a different id).
         let live_token = seed_real_owner_mailbox(&shared, channel_id, live_successor_id).await;
-        // The ledger still records the PRIOR re-adopted turn's id.
+        // The ledger still records the PRIOR re-adopted turn's id, marked FINISHED
+        // (its terminal delivery had committed) — so the ONLY guard rejecting the
+        // reclaim here is the exact-id mismatch against the live successor, not the
+        // `finished` gate.
         shared.record_readopted_mailbox_owner(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            stale_ledger_id.get(),
+        );
+        shared.mark_readopted_mailbox_owner_finished(
             &provider,
             channel_id.get(),
             real_owner().get(),
@@ -1452,6 +1496,78 @@ mod tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
+    /// Path B negative (#4370 R3-1 LIVENESS GUARD): row ABSENT, the owner IS in the
+    /// ledger with the EXACT `(owner, active_user_message_id)`, and aged past the
+    /// 120s gate — but the entry is NOT `finished` (a genuinely LIVE re-adopted turn
+    /// whose durable row merely happens to be absent, e.g. a not-yet-committed turn
+    /// whose row was transiently cleared). Absence + exact-id + age ALONE must NOT
+    /// reclaim it; only a `finished` entry (a committed terminal delivery) is
+    /// reclaimable. Before R3-1 this shape had no liveness signal at all and could
+    /// have been stolen — this is the test that pins the enforced invariant.
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_b_absent_row_ledger_live_not_finished_is_never_stolen() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_370_084);
+        let tmux = "AgentDesk-claude-4370-pathb-live";
+        let real_id = MessageId::new(4_370_184);
+        let synth_id = MessageId::new(4_370_284);
+        let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
+        // Ledger records the re-adopted owner but the entry is LIVE: a fresh
+        // `record_readopted_mailbox_owner` seeds `finished == false`, and no
+        // terminal commit has stamped it finished.
+        shared.record_readopted_mailbox_owner(
+            &provider,
+            channel_id.get(),
+            real_owner().get(),
+            real_id.get(),
+        );
+        assert!(
+            inflight::load_inflight_state(&provider, channel_id.get()).is_none(),
+            "Path B precondition: the durable row is ABSENT"
+        );
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            real_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            // AGED — isolates the `finished` gate from the age gate: age is
+            // satisfied, so a reclaim would fire if `finished` were not required.
+            old_owner_started_at(),
+            synth_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "an ABSENT-row re-adopted owner that has NOT committed terminal delivery (finished == false) must NEVER be reclaimed, even aged with an exact-id ledger match (#4370 R3-1 liveness guard)"
+        );
+        assert!(!real_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+
+        let synth_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            synth_id,
+            ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(
+            !synth_claimed,
+            "the live (not-finished) re-adopted turn must keep the mailbox slot"
+        );
+    }
+
     /// #4370 F3(b): a `Finalized` reclaim of a re-adopted REAL-user owner does NOT
     /// suppress that turn's completion footer / ✅ reaction / analytics.
     ///
@@ -1472,13 +1588,22 @@ mod tests {
     /// (context shape) and the behaviour (reclaim finalizes cleanly).
     #[tokio::test(flavor = "current_thread")]
     async fn finalized_reclaim_of_readopted_real_owner_does_not_suppress_completion_footer() {
-        // Invariant: the reclaim's finalize context must never be a
-        // backstop-cleanup shape, the only shape that strips ⏳ / withholds ✅ on a
-        // Cancel. If someone re-points the reclaim at such a context, this breaks.
-        let ctx = crate::services::discord::turn_finalizer::FinalizeContext::watcher();
+        // #4370 R3-3: assert the REAL context the reclaim submits — read from the
+        // SAME `reclaim_finalize_context()` source `finalize_stale_mailbox_owner_if_current`
+        // passes, NOT a re-fabricated `FinalizeContext::watcher()`. If the production
+        // call site is re-pointed at a backstop-cleanup context, THIS breaks (the
+        // old test asserted a standalone `watcher()` and would have stayed green).
+        let ctx = stale_reclaim::reclaim_finalize_context();
+        // The exact `backstop_cleanup` predicate from `finalized_reaction_lifecycle`
+        // (turn_finalizer/cleanup.rs:54-57) — the only shape that schedules a
+        // reaction change on a Cancel.
+        let backstop_cleanup = ctx.clear_inflight
+            && ctx.kickoff_queue
+            && !ctx.allow_completion_cleanup
+            && !ctx.drain_voice;
         assert!(
-            !(ctx.clear_inflight && ctx.kickoff_queue),
-            "stale-reclaim finalize context must not be a backstop-cleanup shape (#4370 F3b)"
+            !backstop_cleanup,
+            "the reclaim finalize context must not be a backstop-cleanup shape — that is the only shape that strips ⏳ / withholds ✅ on a Cancel (#4370 F3b)"
         );
 
         let _lock = crate::config::shared_test_env_lock()
@@ -1490,13 +1615,25 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4_370_090);
         let tmux = "AgentDesk-claude-4370-footer";
-        let real_id = MessageId::new(4_370_190);
-        let synth_id = MessageId::new(4_370_290);
+        // REAL Discord snowflake ids (>= 1e14): required so the reclaim's Cancel
+        // actually reaches the reaction gate in `finalized_reaction_lifecycle`
+        // (it early-returns on non-real ids), making the "no reaction scheduled"
+        // assertion below a genuine test of the context gate, not of the id filter.
+        let real_id = MessageId::new(1_437_009_000_000_190);
+        let synth_id = MessageId::new(1_437_009_000_000_290);
         let real_token = seed_real_owner_mailbox(&shared, channel_id, real_id).await;
         // Committed (footer/✅ already rendered pre-restart) + marked re-adopted.
         let mut state = real_user_inflight_state(channel_id, real_id, tmux, true);
         state.readopted_from_inflight = true;
         inflight::save_inflight_state(&state).expect("save committed re-adopted inflight");
+
+        // Observe the ACTUAL finalizer-scheduled reactions. In test builds
+        // `schedule_reaction_cleanup` records synchronously into a global the
+        // recorder captures; this and the finalizer's own reaction tests all
+        // serialize on `shared_test_env_lock` (held above), so the recorder cannot
+        // race. An empty record set proves the reclaim scheduled NO reaction change
+        // and therefore cannot suppress the already-pending completion footer / ✅.
+        crate::services::discord::turn_finalizer::cleanup::begin_reaction_cleanup_recording();
 
         let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
             &shared,
@@ -1513,6 +1650,14 @@ mod tests {
         assert!(
             reclaimed,
             "a committed re-adopted owner must yield the stuck mailbox (Finalized, no age gate) (#4370 F3b)"
+        );
+        // The reclaim scheduled NO reaction change — the behavioural proof that it
+        // cannot suppress the re-adopted turn's already-rendered/pending chrome.
+        let reaction_records =
+            crate::services::discord::turn_finalizer::cleanup::take_reaction_cleanup_records();
+        assert!(
+            reaction_records.is_empty(),
+            "the stale-owner reclaim must schedule NO reaction change (would suppress the completion footer / ✅); got {reaction_records:?} (#4370 F3b)"
         );
         // The finalize released the mailbox cleanly (token cancelled, global_active
         // decremented) WITHOUT re-touching the already-rendered completion UI.

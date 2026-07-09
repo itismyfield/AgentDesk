@@ -290,6 +290,26 @@ pub(super) async fn run_terminal_commit_epilogue(
                 );
             }
         }
+        // #4370 R3-1: this pass just committed the terminal delivery for the
+        // pinned turn and cleared its on-disk row above (the row-ABSENT "Path B"
+        // shape). Stamp the re-adopted-mailbox ledger entry FINISHED so a later
+        // starved synthetic relay turn can reclaim the stuck mailbox on a POSITIVE
+        // liveness signal instead of the unenforced "absent row => not live"
+        // assumption. This is the terminal-commit pass (`terminal_output_committed
+        // && !lifecycle_stage_paused`), so it runs ONLY for a genuinely terminal
+        // turn; gating on `!completion_is_stale_for_newer_turn` keeps a pass that
+        // is merely flushing an OLDER turn's trailing output from marking the NEWER
+        // live turn (which owns `inflight_state` in the stale case) finished. It is
+        // a no-op unless THIS exact turn was re-adopted from inflight (the ledger
+        // has no entry otherwise), so calling it on every terminal commit is safe.
+        if !completion_is_stale_for_newer_turn && let Some(committed) = inflight_state.as_ref() {
+            shared.mark_readopted_mailbox_owner_finished(
+                provider_kind,
+                channel_id.get(),
+                committed.request_owner_user_id,
+                committed.effective_finalizer_turn_id(),
+            );
+        }
         // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token
         // release) MUST run on every relay-completed terminal even when
         // `dispatch_ok = false` (else organic turns leak forever), but the

@@ -674,6 +674,25 @@ pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_id
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
         return GuardedSaveOutcome::Missing;
     };
+    // #4370 R3-5: match the broad `save_inflight_state_identity_gated_in_root`
+    // id-0 fail-closed gate. `InflightTurnIdentity` cannot disambiguate colliding
+    // `user_msg_id == 0 && turn_start_offset == None` rows (see the identity doc at
+    // `model.rs`), so an offsetless id-0 snapshot must never authorize mutating a
+    // durable row it cannot uniquely name. Not currently reachable (classify
+    // short-circuits `owner == TUI_DIRECT_SYNTHETIC_OWNER_USER_ID` to `Synthetic`
+    // before reading this marker, and real re-adopted owners carry a non-zero
+    // `user_msg_id`), but kept as defense-in-depth so this narrow patch stays as
+    // fail-closed as the broad save it deliberately preserves `restart_mode` past.
+    if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel_id,
+            snapshot_identity = ?expected,
+            durable_identity = ?InflightTurnIdentity::from_state(&on_disk),
+            "readopted-from-inflight marker skipped because offsetless id-0 snapshot cannot safely match a durable row (#4370 R3-5 fail-closed)"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
     if on_disk.rebind_origin || !expected.matches_state(&on_disk) {
         return GuardedSaveOutcome::IdentityMismatch;
     }
@@ -1088,6 +1107,45 @@ mod tests {
                 &mismatched,
             ),
             GuardedSaveOutcome::IdentityMismatch,
+        );
+
+        // (5) #4370 R3-5: an offsetless id-0 snapshot is refused fail-closed even
+        // against a byte-identical durable row. Because `InflightTurnIdentity`
+        // cannot uniquely name a `user_msg_id == 0 && turn_start_offset == None`
+        // row, the marker patch must never authorize mutating it (mirrors the
+        // broad `save_inflight_state_identity_gated_in_root` id-0 gate). Asserting
+        // `IdentityMismatch` (not `Missing`) proves BOTH that the row persisted AND
+        // that the id-0 guard — not a matches_state miss — produced the refusal.
+        let mut id0 = InflightTurnState::new(
+            ProviderKind::Codex,
+            54_370,
+            Some("adk-test".to_string()),
+            343_742_347_365_974_026,
+            0, // user_msg_id == 0
+            0,
+            "id0 offsetless prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-codex-4370-id0".to_string()),
+            Some("/tmp/AgentDesk-codex-4370-id0.jsonl".to_string()),
+            None,
+            512,
+        );
+        // Force the offsetless id-0 shape the R3-5 guard fails closed on (the
+        // constructor seeds a `turn_start_offset` from `last_offset`).
+        id0.turn_start_offset = None;
+        assert_eq!(id0.user_msg_id, 0);
+        assert!(id0.turn_start_offset.is_none());
+        save_inflight_state_in_root(temp.path(), &id0).expect("seed offsetless id-0 row");
+        let id0_expected = InflightTurnIdentity::from_state(&id0);
+        assert_eq!(
+            mark_readopted_from_inflight_if_identity_unchanged_in_root(
+                temp.path(),
+                &ProviderKind::Codex,
+                id0.channel_id,
+                &id0_expected,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "an offsetless id-0 snapshot must be refused fail-closed even against a byte-identical durable row (#4370 R3-5)",
         );
     }
 }

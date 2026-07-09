@@ -23,9 +23,11 @@ use crate::services::provider::ProviderKind;
 /// Its lifetime is exactly right. A fresh process re-derives the mailbox from
 /// disk, so the ledger never needs to persist across restarts; and an entry that
 /// outlives its own turn is INERT — a live successor turn owns a DIFFERENT
-/// `active_user_message_id`, so a stale entry can never match it (that exact-id
-/// requirement, plus the `>= 120s` age gate on the resulting `OwnerInflightAbsent`
-/// reason, is the live-turn-theft guard).
+/// `active_user_message_id`, so a stale entry can never match it. The
+/// live-turn-theft guard is threefold: that exact-id requirement, the
+/// `finished` bit (#4370 R3-1 — a still-live re-adopted turn is never reclaimed
+/// even on an exact-id match), and the `>= 120s` age gate on the resulting
+/// `OwnerInflightAbsent` reason.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::services::discord) struct ReadoptedMailboxOwner {
     /// The real Discord user id that owns the re-adopted mailbox turn.
@@ -33,6 +35,19 @@ pub(in crate::services::discord) struct ReadoptedMailboxOwner {
     /// The mailbox `active_user_message_id` of the re-adopted turn (== the turn's
     /// effective finalizer id / `MessageId` the mailbox slot carries).
     pub active_user_message_id: u64,
+    /// #4370 R3-1: `true` once this re-adopted turn's TERMINAL DELIVERY committed.
+    /// It is the row-ABSENT ("Path B") analogue of the present row's on-disk
+    /// `terminal_delivery_committed`, and is stamped at the watcher
+    /// terminal-commit clear — the SAME production path that produces the
+    /// row-ABSENT shape (`tmux_watcher/terminal_commit_epilogue.rs`).
+    ///
+    /// The absent-row reclaim REQUIRES it. Without it, safety rested on the
+    /// UNENFORCED invariant "a cleared on-disk row implies the turn is not live":
+    /// absence + exact-id + age alone could, in principle, steal a genuinely LIVE
+    /// re-adopted turn whose durable row merely happened to be absent. With it,
+    /// such a turn is `finished == false` and is refused — the invariant is now an
+    /// enforced fact, not an assumption (#4370 R3-1).
+    pub finished: bool,
 }
 
 /// #4370: the per-process ledger. Keyed by `(provider, channel_id)`; set at the
@@ -60,17 +75,50 @@ impl SharedData {
             ReadoptedMailboxOwner {
                 owner_user_id,
                 active_user_message_id,
+                // #4370 R3-1: a freshly re-adopted turn is LIVE — its terminal
+                // delivery has not committed yet. The watcher terminal-commit
+                // clear stamps `finished` when it does.
+                finished: false,
             },
         );
     }
 
+    /// #4370 R3-1: stamp the ledger entry for `(provider, channel_id)` FINISHED —
+    /// its re-adopted turn committed terminal delivery. Flips ONLY the entry whose
+    /// `(owner_user_id, active_user_message_id)` still matches, so a newer re-adopt
+    /// that overwrote the slot with a DIFFERENT turn is never marked finished on an
+    /// older turn's commit (that newer turn is live). A no-op when no entry exists —
+    /// the common non-re-adopted terminal commit — so the watcher terminal-commit
+    /// path can call it unconditionally.
+    pub(in crate::services::discord) fn mark_readopted_mailbox_owner_finished(
+        &self,
+        provider: &ProviderKind,
+        channel_id: u64,
+        owner_user_id: u64,
+        active_user_message_id: u64,
+    ) {
+        if let Some(mut entry) = self
+            .readopted_mailbox_ledger
+            .entries
+            .get_mut(&(provider.clone(), channel_id))
+            && entry.owner_user_id == owner_user_id
+            && entry.active_user_message_id == active_user_message_id
+        {
+            entry.finished = true;
+        }
+    }
+
     /// #4370: `true` iff the ledger records `(provider, channel_id)` as a mailbox
     /// re-adopted from inflight whose owner AND `active_user_message_id` BOTH
-    /// still match the live mailbox. This is the row-ABSENT ("Path B") reclaim
-    /// authority: a live successor turn owns a different `active_user_message_id`,
-    /// so it can never match — the exact-id requirement is the live-turn-theft
-    /// guard, reinforced by the `>= 120s` age gate on the `OwnerInflightAbsent`
-    /// reason that an absent row yields.
+    /// still match the live mailbox AND whose turn is `finished` (its terminal
+    /// delivery committed; #4370 R3-1). This is the row-ABSENT ("Path B") reclaim
+    /// authority, and it now carries THREE independent live-turn-theft guards:
+    ///   1. a live successor turn owns a different `active_user_message_id`, so it
+    ///      can never match the exact-id requirement;
+    ///   2. a re-adopted turn that is still LIVE (terminal delivery not committed)
+    ///      is `finished == false`, so absence + exact-id alone cannot steal it;
+    ///   3. the `OwnerInflightAbsent` reason an absent row yields still enforces
+    ///      the `>= 120s` age gate on top (defense-in-depth, R3-4).
     pub(in crate::services::discord) fn is_readopted_mailbox_owner(
         &self,
         provider: &ProviderKind,
@@ -84,6 +132,7 @@ impl SharedData {
             .is_some_and(|entry| {
                 entry.owner_user_id == owner_user_id
                     && entry.active_user_message_id == active_user_message_id
+                    && entry.finished
             })
     }
 
