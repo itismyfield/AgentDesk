@@ -1082,3 +1082,195 @@ EOF
   echo "✓ [gate] ${scope} active/finalizing turns drained (${waited}s, queued=${queue_depth})"
   return 0
 }
+
+# ── #4255 deploy pre-flight: resource-contention guard ──────────────────────
+# Two release deploys were KILLED mid-build by resource contention that this
+# guard exists to catch BEFORE an expensive `cargo build --release` starts:
+#   • 2026-07-05: a concurrent Unreal Engine build oversubscribed CPU/RAM.
+#   • 2026-07-07: a runaway `ugrep` pegged a core and starved the build.
+# Design: every probe FAILS OPEN — a metric that cannot be read is skipped, never
+# manufactured into a finding — so a clean machine is always a no-op and only a
+# positively-observed contention signal blocks. Builder detection uses exact
+# process-name matching (`pgrep -x`), NEVER `pgrep -f <pattern>`: `pgrep -f
+# deploy-release.sh` self-matches this very script and any monitoring wrapper
+# whose argv contains that string, which previously wedged a build gate into a
+# deadlock that never cleared. Exact-name matching also means the ssh client,
+# sshd, and a peer's remote deploy shell (all `ssh`/`sshd`/`bash`, never
+# `cargo`/`rustc`) can never be mistaken for a concurrent builder on the cluster
+# path. See #4255.
+
+_preflight_cpu_count() {
+  # Logical CPU count — used to scale the default load-average ceiling so one
+  # default is sane on both the mac-mini (more cores) and the mac-book (fewer).
+  local n=""
+  if command -v sysctl >/dev/null 2>&1; then
+    n="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+  fi
+  if [ -z "$n" ] && command -v nproc >/dev/null 2>&1; then
+    n="$(nproc 2>/dev/null || true)"
+  fi
+  case "$n" in
+    ''|*[!0-9]*) n=8 ;;   # conservative fallback when the count is unreadable
+  esac
+  printf '%s' "$n"
+}
+
+_preflight_default_max_loadavg() {
+  # Default 1-min load-average ceiling = 1.5 × logical CPUs. Before OUR build
+  # starts the machine should be near-idle, so a load already at 1.5× core count
+  # means other work is saturating it (the 07-05 concurrent-UE-build incident).
+  local ncpu
+  ncpu="$(_preflight_cpu_count)"
+  awk -v n="$ncpu" 'BEGIN { printf "%.2f", (n + 0) * 1.5 }'
+}
+
+_preflight_loadavg_1min() {
+  # 1-minute load average as a bare number, or nothing when unreadable.
+  # `sysctl -n vm.loadavg` → "{ 3.70 3.15 3.03 }"; the first token is the 1-min.
+  local raw field
+  if command -v sysctl >/dev/null 2>&1; then
+    raw="$(sysctl -n vm.loadavg 2>/dev/null || true)"
+    field="$(printf '%s' "$raw" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+$/) { print $i; exit } }')"
+    if [ -n "$field" ]; then
+      printf '%s' "$field"
+      return 0
+    fi
+  fi
+  # Fallback: parse `uptime` — macOS "load averages: 3.70 3.15 3.03" or
+  # GNU "load average: 3.70, 3.15, 3.03".
+  if command -v uptime >/dev/null 2>&1; then
+    uptime 2>/dev/null | sed -E 's/.*load averages?:[[:space:]]*//; s/,//g' | awk '{ print $1 }'
+    return 0
+  fi
+  return 0
+}
+
+_preflight_mem_pressure_level() {
+  # macOS memory-pressure level: 1 = normal, 2 = warn, 4 = critical
+  # (kern.memorystatus_vm_pressure_level). Prints the integer, or nothing when
+  # the sysctl is unavailable (e.g. Linux CI) so the memory gate is skipped.
+  command -v sysctl >/dev/null 2>&1 || return 0
+  local lvl
+  lvl="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || true)"
+  case "$lvl" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s' "$lvl"
+}
+
+_preflight_num_gt() {
+  # Float-aware "a > b": returns 0 (true) only when both parse as numbers AND
+  # a > b. A non-numeric operand → return 1 (NOT greater) so an unreadable
+  # metric can never trip a gate.
+  local a="$1" b="$2"
+  case "$a" in ''|*[!0-9.]*) return 1 ;; esac
+  case "$b" in ''|*[!0-9.]*) return 1 ;; esac
+  awk -v a="$a" -v b="$b" 'BEGIN { exit !((a + 0) > (b + 0)) }'
+}
+
+_preflight_builder_pids() {
+  # Space-joined PIDs of an EXACT-named build tool. `pgrep -x <name>` only — see
+  # the header note: `pgrep -f` would self-match the deploy script/wrapper.
+  local name="$1"
+  command -v pgrep >/dev/null 2>&1 || return 0
+  pgrep -x "$name" 2>/dev/null | tr '\n' ' ' | sed -E 's/[[:space:]]+$//' || true
+}
+
+_preflight_self_pgid() {
+  ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]' || true
+}
+
+_preflight_high_cpu_processes() {
+  # Emit "pid<TAB>cpu<TAB>comm" for each process whose ps %CPU (a ~1-minute
+  # decaying average on macOS, so a runaway/stuck process such as the 07-07
+  # ugrep still reads high) is >= the threshold, EXCLUDING this deploy's own
+  # process group so neither the deploy script, its lock wrapper, nor a peer's
+  # ssh-invoked shell is ever counted as contention (#4255).
+  local threshold="$1"
+  case "$threshold" in ''|*[!0-9.]*) return 0 ;; esac
+  command -v ps >/dev/null 2>&1 || return 0
+  local self_pgid
+  self_pgid="$(_preflight_self_pgid)"
+  ps -Ao pid=,pgid=,%cpu=,comm= 2>/dev/null | awk -v thr="$threshold" -v spg="$self_pgid" '
+    {
+      pid = $1; pgid = $2; cpu = $3;
+      comm = $4;
+      for (i = 5; i <= NF; i++) comm = comm " " $i;
+      if (spg != "" && pgid == spg) next;
+      if ((cpu + 0) >= (thr + 0)) printf "%s\t%s\t%s\n", pid, cpu, comm;
+    }' || true
+}
+
+_preflight_resource_contention() {
+  # #4255: refuse an expensive release build when the machine is already under
+  # resource contention that has twice killed a mid-flight deploy. Prints every
+  # detected cause with its pid / metric-vs-threshold and returns 1 (refuse)
+  # when any finding exists; returns 0 on a clean machine. Escape hatch:
+  # AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1 proceeds anyway (findings are
+  # still printed, downgraded to warnings), consistent with the
+  # AGENTDESK_DEPLOY_FORCE_ROLLBACK force-through style.
+  local force="${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}"
+  local max_load="${AGENTDESK_DEPLOY_MAX_LOADAVG:-}"
+  local max_pressure="${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-4}"
+  local high_cpu_pct="${AGENTDESK_DEPLOY_HIGH_CPU_PCT:-90}"
+  local -a findings=()
+  local name pids loadavg pressure ncpu
+  local hpid hcpu hcomm
+
+  case "$max_pressure" in ''|*[!0-9]*) max_pressure=4 ;; esac
+  case "$high_cpu_pct" in ''|*[!0-9.]*) high_cpu_pct=90 ;; esac
+  if [ -z "$max_load" ]; then
+    max_load="$(_preflight_default_max_loadavg)"
+  fi
+  ncpu="$(_preflight_cpu_count)"
+
+  # (1) Concurrent build tools — EXACT-name match only (never `pgrep -f`).
+  for name in cargo rustc UnrealEditor UnrealEditor-Cmd UnrealBuildTool ShaderCompileWorker; do
+    pids="$(_preflight_builder_pids "$name" || true)"
+    if [ -n "$pids" ]; then
+      findings+=("concurrent build tool '${name}' running (pid ${pids}) — would oversubscribe CPU/RAM against the release build")
+    fi
+  done
+
+  # (2) Load average vs ceiling.
+  loadavg="$(_preflight_loadavg_1min || true)"
+  if [ -n "$loadavg" ] && _preflight_num_gt "$loadavg" "$max_load"; then
+    findings+=("1-min load average ${loadavg} exceeds ceiling ${max_load} (AGENTDESK_DEPLOY_MAX_LOADAVG; default 1.5×${ncpu} cores)")
+  fi
+
+  # (3) Memory pressure vs ceiling (macOS kern.memorystatus_vm_pressure_level).
+  pressure="$(_preflight_mem_pressure_level || true)"
+  if [ -n "$pressure" ] && [ "$pressure" -ge "$max_pressure" ] 2>/dev/null; then
+    findings+=("memory pressure level ${pressure} >= ceiling ${max_pressure} (1=normal 2=warn 4=critical; AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL)")
+  fi
+
+  # (4) Other high-CPU processes (own process group excluded).
+  while IFS="$(printf '\t')" read -r hpid hcpu hcomm; do
+    [ -n "$hpid" ] || continue
+    findings+=("high-CPU process '${hcomm}' (pid ${hpid}, ${hcpu}% ps-avg) >= ${high_cpu_pct}% (AGENTDESK_DEPLOY_HIGH_CPU_PCT)")
+  done <<EOF
+$(_preflight_high_cpu_processes "$high_cpu_pct")
+EOF
+
+  if [ "${#findings[@]}" -eq 0 ]; then
+    echo "▸ [gate] Resource pre-flight clear (load=${loadavg:-n/a}/${max_load}, mem-pressure=${pressure:-n/a}/${max_pressure})"
+    return 0
+  fi
+
+  local f
+  if [ "$force" = "1" ]; then
+    echo "⚠ [gate] Resource contention detected but AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1 — proceeding anyway:" >&2
+    for f in "${findings[@]}"; do
+      echo "    - $f" >&2
+    done
+    return 0
+  fi
+
+  echo "🛑 [gate] Refusing release build — resource contention detected (#4255):" >&2
+  for f in "${findings[@]}"; do
+    echo "    - $f" >&2
+  done
+  echo "  Two prior deploys were KILLED mid-build by exactly this (07-05 concurrent UE build, 07-07 runaway ugrep)." >&2
+  echo "  Free the machine and retry, or set AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1 to force through." >&2
+  return 1
+}

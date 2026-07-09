@@ -26,6 +26,22 @@ set -euo pipefail
 #                                      offline/emergency deploy.
 #   AGENTDESK_DEPLOY_FAST=1            opt into the release-fast Cargo profile
 #                                      for lower-latency dev-loop deploys.
+# Resource-contention pre-flight (#4255 — runs on every node before the build):
+#   AGENTDESK_DEPLOY_MAX_LOADAVG           1-min load-average ceiling; over it the
+#                                          deploy refuses. Default: 1.5 × logical
+#                                          CPU count (e.g. 21.0 on a 14-core box).
+#   AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL macOS memory-pressure ceiling
+#                                          (kern.memorystatus_vm_pressure_level:
+#                                          1=normal 2=warn 4=critical). Refuse when
+#                                          the level is >= this. Default: 4.
+#   AGENTDESK_DEPLOY_HIGH_CPU_PCT           any non-deploy process at or above this
+#                                          ps %CPU (own process group excluded) is
+#                                          reported by pid/name and refuses.
+#                                          Default: 90.
+#   AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1
+#                                          escape hatch — proceed past a failed
+#                                          resource pre-flight (findings are still
+#                                          printed, downgraded to warnings).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
@@ -800,6 +816,10 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
         AGENTDESK_DEPLOY_SKIP_FRESHNESS \
         AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS \
+        AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT \
+        AGENTDESK_DEPLOY_MAX_LOADAVG \
+        AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL \
+        AGENTDESK_DEPLOY_HIGH_CPU_PCT \
         AGENTDESK_DEPLOY_TEST_MODE \
         AGENTDESK_REL_PORT \
         AGENTDESK_REPORT_CHANNEL_ID \
@@ -964,6 +984,10 @@ export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 export AGENTDESK_DEPLOY_FAST=$(printf '%q' "${AGENTDESK_DEPLOY_FAST:-0}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
+export AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=$(printf '%q' "${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}")
+export AGENTDESK_DEPLOY_MAX_LOADAVG=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_LOADAVG:-}")
+export AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-}")
+export AGENTDESK_DEPLOY_HIGH_CPU_PCT=$(printf '%q' "${AGENTDESK_DEPLOY_HIGH_CPU_PCT:-}")
 export AGENTDESK_DEPLOY_ALLOW_NON_MAIN=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}")
 export AGENTDESK_DEPLOY_ALLOW_DIRTY=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_DIRTY:-0}")
 export AGENTDESK_DEPLOY_LOCK_FILE=$(printf '%q' "$DEPLOY_LOCK_FILE")
@@ -1012,6 +1036,21 @@ if _self_hosted_release_session; then
 fi
 
 _acquire_release_deploy_lock "$@"
+
+# #4255: resource-contention pre-flight — refuse (or, with the force hatch,
+# warn) BEFORE any expensive build work when the machine is already saturated by
+# another builder / high-load process, which twice KILLED a mid-flight deploy
+# (07-05 concurrent UE build, 07-07 runaway ugrep). Runs on EVERY node: each
+# peer invokes this same script under its own lock, so it checks its own local
+# resources. Exact-name builder matching (pgrep -x) means the ssh client, sshd,
+# and the deploy script itself are never mistaken for contention, and the
+# high-CPU scan excludes this deploy's own process group. Skipped in the
+# detached-helper dry run (DEPLOY_TEST_MODE=1), which never builds.
+if [ "$DEPLOY_TEST_MODE" != "1" ]; then
+    if ! _preflight_resource_contention; then
+        exit 1
+    fi
+fi
 
 # #743: Zero-inflight gate for create-pr dispatches on the release runtime.
 # A restart during an in-flight create-pr dispatch leaves its completion
