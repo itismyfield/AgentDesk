@@ -54,7 +54,25 @@ pub(crate) fn claude_tui_force_initial_offset_for_adopted_transcript(
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .is_none();
-    if already_durable_claude_transcript {
+    // #4400 (b) review r2: the adopted #3107 self-heal orphan (zero-id,
+    // watcher-owned) was born FROM the live transcript stream — its persisted
+    // offsets are transcript-space by construction whenever its saved output
+    // path IS the resolved transcript. The self-heal does not stamp
+    // `runtime_kind`, so the durable-stamp check above can never admit it;
+    // without this arm the EOF rebase below would drop the backlog written
+    // while the watcher was dead (invariant I3 — the 16:30~16:37Z window).
+    // Path equality plus the fifo-less shape keep wrapper-space coordinates
+    // excluded exactly as the durable check does.
+    let adopted_orphan_same_transcript = existing_saved_output_path
+        .is_some_and(|saved_path| rebind_output_paths_same(saved_path, output_path))
+        && existing.is_adoptable_orphaned_synthetic_watcher_row()
+        && existing
+            .input_fifo_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .is_none();
+    if already_durable_claude_transcript || adopted_orphan_same_transcript {
         return None;
     }
 

@@ -845,7 +845,15 @@ fn save_existing_inflight_rebind_adoption_impl_in_root(
     if on_disk.restart_mode != state.restart_mode {
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if expected.user_msg_id == 0 || !expected.matches_state(&on_disk) {
+    // #4400 (b) r2: zero-id `expected` authorizes this save ONLY for the
+    // adoptable #3107 self-heal orphan carrying a birth `turn_start_offset`
+    // (the id-0 fail-closed rule of `identity_matches_with_offset_guard`); all
+    // other zero-id shapes keep the unconditional refusal (I2).
+    if !expected.matches_state(&on_disk)
+        || (expected.user_msg_id == 0
+            && !(on_disk.is_adoptable_orphaned_synthetic_watcher_row()
+                && on_disk.turn_start_offset.is_some()))
+    {
         return GuardedSaveOutcome::IdentityMismatch;
     }
     if let Some(expected_offset) = expected_turn_start_offset {
@@ -1146,6 +1154,131 @@ mod tests {
             ),
             GuardedSaveOutcome::IdentityMismatch,
             "an offsetless id-0 snapshot must be refused fail-closed even against a byte-identical durable row (#4370 R3-5)",
+        );
+    }
+
+    /// The zero-id headless row exactly as the #3107 watcher self-heal
+    /// re-mints it (the #4400 (b) adoption subject): no request owner, no user
+    /// message, Watcher relay owner, live-stream anchors, birth offset stamped
+    /// by the constructor.
+    fn orphaned_synthetic_watcher_row(channel_id: u64) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            None,
+            0,
+            0,
+            1_518_888_000_000_000_001,
+            String::new(),
+            None,
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/48fdb7f3-0000-4000-8000-000000004400.jsonl".to_string()),
+            None,
+            8_192,
+        );
+        state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        state
+    }
+
+    /// #4400 (b) review r2: the rebind adoption save must accept the adoptable
+    /// zero-id orphan (pre-fix it was refused as `IdentityMismatch`, turning
+    /// the classifier's 409 self-deadlock into a 500 self-deadlock — the fix
+    /// was invalid on the real path), while every OTHER zero-id shape keeps
+    /// the unconditional refusal. Each contrast row is a mutation kill: widen
+    /// the new arm past the orphan shape and its assert fails.
+    #[test]
+    fn rebind_adoption_save_adopts_zero_id_orphan_but_refuses_live_synthetic_shapes() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let provider = ProviderKind::Claude;
+
+        // (1) The adoptable orphan: Saved. The adoption mutates only the
+        // watcher-binding surface (tmux/output/owner) and must keep the row's
+        // zero-id identity and committed offsets untouched.
+        let orphan = orphaned_synthetic_watcher_row(64_400);
+        save_inflight_state_in_root(temp.path(), &orphan).expect("seed orphan row");
+        let expected = InflightTurnIdentity::from_state(&orphan);
+        let mut adopted = orphan.clone();
+        adopted.output_path = Some("/tmp/48fdb7f3-0000-4000-8000-000000004400.jsonl".to_string());
+        adopted.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        assert_eq!(
+            save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+                temp.path(),
+                &adopted,
+                &expected,
+                orphan.turn_start_offset,
+            ),
+            GuardedSaveOutcome::Saved,
+            "#4400 (b): the adoption save must accept the orphaned zero-id synthetic watcher row \
+             — refusing it turns the respawn 409 deadlock into an Internal-error 500 deadlock (I1)",
+        );
+        let persisted_path = inflight_state_path(temp.path(), &provider, orphan.channel_id);
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_path).expect("read adopted row"),
+        )
+        .expect("parse adopted row");
+        assert_eq!(persisted.user_msg_id, 0);
+        assert_eq!(persisted.request_owner_user_id, 0);
+        assert_eq!(
+            persisted.last_offset, 8_192,
+            "the non-rebase adoption save must preserve the committed offset (I3)"
+        );
+
+        // (2) Opus-arm safety contrast: a live TUI-direct synthetic row
+        // (#4018 owner `request_owner_user_id == 1`) is NOT the orphan and
+        // must keep the refusal — adopting it would steal a live relay owner.
+        let mut tui_direct = orphaned_synthetic_watcher_row(64_401);
+        tui_direct.request_owner_user_id = 1;
+        save_inflight_state_in_root(temp.path(), &tui_direct).expect("seed TUI-direct row");
+        let tui_expected = InflightTurnIdentity::from_state(&tui_direct);
+        assert_eq!(
+            save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+                temp.path(),
+                &tui_direct,
+                &tui_expected,
+                tui_direct.turn_start_offset,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "a live TUI-direct synthetic row (owner 1) must keep the zero-id refusal (I2)",
+        );
+
+        // (3) Bridge-owned/default zero-id row: not the self-heal shape.
+        let mut bridge_owned = orphaned_synthetic_watcher_row(64_402);
+        bridge_owned.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
+        save_inflight_state_in_root(temp.path(), &bridge_owned).expect("seed bridge-owned row");
+        let bridge_expected = InflightTurnIdentity::from_state(&bridge_owned);
+        assert_eq!(
+            save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+                temp.path(),
+                &bridge_owned,
+                &bridge_expected,
+                bridge_owned.turn_start_offset,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "a bridge-owned zero-id row must keep the refusal",
+        );
+
+        // (4) Offsetless zero-id orphan: fail closed (mirrors the id-0
+        // birth-offset rule in `identity_matches_with_offset_guard`).
+        let mut offsetless = orphaned_synthetic_watcher_row(64_403);
+        offsetless.turn_start_offset = None;
+        save_inflight_state_in_root(temp.path(), &offsetless).expect("seed offsetless row");
+        let offsetless_expected = InflightTurnIdentity::from_state(&offsetless);
+        assert_eq!(
+            save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+                temp.path(),
+                &offsetless,
+                &offsetless_expected,
+                None,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "an offsetless zero-id row cannot be uniquely named and must be refused fail-closed",
         );
     }
 }

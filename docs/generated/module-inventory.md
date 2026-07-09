@@ -490,13 +490,13 @@
 | `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store/mod.rs` | 873 | 873 | 0 |  |
 | `services::discord::inflight::clear_store::abandon` | `src/services/discord/inflight/clear_store/abandon.rs` | 253 | 253 | 0 |  |
 | `services::discord::inflight::finalizer_identity` | `src/services/discord/inflight/finalizer_identity.rs` | 56 | 56 | 0 |  |
-| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1231 | 915 | 316 |  |
+| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1267 | 951 | 316 |  |
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 821 | 307 | 514 |  |
 | `services::discord::inflight::ownership_ops` | `src/services/discord/inflight/ownership_ops.rs` | 329 | 329 | 0 |  |
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 810 | 810 | 0 |  |
 | `services::discord::inflight::removal` | `src/services/discord/inflight/removal.rs` | 465 | 465 | 0 |  |
 | `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 966 | 236 | 730 |  |
-| `services::discord::inflight::save_store::identity_gate` | `src/services/discord/inflight/save_store/identity_gate.rs` | 1151 | 991 | 160 |  |
+| `services::discord::inflight::save_store::identity_gate` | `src/services/discord/inflight/save_store/identity_gate.rs` | 1284 | 999 | 285 |  |
 | `services::discord::inflight::stall_recovery_tests::flake_isolation_4361` | `src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs` | 289 | 289 | 0 |  |
 | `services::discord::inflight::store` | `src/services/discord/inflight/store.rs` | 402 | 351 | 51 |  |
 | `services::discord::inflight::watcher_state` | `src/services/discord/inflight/watcher_state.rs` | 365 | 365 | 0 |  |
@@ -572,12 +572,12 @@
 | `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 814 | 312 | 502 |  |
 | `services::discord::recovery_engine::crash_resume_guard` | `src/services/discord/recovery_engine/crash_resume_guard.rs` | 368 | 176 | 192 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
-| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1049 | 786 | 263 |  |
-| `services::discord::recovery_engine::manual_rebind::adoption` | `src/services/discord/recovery_engine/manual_rebind/adoption.rs` | 286 | 77 | 209 |  |
+| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1205 | 786 | 419 |  |
+| `services::discord::recovery_engine::manual_rebind::adoption` | `src/services/discord/recovery_engine/manual_rebind/adoption.rs` | 304 | 95 | 209 |  |
 | `services::discord::recovery_engine::manual_rebind::codex_tui_replay` | `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs` | 944 | 233 | 711 |  |
 | `services::discord::recovery_engine::manual_rebind_output_path` | `src/services/discord/recovery_engine/manual_rebind_output_path.rs` | 539 | 348 | 191 |  |
 | `services::discord::recovery_engine::output_path_detect` | `src/services/discord/recovery_engine/output_path_detect.rs` | 177 | 177 | 0 |  |
-| `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 368 | 177 | 191 |  |
+| `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 370 | 179 | 191 |  |
 | `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 2091 | 972 | 1119 |  |
 | `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2404 | 2313 | 91 | giant-file |
 | `services::discord::recovery_engine::restore_persist_outcome` | `src/services/discord/recovery_engine/restore_persist_outcome.rs` | 102 | 102 | 0 |  |

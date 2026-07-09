@@ -74,13 +74,15 @@ fn can_resume_existing_rebind_inflight(state: &inflight::InflightTurnState) -> b
 ///     bridge-owned/default (`None`) zero-id row is not the #4400 orphan.
 ///   - restore anchors — without a tmux session + output path there is
 ///     nothing to reattach a watcher to.
+///
+/// The predicate body lives on `InflightTurnState`
+/// (`is_adoptable_orphaned_synthetic_watcher_row`) because the adoption-save
+/// identity gate and the adopted-transcript offset check must apply the SAME
+/// shape test — review r2 found that classifying adopt here while the deeper
+/// layers still refused the zero-id row merely converted the 409 loop into a
+/// 500 loop.
 fn can_adopt_orphaned_synthetic_watcher_row(state: &inflight::InflightTurnState) -> bool {
-    !state.rebind_origin
-        && state.user_msg_id == 0
-        && state.request_owner_user_id == 0
-        && !state.terminal_delivery_committed
-        && state.effective_relay_owner_kind() == inflight::RelayOwnerKind::Watcher
-        && has_restore_anchor(state)
+    state.is_adoptable_orphaned_synthetic_watcher_row()
 }
 
 pub(super) fn recovery_phase_for_existing_inflight_rebind(

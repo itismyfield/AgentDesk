@@ -1022,6 +1022,42 @@ impl InflightTurnState {
         }
     }
 
+    /// #4400 (b): is this row the orphaned headless synthetic shape that the
+    /// #3107 watcher self-heal (`reacquire_watcher_inflight_for_active_stream`)
+    /// re-mints after a stall-watchdog force-clean deleted the real row?
+    ///
+    /// Zero ids (`user_msg_id == 0 && request_owner_user_id == 0`) exclude both
+    /// real user turns AND the #4018 TUI-direct synthetic relay owner
+    /// (`request_owner_user_id == 1`), so adopting this shape can never steal a
+    /// live turn (invariant I2). Watcher ownership plus non-blank restore
+    /// anchors (tmux session + output path) are the self-heal birth stamps;
+    /// rebind-origin rows keep their own #3581 replace/reap lifecycle and a
+    /// terminal-committed row keeps the committed-cleanup path authoritative.
+    ///
+    /// Single source of truth shared by the rebind preflight classifier
+    /// (`recovery_engine::phase_policy::can_adopt_orphaned_synthetic_watcher_row`),
+    /// the adoption-save identity gate
+    /// (`save_existing_inflight_rebind_adoption_impl_in_root`), and the
+    /// adopted-transcript offset preservation check
+    /// (`claude_tui_force_initial_offset_for_adopted_transcript`) — the three
+    /// layers must not drift or the adoption either 409s (classifier), 500s
+    /// (identity gate), or drops the dead-window backlog (offset rebase).
+    pub(in crate::services::discord) fn is_adoptable_orphaned_synthetic_watcher_row(&self) -> bool {
+        !self.rebind_origin
+            && self.user_msg_id == 0
+            && self.request_owner_user_id == 0
+            && !self.terminal_delivery_committed
+            && self.effective_relay_owner_kind() == RelayOwnerKind::Watcher
+            && self
+                .tmux_session_name
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty())
+            && self
+                .output_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+    }
+
     pub(in crate::services::discord) fn set_relay_owner_kind(&mut self, kind: RelayOwnerKind) {
         self.relay_owner_kind = kind;
         self.watcher_owns_live_relay = matches!(kind, RelayOwnerKind::Watcher);

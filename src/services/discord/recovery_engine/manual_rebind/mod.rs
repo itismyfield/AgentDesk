@@ -1046,4 +1046,160 @@ mod stall_watchdog_respawn_deadlock_tests {
             "the synthetic rebind-origin row must be persisted"
         );
     }
+
+    /// #4400 (b) review r2: full-path 16:32Z reproduction through
+    /// `rebind_inflight_for_channel` itself. The r1 classifier/helper tests
+    /// proved the phase decision but missed that the resume machinery's
+    /// adoption save (`identity_gate.rs`) refused zero-id rows (`RebindError::
+    /// Internal` — a 500 loop instead of the 409 loop) and that the adopted
+    /// transcript's offsets were EOF-rebased (`adoption.rs` — backlog loss).
+    /// This test drives the REAL path end to end against a live tmux session:
+    ///   - `Ok(..)` kills reverting the identity-gate zero-id adoption arm
+    ///     (that mutation returns `Err(Internal("persist existing inflight
+    ///     watcher adoption …"))` — I1);
+    ///   - `initial_offset == 8_192` kills reverting the adopted-orphan
+    ///     durable-transcript arm (that mutation EOF-rebases to 12_288 — I3);
+    ///   - `watcher_spawned` + the registry entry prove the single-watcher
+    ///     claim was reached (the opus-arm safety property).
+    ///
+    /// Follows the `platform::tmux::live_pane_tests` precedent: skips when
+    /// tmux is unavailable. `session_id` is seeded on the orphan row to stand
+    /// in for the PG dispatched-session selector cache the live runtime
+    /// carries (`shared.pg_pool` is `None` in tests); the saved-output-path
+    /// `Keep` decision it produces is identical to the incident's.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebind_full_path_adopts_orphan_row_and_resumes_at_committed_offset() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        if !crate::services::platform::tmux::is_available() {
+            eprintln!("skipping #4400 full-path rebind test: tmux is not available");
+            return;
+        }
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 4_400_163_200_000_001_u64;
+        let discord_channel = ChannelId::new(channel_id);
+        // `-cc` suffix keeps `channel_supports_provider` resolving Claude for
+        // the parsed channel name; the pid keeps parallel runs collision-free.
+        let tmux_session = format!("AgentDesk-claude-e2e4400-{}-cc", std::process::id());
+        let created =
+            crate::services::platform::tmux::create_session(&tmux_session, None, "sleep 60")
+                .expect("create tmux session");
+        assert!(
+            created.status.success(),
+            "tmux session must start: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        // The ClaudeTui runtime-kind marker the live handoff writes — this is
+        // what `resolve_rebind_runtime_state` keys the transcript branch on.
+        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+            &tmux_session,
+            RuntimeHandoffKind::ClaudeTui,
+        )
+        .expect("write runtime-kind marker");
+
+        // UUID-stem Claude transcript: 8_192 committed bytes + 4_096 backlog
+        // bytes written while the watcher was dead (no trailing newline, so
+        // the spawned watcher cannot consume a complete JSONL line).
+        let session_uuid = "48fdb7f3-4400-4000-8000-000000163200";
+        let transcript_path = tmp.path().join(format!("{session_uuid}.jsonl"));
+        let transcript_path_str = transcript_path.display().to_string();
+        std::fs::write(&transcript_path, vec![b'x'; 12_288]).expect("write transcript");
+
+        // The re-minted #3107 self-heal orphan row, persisted through the same
+        // atomic if-absent path the self-heal uses.
+        let mut orphan = super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            None,
+            0,
+            0,
+            1_518_888_000_000_000_001,
+            String::new(),
+            Some(session_uuid.to_string()),
+            Some(tmux_session.clone()),
+            Some(transcript_path_str.clone()),
+            None,
+            8_192,
+        );
+        orphan.turn_source = super::inflight::TurnSource::ExternalInput;
+        orphan.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+        assert!(
+            super::inflight::save_inflight_state_if_absent(&orphan).expect("persist orphan row"),
+            "the self-heal if-absent write must land on an empty store"
+        );
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = std::sync::Arc::new(serenity::Http::new("Bot test-token"));
+        let result = rebind_inflight_for_channel(
+            &http,
+            &shared,
+            &provider,
+            channel_id,
+            Some(tmux_session.clone()),
+        )
+        .await;
+
+        // Synchronous assertion window: current_thread flavor means the
+        // spawned watcher task cannot run until this future yields, so the
+        // persisted row below is exactly what the rebind path wrote.
+        let row = super::inflight::load_inflight_state(&provider, channel_id);
+        let watcher_entry = shared.tmux_watchers.remove(&discord_channel);
+        if let Some((_, handle)) = watcher_entry.as_ref() {
+            handle
+                .cancel
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let _ = crate::services::platform::tmux::kill_session(&tmux_session, "#4400 e2e cleanup");
+
+        let outcome = result.expect(
+            "adopting the re-minted orphan row must resume the relay — neither the 409 \
+             (InflightAlreadyExists) nor the 500 (Internal adoption-save refusal) deadlock (I1)",
+        );
+        assert_eq!(
+            outcome.initial_offset, 8_192,
+            "the watcher must resume at the committed offset — an EOF rebase (12_288) would \
+             drop the backlog written while the watcher was dead (I3)"
+        );
+        assert!(
+            outcome.watcher_spawned,
+            "the single-watcher claim must be reached and spawn for the adopted row"
+        );
+        assert!(
+            watcher_entry.is_some(),
+            "the watcher registry must carry the channel's claimed watcher handle"
+        );
+
+        let row = row.expect("the adopted row must remain persisted");
+        assert_eq!(row.user_msg_id, 0, "adoption must not mint a fake user id");
+        assert_eq!(
+            row.request_owner_user_id, 0,
+            "adoption must not seize ownership for a synthetic owner (I2)"
+        );
+        assert_eq!(
+            row.last_offset, 8_192,
+            "the persisted committed offset must survive adoption un-rebased (I3)"
+        );
+        assert_eq!(
+            row.tmux_session_name.as_deref(),
+            Some(tmux_session.as_str())
+        );
+        assert_eq!(
+            row.output_path.as_deref(),
+            Some(transcript_path_str.as_str())
+        );
+        assert_eq!(
+            row.effective_relay_owner_kind(),
+            super::inflight::RelayOwnerKind::Watcher,
+            "the adopted row must stay watcher-owned"
+        );
+    }
 }
