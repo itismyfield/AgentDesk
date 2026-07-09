@@ -60,6 +60,7 @@ echo "=== Policy DB capability manifest guard (#3734) ==="
 
 echo "=== await_holding_lock ratchet guard ==="
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
+"$PYTHON" -m unittest tests.test_await_holding_lock_ratchet
 
 echo "=== Hotfile LOC ratchet guard (#3565) ==="
 "$PYTHON" scripts/check_hotfile_ratchet.py
@@ -107,7 +108,7 @@ fi
 
 echo "=== Check hardcoded port/path drift ==="
 grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --include='*.json' \
-  --exclude-dir=target --exclude-dir=.git --exclude-dir=node_modules \
+  --exclude-dir=target --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.claude \
   | grep -v 'Cargo.lock' \
   | grep -v '// port' \
   | grep -v '# port' || true
@@ -115,7 +116,7 @@ grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --inc
 echo ""
 echo "=== Checking hardcoded home paths (informational; see #100) ==="
 if grep -rn 'env!("HOME")' --include='*.rs' \
-  --exclude-dir=target --exclude-dir=.git 2>/dev/null; then
+  --exclude-dir=target --exclude-dir=.git --exclude-dir=.claude 2>/dev/null; then
   echo "NOTE: env!(\"HOME\") found; tracked in #100"
 else
   echo "OK: No env!(\"HOME\") found"
