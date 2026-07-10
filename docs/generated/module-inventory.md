@@ -751,7 +751,7 @@
 | `services::discord::tui_prompt_relay::synthetic_start::stale_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs` | 433 | 433 | 0 |  |
 | `services::discord::tui_prompt_relay::synthetic_start_wiring` | `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs` | 137 | 137 | 0 |  |
 | `services::discord::tui_task_card` | `src/services/discord/tui_task_card.rs` | 2084 | 1167 | 917 | giant-file |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 998 | 998 | 0 |  |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 997 | 997 | 0 |  |
 | `services::discord::turn_bridge::activity_heartbeat` | `src/services/discord/turn_bridge/activity_heartbeat.rs` | 77 | 77 | 0 |  |
 | `services::discord::turn_bridge::bridge_latency_spans` | `src/services/discord/turn_bridge/bridge_latency_spans.rs` | 236 | 142 | 94 |  |
 | `services::discord::turn_bridge::cancel_finalize_policy` | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` | 596 | 146 | 450 |  |

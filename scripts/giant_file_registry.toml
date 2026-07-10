@@ -480,7 +480,7 @@ decompose_issue = "#3405"
 # registration.
 
 # RETIRED 2026-07-10 (#4230 S11): turn_bridge/mod.rs dropped from 1231 to
-# 998 production LoC after the remaining free-function helper zones and all
+# 997 production LoC after the remaining free-function helper zones and all
 # 460 inline test LoC moved to capped/natural child modules. The #3038-tagged
 # registry entry is retired; the root is below the 1000-prod-LoC giant threshold.
 

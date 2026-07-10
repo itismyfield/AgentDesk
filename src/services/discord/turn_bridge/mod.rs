@@ -62,8 +62,9 @@ use crate::db::session_observability::{
     BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
     mark_session_tool_use_pg,
 };
-use crate::db::session_transcripts::SessionTranscriptEvent;
+use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
+use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
 use crate::services::memory::{
     CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -72,10 +73,10 @@ use crate::services::observability::session_inventory::{
 };
 use crate::services::provider::cancel_requested;
 use output_lifecycle::BridgeOutputOwner;
-pub(super) use panel_lifecycle::{
+pub(super) use panel_lifecycle::record_placeholder_live_event;
+use panel_lifecycle::{
     child_progress_line, ensure_active_placeholder_card, first_request_line,
-    record_placeholder_live_event, refresh_session_panel_line_from_lifecycle,
-    refresh_task_panel_line_from_dispatch,
+    refresh_session_panel_line_from_lifecycle, refresh_task_panel_line_from_dispatch,
 };
 use response_delivery::{
     done_result_requires_full_terminal_replay, push_transcript_event,
@@ -85,11 +86,11 @@ use std::collections::VecDeque;
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(super) use activity_heartbeat::maybe_refresh_active_turn_activity_heartbeat;
 use bridge_latency_spans::BridgeLatencySpans;
+pub(super) use cancel_finalize_policy::sync_inflight_restart_mode_from_cancel;
 pub(super) use cancel_finalize_policy::{
     classify_turn_finished_dispatch_kind, is_done_setting_terminal_frame,
     resolve_bridge_owner_channel, should_finalize_cancel_after_recv,
     should_record_final_turn_transcript, should_suppress_headless_delivery_for_cancel,
-    sync_inflight_restart_mode_from_cancel,
 };
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
@@ -162,11 +163,12 @@ use recall_feedback::{
     analyze_recall_feedback_turn, build_voluntary_feedback_reminder, reminder_transcript_event,
     transcript_contains_explicit_memento_tool_call,
 };
-pub(super) use retry_state::{
+pub(super) use retry_state::spawn_retry_with_history_with_release;
+use retry_state::{
     bridge_confirmed_response_sent_offset_seed, bridge_should_reclaim_relay_from_missing_watcher,
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
-    rewind_and_persist_delivery_on_reclaim, spawn_retry_with_history_with_release,
-    sync_response_delivery_state, sync_terminal_error_delivery_state_for_bridge_owner,
+    rewind_and_persist_delivery_on_reclaim, sync_response_delivery_state,
+    sync_terminal_error_delivery_state_for_bridge_owner,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use sqlx::Row;
@@ -512,14 +514,12 @@ pub(super) fn spawn_turn_bridge(
             broadcaster: shared_owned.inflight_signals.clone(),
             channel_id,
         };
-
         let mut inflight_guard = InflightCleanupGuard {
             provider: Some(provider.clone()),
             channel_id: channel_id.get(),
             user_msg_id: user_msg_id.map(|id| id.get()).unwrap_or(0),
             token_hash: shared_owned.token_hash.clone(),
         };
-
         let mut inflight_state = bridge.inflight_state.clone();
         inflight_state.set_watcher_owner_channel_id(resolved_watcher_owner_channel_id.get());
         // Codex P2: a no-anchor recovery turn (bridge.current_msg_id == None)
@@ -567,7 +567,6 @@ pub(super) fn spawn_turn_bridge(
         // #3813 AC#1 tail: bridge-side latency spans (observation-only), anchored
         // on `turn_start` above. See bridge_latency_spans.rs for the invariants.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
-
         // #3805 P2 (PR-B): this turn's status-panel epoch. Seeded from the pinned
         // inflight snapshot and threaded through the two-message create (which
         // bumps it) and the terminal completion edit (which proves it against the

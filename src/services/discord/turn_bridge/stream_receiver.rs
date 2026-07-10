@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) struct StreamMessageReceiverAdapter {
+pub(in crate::services::discord) struct StreamMessageReceiverAdapter {
     rx: tokio::sync::mpsc::UnboundedReceiver<StreamMessage>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -25,7 +25,7 @@ impl Drop for StreamMessageReceiverAdapter {
     }
 }
 
-pub(super) fn spawn_stream_message_receiver_adapter(
+pub(in crate::services::discord) fn spawn_stream_message_receiver_adapter(
     rx: mpsc::Receiver<StreamMessage>,
 ) -> StreamMessageReceiverAdapter {
     let (tx, async_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -49,7 +49,7 @@ pub(super) fn spawn_stream_message_receiver_adapter(
     StreamMessageReceiverAdapter { rx: async_rx, stop }
 }
 
-pub(super) fn turn_bridge_stream_wait_duration(
+pub(in crate::services::discord) fn turn_bridge_stream_wait_duration(
     done: bool,
     terminal_control_drain_until: Option<std::time::Instant>,
     now: std::time::Instant,

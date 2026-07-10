@@ -10,7 +10,7 @@
 
 use super::*;
 
-pub(super) fn sync_inflight_restart_mode_from_cancel(
+pub(in crate::services::discord) fn sync_inflight_restart_mode_from_cancel(
     cancel_token: &crate::services::provider::CancelToken,
     inflight_state: &mut InflightTurnState,
 ) -> bool {

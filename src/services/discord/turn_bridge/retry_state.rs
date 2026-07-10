@@ -20,7 +20,7 @@ use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 /// after the inner `auto_retry_with_history` returns) — both paths
 /// remove the same `channel_id` from the `RETRY_PENDING` set, so a
 /// double-remove is a no-op.
-pub(super) fn spawn_retry_with_history_with_release(
+pub(in crate::services::discord) fn spawn_retry_with_history_with_release(
     gateway: std::sync::Arc<dyn gateway::TurnGateway>,
     channel_id: ChannelId,
     user_msg_id: MessageId,

@@ -17,7 +17,7 @@ fn active_turn_thread_channel_id(
         .or(inflight_state.thread_id)
 }
 
-pub(super) fn maybe_refresh_active_turn_activity_heartbeat(
+pub(in crate::services::discord) fn maybe_refresh_active_turn_activity_heartbeat(
     shared: &SharedData,
     provider: &ProviderKind,
     inflight_state: &InflightTurnState,

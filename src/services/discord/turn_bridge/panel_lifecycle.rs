@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(super) fn record_placeholder_live_event(
+pub(in crate::services::discord) fn record_placeholder_live_event(
     shared: &SharedData,
     channel_id: ChannelId,
     event: Option<super::super::placeholder_live_events::RecentPlaceholderEvent>,
