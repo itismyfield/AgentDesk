@@ -87,6 +87,22 @@ pub struct WatcherStateSnapshot {
     /// mailbox is idle (no active turn).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mailbox_active_user_msg_id: Option<u64>,
+    /// #4408 phase-2 (I1): the transcript path the dcserver actually binds its
+    /// relay tail to. Resolved with per-field precedence — a live inflight row's
+    /// persisted `output_path` wins; otherwise the in-memory tmux runtime
+    /// binding's `relay_output_path` (a sync single-shot lookup, never held
+    /// across an await). Lets the out-of-band watchdog compare the server's
+    /// asserted selector (B) against its own growth-aware transcript pick (F).
+    /// `null`/absent means neither source is known, so the watchdog fails closed
+    /// instead of alarming on an unknown bind. See `resolve_bound_selector`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_output_path: Option<String>,
+    /// #4408 phase-2 (I1): the provider session the bound transcript belongs to,
+    /// resolved from the inflight row's `session_id` first, else the runtime
+    /// binding. Read-only; the side-effecting claude-session-id GET (which
+    /// advances a watermark) is intentionally never consulted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_session_id: Option<String>,
     /// #3126: `true` when the in-flight row records a turn whose terminal
     /// assistant response has already been committed
     /// (`InflightTurnState::terminal_delivery_committed`). A row with this set
@@ -184,6 +200,39 @@ fn ownerless_external_input_inflight_is_idle(
     inflight: Option<&discord::inflight::InflightTurnState>,
 ) -> bool {
     inflight.is_some_and(discord::inflight::ownerless_external_input_inflight_is_stale)
+}
+
+/// #4408 phase-2 (I1): resolve the transcript path / provider session the relay
+/// tail is bound to, surfaced on `watcher-state` so the out-of-band watchdog can
+/// compare the server's asserted selector (B) against its own growth-aware
+/// transcript pick (F).
+///
+/// Precedence is per field: a live inflight row's persisted `output_path` /
+/// `session_id` win because they are the authoritative binding; when the inflight
+/// row is absent — or leaves a field blank — we fall back to the in-memory tmux
+/// runtime binding's `relay_output_path` / `session_id`. Both inputs come from
+/// sync single-shot lookups that never straddle an await (so no
+/// `await_holding_lock` allow is introduced), and the side-effecting
+/// claude-session-id GET path is intentionally NOT consulted. A field is `None`
+/// when neither source knows it, so serialization omits it and the watchdog fails
+/// closed instead of alarming on an unknown bind.
+fn resolve_bound_selector(
+    inflight_output_path: Option<&str>,
+    inflight_session_id: Option<&str>,
+    binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> (Option<String>, Option<String>) {
+    fn non_blank(value: Option<&str>) -> Option<String> {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    let bound_output_path = non_blank(inflight_output_path)
+        .or_else(|| non_blank(binding.map(|binding| binding.relay_output_path())));
+    let bound_session_id = non_blank(inflight_session_id)
+        .or_else(|| non_blank(binding.and_then(|binding| binding.session_id.as_deref())));
+    (bound_output_path, bound_session_id)
 }
 
 fn relay_active_turn_from_inflight(
@@ -549,6 +598,25 @@ async fn watcher_state_snapshot_for_shared(
     });
     let relay_stall_state = RelayStallClassifier::classify(&relay_health);
     trace_relay_health_classification(&relay_health, relay_stall_state);
+    // #4408 phase-2 (I1): resolve the relay tail's bound transcript/session. The
+    // runtime binding is a sync single-shot lookup (its Mutex guard is released
+    // inside the call and never held across the awaits above/below), so this adds
+    // no `await_holding_lock` allow.
+    let tmux_runtime_binding = session
+        .tmux_session
+        .as_deref()
+        .and_then(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session);
+    let (bound_output_path, bound_session_id) = resolve_bound_selector(
+        session
+            .inflight
+            .as_ref()
+            .and_then(|state| state.output_path.as_deref()),
+        session
+            .inflight
+            .as_ref()
+            .and_then(|state| state.session_id.as_deref()),
+        tmux_runtime_binding.as_ref(),
+    );
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
         attached: session.attached,
@@ -568,6 +636,8 @@ async fn watcher_state_snapshot_for_shared(
         tmux_session_alive,
         has_pending_queue,
         mailbox_active_user_msg_id,
+        bound_output_path,
+        bound_session_id,
         inflight_terminal_delivery_committed: session.inflight_terminal_delivery_committed(),
         inflight_identity: session
             .inflight
@@ -900,11 +970,13 @@ mod tests {
 
     use super::{
         HealthRegistry, build_health_snapshot, rebind_origin_inflight_is_idle,
-        relay_active_turn_from_inflight,
+        relay_active_turn_from_inflight, resolve_bound_selector,
     };
+    use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::discord::relay_health::RelayActiveTurn;
     use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
     use chrono::TimeZone;
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
@@ -982,6 +1054,94 @@ mod tests {
             RelayActiveTurn::None,
             "restart recovery can resurrect a cancel token for the stale row, but not the lost bridge tail"
         );
+    }
+
+    /// #4408 phase-2 (I1) case 1 (inflight): a live inflight row's persisted
+    /// `output_path`/`session_id` are authoritative and win over any runtime
+    /// binding, so B reflects the turn's own bind.
+    #[test]
+    fn bound_selector_prefers_inflight_over_binding() {
+        let binding = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: "/tmp/binding-primary.jsonl".to_string(),
+            relay_output_path: Some("/tmp/binding-relay.jsonl".to_string()),
+            input_fifo_path: None,
+            session_id: Some("binding-session".to_string()),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        let (bound_output_path, bound_session_id) = resolve_bound_selector(
+            Some("/tmp/inflight.jsonl"),
+            Some("inflight-session"),
+            Some(&binding),
+        );
+        assert_eq!(bound_output_path.as_deref(), Some("/tmp/inflight.jsonl"));
+        assert_eq!(bound_session_id.as_deref(), Some("inflight-session"));
+    }
+
+    /// #4408 phase-2 (I1) case 2 (binding-only): with no inflight row the bind
+    /// falls back to the in-memory runtime binding's `relay_output_path`/
+    /// `session_id`. This is the m5 mutation target — deleting the server-side
+    /// binding fallback in `resolve_bound_selector` collapses B to `None` here
+    /// and this assertion FAILs.
+    #[test]
+    fn bound_selector_falls_back_to_runtime_binding() {
+        let binding = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: "/tmp/binding-primary.jsonl".to_string(),
+            relay_output_path: Some("/tmp/binding-relay.jsonl".to_string()),
+            input_fifo_path: None,
+            session_id: Some("binding-session".to_string()),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        let (bound_output_path, bound_session_id) =
+            resolve_bound_selector(None, None, Some(&binding));
+        assert_eq!(
+            bound_output_path.as_deref(),
+            Some("/tmp/binding-relay.jsonl")
+        );
+        assert_eq!(bound_session_id.as_deref(), Some("binding-session"));
+    }
+
+    /// #4408 phase-2 (I1) case 3 (neither): with no inflight row and no runtime
+    /// binding both fields are `None`, so `skip_serializing_if` omits them from
+    /// the `watcher-state` JSON and the watchdog reads B as absent (fail-closed).
+    #[test]
+    fn bound_selector_absent_when_no_source_and_omitted_from_json() {
+        #[derive(serde::Serialize)]
+        struct BoundFieldsProbe {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            bound_output_path: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            bound_session_id: Option<String>,
+        }
+
+        let (bound_output_path, bound_session_id) = resolve_bound_selector(None, None, None);
+        assert!(bound_output_path.is_none());
+        assert!(bound_session_id.is_none());
+        let omitted = serde_json::to_value(BoundFieldsProbe {
+            bound_output_path,
+            bound_session_id,
+        })
+        .expect("serialize omitted bound selector");
+        assert!(omitted.get("bound_output_path").is_none());
+        assert!(omitted.get("bound_session_id").is_none());
+
+        // A resolved value IS emitted under the same attribute (blank-guarded).
+        let (bound_output_path, bound_session_id) =
+            resolve_bound_selector(Some("/tmp/live.jsonl"), Some("   "), None);
+        let emitted = serde_json::to_value(BoundFieldsProbe {
+            bound_output_path,
+            bound_session_id,
+        })
+        .expect("serialize present bound selector");
+        assert_eq!(
+            emitted.get("bound_output_path").and_then(|v| v.as_str()),
+            Some("/tmp/live.jsonl")
+        );
+        // A whitespace-only session id is treated as absent, not an empty bind.
+        assert!(emitted.get("bound_session_id").is_none());
     }
 
     #[tokio::test]

@@ -597,7 +597,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
              #1133 enriched diagnostics (omitted when source is absent): \
              inflight_started_at, inflight_updated_at, inflight_user_msg_id, \
              inflight_current_msg_id, watcher_owner_channel_id, tmux_session_alive \
-             (PID check via `tmux has-session`), mailbox_active_user_msg_id. Returns \
+             (PID check via `tmux has-session`), mailbox_active_user_msg_id. \
+             #4408 phase-2 (I1, omitted when unknown): bound_output_path and \
+             bound_session_id expose the transcript path / provider session the \
+             relay tail is actually bound to (inflight `output_path`/`session_id` \
+             first, else the in-memory tmux runtime binding's relay path), so an \
+             out-of-band watchdog can compare the server's asserted selector \
+             against its own growth-aware transcript pick. Returns \
              404 when no watcher / inflight / mailbox engagement exists for the channel.",
         )
         .with_params([("id", path_param("Discord channel ID (numeric)"))])
@@ -622,6 +628,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "tmux_session_alive": true,
                 "has_pending_queue": false,
                 "mailbox_active_user_msg_id": 9001,
+                "bound_output_path": "/tmp/rollout.jsonl",
+                "bound_session_id": "session-1",
             }),
         ),
         ep(

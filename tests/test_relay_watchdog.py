@@ -34,6 +34,9 @@ from scripts.relay_watchdog import (
     PG_UNCLASSIFIED_DOWN,
     PG_UNKNOWN,
     PG_UPSTREAM_DOWN,
+    SELECTOR_DIVERGED,
+    SELECTOR_SYNCED,
+    SELECTOR_UNKNOWN,
     STATE_GAP,
     STATE_LAGGING,
     STATE_OK,
@@ -49,6 +52,7 @@ from scripts.relay_watchdog import (
     evaluate,
     evaluate_coverage,
     evaluate_pg_health,
+    evaluate_selector_sync,
     expected_tmux_session_name,
     load_state,
     main_channel_project_re,
@@ -59,6 +63,7 @@ from scripts.relay_watchdog import (
     project_slug,
     save_state,
     select_watch_transcript,
+    selector_divergence_confirmed,
     tick_channel,
     tick_pg_tunnel,
 )
@@ -389,6 +394,55 @@ class CoverageEvaluationTests(unittest.TestCase):
         self.assertEqual(verdict.consecutive_uncovered, 0)
 
 
+class SelectorSyncEvaluationTests(unittest.TestCase):
+    """Pure I1 judgment (#4408 phase 2): B (watcher-state bound_output_path) vs
+    F (growth-aware transcript pick)."""
+
+    def test_absent_bind_is_unknown_fail_closed(self):
+        verdict = evaluate_selector_sync(None, "/tmp/f.jsonl", True)
+        self.assertEqual(verdict.state, SELECTOR_UNKNOWN)
+        self.assertEqual(verdict.reason, "bound_output_path_absent")
+        self.assertFalse(verdict.diverged)
+
+    def test_no_transcript_is_unknown(self):
+        verdict = evaluate_selector_sync("/tmp/b.jsonl", None, True)
+        self.assertEqual(verdict.state, SELECTOR_UNKNOWN)
+        self.assertEqual(verdict.reason, "no_transcript")
+        self.assertFalse(verdict.diverged)
+
+    def test_matching_bind_is_synced(self):
+        verdict = evaluate_selector_sync("/tmp/f.jsonl", "/tmp/f.jsonl", True)
+        self.assertEqual(verdict.state, SELECTOR_SYNCED)
+        self.assertEqual(verdict.reason, "selector_synced")
+        self.assertFalse(verdict.diverged)
+
+    def test_mismatch_without_growth_is_not_actionable(self):
+        verdict = evaluate_selector_sync("/tmp/b.jsonl", "/tmp/f.jsonl", False)
+        self.assertEqual(verdict.state, SELECTOR_SYNCED)
+        self.assertEqual(verdict.reason, "f_not_growing")
+        self.assertFalse(verdict.diverged)
+
+    def test_mismatch_with_growing_f_is_diverged(self):
+        verdict = evaluate_selector_sync("/tmp/b.jsonl", "/tmp/f.jsonl", True)
+        self.assertEqual(verdict.state, SELECTOR_DIVERGED)
+        self.assertEqual(verdict.reason, "selector_diverged")
+        self.assertTrue(verdict.diverged)
+
+
+class SelectorConfirmBoundaryTests(unittest.TestCase):
+    """Mutation-2 target: removing the swap-confirm age gate in
+    ``selector_divergence_confirmed`` makes the below-threshold case FAIL."""
+
+    def test_below_swap_confirm_is_not_confirmed(self):
+        self.assertFalse(selector_divergence_confirmed(True, 299.0, 300))
+
+    def test_exactly_at_swap_confirm_is_confirmed(self):
+        self.assertTrue(selector_divergence_confirmed(True, 300.0, 300))
+
+    def test_not_diverged_never_confirms(self):
+        self.assertFalse(selector_divergence_confirmed(False, 10_000.0, 300))
+
+
 class PgHealthEvaluationTests(unittest.TestCase):
     def test_db_true_is_authoritative_even_without_listener_probe(self):
         self.assertEqual(evaluate_pg_health(True, None).state, PG_OK)
@@ -434,6 +488,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.github_repo, "")
         self.assertEqual(cfg.pg_alert_after_secs, 300)
         self.assertEqual(cfg.pg_realert_secs, 900)
+        self.assertEqual(cfg.swap_confirm_secs, 300)
 
     def test_overrides_apply(self):
         cfg = parse_config(
@@ -449,12 +504,14 @@ class ConfigTests(unittest.TestCase):
                 "gap_alert_secs": 1200,
                 "pg_alert_after_secs": 60,
                 "pg_realert_secs": 180,
+                "swap_confirm_secs": 45,
                 "github_repo": "owner/repo",
             }
         )
         self.assertEqual(cfg.gap_alert_secs, 1200)
         self.assertEqual(cfg.pg_alert_after_secs, 60)
         self.assertEqual(cfg.pg_realert_secs, 180)
+        self.assertEqual(cfg.swap_confirm_secs, 45)
         self.assertEqual(cfg.github_repo, "owner/repo")
         self.assertEqual(cfg.channels[0].announce_to, "project-agentdesk")
 
@@ -490,6 +547,8 @@ class ConfigTests(unittest.TestCase):
             parse_config({**base, "pg_alert_after_secs": 0})
         with self.assertRaises(ConfigError):
             parse_config({**base, "pg_realert_secs": -1})
+        with self.assertRaises(ConfigError):
+            parse_config({**base, "swap_confirm_secs": 0})
 
     def test_load_config_surfaces_bad_numeric_as_config_error(self):
         # File-level proof that main()'s `except ConfigError` retry path (the
@@ -1113,6 +1172,64 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+
+    def _grow_selected_transcript(self) -> None:
+        tr = self.proj_dir / "s.jsonl"
+        with tr.open("a", encoding="utf-8") as f:
+            f.write("\n")
+        os.utime(tr, (self.now, self.now))
+
+    def test_selector_divergence_alerts_only_after_swap_confirm(self):
+        # One delivered block → gap verdict stays OK, isolating the selector path.
+        self.write_transcript([(self.now - 30, "delivered block one")])
+        rt = self.make_rt(swap_confirm_secs=1)
+        rt.haystack = norm("delivered block one")
+        # dcserver asserts a bind to a DIFFERENT transcript than F (s.jsonl).
+        rt.watcher_probe = WatcherStateProbe(200, True, False, "/tmp/stale-bind.jsonl")
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(
+            [a for a in rt.alerts if "셀렉터" in a[0]],
+            [],
+            "first tick has no growth proof; selector probe is skipped",
+        )
+
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(
+            [a for a in rt.alerts if "셀렉터" in a[0]],
+            [],
+            "a divergence within the swap-confirm window is not alarmed",
+        )
+        self.assertIn("selector_diverged_since", state["999"])
+
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        selector_alerts = [a for a in rt.alerts if "셀렉터 동기화" in a[0]]
+        self.assertEqual(len(selector_alerts), 1)
+        body, trigger_turn = selector_alerts[0]
+        self.assertIn("/tmp/stale-bind.jsonl", body)
+        self.assertIn("/api/inflight/rebind", body)
+        self.assertIn("sessions", body)
+        self.assertFalse(
+            trigger_turn, "read-only selector alerts must not trigger a turn"
+        )
+
+    def test_selector_bind_absent_is_fail_closed(self):
+        self.write_transcript([(self.now - 30, "delivered block one")])
+        rt = self.make_rt(swap_confirm_secs=1)
+        rt.haystack = norm("delivered block one")
+        # Old server: HTTP 200 but no bound_output_path field → probe carries None.
+        rt.watcher_probe = WatcherStateProbe(200, True, False, None)
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 100)
+
+        self.assertEqual([a for a in rt.alerts if "셀렉터" in a[0]], [])
+        self.assertNotIn("selector_diverged_since", state["999"])
 
     def test_coverage_404_alerts_only_after_two_consecutive_ticks(self):
         rt = self.make_rt()

@@ -80,6 +80,15 @@ COVERAGE_UNCOVERED = "uncovered"
 COVERAGE_UNKNOWN = "unknown"
 COVERAGE_CONFIRM_TICKS = 2
 
+# Independent selector-sync states (#4408 phase 2, I1).  Compares the dcserver's
+# asserted relay bind (B = watcher-state `bound_output_path`) against the
+# watchdog's own growth-aware transcript pick (F).  Fail-closed: a missing/null
+# bind is UNKNOWN and never an alarm.  Evaluated in parallel with the gap and
+# coverage judgments; it must never suppress or replace either.
+SELECTOR_SYNCED = "synced"
+SELECTOR_DIVERGED = "diverged"
+SELECTOR_UNKNOWN = "unknown"
+
 PG_TOPOLOGY_TUNNEL = "tunnel"
 PG_TOPOLOGY_DIRECT = "direct"
 
@@ -157,6 +166,12 @@ class Config:
     # drill; the deploy does not ship machine-local config values.
     pg_alert_after_secs: int = 300
     pg_realert_secs: int = 900
+    # #4408 phase-2 (I1): a selector divergence (dcserver bound to a different
+    # transcript than the one actually growing) must persist at least this long
+    # before it alarms, so a legitimate post-swap rebind lag — the server still
+    # briefly bound to the pre-swap transcript — is not misread as a stuck relay
+    # tail. The deploy does not ship machine-local overrides.
+    swap_confirm_secs: int = 300
 
 
 class ConfigError(Exception):
@@ -202,6 +217,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
         "dcserver_port",
         "pg_alert_after_secs",
         "pg_realert_secs",
+        "swap_confirm_secs",
     ):
         if key in raw:
             # A malformed number must surface as ConfigError, never ValueError:
@@ -222,7 +238,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
             "config field 'pg_topology' must be 'tunnel' or 'direct'"
         )
     kwargs["pg_topology"] = pg_topology
-    for key in ("pg_alert_after_secs", "pg_realert_secs"):
+    for key in ("pg_alert_after_secs", "pg_realert_secs", "swap_confirm_secs"):
         if key in kwargs and kwargs[key] <= 0:
             raise ConfigError(f"config field {key!r} must be greater than zero")
     return Config(channels=tuple(channels), **kwargs)
@@ -417,10 +433,24 @@ class CoverageVerdict:
 
 
 @dataclass(frozen=True)
+class SelectorVerdict:
+    state: str
+    reason: str
+    # Raw B != F with F growing, independent of the swap-confirm age gate.  The
+    # caller persists a divergence-start timestamp keyed off this flag, then
+    # applies :func:`selector_divergence_confirmed` before alarming.
+    diverged: bool
+
+
+@dataclass(frozen=True)
 class WatcherStateProbe:
     status: int | None
     attached: bool | None = None
     desynced: bool | None = None
+    # #4408 phase-2 (I1): the transcript path the dcserver asserts its relay tail
+    # is bound to (`bound_output_path`). `None` means an old server without the
+    # field, a JSON null, or a non-200 response — all fail-closed to no alarm.
+    bound_output_path: str | None = None
 
 
 def evaluate_coverage(
@@ -469,6 +499,44 @@ def evaluate_coverage(
     if attached is True and desynced is True:
         return uncovered("attached_but_desynced")
     return CoverageVerdict(COVERAGE_UNKNOWN, "watcher_state_malformed", 0, False)
+
+
+def evaluate_selector_sync(
+    bound_output_path: str | None,
+    selected_transcript: str | None,
+    f_growing: bool,
+) -> "SelectorVerdict":
+    """Pure I1 judgment: does the dcserver's asserted relay bind match F?
+
+    ``B`` is ``bound_output_path`` from watcher-state; ``F`` is the watchdog's
+    own growth-aware transcript pick.  A missing/null ``B`` means an old server
+    that does not expose the bind — fail closed to UNKNOWN, never an alarm.  When
+    ``F`` is not growing there is no proof ``F`` is the live transcript, so a
+    mismatch is not actionable.  A raw divergence (``diverged``) is ``B != F``
+    with ``F`` growing; the time-based swap-confirm gate is applied separately by
+    :func:`selector_divergence_confirmed` so the caller can persist the window.
+    """
+    if bound_output_path is None:
+        return SelectorVerdict(SELECTOR_UNKNOWN, "bound_output_path_absent", False)
+    if not selected_transcript:
+        return SelectorVerdict(SELECTOR_UNKNOWN, "no_transcript", False)
+    if bound_output_path == selected_transcript:
+        return SelectorVerdict(SELECTOR_SYNCED, "selector_synced", False)
+    if not f_growing:
+        return SelectorVerdict(SELECTOR_SYNCED, "f_not_growing", False)
+    return SelectorVerdict(SELECTOR_DIVERGED, "selector_diverged", True)
+
+
+def selector_divergence_confirmed(
+    diverged: bool, divergence_age_secs: float, swap_confirm_secs: int
+) -> bool:
+    """A raw selector divergence only alarms after it persists ``swap_confirm_secs``.
+
+    During a legitimate transcript swap the server can still be bound to the
+    pre-swap transcript for a moment while it rebinds; gating on the divergence
+    age prevents that transient from being misread as a stuck relay tail.
+    """
+    return diverged and divergence_age_secs >= swap_confirm_secs
 
 
 def evaluate_pg_health(db: object, tunnel_open: bool | None) -> PgHealthVerdict:
@@ -674,10 +742,12 @@ class Runtime:
             return WatcherStateProbe(200)
         attached = payload.get("attached")
         desynced = payload.get("desynced")
+        bound_output_path = payload.get("bound_output_path")
         return WatcherStateProbe(
             200,
             attached if isinstance(attached, bool) else None,
             desynced if isinstance(desynced, bool) else None,
+            bound_output_path if isinstance(bound_output_path, str) else None,
         )
 
     def discord_haystack(self, channel_id: str) -> str | None:
@@ -1189,6 +1259,99 @@ def tick_coverage(
     )
 
 
+def tick_selector_sync(
+    rt: Runtime,
+    ch: ChannelConfig,
+    chs: dict[str, Any],
+    selected_transcript: Path | None,
+    f_growing: bool,
+    now: float,
+) -> None:
+    """Observe I1 (selector sync) only; never repair or suppress gap/I2 checks.
+
+    B is the dcserver's asserted relay bind (``bound_output_path`` from
+    watcher-state).  F is the watchdog's own growth-aware transcript pick.  When
+    the server is bound to a different transcript than the one actually growing
+    and stays diverged past ``swap_confirm_secs``, the relay tail is stuck on a
+    dead transcript (the #4423 selector-swap blind spot) → out-of-band alarm.
+    Owns a private ``selector_*`` cooldown/window key so it cannot perturb the
+    gap or coverage state machines.
+    """
+    cid = ch.channel_id
+    if not f_growing or not selected_transcript:
+        # No growing live transcript to compare against — a mismatch is not
+        # actionable, and any pending divergence window is stale.  Skip the HTTP
+        # probe entirely (matches tick_coverage's probe-only-when-needed shape).
+        chs.pop("selector_diverged_since", None)
+        return
+
+    probe = rt.watcher_state(cid)
+    bound = probe.bound_output_path if probe.status == 200 else None
+    verdict = evaluate_selector_sync(bound, str(selected_transcript), f_growing)
+
+    if not verdict.diverged:
+        chs.pop("selector_diverged_since", None)
+        if verdict.state == SELECTOR_UNKNOWN:
+            # Fail-closed: old server without the field, JSON null, or dcserver
+            # unreachable → never alarm on an unknown bind.
+            rt.log(f"[{cid}] selector-sync unknown reason={verdict.reason} — no alert")
+        elif chs.pop("selector_alerting", None):
+            rt.log(f"[{cid}] selector-sync restored (B==F) reason={verdict.reason}")
+        return
+
+    raw_since = chs.get("selector_diverged_since")
+    if isinstance(raw_since, (int, float)) and not isinstance(raw_since, bool):
+        since = float(raw_since)
+    else:
+        since = now
+    chs["selector_diverged_since"] = since
+    age = now - since
+    if not selector_divergence_confirmed(verdict.diverged, age, rt.cfg.swap_confirm_secs):
+        rt.log(
+            f"[{cid}] selector-sync diverged B={bound!r} F={selected_transcript} "
+            f"age={int(age)}s (< {rt.cfg.swap_confirm_secs}s swap-confirm — not yet alarmed)"
+        )
+        return
+    if rt.in_deploy_window(now):
+        rt.log(
+            f"[{cid}] selector-sync divergence suppressed — deploy window "
+            f"(marker < {rt.cfg.deploy_quiet_secs}s old)"
+        )
+        return
+    raw_last_alert = chs.get("last_selector_alert", 0)
+    last_alert = (
+        float(raw_last_alert)
+        if isinstance(raw_last_alert, (int, float)) and not isinstance(raw_last_alert, bool)
+        else 0.0
+    )
+    if now - last_alert < rt.cfg.realert_secs:
+        rt.log(
+            f"[{cid}] selector-sync divergence persists B={bound!r} "
+            "(alert suppressed, selector cooldown)"
+        )
+        return
+    rt.alert(
+        ch,
+        "🚨 **릴레이 셀렉터 동기화 불변식 위반 (I1)**\n\n"
+        f"dcserver는 릴레이 tail을 `{bound}`에 바인딩하고 있으나, 실제로 성장 중인 "
+        f"트랜스크립트는 `{selected_transcript}` 입니다.\n"
+        f"이 불일치가 **{int(age)}초**(swap-confirm {rt.cfg.swap_confirm_secs}s 초과) 지속 — "
+        "세션 스왑 후 릴레이 tail이 죽은 트랜스크립트에 고착된 상태입니다 (#4423 blind spot).\n\n"
+        "복구 런북 (#4423):\n"
+        "1. `sessions` 테이블에서 해당 채널 행의 output_path/session_id를 성장 중인 "
+        "트랜스크립트로 `UPDATE`.\n"
+        "2. `POST /api/inflight/rebind` 로 inflight 바인딩을 성장 중인 트랜스크립트로 재지정.\n\n"
+        "워치독은 read-only이며 자동 수리를 수행하지 않습니다.\n"
+        f"런타임: {rt.dcserver_snapshot()}",
+        trigger_turn=False,
+    )
+    chs["last_selector_alert"] = now
+    chs["selector_alerting"] = True
+    rt.log(
+        f"[{cid}] SELECTOR ALERT B={bound!r} F={selected_transcript} age={int(age)}s"
+    )
+
+
 def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: float) -> None:
     cfg = rt.cfg
     cid = ch.channel_id
@@ -1220,6 +1383,18 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         str(candidate.path): candidate.size for candidate in candidates
     }
     selected = next((candidate for candidate in candidates if candidate.path == tr), None)
+    # I1 selector sync (#4408 phase 2): compare the dcserver's asserted relay
+    # bind (B) against F. Parallel to gap/coverage — its own cooldown key, wrapped
+    # so it can never short-circuit or suppress the gap verdict below.
+    f_growing = (
+        selected is not None
+        and str(selected.path) in previous_sizes
+        and selected.size > previous_sizes[str(selected.path)]
+    )
+    try:
+        tick_selector_sync(rt, ch, chs, tr, f_growing, now)
+    except Exception as e:  # noqa: BLE001 — selector sync must never suppress gap checks
+        rt.log(f"[{cid}] selector-sync tick error: {type(e).__name__}: {e}")
     idle = (now - selected.mtime) if selected else float("inf")
     if idle >= cfg.idle_quiet_secs:
         # Stale transcript: any "gap" is historic, not live. Never alert.
