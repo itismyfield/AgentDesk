@@ -812,13 +812,12 @@ mod tests {
         assert_eq!(inserted.status, VoiceTurnLinkStatus::Active);
 
         // Prior generation should now be cancelled.
-        let prior: (i32, String) = sqlx::query_as(
-            "SELECT generation, status FROM voice_turn_link WHERE dispatch_id = $1",
-        )
-        .bind("dispatch-0")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let prior: (i32, String) =
+            sqlx::query_as("SELECT generation, status FROM voice_turn_link WHERE dispatch_id = $1")
+                .bind("dispatch-0")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(prior.0, 0);
         assert_eq!(prior.1, "cancelled");
 
@@ -1023,7 +1022,9 @@ mod tests {
         cancelled.utterance_id = "utt-cancelled".to_string();
         cancelled.dispatch_id = Some("dispatch-cancelled".to_string());
         cancelled.turn_id = Some("turn-cancelled".to_string());
-        retarget_voice_turn_link_pg(&pool, &cancelled).await.unwrap();
+        retarget_voice_turn_link_pg(&pool, &cancelled)
+            .await
+            .unwrap();
         let mut cancelled_next = cancelled.clone();
         cancelled_next.generation = 1;
         cancelled_next.dispatch_id = Some("dispatch-cancelled-next".to_string());
@@ -1636,5 +1637,4 @@ mod tests {
         pool.close().await;
         pg.drop().await;
     }
-
 }
