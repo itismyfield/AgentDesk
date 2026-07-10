@@ -41,17 +41,25 @@ use super::{
 };
 use crate::services::provider::ProviderKind;
 
+#[path = "relay_recovery_auto_heal_apply.rs"]
+mod auto_heal_apply;
 #[path = "relay_recovery_auto_heal_attempts.rs"]
 mod auto_heal_attempts;
+#[path = "relay_recovery_auto_heal_confirm.rs"]
+mod auto_heal_confirm;
 #[path = "relay_recovery_completion_footer.rs"]
 mod completion_footer;
 
+use auto_heal_apply::apply_relay_recovery_plan;
 #[cfg(test)]
-use auto_heal_attempts::clear_auto_heal_attempts_for_tests;
 use auto_heal_attempts::{
     AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW,
-    AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW, AUTO_HEAL_WINDOW_SECS, auto_heal_key,
-    max_attempts_per_window_for_snapshot, remaining_auto_heal_attempts, reserve_auto_heal_attempt,
+    AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW, auto_heal_test_lock,
+    clear_auto_heal_attempts_for_tests, reserve_auto_heal_attempt,
+};
+use auto_heal_attempts::{
+    AUTO_HEAL_WINDOW_SECS, auto_heal_key, max_attempts_per_window_for_snapshot,
+    remaining_auto_heal_attempts,
 };
 
 const FROZEN_BUSY_JSONL_READY_FALLBACK_AGE: Duration = Duration::from_secs(10 * 60);
@@ -364,7 +372,12 @@ fn auto_heal_metadata(
     skipped_reason: Option<&'static str>,
     now_ms: i64,
 ) -> RelayRecoveryAutoHeal {
-    let key = auto_heal_key(&snapshot.provider, snapshot.channel_id, action);
+    let key = auto_heal_key(
+        &snapshot.provider,
+        snapshot.channel_id,
+        action,
+        RelayRecoveryApplySource::Manual,
+    );
     let max_attempts_per_window = max_attempts_per_window_for_snapshot(snapshot, action);
     RelayRecoveryAutoHeal {
         eligible,
@@ -595,76 +608,13 @@ pub(in crate::services::discord) async fn auto_apply_relay_recovery_for_shared(
     Ok(apply_relay_recovery_plan(registry, &shared, provider, decision, now_ms, source).await)
 }
 
-async fn apply_relay_recovery_plan(
-    registry: &HealthRegistry,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    mut decision: RelayRecoveryDecision,
-    now_ms: i64,
-    source: RelayRecoveryApplySource,
-) -> RelayRecoveryResponse {
-    if !decision.auto_heal.eligible {
-        trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
-        return RelayRecoveryResponse {
-            ok: false,
-            mode: "apply",
-            applied: false,
-            skipped: true,
-            decision,
-            apply_result: None,
-        };
-    }
-
-    let key = auto_heal_key(&decision.provider, decision.channel_id, decision.action);
-    match reserve_auto_heal_attempt(&key, now_ms, decision.auto_heal.max_attempts_per_window) {
-        Ok(remaining) => {
-            decision.auto_heal.remaining_attempts = remaining;
-        }
-        Err(reason) => {
-            decision.auto_heal.remaining_attempts = 0;
-            decision.auto_heal.skipped_reason = Some(reason);
-            trace_relay_recovery_skipped(&decision, Some(reason));
-            return RelayRecoveryResponse {
-                ok: false,
-                mode: "apply",
-                applied: false,
-                skipped: true,
-                decision,
-                apply_result: None,
-            };
-        }
-    }
-
-    let apply_result =
-        apply_relay_recovery_decision(registry, shared, provider, &decision, source).await;
-    let applied = relay_recovery_status_counts_as_applied(apply_result.status);
-    tracing::info!(
-        target: "agentdesk::discord::relay_recovery",
-        provider = decision.provider.as_str(),
-        channel_id = decision.channel_id,
-        action = decision.action.as_str(),
-        source = source.as_str(),
-        status = apply_result.status,
-        removed_thread_proofs = apply_result.removed_thread_proofs,
-        removed_mailbox_token = apply_result.removed_mailbox_token,
-        "relay recovery auto-heal applied"
-    );
-    RelayRecoveryResponse {
-        ok: applied,
-        mode: "apply",
-        applied,
-        skipped: false,
-        decision,
-        apply_result: Some(apply_result),
-    }
-}
-
 fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
     matches!(
         status,
         "applied"
             | "reattached_watcher"
             | "reuse_existing_live_watcher"
+            | "reattach_confirm_startup_grace"
             | "cleared_idle_tmux_stale_turn"
             | "scheduled_pending_queue_drain"
     )
@@ -1525,13 +1475,8 @@ mod tests {
     use super::*;
     use crate::services::provider::{CancelToken, ProviderKind};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, OnceLock};
-
-    fn auto_heal_test_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
 
     fn isolated_agentdesk_root() -> (AgentdeskRootGuard, tempfile::TempDir) {
         let temp = tempfile::TempDir::new().unwrap();
@@ -2881,6 +2826,7 @@ mod tests {
             "codex",
             42,
             RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
         );
 
         assert_eq!(
@@ -2924,7 +2870,12 @@ mod tests {
             ..snapshot()
         };
         let decision = plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
-        let key = auto_heal_key(&decision.provider, decision.channel_id, decision.action);
+        let key = auto_heal_key(
+            &decision.provider,
+            decision.channel_id,
+            decision.action,
+            RelayRecoveryApplySource::Manual,
+        );
 
         assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
         assert!(decision.auto_heal.eligible);
