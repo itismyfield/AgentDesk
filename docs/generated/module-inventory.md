@@ -470,7 +470,7 @@
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
-| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1534 | 611 | 923 |  |
+| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1624 | 654 | 970 |  |
 | `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 268 | 101 | 167 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 226 | 226 | 0 |  |
@@ -706,7 +706,7 @@
 | `services::discord::tmux_watcher::no_result_exits` | `src/services/discord/tmux_watcher/no_result_exits.rs` | 814 | 814 | 0 |  |
 | `services::discord::tmux_watcher::orphan_status_panel_cleanup` | `src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs` | 238 | 238 | 0 |  |
 | `services::discord::tmux_watcher::panel_decisions` | `src/services/discord/tmux_watcher/panel_decisions.rs` | 599 | 574 | 25 |  |
-| `services::discord::tmux_watcher::placeholder_reclaim` | `src/services/discord/tmux_watcher/placeholder_reclaim.rs` | 324 | 133 | 191 |  |
+| `services::discord::tmux_watcher::placeholder_reclaim` | `src/services/discord/tmux_watcher/placeholder_reclaim.rs` | 320 | 133 | 187 |  |
 | `services::discord::tmux_watcher::post_stream_exit` | `src/services/discord/tmux_watcher/post_stream_exit.rs` | 254 | 254 | 0 |  |
 | `services::discord::tmux_watcher::prompt_observe` | `src/services/discord/tmux_watcher/prompt_observe.rs` | 109 | 109 | 0 |  |
 | `services::discord::tmux_watcher::provider_session_persistence` | `src/services/discord/tmux_watcher/provider_session_persistence.rs` | 146 | 100 | 46 |  |

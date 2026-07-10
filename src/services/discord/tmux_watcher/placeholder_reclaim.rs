@@ -252,20 +252,19 @@ mod redrive_reclaim_e2e_tests {
                     }
                 }
                 if placeholder_msg_id.is_some() {
-                    assert!(
-                        !reclaim_orphan_external_input_placeholder(
-                            &http,
-                            &shared,
-                            channel_id,
-                            &mut placeholder_msg_id,
-                            &mut restored,
-                            &mut last_edit_text,
-                            &provider,
-                            &tmux_session,
-                        )
-                        .await,
-                        "shielded reclaim must preserve and defer"
-                    );
+                    let reclaimed = reclaim_orphan_external_input_placeholder(
+                        &http,
+                        &shared,
+                        channel_id,
+                        &mut placeholder_msg_id,
+                        &mut restored,
+                        &mut last_edit_text,
+                        &provider,
+                        &tmux_session,
+                    )
+                    .await;
+                    deletes += usize::from(reclaimed);
+                    assert!(!reclaimed, "shielded reclaim must preserve and defer");
                     let preserved_msg_id = placeholder_msg_id
                         .expect("shielded reclaim must preserve the placeholder id");
                     assert!(
@@ -277,9 +276,6 @@ mod redrive_reclaim_e2e_tests {
                         ),
                         "shield must return before delete and durable-retry enqueue"
                     );
-                    if placeholder_msg_id.is_none() {
-                        deletes += 1;
-                    }
                 }
             }
             assert!(

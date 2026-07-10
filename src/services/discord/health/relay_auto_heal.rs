@@ -28,6 +28,7 @@ type RedriveKey = (String, String, u64);
 struct RedriveEpisode {
     frontier: u64,
     identity: Option<InflightTurnIdentity>,
+    turn_nonce: Option<String>,
     reconnect_count: u64,
 }
 
@@ -35,19 +36,26 @@ impl RedriveEpisode {
     fn resets(&self, previous: &Self) -> bool {
         self.frontier > previous.frontier
             || (self.identity.is_some() && self.identity != previous.identity)
+            || (self.turn_nonce.is_some() && self.turn_nonce != previous.turn_nonce)
             || self.reconnect_count != previous.reconnect_count
     }
 
-    fn self_reattach_identity(&self, post: &InflightTurnState) -> Option<InflightTurnIdentity> {
+    fn self_reattach_identity(
+        &self,
+        post: &InflightTurnState,
+    ) -> Option<(InflightTurnIdentity, Option<String>)> {
         let previous = self.identity.as_ref()?;
         let post_identity = InflightTurnIdentity::from_state(post);
-        let same_turn = previous.user_msg_id == post_identity.user_msg_id
+        let same_nonce = self.turn_nonce.is_some() && self.turn_nonce == post.turn_nonce;
+        let same_managed_turn = previous.user_msg_id != 0
+            && previous.user_msg_id == post_identity.user_msg_id
             && previous.started_at == post_identity.started_at
             && previous.tmux_session_name == post_identity.tmux_session_name;
         let synthetic_rebind = post.rebind_origin
             && post_identity.user_msg_id == 0
             && previous.tmux_session_name == post_identity.tmux_session_name;
-        (same_turn || synthetic_rebind).then_some(post_identity)
+        (same_nonce || same_managed_turn || synthetic_rebind)
+            .then_some((post_identity, post.turn_nonce.clone()))
     }
 }
 
@@ -92,10 +100,24 @@ impl SharedData {
         )
     }
 
-    fn redrive_episode(snapshot: &WatcherStateSnapshot) -> RedriveEpisode {
+    fn redrive_episode(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        snapshot: &WatcherStateSnapshot,
+    ) -> RedriveEpisode {
+        let turn_nonce =
+            crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+                .filter(|state| {
+                    snapshot
+                        .inflight_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.matches_state(state))
+                })
+                .and_then(|state| state.turn_nonce);
         RedriveEpisode {
             frontier: snapshot.last_relay_offset,
             identity: snapshot.inflight_identity.clone(),
+            turn_nonce,
             reconnect_count: snapshot.reconnect_count,
         }
     }
@@ -108,7 +130,7 @@ impl SharedData {
         now_unix: i64,
     ) -> RedriveAttemptDecision {
         let key = self.redrive_key(provider, channel_id);
-        let episode = Self::redrive_episode(snapshot);
+        let episode = Self::redrive_episode(provider, channel_id, snapshot);
         let mut state = REDRIVE_ATTEMPTS
             .entry(key)
             .or_insert_with(|| RedriveAttemptState::new(episode.clone(), now_unix));
@@ -175,9 +197,10 @@ impl SharedData {
             }
             if let Some(post) =
                 crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
-                && let Some(identity) = state.episode.self_reattach_identity(&post)
+                && let Some((identity, turn_nonce)) = state.episode.self_reattach_identity(&post)
             {
                 state.episode.identity = Some(identity);
+                state.episode.turn_nonce = turn_nonce;
             }
         }
         let emit_capped_alarm =
@@ -190,13 +213,16 @@ impl SharedData {
         let episode = if shield_channel_id == channel_id {
             state.episode.clone()
         } else {
+            let owner_inflight = crate::services::discord::inflight::load_inflight_state(
+                provider,
+                shield_channel_id.get(),
+            );
             RedriveEpisode {
                 frontier: self.committed_relay_offset(shield_channel_id),
-                identity: crate::services::discord::inflight::load_inflight_state(
-                    provider,
-                    shield_channel_id.get(),
-                )
-                .map(|post| InflightTurnIdentity::from_state(&post)),
+                identity: owner_inflight
+                    .as_ref()
+                    .map(InflightTurnIdentity::from_state),
+                turn_nonce: owner_inflight.and_then(|post| post.turn_nonce),
                 reconnect_count: self
                     .tmux_relay_coord(shield_channel_id)
                     .reconnect_count
@@ -209,10 +235,9 @@ impl SharedData {
         let mut shield = REDRIVE_PLACEHOLDER_SHIELDS
             .entry(self.redrive_key(provider, shield_channel_id))
             .or_insert_with(|| (episode.clone(), now_millis));
-        if first_attempt_of_episode && episode.resets(&shield.0) {
-            shield.1 = now_millis;
-        }
-        if first_attempt_of_episode || shield_channel_id == channel_id {
+        if first_attempt_of_episode {
+            *shield = (episode, now_millis);
+        } else if shield_channel_id == channel_id {
             shield.0 = episode;
         }
         decision
@@ -400,11 +425,13 @@ impl HealthRegistry {
                     RelayRecoveryApplySource::ProbeAutoHeal,
                 )
                 .await?;
+                let shield_channel_id =
+                    redrive_shield_channel_after_reattach(&shared, &snapshot, channel_id);
                 (
                     response.applied,
                     true,
                     Some(response.decision.auto_heal.window_secs),
-                    channel_id,
+                    shield_channel_id,
                 )
             };
         if applied {
@@ -421,6 +448,22 @@ impl HealthRegistry {
         }
         Ok(applied)
     }
+}
+
+fn redrive_shield_channel_after_reattach(
+    shared: &SharedData,
+    snapshot: &WatcherStateSnapshot,
+    fallback_channel_id: ChannelId,
+) -> ChannelId {
+    snapshot
+        .tmux_session
+        .as_deref()
+        .and_then(|tmux_session| {
+            shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(tmux_session)
+        })
+        .unwrap_or(fallback_channel_id)
 }
 
 fn trace_redrive_cap_if_needed(
@@ -1379,22 +1422,44 @@ mod tests {
             Some(3),
             "a self-induced identity rewrite without reconnect must not reset the cap episode"
         );
-        twice_reattached
-            .inflight_identity
-            .as_mut()
-            .expect("twice-reattached identity")
-            .user_msg_id = 9_999;
+        let mut same_second_successor = synthetic_rebind_state(
+            &provider,
+            channel_id,
+            tmux_session,
+            output_path,
+            &rebound.started_at,
+            snapshot.last_relay_offset + 2,
+        );
+        same_second_successor.rebind_origin = false;
+        crate::services::discord::inflight::save_inflight_state(&same_second_successor)
+            .expect("persist same-second TUI successor identity");
+        assert_eq!(
+            shared.commit_redrive_success(
+                &provider,
+                channel_id,
+                channel_id,
+                base + 4_000_090,
+                true,
+            ),
+            RedriveAttemptDecision {
+                attempt: Some(3),
+                emit_capped_alarm: false,
+            }
+        );
+        let mut successor_snapshot = twice_reattached;
+        successor_snapshot.inflight_identity =
+            Some(InflightTurnIdentity::from_state(&same_second_successor));
         assert_eq!(
             shared
                 .redrive_attempt_decision(
                     &provider,
                     channel_id,
-                    &twice_reattached,
+                    &successor_snapshot,
                     base + 4_000_091,
                 )
                 .attempt,
             Some(1),
-            "a real successor turn identity must still reset the episode"
+            "a same-second user-id-zero successor must still reset the episode"
         );
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
@@ -1454,6 +1519,11 @@ mod tests {
         let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
         snapshot.watcher_owner_channel_id = Some(owner_channel_id.get());
         snapshot.relay_health.watcher_owner_channel_id = Some(owner_channel_id.get());
+        assert_eq!(
+            redrive_shield_channel_after_reattach(&shared, &snapshot, channel_id),
+            owner_channel_id,
+            "reuse-existing reattach must shield the incumbent watcher owner"
+        );
         let first_owner = synthetic_rebind_state(
             &provider,
             owner_channel_id,
@@ -1465,6 +1535,19 @@ mod tests {
         crate::services::discord::inflight::save_inflight_state(&first_owner)
             .expect("persist first owner identity");
         let first_owner_identity = InflightTurnIdentity::from_state(&first_owner);
+        let owner_key = shared.redrive_key(&provider, owner_channel_id);
+        REDRIVE_PLACEHOLDER_SHIELDS.insert(
+            owner_key.clone(),
+            (
+                RedriveEpisode {
+                    frontier: 0,
+                    identity: Some(first_owner_identity.clone()),
+                    turn_nonce: first_owner.turn_nonce.clone(),
+                    reconnect_count: 0,
+                },
+                1_234,
+            ),
+        );
         let base = 1_820_000_000;
         assert_eq!(
             gated_nudge(
@@ -1480,7 +1563,14 @@ mod tests {
             gated_nudge(&shared, &provider, &snapshot, channel_id, base),
             (true, Some(1))
         );
-        let owner_key = shared.redrive_key(&provider, owner_channel_id);
+        assert_ne!(
+            shared
+                .redrive_placeholder_shield_context(&provider, owner_channel_id)
+                .expect("first attempt re-arms the owner shield")
+                .0,
+            1_234,
+            "the first action of a new request episode must replace a stale owner shield"
+        );
         REDRIVE_PLACEHOLDER_SHIELDS
             .get_mut(&owner_key)
             .expect("first owner nudge records a shield")
