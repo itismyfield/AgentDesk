@@ -5,8 +5,9 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cluster, cron_api, dispatched_sessions, dispatches, docs,
-    health_api, idle_recap, maintenance, messages, monitoring, pipeline, prompt_manifest_retention,
-    protected_api_domain, provider_cli_api, queue_api, routines, skills_api, termination_events,
+    health_api, idle_recap, maintenance, message_outbox, messages, monitoring, pipeline,
+    prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api, routines,
+    skills_api, termination_events,
 };
 
 // Category: dispatches, queue, and ops
@@ -23,6 +24,11 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/dispatch-outbox/failed",
                 get(health_api::list_dispatch_outbox_failures_handler)
                     .post(health_api::ack_dispatch_outbox_failures_handler),
+            )
+            .route("/message-outbox/failed", get(message_outbox::list_failed))
+            .route(
+                "/message-outbox/failed/redrive",
+                post(message_outbox::redrive_failed),
             )
             .route(
                 "/doctor/startup/latest",

@@ -208,7 +208,8 @@ src/
 │   │   │   │       ├── part_06.rs
 │   │   │   │       ├── part_07.rs
 │   │   │   │       ├── part_08.rs
-│   │   │   │       └── part_09.rs
+│   │   │   │       ├── part_09.rs
+│   │   │   │       └── part_10.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── taxonomy.rs
@@ -264,6 +265,7 @@ src/
 │   │   ├── maintenance.rs
 │   │   ├── meetings.rs
 │   │   ├── memory_api.rs
+│   │   ├── message_outbox.rs
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
@@ -507,6 +509,7 @@ src/
 │   │   │   ├── send_target.rs
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
+│   │   │   ├── source_registry.rs
 │   │   │   ├── transport.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_live_events/
@@ -1053,6 +1056,9 @@ src/
 │   ├── long_turn_watchdog.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
+│   ├── message_outbox_recovery.rs
+│   ├── message_outbox_recovery_support.rs
+│   ├── message_outbox_recovery_tests.rs
 │   ├── mod.rs
 │   ├── monitoring_store.rs
 │   ├── opencode.rs

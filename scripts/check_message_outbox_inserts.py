@@ -13,6 +13,7 @@ CANONICAL = {
     Path("src/services/message_outbox_recovery.rs"),
 }
 TEST_FIXTURE_PATH = Path("src/server/mod.rs")
+TEST_ONLY_PATHS = {Path("src/services/message_outbox_recovery_tests.rs")}
 TEST_FIXTURE_COLUMNS = (
     "target, content, bot, source, status, retry_count, claimed_at, claim_owner"
 )
@@ -22,7 +23,7 @@ def audit(root: Path) -> list[str]:
     findings: list[str] = []
     for path in sorted((root / "src").rglob("*.rs")):
         relative = path.relative_to(root)
-        if relative in CANONICAL:
+        if relative in CANONICAL or relative in TEST_ONLY_PATHS:
             continue
         text = path.read_text(encoding="utf-8")
         matches = list(INSERT.finditer(text))

@@ -8,6 +8,8 @@
 >
 > Last refreshed: 2026-07-05 (#4089 — `worker_registry.rs` exposes the local RateLimitSync leader-worker active flag (`rate_limit_sync_active`) so the claude-accounts switch endpoint can report whether the receiving node performs usage collection. Read-only exposure: leader election, lease, and singleton ownership assumptions are unchanged; the Keychain auth switch itself is node-local by design (MVP), so non-leader switches surface `rate_limit_sync_not_active_on_this_node` instead of racing the leader loop.)
 >
+> Last refreshed: 2026-07-11 (#4424 — message_outbox source authorization and leader-owned durable failed-row recovery).
+>
 > PR #3456 made the `src/server/worker_registry.rs` worker-lifecycle log fields
 > consistent: every started / stopped / future-exited / self-fenced /
 > supervisor-shutdown tracing event now emits the same structured spec fields
@@ -416,6 +418,23 @@
   before merging.
 
 ### Audited touches
+
+- #4424 message_outbox source-contract recovery: the protected
+  `GET /api/message-outbox/failed` inspection route is read-only on any control
+  node, while `POST /api/message-outbox/failed/redrive` is classified as a
+  **leader-owned operator side effect** and the deployment runbook must target
+  the active leader. The mutation itself is shared-Postgres durable and
+  identity-safe: migration 0081 records a unique
+  `(message_outbox_id,idempotency_key)` audit claim, the service locks exact
+  requested rows, revalidates the central Loopback source contract, suppresses
+  active/sent semantic siblings and duplicate failed identities, and only then
+  updates the same failed row to pending. Consequently an accidental retry or
+  concurrent call on another node converges to `idempotent_replay`/no-op rather
+  than a second pending row or send. The normal message_outbox worker retains
+  its existing PG claim-owner fencing; no worker scope, gateway lease, target
+  authorization, or worker-local relay ownership changes. Operational live
+  redrive remains outside the implementation PR and is performed by the
+  orchestrator only after deploy and independent review.
 
 - #4230 S11 turn-bridge helper-zone retirement: the remaining free helpers in
   `turn_bridge/mod.rs` moved verbatim to `retry_state.rs`, `stream_receiver.rs`,

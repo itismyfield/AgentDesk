@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-07-08 (against #4218 log field-key unification — tmux watcher path touched by tracing key rename only, `channel =` -> `channel_id =`; line counts and freeze entries unchanged).
+> Last refreshed: 2026-07-11 (against #4424 message_outbox source contract and protected idempotent recovery API).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -48,7 +48,7 @@
 
 ### `discord_outbound`
 
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery}.rs`
+- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery,source_registry}.rs`
   (#1006 v3 domain types, pure planner, delivery implementation, shared
   transport/dedup primitives, and the #3038 send-to-agent/manual outbound
   dispatch surface).
@@ -61,7 +61,9 @@
     delivery lease/frontier/owner-context sidecar, plus the #4081 bounded
     recent-content fingerprint guard; bugfix only until split under #3405).
   - `src/services/message_outbox.rs` is the PG-backed message outbox
-    enqueue/claim/accounting surface (now below the giant-file threshold once
+    enqueue/claim/accounting surface; `src/services/message_outbox_recovery.rs`
+    plus `message_outbox_recovery_support.rs` own exact-ID inspection and
+    idempotent failed-row redrive (all below the giant-file threshold once
     `#[cfg(test)] mod` blocks are excluded; bugfix only until split).
 - active_callsite_coverage: see
   [`discord-outbound-migration.md`](discord-outbound-migration.md) (table is
@@ -1558,7 +1560,8 @@
 
 ### `dashboard_routes`
 
-- canonical_modules: `src/server/routes/*.rs` (per-domain route module).
+- canonical_modules: `src/server/routes/*.rs` (per-domain route module), including
+  the protected exact-ID `src/server/routes/message_outbox.rs` operator surface.
   `src/server/routes/auto_queue.rs` is now a small HTTP-only facade;
   its query/command/view/FSM behavior lives under
   `src/services/auto_queue/{query,command,view,fsm,phase_gate}.rs` plus

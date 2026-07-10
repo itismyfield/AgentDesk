@@ -9,6 +9,7 @@ mod part_06;
 mod part_07;
 mod part_08;
 mod part_09;
+mod part_10;
 
 pub(super) fn all() -> Vec<EndpointDoc> {
     let mut endpoints = Vec::new();
@@ -21,5 +22,6 @@ pub(super) fn all() -> Vec<EndpointDoc> {
     endpoints.extend(part_07::endpoints());
     endpoints.extend(part_08::endpoints());
     endpoints.extend(part_09::endpoints());
+    endpoints.extend(part_10::endpoints());
     endpoints
 }

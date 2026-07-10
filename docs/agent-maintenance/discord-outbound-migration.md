@@ -2,6 +2,8 @@
 
 > Last refreshed: 2026-07-03 (against #3874 dead-code removal — manual outbound callsite coverage map refreshed after removing permanently-None `Option<&Db>` threading; no delivery semantics change).
 
+> Last refreshed: 2026-07-11 (#4424 — `outbound/source_registry.rs` is now the single typed, caller-class-scoped authorization table for send and message_outbox enqueue; eight verified producers are added for LoopbackInternal only. Delivery verbs and v3 callsite migration status are unchanged.)
+
 > #3664 outbound bot-selection note: the outbox drain (`src/server/mod.rs`)
 > now resolves the delivery bot via `message_outbox::delivery_bot_for_target_session`.
 > For a private (DM) session — tmux name `AgentDesk-<provider>-dm-<digits>` with a
@@ -86,6 +88,7 @@ HTTP path.
 | **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. Success paths record the reservation; terminal skip/permanent-failure paths explicitly release it before returning. |
 | `DiscordOutboundClient`, `HttpOutboundClient`, `OutboundDeduper` | `outbound/transport.rs` | active | Transport trait, HTTP client, fingerprint helper, and in-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`. |
 | `shared_outbound_deduper()` | `outbound/mod.rs` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
+| `validate_send_source_for(...)` / `SendCallerClass` | `outbound/source_registry.rs` | active — shared by enqueue and send gates | Exact, case-sensitive source authorization with one typed static policy table plus the unchanged known-agent fallback. New internal producers must be registered here and remain caller-class scoped; `message_outbox` validates as `LoopbackInternal` before DB work. |
 | **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | **all six owners structurally routed; rollout flags retired in #3998 S1-f2; rollback is git revert** | The single delivery entry point routes the turn-output surfaces through the controller (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay) whenever each owner’s structural conditions are satisfied. A4/A5 route anchored short-replace and anchored long-chunk-with-delete terminal delivery through the controller; anchored long chunks use `SendNewChunks { delete_anchor: true }` (chunks first, best-effort anchor delete after full success, delete failure records cleanup but stays Delivered). The watcher no-placeholder new-message direct fallback remains legacy because anchor-less fresh-send is not yet a controller verb. The retained exclusions are empty body, `NoRange` deliver-without-advance, headless enqueue, watcher no-placeholder new-message fresh-send, and the TUI completion gate (see §8.1.1). A2b (`session_relay_sink` short-replace) owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The held lease is RAII-released on future cancel/panic via the internal `ControllerLeaseGuard` (review-fix H1 r2), matching legacy `SinkDeliveryLeaseGuard::Drop`; the guard now keys acquire/renew/commit/release on `DeliveryLeaseKey` instead of `TurnKey`, preserving non-zero turn identity while disambiguating id-0 rows with inflight `started_at` + `turn_start_offset` when both are present and otherwise using the explicit degenerate legacy fallback. If no `lease_key` is supplied, the controller uses the existing markerless path and never commits/releases a lease. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. |
 
 `DeliveryOutcome::Delivered` replace metadata is additive: `FreshFallbackAfterEditFailure` carries the fallback replacement anchor when Discord returns one, so A6a recovery can re-record D1 idempotency while non-recovery owners continue to ignore the extra field.
@@ -322,6 +325,11 @@ button hits the manual outbound API, which is covered under §3.A
 ---
 
 ## 5. Regression coverage
+
+- `src/services/discord/outbound/source_registry.rs` and
+  `src/services/message_outbox.rs`: the caller truth table, complete producer
+  contract, enqueue/send parity, and forbidden-source zero-row tests prevent
+  authorization drift between staging and worker delivery (#4424).
 
 - `src/services/discord/outbound/delivery.rs`:
   `v3_split_duplicate_preserves_ordered_chunk_metadata` verifies static v3
