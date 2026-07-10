@@ -248,7 +248,7 @@ impl StallWatchdogLivenessEvidence {
         }
     }
 
-    fn has_positive_liveness(&self, freshness_secs: u64) -> bool {
+    pub(super) fn has_positive_liveness(&self, freshness_secs: u64) -> bool {
         !self.reason_codes(freshness_secs).is_empty()
     }
 }
@@ -503,13 +503,8 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
     threshold_secs: u64,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
-    let (shadow_verdict, shadow_reasons) = stall_verdict::judgment_log_fields(
-        provider,
-        channel_id,
-        snapshot,
-        Some(decision),
-        freshness_secs,
-    );
+    let (shadow_verdict, shadow_reasons) =
+        stall_verdict::judgment_log_fields(snapshot, Some(decision), freshness_secs);
     tracing::warn!(
         event = "stall_watchdog_force_cleanup_deferred",
         reason_code = "1446_stall_watchdog",
@@ -585,13 +580,8 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
     let liveness_reasons = decision
         .map(|decision| decision.evidence.reason_codes_csv(freshness_secs))
         .unwrap_or_else(|| "not_evaluated".to_string());
-    let (shadow_verdict, shadow_reasons) = stall_verdict::judgment_log_fields(
-        provider,
-        channel_id,
-        snapshot,
-        decision,
-        freshness_secs,
-    );
+    let (shadow_verdict, shadow_reasons) =
+        stall_verdict::judgment_log_fields(snapshot, decision, freshness_secs);
     tracing::warn!(
         event = "stall_watchdog_force_cleanup_judgment",
         reason_code = "1446_stall_watchdog",
