@@ -723,12 +723,12 @@
 | `services::discord::tmux_watcher::placeholder_reclaim` | `src/services/discord/tmux_watcher/placeholder_reclaim.rs` | 320 | 133 | 187 |  |
 | `services::discord::tmux_watcher::post_stream_exit` | `src/services/discord/tmux_watcher/post_stream_exit.rs` | 254 | 254 | 0 |  |
 | `services::discord::tmux_watcher::prompt_observe` | `src/services/discord/tmux_watcher/prompt_observe.rs` | 109 | 109 | 0 |  |
-| `services::discord::tmux_watcher::provider_output_guard` | `src/services/discord/tmux_watcher/provider_output_guard.rs` | 100 | 72 | 28 |  |
+| `services::discord::tmux_watcher::provider_output_guard` | `src/services/discord/tmux_watcher/provider_output_guard.rs` | 200 | 110 | 90 |  |
 | `services::discord::tmux_watcher::provider_session_persistence` | `src/services/discord/tmux_watcher/provider_session_persistence.rs` | 146 | 100 | 46 |  |
 | `services::discord::tmux_watcher::session_bound_ack` | `src/services/discord/tmux_watcher/session_bound_ack.rs` | 523 | 523 | 0 |  |
 | `services::discord::tmux_watcher::single_message_footer` | `src/services/discord/tmux_watcher/single_message_footer.rs` | 533 | 419 | 114 |  |
 | `services::discord::tmux_watcher::stall_exit` | `src/services/discord/tmux_watcher/stall_exit.rs` | 295 | 110 | 185 |  |
-| `services::discord::tmux_watcher::streaming_status_tick` | `src/services/discord/tmux_watcher/streaming_status_tick.rs` | 963 | 963 | 0 |  |
+| `services::discord::tmux_watcher::streaming_status_tick` | `src/services/discord/tmux_watcher/streaming_status_tick.rs` | 962 | 962 | 0 |  |
 | `services::discord::tmux_watcher::supervisor_relay` | `src/services/discord/tmux_watcher/supervisor_relay.rs` | 619 | 619 | 0 |  |
 | `services::discord::tmux_watcher::terminal_abort_exits` | `src/services/discord/tmux_watcher/terminal_abort_exits.rs` | 537 | 537 | 0 |  |
 | `services::discord::tmux_watcher::terminal_commit_epilogue` | `src/services/discord/tmux_watcher/terminal_commit_epilogue.rs` | 526 | 526 | 0 |  |

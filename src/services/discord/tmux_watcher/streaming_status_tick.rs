@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod provider_output_guard;
-use provider_output_guard::guard_rollover;
+use provider_output_guard::{guard_rollover, guard_streaming_frame};
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -845,9 +845,7 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
-        // #3805 P2 (PR-D): after answer rollover the live status
-        // panel is stranded ABOVE the new tail answer. Flag ON
-        // re-anchors it BELOW; flag OFF stays byte-identical.
+        // #3805 P2 (PR-D): re-anchor the stranded panel below a rollover tail; OFF-inert.
         let two_message_panel_enabled = shared.ui.two_message_panel_enabled;
         let inflight_for_reanchor =
             if two_message_panel_enabled && watcher_did_rollover_this_interval {
@@ -908,18 +906,19 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
-        let display_text = build_watcher_streaming_edit_text(
+        let mut display_text = build_watcher_streaming_edit_text(
             shared.ui.status_panel_v2_enabled,
             current_portion,
             &status_block,
             &watcher_provider,
         );
-
-        if crate::services::discord::single_message_panel::streaming_footer_text_changed(
-            single_message_panel_footer_mode,
-            &last_edit_text,
-            &display_text,
-        ) {
+        if guard_streaming_frame(&watcher_provider, current_portion, &mut display_text)
+            && crate::services::discord::single_message_panel::streaming_footer_text_changed(
+                single_message_panel_footer_mode,
+                &last_edit_text,
+                &display_text,
+            )
+        {
             let edit_committed = match placeholder_msg_id {
                 Some(msg_id) => {
                     rate_limit_wait(&shared, channel_id).await;
