@@ -8,6 +8,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from typing import Callable, Iterable
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -177,6 +178,14 @@ class WorkerEntry:
     notes: str
 
 
+@dataclass(frozen=True)
+class ModuleFileDeclaration:
+    parent: Path
+    name: str
+    child_paths: tuple[Path, ...]
+    requires_test: bool
+
+
 class ParseError(RuntimeError):
     pass
 
@@ -223,7 +232,10 @@ def split_prod_test_lines(text: str) -> tuple[int, int]:
 
 
 def rel_posix(path: Path) -> str:
-    return path.relative_to(REPO_ROOT).as_posix()
+    try:
+        return path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
 
 
 def offset_to_line(text: str, offset: int) -> int:
@@ -234,9 +246,17 @@ def is_test_file(path: Path) -> bool:
     return path.name.endswith("_tests.rs") or path.name in TEST_FILE_NAMES
 
 
+def all_rust_files() -> list[Path]:
+    if not SRC_ROOT.is_dir():
+        return []
+    return sorted(path for path in SRC_ROOT.rglob("*.rs") if path.is_file())
+
+
 def production_rust_files() -> list[Path]:
     return sorted(
-        path for path in SRC_ROOT.rglob("*.rs") if path.is_file() and not is_test_file(path)
+        path
+        for path in SRC_ROOT.rglob("*.rs")
+        if path.is_file() and not is_test_file(path)
     )
 
 
@@ -650,21 +670,118 @@ def resolve_function_source(
     return None
 
 
-# `mod <name>;` file-module declaration, capturing any preceding `#[cfg(...)]`.
+# File-module and inline-module declarations, capturing immediately preceding
+# attributes in any order. The test-only module graph uses this for `#[cfg]`,
+# `#[path]`, and inline test-module context; the older `_MOD_DECL_RE` name is
+# kept as an alias for callers/tests that intentionally inspect this parser.
 _MOD_DECL_RE = re.compile(
-    r"(?:#\[cfg\((?P<predicate>[^]]*?)\)\]\s*)?"
-    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;"
+    r"(?P<attrs>(?:\s*#\[[^\]]*\]\s*)*)"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"(?P<kind>[{;])",
+    re.MULTILINE,
 )
+_CFG_ATTR_RE = re.compile(r"#\[\s*cfg\((?P<predicate>[^]]*?)\)\s*\]")
+_PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
 
 
-def _declared_child_paths(parent: Path, name: str) -> list[Path]:
+@dataclass(frozen=True)
+class _InlineModuleContext:
+    end: int
+    module_dir: Path
+    requires_test: bool
+
+
+def _attrs_require_test(attrs: str) -> bool:
+    return any(
+        cfg_requires_test(match.group("predicate"))
+        for match in _CFG_ATTR_RE.finditer(attrs)
+    )
+
+
+def _path_attr(attrs: str) -> str | None:
+    match = _PATH_ATTR_RE.search(attrs)
+    return match.group("path") if match else None
+
+
+def _file_module_dir(parent: Path) -> Path:
+    if parent.name in {"lib.rs", "main.rs", "mod.rs"}:
+        return parent.parent
+    return parent.parent / parent.stem
+
+
+def _declared_child_paths(
+    parent: Path,
+    name: str,
+    *,
+    base: Path | None = None,
+    path_attr: str | None = None,
+) -> tuple[Path, ...]:
     """Resolve the file(s) a `mod <name>;` declaration in ``parent`` points to."""
 
-    base = parent.parent
-    return [base / f"{name}.rs", base / name / "mod.rs"]
+    if path_attr is not None:
+        path_base = base if base is not None else parent.parent
+        return ((path_base / path_attr).resolve(),)
+    base = base or _file_module_dir(parent)
+    return ((base / f"{name}.rs").resolve(), (base / name / "mod.rs").resolve())
 
 
-def test_only_module_files() -> set[Path]:
+def _module_file_declarations(
+    parent: Path,
+    text: str,
+    *,
+    parent_requires_test: bool = False,
+) -> list[ModuleFileDeclaration]:
+    declarations: list[ModuleFileDeclaration] = []
+    contexts: list[_InlineModuleContext] = []
+    for match in _MOD_DECL_RE.finditer(text):
+        start = match.start()
+        contexts = [context for context in contexts if start < context.end]
+        inherited_test = parent_requires_test or any(
+            context.requires_test for context in contexts
+        )
+        attrs = match.group("attrs") or ""
+        requires_test = inherited_test or _attrs_require_test(attrs)
+        name = match.group("name")
+
+        if match.group("kind") == "{":
+            try:
+                _body, end = scan_balanced(text, match.end() - 1, "{", "}")
+            except ParseError:
+                continue
+            base = contexts[-1].module_dir if contexts else _file_module_dir(parent)
+            contexts.append(
+                _InlineModuleContext(
+                    end=end,
+                    module_dir=base / name,
+                    requires_test=requires_test,
+                )
+            )
+            continue
+
+        base = contexts[-1].module_dir if contexts else None
+        declarations.append(
+            ModuleFileDeclaration(
+                parent=parent,
+                name=name,
+                child_paths=_declared_child_paths(
+                    parent,
+                    name,
+                    base=base,
+                    path_attr=_path_attr(attrs),
+                ),
+                requires_test=requires_test,
+            )
+        )
+    return declarations
+
+
+def test_only_module_files(
+    production_files: Iterable[Path] | None = None,
+    *,
+    all_files: Iterable[Path] | None = None,
+    read_text_fn: Callable[[Path], str] = read_text,
+) -> set[Path]:
     """Files whose module is declared *only* under a test-requiring cfg.
 
     A file like ``src/server/routes/routes_tests/common.rs`` carries no
@@ -675,32 +792,55 @@ def test_only_module_files() -> set[Path]:
     test context (e.g. ``src/db/schema.rs``) stays production.
     """
 
-    test_targets: set[Path] = set()
-    prod_targets: set[Path] = set()
-    for path in production_rust_files():
-        text = read_text(path)
-        for match in _MOD_DECL_RE.finditer(text):
-            predicate = match.group("predicate")
-            requires_test = predicate is not None and cfg_requires_test(predicate)
-            for child in _declared_child_paths(path, match.group("name")):
-                (test_targets if requires_test else prod_targets).add(child.resolve())
-
-    test_only_dirs: list[Path] = []
-    test_only_files: set[Path] = set()
-    for target in test_targets - prod_targets:
-        if target.name == "mod.rs":
-            test_only_dirs.append(target.parent)
-        test_only_files.add(target)
+    prod_file_items = list(production_files or production_rust_files())
+    prod_by_resolved = {path.resolve(): path for path in prod_file_items}
+    prod_files = list(prod_by_resolved)
+    source_files = [path.resolve() for path in (all_files or all_rust_files())]
+    prod_file_set = set(prod_files)
+    declarations_by_parent: dict[Path, list[ModuleFileDeclaration]] = {}
+    for path in source_files:
+        try:
+            text = read_text_fn(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        declarations_by_parent[path] = _module_file_declarations(
+            path,
+            text,
+            parent_requires_test=is_test_file(path),
+        )
 
     result: set[Path] = set()
-    for path in production_rust_files():
-        resolved = path.resolve()
-        if resolved in test_only_files:
-            result.add(path)
-            continue
-        if any(directory in resolved.parents for directory in test_only_dirs):
-            result.add(path)
-    return result
+    while True:
+        test_targets: set[Path] = set()
+        prod_targets: set[Path] = set()
+        for parent, declarations in declarations_by_parent.items():
+            parent_is_test = is_test_file(parent) or parent in result
+            for declaration in declarations:
+                target_set = (
+                    test_targets
+                    if (parent_is_test or declaration.requires_test)
+                    else prod_targets
+                )
+                target_set.update(declaration.child_paths)
+
+        test_only_dirs = [
+            target.parent
+            for target in (test_targets - prod_targets)
+            if target.name == "mod.rs"
+        ]
+        next_result: set[Path] = set()
+        direct_test_only = test_targets - prod_targets
+        for path in prod_files:
+            if path in direct_test_only or any(
+                directory in path.parents for directory in test_only_dirs
+            ):
+                next_result.add(path)
+
+        if next_result == result:
+            return {
+                prod_by_resolved[path] for path in next_result if path in prod_file_set
+            }
+        result = next_result
 
 
 def collect_modules() -> list[ModuleEntry]:
@@ -1390,9 +1530,10 @@ def render_module_inventory(entries: list[ModuleEntry]) -> str:
         f"- Giant-file threshold: `>= {GIANT_FILE_THRESHOLD}` production lines",
         f"- Giant files: `{giant_count}`",
         "",
-        "> `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the",
-        "> giant-file flag tracks `Prod` so inline test fixtures do not freeze a",
-        "> module (#3036). `Lines` is the raw total for reference.",
+        "> `Prod` excludes lines inside `#[cfg(test)] mod` blocks and whole",
+        "> files reached only through test-only module declarations; the",
+        "> giant-file flag tracks `Prod` so test fixtures do not freeze a module",
+        "> (#3036/#4394). `Lines` is the raw total for reference.",
         "",
         "## Namespace Summary",
         "",

@@ -55,40 +55,17 @@ _INVENTORY = _load_inventory_generator()
 def _test_only_module_files() -> set[Path]:
     """Files reached only through a test-gated parent ``mod`` declaration.
 
-    Mirrors ``generate_inventory_docs.test_only_module_files`` but iterates the
-    audit's (patchable) ``common.production_rust_files`` so the production/test
-    split — including cross-file test-only subtrees — stays consistent (#3036).
+    Delegates to ``generate_inventory_docs.test_only_module_files`` while
+    passing the audit's patchable file iterators. This keeps generator, audit,
+    and ratchet on one test-only module graph instead of maintaining a parser
+    mirror here (#3036/#4394).
     """
 
-    files = list(production_rust_files())
-    test_targets: set[Path] = set()
-    prod_targets: set[Path] = set()
-    for path in files:
-        text = read_text(path)
-        for match in _INVENTORY._MOD_DECL_RE.finditer(text):
-            predicate = match.group("predicate")
-            requires_test = predicate is not None and _INVENTORY.cfg_requires_test(
-                predicate
-            )
-            base = path.parent
-            for child in (base / f"{match.group('name')}.rs", base / match.group("name") / "mod.rs"):
-                (test_targets if requires_test else prod_targets).add(child.resolve())
-
-    test_only_dirs: list[Path] = []
-    test_only_files: set[Path] = set()
-    for target in test_targets - prod_targets:
-        if target.name == "mod.rs":
-            test_only_dirs.append(target.parent)
-        test_only_files.add(target)
-
-    result: set[Path] = set()
-    for path in files:
-        resolved = path.resolve()
-        if resolved in test_only_files or any(
-            directory in resolved.parents for directory in test_only_dirs
-        ):
-            result.add(path)
-    return result
+    return _INVENTORY.test_only_module_files(
+        production_files=production_rust_files(),
+        all_files=common.all_rust_files(),
+        read_text_fn=read_text,
+    )
 
 
 def giant_production_loc() -> dict[str, int]:

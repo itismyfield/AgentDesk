@@ -443,6 +443,141 @@ class TestOnlySubtreeTest(unittest.TestCase):
         self.assertNotIn("src/db/schema.rs", test_only)
         self.assertIn("src/db/schema_extra.rs", test_only)
 
+    def test_inline_cfg_test_mod_file_child_uses_inline_module_base(self) -> None:
+        # Gap A / #4394: a file module declared inside an inline cfg(test) mod is
+        # test-only, and Rust resolves it under <parent-stem>/<inline-mod>/.
+        files = {
+            "src/services/discord/inflight.rs": (
+                """
+                pub fn production_surface() {}
+
+                #[cfg(test)]
+                mod stall_recovery_tests {
+                    mod flake_isolation_4361;
+                }
+                """
+            ),
+            "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs": (
+                "pub fn helper() {}\n"
+            ),
+            "src/services/discord/flake_isolation_4361.rs": (
+                "pub fn wrong_old_base_must_stay_prod() {}\n"
+            ),
+        }
+        with self._with_src(files):
+            test_only = {GEN.rel_posix(p) for p in GEN.test_only_module_files()}
+            modules = {entry.file_path: entry for entry in GEN.collect_modules()}
+        self.assertIn(
+            "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs",
+            test_only,
+        )
+        self.assertNotIn("src/services/discord/flake_isolation_4361.rs", test_only)
+        child = modules[
+            "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs"
+        ]
+        self.assertEqual((child.prod_line_count, child.test_line_count), (0, 1))
+        self.assertEqual(child.prod_line_count + child.test_line_count, child.line_count)
+
+    def test_test_named_parent_file_declarations_seed_test_only_children(self) -> None:
+        # Gap B / #4394: *_tests.rs files are excluded from inventory rows, but
+        # their child file modules must still seed the test-only graph.
+        files = {
+            "src/server/routes/tests/auto_queue_preflight_harness_tests.rs": (
+                """
+                #[path = "preflight_harness/types.rs"]
+                mod types;
+                #[path = "preflight_harness/validation.rs"]
+                mod validation;
+                """
+            ),
+            "src/server/routes/tests/preflight_harness/types.rs": "pub fn ty() {}\n",
+            "src/server/routes/tests/preflight_harness/validation.rs": (
+                "pub fn validate() {}\n"
+            ),
+        }
+        with self._with_src(files):
+            test_only = {GEN.rel_posix(p) for p in GEN.test_only_module_files()}
+            modules = {entry.file_path: entry for entry in GEN.collect_modules()}
+        self.assertIn("src/server/routes/tests/preflight_harness/types.rs", test_only)
+        self.assertIn("src/server/routes/tests/preflight_harness/validation.rs", test_only)
+        self.assertNotIn("src/server/routes/tests/auto_queue_preflight_harness_tests.rs", modules)
+        for rel in (
+            "src/server/routes/tests/preflight_harness/types.rs",
+            "src/server/routes/tests/preflight_harness/validation.rs",
+        ):
+            row = modules[rel]
+            self.assertEqual(row.prod_line_count, 0)
+            self.assertEqual(row.test_line_count, row.line_count)
+
+    def test_path_attribute_order_resolves_test_only_targets(self) -> None:
+        # Gap C / #4394: #[path] can appear before or after #[cfg(test)].
+        # Without parsing the attr blob, these support files fall back to the
+        # wrong default module path and remain production.
+        files = {
+            "src/lib.rs": (
+                """
+                #[cfg(test)]
+                #[path = "support/cfg_then_path.rs"]
+                mod cfg_then_path;
+
+                #[path = "support/path_then_cfg.rs"]
+                #[cfg(all(test, feature = "fixture"))]
+                mod path_then_cfg;
+                """
+            ),
+            "src/support/cfg_then_path.rs": "pub fn a() {}\n",
+            "src/support/path_then_cfg.rs": "pub fn b() {}\n",
+        }
+        with self._with_src(files):
+            test_only = {GEN.rel_posix(p) for p in GEN.test_only_module_files()}
+        self.assertIn("src/support/cfg_then_path.rs", test_only)
+        self.assertIn("src/support/path_then_cfg.rs", test_only)
+
+    def test_inline_cfg_test_path_attr_uses_inline_module_base(self) -> None:
+        # Gap A x C / #4394: inside an inline mod, #[path] is relative to the
+        # inline module base, not to the parent file directory.
+        files = {
+            "src/widget.rs": (
+                """
+                pub fn production_surface() {}
+
+                #[cfg(test)]
+                mod tests {
+                    #[path = "harness_support.rs"]
+                    mod harness_support;
+                }
+                """
+            ),
+            "src/widget/tests/harness_support.rs": "pub fn helper() {}\n",
+        }
+        with self._with_src(files):
+            test_only = {GEN.rel_posix(p) for p in GEN.test_only_module_files()}
+            modules = {entry.file_path: entry for entry in GEN.collect_modules()}
+        self.assertIn("src/widget/tests/harness_support.rs", test_only)
+        row = modules["src/widget/tests/harness_support.rs"]
+        self.assertEqual((row.prod_line_count, row.test_line_count), (0, 1))
+
+    def test_non_test_path_declaration_keeps_child_production(self) -> None:
+        files = {
+            "src/lib.rs": (
+                """
+                #[cfg(test)]
+                #[path = "shared.rs"]
+                mod shared_for_tests;
+
+                #[path = "shared.rs"]
+                mod shared_for_prod;
+                """
+            ),
+            "src/shared.rs": "pub fn shared() {}\n",
+        }
+        with self._with_src(files):
+            test_only = {GEN.rel_posix(p) for p in GEN.test_only_module_files()}
+            modules = {entry.file_path: entry for entry in GEN.collect_modules()}
+        self.assertNotIn("src/shared.rs", test_only)
+        self.assertEqual(modules["src/shared.rs"].prod_line_count, 1)
+        self.assertEqual(modules["src/shared.rs"].test_line_count, 0)
+
 
 class RegistryParseTest(unittest.TestCase):
     def test_strip_comment_keeps_hash_inside_string(self) -> None:

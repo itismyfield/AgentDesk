@@ -7,9 +7,10 @@
 - Giant-file threshold: `>= 1000` production lines
 - Giant files: `96`
 
-> `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
-> giant-file flag tracks `Prod` so inline test fixtures do not freeze a
-> module (#3036). `Lines` is the raw total for reference.
+> `Prod` excludes lines inside `#[cfg(test)] mod` blocks and whole
+> files reached only through test-only module declarations; the
+> giant-file flag tracks `Prod` so test fixtures do not freeze a module
+> (#3036/#4394). `Lines` is the raw total for reference.
 
 ## Namespace Summary
 
@@ -303,8 +304,8 @@
 | `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 684 | 684 | 0 |  |
 | `server::routes::stats` | `src/server/routes/stats.rs` | 722 | 589 | 133 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 152 | 152 | 0 |  |
-| `server::routes::tests::preflight_harness::types` | `src/server/routes/tests/preflight_harness/types.rs` | 217 | 217 | 0 |  |
-| `server::routes::tests::preflight_harness::validation` | `src/server/routes/tests/preflight_harness/validation.rs` | 260 | 260 | 0 |  |
+| `server::routes::tests::preflight_harness::types` | `src/server/routes/tests/preflight_harness/types.rs` | 217 | 0 | 217 |  |
+| `server::routes::tests::preflight_harness::validation` | `src/server/routes/tests/preflight_harness/validation.rs` | 260 | 0 | 260 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | 1857 | 0 | giant-file |
 | `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 463 | 393 | 70 |  |
 | `server::state` | `src/server/state.rs` | 11 | 11 | 0 |  |
@@ -497,7 +498,7 @@
 | `services::discord::inflight::removal` | `src/services/discord/inflight/removal.rs` | 465 | 465 | 0 |  |
 | `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 966 | 236 | 730 |  |
 | `services::discord::inflight::save_store::identity_gate` | `src/services/discord/inflight/save_store/identity_gate.rs` | 1284 | 999 | 285 |  |
-| `services::discord::inflight::stall_recovery_tests::flake_isolation_4361` | `src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs` | 289 | 289 | 0 |  |
+| `services::discord::inflight::stall_recovery_tests::flake_isolation_4361` | `src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs` | 289 | 0 | 289 |  |
 | `services::discord::inflight::store` | `src/services/discord/inflight/store.rs` | 402 | 351 | 51 |  |
 | `services::discord::inflight::watcher_state` | `src/services/discord/inflight/watcher_state.rs` | 365 | 365 | 0 |  |
 | `services::discord::inflight_heartbeat_sweeper` | `src/services/discord/inflight_heartbeat_sweeper.rs` | 299 | 264 | 35 |  |
