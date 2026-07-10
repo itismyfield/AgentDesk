@@ -409,7 +409,7 @@
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 4254 | 1329 | 2925 | giant-file |
 | `services::codex_tui::rollout_tail::parser` | `src/services/codex_tui/rollout_tail/parser.rs` | 405 | 405 | 0 |  |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 862 | 354 | 508 |  |
-| `services::codex_tui::warm_followup` | `src/services/codex_tui/warm_followup.rs` | 684 | 501 | 183 |  |
+| `services::codex_tui::warm_followup` | `src/services/codex_tui/warm_followup.rs` | 695 | 512 | 183 |  |
 | `services::cswap` | `src/services/cswap.rs` | 887 | 552 | 335 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 5552 | 4168 | 1384 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
@@ -922,7 +922,7 @@
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 1237 | 926 | 311 |  |
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
-| `services::process` | `src/services/process.rs` | 1145 | 684 | 461 |  |
+| `services::process` | `src/services/process.rs` | 1229 | 759 | 470 |  |
 | `services::provider` | `src/services/provider.rs` | 2261 | 1647 | 614 | giant-file |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
