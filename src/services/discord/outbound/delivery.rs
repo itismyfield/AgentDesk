@@ -195,6 +195,12 @@ where
         LengthPolicyDecision::Split {
             chunk_char_limit, ..
         } => {
+            if message.create_nonce.is_some() {
+                release_reservation(reservation.as_mut());
+                return DeliveryResult::PermanentFailure {
+                    reason: "create nonce requires a single-message outbound payload".into(),
+                };
+            }
             deliver_split(
                 client,
                 dedup,
@@ -271,6 +277,17 @@ where
             if let Some(result) = cancelled_delivery_result(cancel_token) {
                 release_reservation(reservation.as_mut());
                 return result;
+            }
+            if matches!(message.operation, OutboundOperation::Edit { .. })
+                && error
+                    .http_status()
+                    .is_some_and(|status| status.as_u16() == 404)
+                && error.discord_error_code() == Some(10_008)
+            {
+                release_reservation(reservation.as_mut());
+                return DeliveryResult::ConfirmedMissing {
+                    reason: error.to_string(),
+                };
             }
             if error.kind() == DispatchMessagePostErrorKind::MessageTooLong {
                 if let Some(result) = retry_minimal_fallback(
@@ -496,17 +513,43 @@ where
                 .await
         }
         OutboundOperation::Send => {
-            if let Some(reference) = resolve_reference(message.reference.as_ref(), overrides) {
-                client
-                    .post_message_with_reference(
-                        target_channel,
-                        content.as_ref(),
-                        &reference.channel_id,
-                        &reference.message_id,
-                    )
-                    .await
-            } else {
-                client.post_message(target_channel, content.as_ref()).await
+            match (
+                resolve_reference(message.reference.as_ref(), overrides),
+                message.create_nonce.as_deref(),
+            ) {
+                (Some(reference), Some(nonce)) => {
+                    client
+                        .post_message_with_reference_and_nonce(
+                            target_channel,
+                            content.as_ref(),
+                            &reference.channel_id,
+                            &reference.message_id,
+                            nonce,
+                            message.enforce_nonce,
+                        )
+                        .await
+                }
+                (Some(reference), None) => {
+                    client
+                        .post_message_with_reference(
+                            target_channel,
+                            content.as_ref(),
+                            &reference.channel_id,
+                            &reference.message_id,
+                        )
+                        .await
+                }
+                (None, Some(nonce)) => {
+                    client
+                        .post_message_with_nonce(
+                            target_channel,
+                            content.as_ref(),
+                            nonce,
+                            message.enforce_nonce,
+                        )
+                        .await
+                }
+                (None, None) => client.post_message(target_channel, content.as_ref()).await,
             }
         }
     }
@@ -697,6 +740,7 @@ mod tests {
     use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
     use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
     use crate::services::provider::CancelToken;
+    use serenity::model::id::MessageId;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -810,6 +854,77 @@ mod tests {
                 .push(user_id.to_string());
             Ok(format!("9{user_id}"))
         }
+    }
+
+    struct EditErrorClient {
+        status: reqwest::StatusCode,
+        discord_code: Option<i64>,
+    }
+
+    impl DiscordOutboundClient for EditErrorClient {
+        async fn post_message(
+            &self,
+            _target_channel: &str,
+            _content: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            unreachable!("edit classification test never posts")
+        }
+
+        async fn edit_message(
+            &self,
+            _target_channel: &str,
+            _message_id: &str,
+            _content: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            Err(DispatchMessagePostError::http(
+                DispatchMessagePostErrorKind::Other,
+                self.status,
+                self.discord_code,
+                "mock Discord edit failure".to_string(),
+            ))
+        }
+    }
+
+    async fn classified_edit_result(
+        status: reqwest::StatusCode,
+        discord_code: Option<i64>,
+    ) -> DeliveryResult {
+        let message = DiscordOutboundMessage::new(
+            "task-card-edit",
+            "task-card-edit:no-dedup",
+            "updated card",
+            OutboundTarget::Channel(ChannelId::new(123)),
+            DiscordOutboundPolicy::preserve_inline_content().without_idempotency(),
+        )
+        .with_operation(OutboundOperation::Edit {
+            message_id: MessageId::new(456),
+        });
+        deliver_outbound(
+            &EditErrorClient {
+                status,
+                discord_code,
+            },
+            &OutboundDeduper::new(),
+            message,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn edit_replacement_requires_structured_discord_unknown_message() {
+        assert!(matches!(
+            classified_edit_result(reqwest::StatusCode::NOT_FOUND, Some(10_008)).await,
+            DeliveryResult::ConfirmedMissing { .. }
+        ));
+        assert!(matches!(
+            classified_edit_result(reqwest::StatusCode::NOT_FOUND, Some(50_001)).await,
+            DeliveryResult::PermanentFailure { .. }
+        ));
+        assert!(matches!(
+            classified_edit_result(reqwest::StatusCode::INTERNAL_SERVER_ERROR, Some(10_008)).await,
+            DeliveryResult::PermanentFailure { .. }
+        ));
     }
 
     #[tokio::test]

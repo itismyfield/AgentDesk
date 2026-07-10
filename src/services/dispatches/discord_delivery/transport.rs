@@ -519,7 +519,8 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
             DispatchMessagePostErrorKind::Other,
             format!("unexpected skip for channel {channel_id}"),
         )),
-        DeliveryResult::PermanentFailure { reason } => {
+        DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => {
             let kind = if reason.to_ascii_lowercase().contains("base_type_max_length")
                 || reason.contains("length")
             {

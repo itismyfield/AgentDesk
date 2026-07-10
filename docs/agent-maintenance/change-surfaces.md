@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-07-11 (against #4424 message_outbox source contract and protected idempotent recovery API).
+> Last refreshed: 2026-07-11 (manual: #4055 durable task-notification card authority).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -109,6 +109,32 @@
   `outbound/{message,policy,decision,result}.rs`.
 - related_issues: #1006, #1175, #1280.
 
+### `task_notification_card_authority`
+
+- canonical_modules:
+  - `src/services/discord/task_notification_delivery/{mod,store,gateway}.rs`
+    owns semantic identity, PG lease/CAS state, stable Discord nonce, bot
+    pinning, and classified create/edit/replacement delivery.
+  - `src/services/discord/tui_prompt_relay/task_notification_prompt.rs` owns
+    prompt observation/footer deferral; `session_relay_sink/task_notification_context.rs`
+    owns card-before-answer promotion and exact reference selection.
+  - `src/services/discord/gateway/outbound_messages.rs` adapts task-card
+    create/edit operations to outbound v3; the Serenity transport in
+    `gateway.rs` is the only raw Discord boundary and enforces create nonce.
+- durable_state: PostgreSQL `task_notification_card_state` is cluster-shared
+  authority. The process-local store is a test/non-PG fallback only.
+- invariants: one logical event row and nonce; ambiguous creates retry the same
+  enforced nonce; transient edits never repost; replacement requires structured
+  Discord `404/10008`; a non-empty task response is sent only after card
+  confirmation and references that card; watcher direct fallback stays blocked
+  until the referenced response is confirmed and its frontier advances; footer
+  eviction requires the exact terminal `tool_use_id`.
+- tests: `task_notification_delivery/tests.rs`,
+  `session_relay_sink/task_notification_context.rs`, and
+  `placeholder_live_events/tests.rs`, plus
+  `tmux_watcher/terminal_direct_fallback.rs` for the fail-closed retry gate.
+- related_issues: #4055, #3654, #4097.
+
 ### `policy_engine`
 
 - canonical_modules: `src/engine/mod.rs` (driver) plus `src/engine/ops/*.rs`
@@ -146,7 +172,7 @@
   - `src/dispatch/dispatch_status.rs` (1445 lines).
   - `src/services/dispatches/outbox_route.rs` (1172 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1496 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1495 lines;
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -782,8 +808,10 @@
     lives in the new `tui_task_card.rs` module, and the shared
     `strip_terminal_controls` + ASCII `truncate_chars` helpers were consolidated
     there too, so this file's surface shrank by one line overall; the new
-    `tui_task_card.rs` module (~1065 prod LoC — crossed the giant threshold in #4032 with Discord-limit clamps, fence-aware preview handling, and regression coverage; registered in the giant-file registry, decompose per #3405) hosts the
-    card render/parse/JSON-aggregate/dedupe-store logic; +48 from #3075 codex P1
+    `tui_task_card.rs` module now hosts only card render/parse/sanitizer logic;
+    #4055 moved its process-local delivery/store authority into the durable
+    `task_notification_delivery/` siblings, shrinking it to 818 prod LoC and
+    removing it from the giant-file registry. +48 from #3075 codex P1
     #1: a `CardSlot::Pending` variant + `TaskCardOutcome` enum so a repeat that
     races ahead of `record_card_message` drops as a no-op instead of building
     `MessageId::new(0)` (panic), plus the pre-record-repeat regression test);
@@ -1267,7 +1295,7 @@
     `min(now+timeout, ceiling)` cap + one-shot ceiling warn and the auto-extend
     `clamp_auto_extend_deadline_ms` clamp, reusing the shared discord/mod.rs
     helpers, so headless Codex honors its 4h ceiling end to end).
-  - `src/services/discord/meeting_orchestrator.rs` (3222 lines after #3034
+  - `src/services/discord/meeting_orchestrator.rs` (3221 lines after #3034
     dead-code sweep removed `is_meeting_channel`).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (993 prod lines; provider
     stop-token/tmux binding runtime + the async interrupt/cancel/hard-stop
@@ -1852,13 +1880,6 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   fast with an actionable, non-timeout reason instead of false-submitting then
   blind-waiting/retrying the full timeout; gate every ready-return path —
   including the recorded-turn idle-transcript fallbacks — on the MCP-auth check.)
-- `src/services/discord/tui_task_card.rs` (~1065 prod LoC) — subtask/result
-  card render/parse/JSON-aggregate/dedupe-store logic plus the shared
-  `strip_terminal_controls`/ASCII-truncate helpers. Crossed the giant threshold
-  in #4032 with Discord-limit hard clamps, fence-aware Markdown preview
-  handling, and regression coverage; registered in the giant-file registry,
-  decompose per #3405 (lift preview rendering/budgeting and card-store state
-  into narrower siblings) before adding non-bugfix behavior.
 - `src/services/tmux_common.rs` (~1090 prod LoC) — Claude/Codex TUI pane-capture
   heuristics: ready-for-input, prompt-draft vs idle-suggestion-ghost, active-work
   streaming, MCP-auth banner, and `/effort` selector detection, plus session
@@ -1959,9 +1980,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
-- `src/services/discord/session_relay_sink.rs` (1679; -59 from #3998 S1-f2
+- `src/services/discord/session_relay_sink.rs` (1689; -59 from #3998 S1-f2
   retiring the A2b rollout getter/cache and flag-OFF pin tests; +7 from #3610
-  PR-1 passing the terminal anchor into the delivered-frontier shadow mirror).
+  PR-1 passing the terminal anchor into the delivered-frontier shadow mirror;
+  -1 prod from #4055 thin card-before-answer/context wiring, with task policy
+  extracted to `session_relay_sink/task_notification_context.rs`).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,
@@ -1973,7 +1996,9 @@ normal test growth is allowed): `src/services/analytics.rs`,
 `src/services/qwen_tmux_wrapper.rs`,
 `src/services/discord/session_runtime.rs`,
 `src/services/tui_turn_state.rs`,
-`src/voice/turn_link.rs`, `src/services/discord/commands/config.rs`
+`src/voice/turn_link.rs`, `src/services/discord/commands/config.rs`,
+`src/services/discord/tui_task_card.rs` (#4055: 1167 -> 818 after durable
+delivery/store authority moved to `task_notification_delivery/`).
 (#3038 S2: 1054 -> 954 after the session-override bookkeeping helpers
 moved verbatim to `discord/shared_state.rs` next to
 `SessionOverrideState`; still ratcheted at 954 in the frozen baseline).

@@ -3,8 +3,7 @@ mod adk_session;
 pub(crate) mod agent_handoff;
 pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;
-// #3479 item-2 giant-file decomposition: catch-up (restart-gap message
-// recovery) subsystem extracted verbatim to its own sibling module.
+// #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
 mod commands;
 mod delivery_lease_key;
@@ -94,6 +93,7 @@ mod startup_reclaim;
 mod status_panel_orphan_store;
 mod steering;
 pub(in crate::services::discord) mod streaming_finalizer;
+mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
 mod terminal_ui_obligation;
 #[cfg(unix)]

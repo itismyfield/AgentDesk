@@ -547,6 +547,13 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                                 outcome.task_notification_kind,
                                 classify_task_notification_kind(&val, state),
                             );
+                            if let Some(context) = super::super::task_notification_delivery::TaskNotificationContext::from_stream_json(&val, state) {
+                                outcome.task_notification_context =
+                                    super::super::task_notification_delivery::merge_context(
+                                        outcome.task_notification_context.take(),
+                                        context,
+                                    );
+                            }
                         }
                         // #2110/#relay-commit: Claude TUI transcript can
                         // emit `stop_hook_summary` before late assistant text.

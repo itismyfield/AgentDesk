@@ -16,6 +16,22 @@ use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
 
+fn task_response_fallback_must_wait_for_sink(
+    has_direct_terminal_response: bool,
+    task_notification_kind: Option<TaskNotificationKind>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+) -> bool {
+    has_direct_terminal_response
+        && task_notification_kind.is_some()
+        && crate::services::discord::task_notification_delivery::unanchored_task_response_fallback_blocked(
+            provider.as_str(),
+            tmux_session_name,
+            channel_id.get(),
+        )
+}
+
 pub(in crate::services::discord) struct WatcherDirectFallbackLocals<'a> {
     pub(in crate::services::discord) tui_direct_anchor_terminal_body_visible: &'a mut bool,
     pub(in crate::services::discord) placeholder_msg_id: &'a mut Option<MessageId>,
@@ -82,6 +98,22 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         last_relayed_offset,
         last_observed_generation_mtime_ns,
     } = locals;
+    if task_response_fallback_must_wait_for_sink(
+        has_direct_terminal_response,
+        task_notification_kind,
+        watcher_provider,
+        tmux_session_name,
+        channel_id,
+    ) {
+        *retry_terminal_delivery_from_offset = true;
+        tracing::warn!(
+            provider = watcher_provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session = tmux_session_name,
+            "#4055: suppressed watcher direct fallback until task context card is confirmed"
+        );
+        return false;
+    }
     let formatted = if shared.ui.status_panel_v2_enabled {
         crate::services::discord::formatting::format_for_discord_with_status_panel(
             direct_terminal_response,
@@ -611,4 +643,56 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         clear_provider_overload_retry_state(channel_id);
     }
     relay_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_response_fallback_waits_until_sink_commits_referenced_answer() {
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_055_901);
+        let session_name = "AgentDesk-claude-4055-fallback-gate";
+
+        crate::services::discord::task_notification_delivery::block_unanchored_task_response_fallback(
+            "CLAUDE",
+            session_name,
+            channel_id.get(),
+        );
+        assert!(task_response_fallback_must_wait_for_sink(
+            true,
+            Some(TaskNotificationKind::Background),
+            &provider,
+            session_name,
+            channel_id,
+        ));
+        assert!(!task_response_fallback_must_wait_for_sink(
+            false,
+            Some(TaskNotificationKind::Background),
+            &provider,
+            session_name,
+            channel_id,
+        ));
+        assert!(!task_response_fallback_must_wait_for_sink(
+            true,
+            None,
+            &provider,
+            session_name,
+            channel_id,
+        ));
+
+        crate::services::discord::task_notification_delivery::clear_unanchored_task_response_fallback(
+            "claude",
+            session_name,
+            channel_id.get(),
+        );
+        assert!(!task_response_fallback_must_wait_for_sink(
+            true,
+            Some(TaskNotificationKind::Background),
+            &provider,
+            session_name,
+            channel_id,
+        ));
+    }
 }

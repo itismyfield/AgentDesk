@@ -146,6 +146,10 @@ pub(crate) enum DeliveryResult {
         dedup_key: OutboundDedupKey,
         existing_messages: Vec<DeliveredMessage>,
     },
+    /// Discord authoritatively reported that an edit target does not exist
+    /// (`404` + code `10008`). This is the only outcome that permits a durable
+    /// authority to replace the message with a new nonce/revision.
+    ConfirmedMissing { reason: String },
     /// Terminal failure; the caller should not retry.
     PermanentFailure { reason: String },
 }

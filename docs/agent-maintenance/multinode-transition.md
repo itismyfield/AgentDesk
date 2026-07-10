@@ -1270,6 +1270,26 @@
   assumption is introduced. The core-4 serial hotfiles (`turn_bridge/mod.rs`,
   `tmux_watcher.rs`, `session_relay_sink.rs`, `turn_finalizer.rs`) are untouched, as
   in #4018.
+- #4055 task-notification card authority — **PG-shared delivery authority plus
+  node-local response frontier**: `task_notification_card_state` uniquely keys
+  `(channel_id, provider, session_key, event_key)` and stores the selected bot,
+  stable Discord create nonce, message id/revision, and a short lease. Multiple
+  workers therefore converge through PG CAS; a worker that crashes after
+  Discord accepted create is reconciled by replaying the same
+  `enforce_nonce=true` nonce. Only a structured Discord `404/10008` can advance
+  to a revision nonce/replacement. Prompt-side footer deferral and the
+  `SessionRelayParser` context remain node-local observations, but the terminal
+  sink must confirm the PG-owned card before sending/committing its node-local
+  answer frontier, and the answer references that confirmed card. Exact footer
+  eviction is node-local UI state keyed by `tool_use_id`; it occurs only after
+  the shared card is confirmed. A worker-local fail-closed marker suppresses the
+  watcher direct fallback from the first sink attempt until the referenced
+  answer is confirmed and its frontier advances; it is retry coordination, not
+  cluster authority, and replay re-enters the PG-backed sink after worker loss.
+  The in-memory card store is used only when PG is absent (tests/non-release
+  fallback), never as multi-worker authority. This adds no leader-only singleton
+  assumption and touches only
+  `session_relay_sink.rs` among the core-4 hotfiles.
 - #3805 P2 PR-A (two-message model scaffolding — worker-local UI flag): adds the
   additive `two_message_panel_enabled` flag to `PlaceholderConfig` and threads it
   through the per-node UI plumbing (`runtime_bootstrap.rs` RunBotContext /

@@ -558,16 +558,6 @@ deadline = "2026-10-31"
 decompose_issue = "#3924"
 
 [[entry]]
-# Crossed the 1000-prod-LoC giant threshold in #4032 when task completion cards
-# gained Discord-limit hard clamps, fence-aware Markdown preview handling, and
-# regression coverage around result-card readability. Decomposition should lift
-# preview rendering/budgeting and card-store state into narrower siblings.
-file = "src/services/discord/tui_task_card.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#3405"
-
-[[entry]]
 # Crossed the 1000-prod-LoC giant threshold while catch-up phase1/phase2
 # admission semantics were aligned for #4107. Decomposition should split the
 # scan/admission commit paths from durable cleanup and checkpoint bookkeeping.

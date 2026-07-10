@@ -35,6 +35,7 @@ mod idle_jsonl;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
 mod relay_format;
+mod task_notification_context;
 use self::idle_jsonl::{
     IdleJsonlSessionInitRearm, IdleRelayRangeAction, idle_jsonl_apply_active_inflight_gate,
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
@@ -43,6 +44,9 @@ use self::idle_jsonl::{
     idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init,
     idle_jsonl_should_retry_without_dedup_shared, idle_relay_range_action,
     prune_idle_jsonl_session_state, read_jsonl_range,
+};
+use self::task_notification_context::{
+    answer_reference, ensure_card_and_route, merge_task_notification_kind,
 };
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -850,6 +854,8 @@ impl SessionBoundDiscordRelaySink {
             delivery.task_notification_kind.as_ref(),
         );
         let channel = ChannelId::new(channel_id);
+        let (route, task_card_message_id) =
+            ensure_card_and_route(&self.health_registry, &shared, &delivery, route).await?;
 
         // #3089 A2b/#3998 S1-f2: structurally eligible short-replace
         // (PlaceholderEdit + single-message body) routes to the controller
@@ -1094,7 +1100,8 @@ impl SessionBoundDiscordRelaySink {
                 &delivery.session_name,
                 channel_id,
             );
-            let prompt_anchor_reference = relay_format::prompt_anchor_reference(prompt_anchor);
+            let prompt_anchor_reference =
+                answer_reference(channel, task_card_message_id, prompt_anchor);
             formatting::send_long_message_raw_with_reference(
                 &http,
                 channel,
@@ -1150,6 +1157,7 @@ impl SessionBoundDiscordRelaySink {
                 &delivery,
                 sink_lease_guard.as_ref(),
             );
+            task_notification_context::mark_response_delivered(&delivery, task_card_message_id);
             Ok(SessionRelayDeliveryOutcome::Delivered)
         }
     }
@@ -1535,6 +1543,7 @@ struct SessionRelayParser {
     full_response: String,
     tool_state: WatcherToolState,
     task_notification_kind: Option<TaskNotificationKind>,
+    task_notification_context: Option<super::task_notification_delivery::TaskNotificationContext>,
     assistant_text_seen: bool,
     frames_observed: u64,
     last_sequence: u64,
@@ -1548,6 +1557,7 @@ impl Default for SessionRelayParser {
             full_response: String::new(),
             tool_state: WatcherToolState::new(),
             task_notification_kind: None,
+            task_notification_context: None,
             assistant_text_seen: false,
             frames_observed: 0,
             last_sequence: 0,
@@ -1585,19 +1595,21 @@ impl SessionRelayParser {
                 self.task_notification_kind =
                     merge_task_notification_kind(self.task_notification_kind, kind);
             }
+            if let Some(context) = outcome.task_notification_context {
+                self.task_notification_context = super::task_notification_delivery::merge_context(
+                    self.task_notification_context.take(),
+                    context,
+                );
+            }
             self.assistant_text_seen |= outcome.assistant_text_seen;
             if !outcome.found_result {
                 break;
             }
 
-            // #2749: Background notifications (e.g. CronCreate self-prompts) must deliver
-            // their final response even when `assistant_text_seen` is false; Subagent/
-            // MonitorAutoTurn still require assistant text to avoid noisy notifications.
-            let task_kind_allows_delivery = match self.task_notification_kind {
-                None => true,
-                Some(TaskNotificationKind::Background) => true,
-                Some(_) => self.assistant_text_seen,
-            };
+            let task_kind_allows_delivery = task_notification_context::allows_delivery(
+                self.task_notification_kind,
+                self.assistant_text_seen,
+            );
             let has_user_visible_response =
                 !self.full_response.trim().is_empty() && task_kind_allows_delivery;
             if has_user_visible_response {
@@ -1607,6 +1619,7 @@ impl SessionRelayParser {
                     session_name: frame.session_name.clone(),
                     response_text: self.full_response.clone(),
                     task_notification_kind: self.task_notification_kind,
+                    task_notification_context: self.task_notification_context.clone(),
                     // #3041 P1-3 (Part a, B1): the RESULT frame carries the commit fence;
                     // copying it onto the delivery keeps the POST and the identity-gated
                     // advance atomic per-frame.
@@ -1632,6 +1645,7 @@ impl SessionRelayParser {
         self.full_response.clear();
         self.tool_state = WatcherToolState::new();
         self.task_notification_kind = None;
+        self.task_notification_context = None;
         self.assistant_text_seen = false;
     }
 }
@@ -1643,6 +1657,7 @@ struct SessionRelayDelivery {
     session_name: String,
     response_text: String,
     task_notification_kind: Option<TaskNotificationKind>,
+    task_notification_context: Option<super::task_notification_delivery::TaskNotificationContext>,
     /// #3041 P1-3 (Part a, B1 — frame-carried commit fence): the producer's authoritative
     /// consumed END on this RESULT frame (`None` = no delegate). A CONFIRMED delivery
     /// advances `confirmed_end_offset` to it, gated by the carried turn identity.
@@ -1670,22 +1685,6 @@ fn delivery_lease_key_for_frame(
         delivery.frame_turn_start_offset,
         "sink",
     )
-}
-
-fn merge_task_notification_kind(
-    current: Option<TaskNotificationKind>,
-    new_kind: TaskNotificationKind,
-) -> Option<TaskNotificationKind> {
-    let priority = |kind: TaskNotificationKind| match kind {
-        TaskNotificationKind::Subagent => 0,
-        TaskNotificationKind::Background => 1,
-        TaskNotificationKind::MonitorAutoTurn => 2,
-    };
-
-    match current {
-        Some(existing) if priority(existing) >= priority(new_kind) => Some(existing),
-        _ => Some(new_kind),
-    }
 }
 
 #[cfg(test)]
@@ -2843,6 +2842,7 @@ mod tests {
             session_name: session_name.to_string(),
             response_text: "answer".to_string(),
             task_notification_kind: None,
+            task_notification_context: None,
             terminal_consumed_end: consumed_end,
             frame_turn_user_msg_id: turn_user_msg_id,
             frame_turn_started_at: turn_started_at.to_string(),
@@ -4179,6 +4179,10 @@ mod tests {
             deliveries[0].task_notification_kind,
             Some(TaskNotificationKind::Subagent)
         );
+        assert!(
+            deliveries[0].task_notification_context.is_some(),
+            "the terminal delivery must retain sanitized subagent task context"
+        );
     }
 
     #[test]
@@ -4226,6 +4230,25 @@ mod tests {
             deliveries[0].task_notification_kind,
             Some(TaskNotificationKind::Background)
         );
+        assert!(
+            deliveries[0].task_notification_context.is_some(),
+            "card promotion requires the exact task context beside the response"
+        );
+    }
+
+    #[test]
+    fn parser_drops_footer_only_context_when_provider_output_is_empty() {
+        let binding = matched("4055");
+        let mut parser = SessionRelayParser::default();
+        let payload = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-empty\",\"tool_use_id\":\"toolu-bg-empty\",\"status\":\"completed\",\"summary\":\"background work\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"\"}\n"
+        );
+        assert!(parser.ingest_frame(&frame(&binding, payload, 1)).is_empty());
+        assert!(
+            parser.task_notification_context.is_none(),
+            "an empty provider result stays footer-only and resets without card promotion"
+        );
     }
 
     #[test]
@@ -4256,6 +4279,7 @@ mod tests {
             session_name: session_name.to_string(),
             response_text: "answer".to_string(),
             task_notification_kind: None,
+            task_notification_context: None,
             terminal_consumed_end: None,
             frame_turn_user_msg_id: 0,
             frame_turn_started_at: "2026-06-04T00:00:00Z".to_string(),

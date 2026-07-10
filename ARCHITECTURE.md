@@ -457,6 +457,8 @@ src/
 │   │   │   └── registry.rs
 │   │   ├── formatting/
 │   │   │   └── long_send_rollback.rs
+│   │   ├── gateway/
+│   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -634,7 +636,8 @@ src/
 │   │   ├── session_relay_sink/
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── orphan_reclaim.rs
-│   │   │   └── relay_format.rs
+│   │   │   ├── relay_format.rs
+│   │   │   └── task_notification_context.rs
 │   │   ├── session_runtime/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
@@ -645,6 +648,11 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── task_notification_delivery/
+│   │   │   ├── gateway.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── store.rs
+│   │   │   └── tests.rs
 │   │   ├── tmux/
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
@@ -720,6 +728,7 @@ src/
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs
+│   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard/
