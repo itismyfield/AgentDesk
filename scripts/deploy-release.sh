@@ -1409,6 +1409,11 @@ xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
 sign_binary_with_fallback "$STAGED_BINARY"
 _clean_release_build_cache_after_staging
 
+# #4381: a deploy restarts dcserver, so a short relay gap is EXPECTED here.
+# Touch the marker the out-of-band relay watchdog checks; while it is fresh
+# (deploy_quiet_secs) the watchdog logs instead of alerting.
+touch "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
+
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
@@ -1716,6 +1721,104 @@ elif _health_json_reconcile_only "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; 
     echo "✓ Release is serving on :${REL_PORT} (provider reconcile in progress)"
 else
     echo "✓ Release is healthy on :${REL_PORT}"
+fi
+
+# ── Out-of-band relay watchdog (#4381) ────────────────────────────────────────
+# Deliberately OUTSIDE dcserver's launchd job: the watchdog must survive exactly
+# the failures it watches for (dcserver crash-looping on PG loss, #4379). The
+# repo is the source of truth — the machine-local prototype (and the 06-29
+# relay-gap-watch before it) evaporated because nothing deployed it. Runs after
+# DEPLOY_OK on purpose: a failed deploy leaves the previous watchdog untouched.
+WATCHDOG_LABEL="com.agentdesk.relay-watchdog"
+WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/$WATCHDOG_LABEL.plist"
+WATCHDOG_BIN="$ADK_REL/bin/relay-watchdog.py"
+WATCHDOG_CONFIG="$ADK_REL/config/relay-watchdog.json"
+echo "▸ Installing out-of-band relay watchdog (#4381)..."
+if install -m 0755 "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
+    if [ -f "$WATCHDOG_CONFIG" ]; then
+        WATCHDOG_PYTHON="$(command -v python3 || echo /usr/bin/python3)"
+        # INVARIANT: the ENTIRE watchdog block is fail-open. We are past
+        # DEPLOY_OK, so any failure here (permissions, full disk, launchd)
+        # must degrade to a loud ⚠ warning and let the script continue —
+        # aborting would poison the exit code of a HEALTHY deploy and skip
+        # _write_release_source_manifest / _deploy_to_all_peers below.
+        # The function body runs from an `if` guard, so `set -e` is suspended
+        # inside it; every step therefore carries its own `|| return 1`.
+        #
+        # Runtime python preflight: relay_watchdog.py declares MIN_PYTHON=3.10
+        # and exits 1 below it. If `command -v python3` resolved to the macOS
+        # system 3.9, arming the plist would put KeepAlive into a silent ~30s
+        # crash-loop — refuse to arm instead (r4 review, PR #4399).
+        _xml_escape() {
+            # Plist bodies are XML: raw &, <, > (and quotes, for safety) in an
+            # operator path would render the plist plutil-invalid and the
+            # watchdog silently unarmed (r4 review, PR #4399).
+            local s=$1
+            s=${s//&/\&amp;}
+            s=${s//</\&lt;}
+            s=${s//>/\&gt;}
+            s=${s//\"/\&quot;}
+            s=${s//\'/\&apos;}
+            printf '%s' "$s"
+        }
+        _install_relay_watchdog_plist() {
+            local label_x python_x bin_x root_x
+            label_x=$(_xml_escape "$WATCHDOG_LABEL") || return 1
+            python_x=$(_xml_escape "$WATCHDOG_PYTHON") || return 1
+            bin_x=$(_xml_escape "$WATCHDOG_BIN") || return 1
+            root_x=$(_xml_escape "$ADK_REL") || return 1
+            mkdir -p "$HOME/Library/LaunchAgents" || return 1
+            cat > "$WATCHDOG_PLIST_PATH.tmp" <<PLIST_EOF || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label_x</string>
+  <key>ProgramArguments</key>
+  <array><string>$python_x</string><string>$bin_x</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>$root_x/logs/relay-watchdog.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$root_x/logs/relay-watchdog.launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>AGENTDESK_ROOT_DIR</key><string>$root_x</string>
+  </dict>
+</dict>
+</plist>
+PLIST_EOF
+            # Atomic publish: launchd never sees a half-written plist, and an
+            # interrupted write leaves only the .tmp (cleaned by the caller).
+            mv -f "$WATCHDOG_PLIST_PATH.tmp" "$WATCHDOG_PLIST_PATH" || return 1
+        }
+        if ! "$WATCHDOG_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+            echo "⚠ Relay watchdog requires python3 >= 3.10 (MIN_PYTHON in relay_watchdog.py);"
+            echo "  resolved runner: $WATCHDOG_PYTHON — NOT armed (arming would KeepAlive-crash-loop)."
+            echo "  Install a newer python3 (e.g. brew install python) and redeploy."
+        elif _install_relay_watchdog_plist; then
+            xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
+            # bootout+bootstrap (not kickstart) so a script/plist change is picked up.
+            launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
+            if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+                echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
+            else
+                echo "⚠ Relay watchdog bootstrap FAILED — relay gaps will go unwatched"
+            fi
+        else
+            rm -f "$WATCHDOG_PLIST_PATH.tmp" 2>/dev/null || true
+            echo "⚠ Relay watchdog plist write FAILED ($WATCHDOG_PLIST_PATH) — not armed"
+            echo "  Deploy continues (fail-open): fix permissions/disk space and redeploy."
+        fi
+    else
+        echo "⚠ Relay watchdog config missing: $WATCHDOG_CONFIG"
+        echo "  Watchdog NOT armed on this node. Channel ids are operator config"
+        echo "  (never hardcoded in the repo); create the config — see the"
+        echo "  scripts/relay_watchdog.py docstring — then redeploy."
+    fi
+else
+    echo "⚠ Relay watchdog staging FAILED (source: $REPO/scripts/relay_watchdog.py)"
 fi
 
 _write_release_source_manifest
