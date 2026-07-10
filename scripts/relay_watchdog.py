@@ -1247,9 +1247,9 @@ def tick_coverage(
         f"watcher-state가 **{verdict.reason}** 상태입니다.\n"
         f"`attached=true && desynced=false`가 아닌 상태가 "
         f"**{verdict.consecutive_uncovered} tick 연속** 관측되었습니다.\n\n"
-        "워치독은 read-only이며 자동 수리를 수행하지 않습니다.\n"
+        "워치독은 read-only이며 자동 수리를 수행하지 않습니다 — 이 알람을 받은 "
+        "에이전트가 조치해야 합니다.\n"
         f"런타임: {rt.dcserver_snapshot()}",
-        trigger_turn=False,
     )
     chs["last_coverage_alert"] = now
     chs["coverage_alerting"] = True
@@ -1341,9 +1341,9 @@ def tick_selector_sync(
         "1. `sessions` 테이블에서 해당 채널 행의 output_path/session_id를 성장 중인 "
         "트랜스크립트로 `UPDATE`.\n"
         "2. `POST /api/inflight/rebind` 로 inflight 바인딩을 성장 중인 트랜스크립트로 재지정.\n\n"
-        "워치독은 read-only이며 자동 수리를 수행하지 않습니다.\n"
+        "워치독은 read-only이며 자동 수리를 수행하지 않습니다 — 이 알람을 받은 "
+        "에이전트가 조치해야 합니다.\n"
         f"런타임: {rt.dcserver_snapshot()}",
-        trigger_turn=False,
     )
     chs["last_selector_alert"] = now
     chs["selector_alerting"] = True

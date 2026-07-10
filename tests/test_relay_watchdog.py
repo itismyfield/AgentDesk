@@ -1212,8 +1212,10 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn("/tmp/stale-bind.jsonl", body)
         self.assertIn("/api/inflight/rebind", body)
         self.assertIn("sessions", body)
-        self.assertFalse(
-            trigger_turn, "read-only selector alerts must not trigger a turn"
+        self.assertTrue(
+            trigger_turn,
+            "actionable selector alerts must trigger an agent turn "
+            "(send-to-agent handoff), not bot-direct delivery",
         )
 
     def test_selector_bind_absent_is_fail_closed(self):
@@ -1244,8 +1246,10 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn("커버리지 불변식 위반", rt.alerts[0][0])
         self.assertIn("watcher_state_404", rt.alerts[0][0])
         self.assertIn("read-only", rt.alerts[0][0])
-        self.assertFalse(
-            rt.alerts[0][1], "read-only coverage alerts must not trigger a turn"
+        self.assertTrue(
+            rt.alerts[0][1],
+            "actionable coverage alerts must trigger an agent turn "
+            "(send-to-agent handoff), not bot-direct delivery",
         )
 
     def test_coverage_alert_is_suppressed_during_deploy_window(self):
