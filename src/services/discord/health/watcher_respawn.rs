@@ -666,6 +666,8 @@ mod tests {
             tmux_session_alive: tmux_alive,
             has_pending_queue: false,
             mailbox_active_user_msg_id: mailbox_active,
+            bound_output_path: None,
+            bound_session_id: None,
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
             inflight_finalizer_turn_id: None,

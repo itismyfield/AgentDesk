@@ -252,7 +252,7 @@
 | `server::routes::docs::inventory::endpoints::part_04` | `src/server/routes/docs/inventory/endpoints/part_04.rs` | 719 | 719 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_05` | `src/server/routes/docs/inventory/endpoints/part_05.rs` | 719 | 719 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_06` | `src/server/routes/docs/inventory/endpoints/part_06.rs` | 749 | 749 | 0 |  |
-| `server::routes::docs::inventory::endpoints::part_07` | `src/server/routes/docs/inventory/endpoints/part_07.rs` | 671 | 671 | 0 |  |
+| `server::routes::docs::inventory::endpoints::part_07` | `src/server/routes/docs/inventory/endpoints/part_07.rs` | 679 | 679 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_08` | `src/server/routes/docs/inventory/endpoints/part_08.rs` | 739 | 739 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_09` | `src/server/routes/docs/inventory/endpoints/part_09.rs` | 113 | 113 | 0 |  |
 | `server::routes::docs::taxonomy` | `src/server/routes/docs/taxonomy.rs` | 256 | 256 | 0 |  |
@@ -471,13 +471,13 @@
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
-| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1732 | 666 | 1066 |  |
-| `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 268 | 101 | 167 |  |
+| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1734 | 666 | 1068 |  |
+| `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 270 | 101 | 169 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 226 | 226 | 0 |  |
-| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1071 | 893 | 178 |  |
-| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2357 | 965 | 1392 |  |
-| `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1382 | 627 | 755 |  |
+| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1231 | 963 | 268 |  |
+| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2359 | 965 | 1394 |  |
+| `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1384 | 627 | 757 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2586 | 1374 | 1212 | giant-file |
@@ -615,7 +615,7 @@
 | `services::discord::router::intake_gate::node_override_routing` | `src/services/discord/router/intake_gate/node_override_routing.rs` | 63 | 63 | 0 |  |
 | `services::discord::router::intake_gate::queue_effects` | `src/services/discord/router/intake_gate/queue_effects.rs` | 953 | 745 | 208 |  |
 | `services::discord::router::intake_gate::reaction_remove` | `src/services/discord/router/intake_gate/reaction_remove.rs` | 226 | 226 | 0 |  |
-| `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 630 | 283 | 347 |  |
+| `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 632 | 283 | 349 |  |
 | `services::discord::router::intake_queue_transaction` | `src/services/discord/router/intake_queue_transaction.rs` | 832 | 474 | 358 |  |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 83 | 83 | 0 |  |
 | `services::discord::router::message_handler::attachments` | `src/services/discord/router/message_handler/attachments.rs` | 142 | 114 | 28 |  |
