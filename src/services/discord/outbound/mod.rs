@@ -21,6 +21,7 @@ pub(crate) mod send_gate;
 pub(crate) mod send_target;
 pub(crate) mod send_to_agent;
 pub(in crate::services::discord) mod serenity_reference;
+pub(crate) mod source_registry;
 mod transport;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 

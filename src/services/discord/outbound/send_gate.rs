@@ -19,6 +19,9 @@ use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
 use crate::services::provider::ProviderKind;
 
+pub use super::source_registry::SendCallerClass;
+use super::source_registry::validate_send_source_for;
+
 /// Handle POST /api/discord/send — agent-to-agent native routing.
 /// Accepts JSON: {"target":"channel:<id>|channel:<name>|agent:<roleId>", "content":"...", "source":"role-id", "bot":"announce|notify", "summary":"..."}
 ///
@@ -330,90 +333,6 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
     .await
 }
 
-/// Caller-class for `/api/discord/send` and friends.
-///
-/// Issue #2047 Finding 7 — the `source` JSON label was previously a free-form
-/// string that any authenticated caller could set to e.g. `"system"` and have
-/// observability dashboards treat the message as if it were emitted by the
-/// internal automation plane. We now require callers to attest their class via
-/// the `X-AgentDesk-Source` header (or, for backwards compat, by being on the
-/// loopback interface) and only honour `source` labels that match that class.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SendCallerClass {
-    /// In-process dcserver call (loopback peer + matching bearer, or no
-    /// bearer when auth is disabled). Allowed to use any internal label.
-    LoopbackInternal,
-    // #3034: header-attested caller classes (#2047). The `from_header` path
-    // that constructs these is wired through tests today; the HTTP send route
-    // still infers `LoopbackInternal` from the peer. Keep the class taxonomy
-    // and the parser live as the header-attestation contract surface.
-    /// External CLI/agent presenting `X-AgentDesk-Source: cli` and a valid
-    /// bearer token. Restricted to a small set of labels.
-    #[allow(dead_code)]
-    Cli,
-    /// Browser dashboard with same-origin loopback. Can only attribute
-    /// messages to `dashboard` or to a known agent role id.
-    #[allow(dead_code)]
-    Dashboard,
-    /// Fallback when no header is provided and the request isn't loopback —
-    /// most restrictive bucket.
-    #[allow(dead_code)]
-    Unknown,
-}
-
-impl Default for SendCallerClass {
-    fn default() -> Self {
-        Self::LoopbackInternal
-    }
-}
-
-impl SendCallerClass {
-    /// Parse the `X-AgentDesk-Source` header value (case-insensitive). Returns
-    /// `None` for unknown / empty values so the caller can fall back to
-    /// peer-based inference.
-    // #3034: header-attestation parser; exercised by tests, route wiring pending.
-    #[allow(dead_code)]
-    pub fn from_header(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "loopback" | "dcserver" | "internal" => Some(Self::LoopbackInternal),
-            "cli" | "agentdesk-cli" => Some(Self::Cli),
-            "dashboard" | "browser" => Some(Self::Dashboard),
-            _ => None,
-        }
-    }
-
-    fn allowed_internal_labels(self) -> &'static [&'static str] {
-        // The 강력 라벨 (`system`, `headless_turn`, …) are loopback-only —
-        // dashboard/cli must not be able to impersonate them.
-        const LOOPBACK_ONLY: &[&str] = &[
-            "kanban-rules",
-            "triage-rules",
-            "review-automation",
-            "auto-queue",
-            "pipeline",
-            "system",
-            "timeouts",
-            "merge-automation",
-            "lifecycle_notifier",
-            "routine-runtime",
-            "headless_turn",
-            "slo_alerter",
-            "quality_regression_alerter",
-            "auto-queue-monitor",
-            "inventory",
-            "voice",
-        ];
-        const CLI_ALLOWED: &[&str] = &["agentdesk-cli", "operator"];
-        const DASHBOARD_ALLOWED: &[&str] = &["dashboard"];
-        match self {
-            SendCallerClass::LoopbackInternal => LOOPBACK_ONLY,
-            SendCallerClass::Cli => CLI_ALLOWED,
-            SendCallerClass::Dashboard => DASHBOARD_ALLOWED,
-            SendCallerClass::Unknown => &[],
-        }
-    }
-}
-
 /// Backward-compatible label gate. New code paths should call
 /// [`is_allowed_send_source_for`] with an explicit caller-class. This wrapper
 /// behaves as if the call came from `LoopbackInternal` so existing in-process
@@ -425,10 +344,7 @@ fn is_allowed_send_source(source: &str) -> bool {
 
 /// Issue #2047 Finding 7 — gate the `source` label by caller-class.
 pub fn is_allowed_send_source_for(source: &str, caller: SendCallerClass) -> bool {
-    if crate::services::discord::settings::is_known_agent(source) {
-        return true;
-    }
-    caller.allowed_internal_labels().contains(&source)
+    validate_send_source_for(source, caller).is_ok()
 }
 
 #[cfg(test)]
