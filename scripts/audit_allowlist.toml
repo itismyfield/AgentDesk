@@ -52,9 +52,9 @@ direct_discord_sends = [
   # #4230 S7: existing ToolUse restart-handoff direct gateway edit moved verbatim from
   # turn_bridge/stream_loop.rs to turn_bridge/stream_loop/tool_arms.rs.
   "src/services/discord/turn_bridge/stream_loop/tool_arms.rs#direct_discord_sends:49054cadcdb1b240",
-  # #4230 S5: existing recovery-notice direct gateway edit moved verbatim from
-  # turn_bridge/mod.rs to turn_bridge/terminal_outcome_delivery.rs.
-  "src/services/discord/turn_bridge/terminal_outcome_delivery.rs#direct_discord_sends:17077162223368f0",
+  # #4230 S10: existing recovery-notice direct gateway edit moved verbatim from
+  # terminal_outcome_delivery.rs to the recovery_retry child handler.
+  "src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs#direct_discord_sends:912eabdb5dce46d2",
   "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:7aef9562406e0468",
   "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:3749de8c4b7edb9e",
   "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:029e6a0f4f88558e",

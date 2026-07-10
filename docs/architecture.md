@@ -94,9 +94,11 @@ Turn bridge decomposition anchors:
 - `turn_bridge/terminal_outcome_delivery.rs` — terminal outcome ownership
   dispatch, main terminal delivery/controller cutover, and child-handler state
   threading.
-- `turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs` — recovery
-  retry fallback and cancelled/prompt-too-long replacement, including their
-  delivery lease commits.
+- `turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs` —
+  cancelled/prompt-too-long replacement, including their delivery lease
+  commits.
+- `turn_bridge/terminal_outcome_delivery/recovery_retry.rs` — session-death
+  recovery retry fallback and recovery notice replacement.
 - `turn_bridge/terminal_outcome_delivery/empty_response_recovery.rs` — empty
   response auto-retry/recovery, late response shaping, and silent-turn delivery
   lease commit.

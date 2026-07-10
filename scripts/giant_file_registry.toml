@@ -496,10 +496,10 @@ deadline = "2026-08-31"
 decompose_issue = "#3038"
 
 # RETIRED 2026-07-10 (#4230 S10): terminal_outcome_delivery.rs dropped from
-# 1370 to 856 production LoC after recovery fallback joined the S9 cancel/PTL
-# handler and the post-commit epilogue plus empty-response/silent-turn recovery
-# moved to child modules. The root is below the 1000-prod-LoC giant threshold,
-# so its promoted registry entry is removed and cannot remain as a ghost.
+# 1370 to 882 production LoC after recovery fallback, post-commit epilogue, and
+# empty-response/silent-turn recovery moved to child modules. The root is below
+# the 1000-prod-LoC giant threshold, so its promoted registry entry is removed
+# and cannot remain as a ghost.
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3540: the durable pending

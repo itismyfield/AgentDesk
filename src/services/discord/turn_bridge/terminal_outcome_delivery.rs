@@ -25,10 +25,15 @@ use empty_response_recovery::{
     EmptyResponseRecoveryContext, EmptyResponseRecoveryMessage, EmptyResponseRecoveryOutcome,
     EmptyResponseRecoveryState, handle_empty_response_recovery,
 };
+use recovery_retry::{
+    RecoveryRetryContext, RecoveryRetryMessage, RecoveryRetryOutcome, RecoveryRetryState,
+    handle_recovery_retry,
+};
 
 mod cancel_prompt_replace;
 mod delivery_epilogue;
 mod empty_response_recovery;
+mod recovery_retry;
 
 use super::*;
 
@@ -233,13 +238,37 @@ pub(super) async fn run_terminal_outcome_delivery(
         .await;
     }
 
-    if recovery_retry || cancelled || is_prompt_too_long {
+    if recovery_retry {
+        let outcome = handle_recovery_retry(
+            RecoveryRetryMessage::SessionDiedDuringRecovery,
+            RecoveryRetryContext {
+                shared_owned: &shared_owned,
+                gateway: &gateway,
+                cancel_token: &cancel_token,
+                channel_id,
+                user_msg_id,
+                current_msg_id,
+                adk_session_key: &adk_session_key,
+                user_text_owned: &user_text_owned,
+            },
+            RecoveryRetryState {
+                full_response: &mut full_response,
+                new_session_id: &mut new_session_id,
+                new_raw_provider_session_id: &mut new_raw_provider_session_id,
+                inflight_state: &mut inflight_state,
+            },
+        )
+        .await;
+        match outcome {
+            RecoveryRetryOutcome::Continue => {}
+        }
+    }
+
+    if cancelled || is_prompt_too_long {
         let message = if cancelled {
             CancelPromptReplaceMessage::Cancelled
-        } else if is_prompt_too_long {
-            CancelPromptReplaceMessage::PromptTooLong
         } else {
-            CancelPromptReplaceMessage::RecoveryRetry
+            CancelPromptReplaceMessage::PromptTooLong
         };
         let outcome = handle_cancel_prompt_replace(
             message,
@@ -254,8 +283,6 @@ pub(super) async fn run_terminal_outcome_delivery(
                 dispatch_id: &dispatch_id,
                 adk_session_key: &adk_session_key,
                 turn_id: &turn_id,
-                user_text_owned: &user_text_owned,
-                recovery_retry,
                 watcher_owner_channel_id,
                 tmux_last_offset,
                 response_sent_offset,
@@ -263,8 +290,6 @@ pub(super) async fn run_terminal_outcome_delivery(
             },
             CancelPromptReplaceState {
                 full_response: &mut full_response,
-                new_session_id: &mut new_session_id,
-                new_raw_provider_session_id: &mut new_raw_provider_session_id,
                 active_background_child_session_ids: &mut active_background_child_session_ids,
                 pending_long_running_open_after_state_save:
                     &mut pending_long_running_open_after_state_save,
@@ -281,6 +306,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         match outcome {
             CancelPromptReplaceOutcome::Continue => {}
         }
+    } else if recovery_retry {
     } else if let Some(owner) = bridge_output_owner {
         let ts = chrono::Local::now().format("%H:%M:%S");
         match owner {
