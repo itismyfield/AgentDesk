@@ -400,11 +400,11 @@
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 1638 | 985 | 653 |  |
 | `services::cluster::stream_relay::identity` | `src/services/cluster/stream_relay/identity.rs` | 37 | 37 | 0 |  |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 845 | 373 | 472 |  |
-| `services::codex` | `src/services/codex.rs` | 3832 | 3112 | 720 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 3840 | 3120 | 720 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 | 32 | 17 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 2554 | 1403 | 1151 | giant-file |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 5 | 5 | 0 |  |
-| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2485 | 1546 | 939 | giant-file |
+| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2548 | 1585 | 963 | giant-file |
 | `services::codex_tui::rollout_index` | `src/services/codex_tui/rollout_index.rs` | 1200 | 618 | 582 |  |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 4254 | 1329 | 2925 | giant-file |
 | `services::codex_tui::rollout_tail::parser` | `src/services/codex_tui/rollout_tail/parser.rs` | 405 | 405 | 0 |  |
