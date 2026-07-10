@@ -44,8 +44,14 @@ pub(super) async fn reclaim_orphan_external_input_placeholder(
     let Some(msg_id) = *placeholder_msg_id else {
         return true;
     };
-    if let Some((nudged_at_millis, frontier_at_nudge)) =
+    if let Some((nudged_at_millis, frontier_at_nudge, shield_identity)) =
         shared.redrive_placeholder_shield_context(provider, channel_id)
+        && shield_identity.is_some()
+        && shield_identity
+            == crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+                .map(|state| {
+                    crate::services::discord::inflight::InflightTurnIdentity::from_state(&state)
+                })
         && super::panel_decisions::redrive_shielded_placeholder(
             nudged_at_millis,
             msg_id.created_at().timestamp_millis(),
@@ -241,7 +247,7 @@ mod redrive_reclaim_e2e_tests {
                 if nudged {
                     nudges += 1;
                     if placeholder_msg_id.is_none() {
-                        placeholder_msg_id = Some(message_id_at(base + 1, 2));
+                        placeholder_msg_id = Some(message_id_at(base + 300, 2));
                         creates += 1;
                     }
                 }

@@ -34,6 +34,11 @@ impl RedriveEpisode {
             || (self.identity.is_some() && self.identity != previous.identity)
             || self.reconnect_count != previous.reconnect_count
     }
+
+    fn refreshes_shield(&self, previous: &Self) -> bool {
+        self.frontier > previous.frontier
+            || (self.identity.is_some() && self.identity != previous.identity)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +47,7 @@ struct RedriveAttemptState {
     attempts: u8,
     last_attempt_unix: i64,
     capped_alarm_emitted: bool,
+    retry_not_before_unix: Option<i64>,
 }
 
 impl RedriveAttemptState {
@@ -51,6 +57,7 @@ impl RedriveAttemptState {
             attempts: 0,
             last_attempt_unix: now_unix,
             capped_alarm_emitted: false,
+            retry_not_before_unix: None,
         }
     }
 }
@@ -107,6 +114,15 @@ impl SharedData {
                 emit_capped_alarm,
             };
         }
+        if state
+            .retry_not_before_unix
+            .is_some_and(|not_before| now_unix < not_before)
+        {
+            return RedriveAttemptDecision {
+                attempt: None,
+                emit_capped_alarm: false,
+            };
+        }
         if state.attempts > 0 {
             let delay = REDRIVE_BACKOFF_SECS[usize::from(state.attempts - 1)];
             if now_unix.saturating_sub(state.last_attempt_unix).max(0) < delay {
@@ -135,6 +151,7 @@ impl SharedData {
             .expect("redrive success must follow an admitted attempt");
         state.attempts += 1;
         state.last_attempt_unix = now_unix;
+        state.retry_not_before_unix = None;
         if reattached {
             let current = self
                 .tmux_relay_coord(channel_id)
@@ -158,20 +175,38 @@ impl SharedData {
         let mut shield = REDRIVE_PLACEHOLDER_SHIELDS
             .entry(key)
             .or_insert_with(|| (episode.clone(), now_millis));
-        if episode.resets(&shield.0) {
+        if episode.refreshes_shield(&shield.0) {
             *shield = (episode, now_millis);
+        } else {
+            shield.0 = episode;
         }
         decision
+    }
+
+    fn note_redrive_noop(
+        &self,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        now_unix: i64,
+        cooldown_secs: i64,
+    ) {
+        if let Some(mut state) = REDRIVE_ATTEMPTS.get_mut(&self.redrive_key(provider, channel_id)) {
+            state.retry_not_before_unix = Some(now_unix.saturating_add(cooldown_secs.max(30)));
+        }
     }
 
     pub(in crate::services::discord) fn redrive_placeholder_shield_context(
         &self,
         provider: &ProviderKind,
         channel_id: ChannelId,
-    ) -> Option<(i64, u64)> {
+    ) -> Option<(
+        i64,
+        u64,
+        Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    )> {
         REDRIVE_PLACEHOLDER_SHIELDS
             .get(&self.redrive_key(provider, channel_id))
-            .map(|shield| (shield.1, shield.0.frontier))
+            .map(|shield| (shield.1, shield.0.frontier, shield.0.identity.clone()))
     }
 }
 
@@ -304,19 +339,19 @@ impl HealthRegistry {
             return Ok(false);
         }
 
-        let (applied, reattached) = if nudge_existing_watcher_for_backlog(
+        let (applied, reattached, noop_cooldown_secs) = if nudge_existing_watcher_for_backlog(
             &shared,
             provider,
             &snapshot,
             channel_id,
             now_unix_secs,
         ) {
-            (true, false)
+            (true, false, None)
         } else {
             if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
                 return Ok(false);
             }
-            relay_recovery::auto_apply_relay_recovery_for_shared(
+            let response = relay_recovery::auto_apply_relay_recovery_for_shared(
                 self,
                 shared.clone(),
                 provider,
@@ -324,15 +359,19 @@ impl HealthRegistry {
                 RelayRecoveryActionKind::ReattachWatcher,
                 RelayRecoveryApplySource::ProbeAutoHeal,
             )
-            .await?
-            .applied
-            .then_some((true, true))
-            .unwrap_or((false, true))
+            .await?;
+            (
+                response.applied,
+                true,
+                Some(response.decision.auto_heal.window_secs),
+            )
         };
         if applied {
             let committed =
                 shared.commit_redrive_success(provider, channel_id, now_unix_secs, reattached);
             trace_redrive_cap_if_needed(provider, channel_id, &snapshot, committed);
+        } else if let Some(cooldown_secs) = noop_cooldown_secs {
+            shared.note_redrive_noop(provider, channel_id, now_unix_secs, cooldown_secs);
         }
         Ok(applied)
     }
@@ -1154,23 +1193,57 @@ mod tests {
         );
         let mut self_reattached = snapshot.clone();
         self_reattached.reconnect_count = 1;
+        let second = shared.redrive_attempt_decision(
+            &provider,
+            channel_id,
+            &self_reattached,
+            base + 4_000_030,
+        );
+        assert_eq!(second.attempt, Some(2));
+        let key = shared.redrive_key(&provider, channel_id);
+        REDRIVE_PLACEHOLDER_SHIELDS
+            .get_mut(&key)
+            .expect("first reattach records shield")
+            .1 = 1_234;
+        shared
+            .tmux_relay_coord(channel_id)
+            .reconnect_count
+            .store(2, Ordering::Release);
         assert_eq!(
-            shared
-                .redrive_attempt_decision(
-                    &provider,
-                    channel_id,
-                    &self_reattached,
-                    base + 4_000_030,
-                )
-                .attempt,
-            Some(2),
+            shared.commit_redrive_success(&provider, channel_id, base + 4_000_030, true),
+            RedriveAttemptDecision {
+                attempt: Some(2),
+                emit_capped_alarm: false,
+            },
             "redrive's own reattach must advance the same capped episode"
         );
-        assert!(
+        let (shield_started, _, shield_identity) = shared
+            .redrive_placeholder_shield_context(&provider, channel_id)
+            .expect("self-reattach must preserve shield");
+        assert_eq!(shield_started, 1_234, "self-reattach must not extend 900s");
+        assert_eq!(shield_identity, snapshot.inflight_identity);
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+
+        assert_eq!(
             shared
-                .redrive_placeholder_shield_context(&provider, channel_id)
-                .is_some(),
-            "self-reattach re-baselining must not erase the reclaim shield"
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 5_000_000,)
+                .attempt,
+            Some(1)
+        );
+        shared.note_redrive_noop(&provider, channel_id, base + 5_000_000, 600);
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 5_000_599,)
+                .attempt,
+            None,
+            "no-op recovery calls must honor the response cooldown"
+        );
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 5_000_600,)
+                .attempt,
+            Some(1),
+            "a no-op cooldown must not consume the first real attempt"
         );
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
     }
