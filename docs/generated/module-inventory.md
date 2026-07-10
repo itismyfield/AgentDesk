@@ -400,16 +400,16 @@
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 1638 | 985 | 653 |  |
 | `services::cluster::stream_relay::identity` | `src/services/cluster/stream_relay/identity.rs` | 37 | 37 | 0 |  |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 845 | 373 | 472 |  |
-| `services::codex` | `src/services/codex.rs` | 3840 | 3120 | 720 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 3851 | 3131 | 720 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 | 32 | 17 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 2554 | 1403 | 1151 | giant-file |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 5 | 5 | 0 |  |
-| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2654 | 1650 | 1004 | giant-file |
+| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2661 | 1657 | 1004 | giant-file |
 | `services::codex_tui::rollout_index` | `src/services/codex_tui/rollout_index.rs` | 1200 | 618 | 582 |  |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 4254 | 1329 | 2925 | giant-file |
 | `services::codex_tui::rollout_tail::parser` | `src/services/codex_tui/rollout_tail/parser.rs` | 405 | 405 | 0 |  |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 862 | 354 | 508 |  |
-| `services::codex_tui::warm_followup` | `src/services/codex_tui/warm_followup.rs` | 633 | 450 | 183 |  |
+| `services::codex_tui::warm_followup` | `src/services/codex_tui/warm_followup.rs` | 662 | 479 | 183 |  |
 | `services::cswap` | `src/services/cswap.rs` | 887 | 552 | 335 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 5552 | 4168 | 1384 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |

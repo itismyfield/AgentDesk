@@ -1756,7 +1756,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2948; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1358),
-  `src/services/qwen.rs` (2198), `src/services/codex.rs` (3120),
+  `src/services/qwen.rs` (2198), `src/services/codex.rs` (3131),
   `src/services/opencode.rs` (2760), `src/services/provider.rs` (1647) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
@@ -1800,7 +1800,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   discovered and adding claimed-rollout candidate selection for restart
   rehydrate; #4411 adds a pinned-path warm tail entry point that carries the
   Discord-origin prompt through turn-local dedupe.
-- `src/services/codex_tui/input.rs` (1650) — Codex TUI input readiness
+- `src/services/codex_tui/input.rs` (1657) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract. #4411 promotes the
