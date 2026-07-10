@@ -6,6 +6,7 @@ use poise::serenity_prelude::ChannelId;
 use super::snapshot::WatcherStateSnapshot;
 use super::{HealthRegistry, stall_liveness};
 use crate::services::discord::SharedData;
+use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::relay_health::RelayStallState;
 use crate::services::discord::relay_recovery::{
     self, RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryError,
@@ -26,7 +27,7 @@ type RedriveKey = (String, String, u64);
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RedriveEpisode {
     frontier: u64,
-    identity: Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    identity: Option<InflightTurnIdentity>,
     reconnect_count: u64,
 }
 
@@ -35,6 +36,18 @@ impl RedriveEpisode {
         self.frontier > previous.frontier
             || (self.identity.is_some() && self.identity != previous.identity)
             || self.reconnect_count != previous.reconnect_count
+    }
+
+    fn self_reattach_identity(&self, post: &InflightTurnState) -> Option<InflightTurnIdentity> {
+        let previous = self.identity.as_ref()?;
+        let post_identity = InflightTurnIdentity::from_state(post);
+        let same_turn = previous.user_msg_id == post_identity.user_msg_id
+            && previous.started_at == post_identity.started_at
+            && previous.tmux_session_name == post_identity.tmux_session_name;
+        let synthetic_rebind = post.rebind_origin
+            && post_identity.user_msg_id == 0
+            && previous.tmux_session_name == post_identity.tmux_session_name;
+        (same_turn || synthetic_rebind).then_some(post_identity)
     }
 }
 
@@ -140,6 +153,7 @@ impl SharedData {
         &self,
         provider: &ProviderKind,
         channel_id: ChannelId,
+        shield_channel_id: ChannelId,
         now_unix: i64,
         reattached: bool,
     ) -> RedriveAttemptDecision {
@@ -158,6 +172,15 @@ impl SharedData {
                 .load(Ordering::Acquire);
             if current == state.episode.reconnect_count.saturating_add(1) {
                 state.episode.reconnect_count = current;
+                if let Some(post) =
+                    crate::services::discord::inflight::load_inflight_state(
+                        provider,
+                        channel_id.get(),
+                    )
+                    && let Some(identity) = state.episode.self_reattach_identity(&post)
+                {
+                    state.episode.identity = Some(identity);
+                }
             }
         }
         let emit_capped_alarm =
@@ -167,18 +190,32 @@ impl SharedData {
             attempt: Some(state.attempts),
             emit_capped_alarm,
         };
-        let episode = state.episode.clone();
+        let episode = if shield_channel_id == channel_id {
+            state.episode.clone()
+        } else {
+            RedriveEpisode {
+                frontier: self.committed_relay_offset(shield_channel_id),
+                identity: crate::services::discord::inflight::load_inflight_state(
+                    provider,
+                    shield_channel_id.get(),
+                )
+                .map(|post| InflightTurnIdentity::from_state(&post)),
+                reconnect_count: self
+                    .tmux_relay_coord(shield_channel_id)
+                    .reconnect_count
+                    .load(Ordering::Acquire),
+            }
+        };
         drop(state);
 
         let now_millis = chrono::Utc::now().timestamp_millis();
         let mut shield = REDRIVE_PLACEHOLDER_SHIELDS
-            .entry(key)
+            .entry(self.redrive_key(provider, shield_channel_id))
             .or_insert_with(|| (episode.clone(), now_millis));
-        if first_attempt_of_episode {
-            *shield = (episode, now_millis);
-        } else {
-            shield.0 = episode;
+        if first_attempt_of_episode && episode.resets(&shield.0) {
+            shield.1 = now_millis;
         }
+        shield.0 = episode;
         decision
     }
 
@@ -338,14 +375,18 @@ impl HealthRegistry {
             return Ok(false);
         }
 
-        let (applied, reattached, noop_cooldown_secs) = if nudge_existing_watcher_for_backlog(
+        let watcher_owner_channel_id = snapshot
+            .watcher_owner_channel_id
+            .map(ChannelId::new)
+            .unwrap_or(channel_id);
+        let (applied, reattached, noop_cooldown_secs, shield_channel_id) = if nudge_existing_watcher_for_backlog(
             &shared,
             provider,
             &snapshot,
             channel_id,
             now_unix_secs,
         ) {
-            (true, false, None)
+            (true, false, None, watcher_owner_channel_id)
         } else {
             if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
                 return Ok(false);
@@ -363,11 +404,17 @@ impl HealthRegistry {
                 response.applied,
                 true,
                 Some(response.decision.auto_heal.window_secs),
+                channel_id,
             )
         };
         if applied {
-            let committed =
-                shared.commit_redrive_success(provider, channel_id, now_unix_secs, reattached);
+            let committed = shared.commit_redrive_success(
+                provider,
+                channel_id,
+                shield_channel_id,
+                now_unix_secs,
+                reattached,
+            );
             trace_redrive_cap_if_needed(provider, channel_id, &snapshot, committed);
         } else if let Some(cooldown_secs) = noop_cooldown_secs {
             shared.note_redrive_noop(provider, channel_id, now_unix_secs, cooldown_secs);
@@ -658,6 +705,34 @@ mod tests {
                 stale_thread_proof: false,
             },
         }
+    }
+
+    fn synthetic_rebind_state(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        tmux_session: &str,
+        output_path: &str,
+        started_at: &str,
+        last_offset: u64,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            0,
+            0,
+            0,
+            "/api/inflight/rebind".to_string(),
+            None,
+            Some(tmux_session.to_string()),
+            Some(output_path.to_string()),
+            None,
+            last_offset,
+        );
+        state.started_at = started_at.to_string();
+        state.updated_at = started_at.to_string();
+        state.rebind_origin = true;
+        state
     }
 
     #[test]
@@ -957,7 +1032,17 @@ mod tests {
         let nudged =
             nudge_existing_watcher_for_backlog(shared, provider, snapshot, channel_id, now);
         if nudged {
-            let committed = shared.commit_redrive_success(provider, channel_id, now, false);
+            let shield_channel_id = snapshot
+                .watcher_owner_channel_id
+                .map(ChannelId::new)
+                .unwrap_or(channel_id);
+            let committed = shared.commit_redrive_success(
+                provider,
+                channel_id,
+                shield_channel_id,
+                now,
+                false,
+            );
             trace_redrive_cap_if_needed(provider, channel_id, snapshot, committed);
             assert_eq!(committed.attempt, Some(reserved_attempt));
             return (true, committed.attempt);
@@ -1065,7 +1150,13 @@ mod tests {
             );
             assert!(!reserved.emit_capped_alarm);
             assert_eq!(
-                shared.commit_redrive_success(provider, channel_id, base + elapsed, false),
+                shared.commit_redrive_success(
+                    provider,
+                    channel_id,
+                    channel_id,
+                    base + elapsed,
+                    false,
+                ),
                 RedriveAttemptDecision {
                     attempt: Some(expected as u8 + 1),
                     emit_capped_alarm: expected == 5,
@@ -1079,6 +1170,11 @@ mod tests {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(4_299_002);
         let tmux_session = "AgentDesk-codex-4299-reset";
@@ -1180,7 +1276,13 @@ mod tests {
             "replacing the live watcher instance must re-arm the episode"
         );
         assert_eq!(
-            shared.commit_redrive_success(&provider, channel_id, base + 3_000_000, false,),
+            shared.commit_redrive_success(
+                &provider,
+                channel_id,
+                channel_id,
+                base + 3_000_000,
+                false,
+            ),
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
@@ -1199,12 +1301,29 @@ mod tests {
         let first =
             shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 4_000_000);
         assert_eq!(first.attempt, Some(1));
+        let mut rebound = synthetic_rebind_state(
+            &provider,
+            channel_id,
+            tmux_session,
+            output_path,
+            "2026-06-12 00:00:01",
+            snapshot.last_relay_offset,
+        );
+        crate::services::discord::inflight::save_inflight_state(&rebound)
+            .expect("persist first self-reattach identity");
+        let first_rebound_identity = InflightTurnIdentity::from_state(&rebound);
         shared
             .tmux_relay_coord(channel_id)
             .reconnect_count
             .store(1, Ordering::Release);
         assert_eq!(
-            shared.commit_redrive_success(&provider, channel_id, base + 4_000_000, true,),
+            shared.commit_redrive_success(
+                &provider,
+                channel_id,
+                channel_id,
+                base + 4_000_000,
+                true,
+            ),
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
@@ -1212,6 +1331,7 @@ mod tests {
         );
         let mut self_reattached = snapshot.clone();
         self_reattached.reconnect_count = 1;
+        self_reattached.inflight_identity = Some(first_rebound_identity);
         let second = shared.redrive_attempt_decision(
             &provider,
             channel_id,
@@ -1224,12 +1344,24 @@ mod tests {
             .get_mut(&key)
             .expect("first reattach records shield")
             .1 = 1_234;
+        rebound.started_at = "2026-06-12 00:00:02".to_string();
+        rebound.updated_at = rebound.started_at.clone();
+        rebound.turn_start_offset = Some(snapshot.last_relay_offset + 1);
+        crate::services::discord::inflight::save_inflight_state(&rebound)
+            .expect("persist second self-reattach identity");
+        let second_rebound_identity = InflightTurnIdentity::from_state(&rebound);
         shared
             .tmux_relay_coord(channel_id)
             .reconnect_count
             .store(2, Ordering::Release);
         assert_eq!(
-            shared.commit_redrive_success(&provider, channel_id, base + 4_000_030, true),
+            shared.commit_redrive_success(
+                &provider,
+                channel_id,
+                channel_id,
+                base + 4_000_030,
+                true,
+            ),
             RedriveAttemptDecision {
                 attempt: Some(2),
                 emit_capped_alarm: false,
@@ -1240,7 +1372,40 @@ mod tests {
             .redrive_placeholder_shield_context(&provider, channel_id)
             .expect("self-reattach must preserve shield");
         assert_eq!(shield_started, 1_234, "self-reattach must not extend 900s");
-        assert_eq!(shield_identity, snapshot.inflight_identity);
+        assert_eq!(shield_identity, Some(second_rebound_identity.clone()));
+        let mut twice_reattached = self_reattached.clone();
+        twice_reattached.reconnect_count = 2;
+        twice_reattached.inflight_identity = Some(second_rebound_identity);
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(
+                    &provider,
+                    channel_id,
+                    &twice_reattached,
+                    base + 4_000_090,
+                )
+                .attempt,
+            Some(3),
+            "self-induced rebind identity replacement must not reset the cap episode"
+        );
+        twice_reattached
+            .inflight_identity
+            .as_mut()
+            .expect("twice-reattached identity")
+            .user_msg_id = 9_999;
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(
+                    &provider,
+                    channel_id,
+                    &twice_reattached,
+                    base + 4_000_091,
+                )
+                .attempt,
+            Some(1),
+            "a real successor turn identity must still reset the episode"
+        );
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
 
         assert_eq!(
