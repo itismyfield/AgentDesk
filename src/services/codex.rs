@@ -1621,6 +1621,7 @@ fn prepare_codex_tui_launch_script(
     launch_options: &CodexLaunchOptions,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    warm_followup_enabled: bool,
 ) -> Result<CodexTuiLaunchScript, String> {
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
@@ -1674,12 +1675,14 @@ fn prepare_codex_tui_launch_script(
 
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
-    crate::services::codex_tui::session::write_codex_tui_launch_options_fingerprint(
-        tmux_session_name,
-        &crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint(
-            launch_options,
-        ),
-    )?;
+    if warm_followup_enabled {
+        crate::services::codex_tui::session::write_codex_tui_launch_options_fingerprint(
+            tmux_session_name,
+            &crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint(
+                launch_options,
+            ),
+        )?;
+    }
     crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
         ProviderKind::Codex.as_str(),
         tmux_session_name,
@@ -1776,8 +1779,12 @@ fn execute_streaming_local_tui_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    let turn_lock = codex_tui_session_turn_lock(tmux_session_name);
-    let _turn_guard = turn_lock.lock().unwrap_or_else(|error| error.into_inner());
+    let warm_followup_enabled =
+        crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled();
+    let turn_lock = warm_followup_enabled.then(|| codex_tui_session_turn_lock(tmux_session_name));
+    let _turn_guard = turn_lock
+        .as_ref()
+        .map(|lock| lock.lock().unwrap_or_else(|error| error.into_inner()));
     let session_selection = crate::services::codex_tui::session::resolve_codex_tui_session(
         session_id,
         std::path::Path::new(working_dir),
@@ -1826,7 +1833,7 @@ fn execute_streaming_local_tui_tmux(
 
     // Emergency kill switch: when disabled, bypass the warm module entirely
     // and retain the pre-#4411 cleanup/relaunch path below.
-    if crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled() {
+    if warm_followup_enabled {
         match crate::services::codex_tui::warm_followup::try_codex_tui_warm_followup(
             &session_selection,
             &launch_options,
@@ -1873,6 +1880,7 @@ fn execute_streaming_local_tui_tmux(
         &launch_options,
         report_channel_id,
         report_provider,
+        warm_followup_enabled,
     )?;
 
     let tmux_result = crate::services::platform::tmux::create_session(

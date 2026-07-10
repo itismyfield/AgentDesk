@@ -930,6 +930,7 @@ fn snapshot_has_retry_safe_prompt_draft(snapshot: &PromptReadinessSnapshot) -> b
         && snapshot.capture_available
         && snapshot.composer_marker_detected
         && snapshot.prompt_draft_detected
+        && active_composer_visible_prompt_draft(snapshot).is_some()
 }
 
 pub(crate) fn prompt_draft_matches(
@@ -939,15 +940,53 @@ pub(crate) fn prompt_draft_matches(
     if !snapshot_has_retry_safe_prompt_draft(snapshot) {
         return false;
     }
-    visible_prompt_draft(snapshot).is_some_and(|draft| draft.trim() == expected_prompt.trim())
+    active_composer_visible_prompt_draft(snapshot)
+        .is_some_and(|draft| draft.trim() == expected_prompt.trim())
 }
 
-fn visible_prompt_draft(snapshot: &PromptReadinessSnapshot) -> Option<&str> {
-    snapshot
+/// Return draft text only when it is structurally anchored inside the active,
+/// bottom-most composer. A historical `› prompt` line in scrollback is never
+/// submission-retry evidence.
+fn active_composer_visible_prompt_draft(snapshot: &PromptReadinessSnapshot) -> Option<&str> {
+    let recent: Vec<&str> = snapshot
         .pane_tail
         .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
         .rev()
-        .find_map(codex_visible_prompt_draft_text)
+        .take(PROMPT_READY_SCAN_LINES)
+        .collect();
+
+    if recent_has_codex_compact_prompt(&recent) {
+        return recent
+            .get(1)
+            .and_then(|line| codex_visible_prompt_draft_text(line));
+    }
+
+    let footer_idx = recent
+        .iter()
+        .take(FOOTER_HINT_BOTTOM_WINDOW)
+        .position(|line| line_is_codex_footer_hint(line))?;
+    let bottom_edge_idx = recent
+        .iter()
+        .take(COMPOSER_EDGE_BOTTOM_WINDOW)
+        .position(|line| line_is_codex_composer_edge(line))?;
+    if footer_idx > bottom_edge_idx
+        || bottom_edge_idx - footer_idx > COMPOSER_FOOTER_ADJACENCY_LINES
+    {
+        return None;
+    }
+    let body_start = bottom_edge_idx + 1;
+    let top_edge_offset = recent
+        .iter()
+        .skip(body_start)
+        .position(|line| line_is_codex_composer_edge(line))?;
+    let body_end = body_start + top_edge_offset;
+    let mut drafts = recent[body_start..body_end]
+        .iter()
+        .filter_map(|line| codex_composer_body_draft_text(line));
+    let draft = drafts.next()?;
+    drafts.next().is_none().then_some(draft)
 }
 
 fn clear_cancelled_partial_prompt_draft(
@@ -960,7 +999,7 @@ fn clear_cancelled_partial_prompt_draft(
     }
     let snapshot = prompt_readiness_snapshot(session_name);
     let matches_partial = snapshot_has_retry_safe_prompt_draft(&snapshot)
-        && visible_prompt_draft(&snapshot).is_some_and(|draft| {
+        && active_composer_visible_prompt_draft(&snapshot).is_some_and(|draft| {
             !draft.trim().is_empty() && expected_prompt.trim().starts_with(draft.trim())
         });
     if !matches_partial {
@@ -1875,9 +1914,21 @@ mod tests {
         }
     }
 
+    fn active_box_draft_snapshot(prompt: &str) -> PromptReadinessSnapshot {
+        let mut snapshot = submit_snapshot(true, true, true, true);
+        snapshot.pane_tail = format!(
+            "old output\n\
+             ╭────────────────────────────────────────╮\n\
+             │ {prompt} ▌                              │\n\
+             ╰────────────────────────────────────────╯\n\
+               Esc to interrupt   Ctrl+J newline   ⏎ send"
+        );
+        snapshot
+    }
+
     #[test]
     fn submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots() {
-        let draft = submit_snapshot(true, true, true, true);
+        let draft = active_box_draft_snapshot("Discord follow-up");
         let submitted = submit_snapshot(true, true, false, true);
         let capture_missing = submit_snapshot(true, false, false, false);
         let pane_dead = submit_snapshot(false, false, false, false);
@@ -1898,11 +1949,23 @@ mod tests {
 
     #[test]
     fn retry_safe_draft_must_match_the_discord_prompt() {
-        let mut snapshot = submit_snapshot(true, true, true, true);
-        snapshot.pane_tail = "old output\n› earlier prompt\n› exact Discord prompt".to_string();
+        let snapshot = active_box_draft_snapshot("exact Discord prompt");
 
         assert!(prompt_draft_matches(&snapshot, "exact Discord prompt"));
         assert!(!prompt_draft_matches(&snapshot, "different prompt"));
+
+        let mut historical_only = submit_snapshot(true, true, true, true);
+        historical_only.pane_tail = "\
+› exact Discord prompt\n\
+╭────────────────────────────────────────╮\n\
+│ ▌                                      │\n\
+╰────────────────────────────────────────╯\n\
+  Esc to interrupt   Ctrl+J newline   ⏎ send"
+            .to_string();
+        assert!(
+            !prompt_draft_matches(&historical_only, "exact Discord prompt"),
+            "a submitted prompt left in scrollback is never fallback evidence"
+        );
     }
 
     // ------------------------------------------------------------------
