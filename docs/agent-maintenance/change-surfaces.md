@@ -1527,14 +1527,17 @@
     `discord-relay`, deadline 2026-08-31); plan-marked irreducible because the
     arms share placeholder state, background-child tracking, transcript events,
     and inflight persistence. Bugfix only outside the #4230 decompose plan).
-  - `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` (1669 lines;
+  - `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` (1370 lines;
     production LoC; #4230 S5 terminal outcome delivery extracted verbatim from
-    `turn_bridge/mod.rs`: cancel, prompt-too-long, recovery retry, empty
-    response, terminal delivery leases, terminal-controller cutover, voice/TUI
-    completion, dispatch completion/failure, watcher-delivered marking, `tv_done`,
-    and terminal status readiness. Registered giant-file (#4230 decompose target
-    continuation — see `giant-file-registry.md`, owner `discord-relay`, deadline
-    2026-08-31). Bugfix only outside the #4230 decompose plan).
+    `turn_bridge/mod.rs`, then #4230 S9 moved the cancel and prompt-too-long
+    replacement arms with both #3041 delivery-lease pairs intact into the
+    447-line `terminal_outcome_delivery/cancel_prompt_replace.rs` child. The
+    recovery retry, empty response, main terminal delivery core, controller
+    cutover, voice/TUI completion, dispatch completion/failure,
+    watcher-delivered marking, `tv_done`, and terminal status readiness remain.
+    Registered giant-file (#4230 decompose target continuation — see
+    `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
+    Bugfix only outside the #4230 decompose plan).
   - `src/services/discord/outbound/turn_output_controller.rs` (1034 prod lines;
     crossed the giant threshold in #3998 E13 when the controller-facing lease
     guard moved from `TurnKey` to `DeliveryLeaseKey` for id-0 disambiguation.

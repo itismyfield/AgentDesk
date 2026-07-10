@@ -704,6 +704,8 @@ src/
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms.rs
 │   │   │   │   └── tool_arms.rs
+│   │   │   ├── terminal_outcome_delivery/
+│   │   │   │   └── cancel_prompt_replace.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── pid_exit.rs

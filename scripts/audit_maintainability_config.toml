@@ -32,6 +32,8 @@
 "src/services/discord/tmux_watcher/no_result_exits.rs" = 814 # 2026-07-08 #4229 S6: approved contiguous verbatim extraction of the no-result exit handler (fresh ready-for-input idle structural finalize / tmux-death break / cancel-shutdown break / ready-for-input stall notice+dispatch-fail / #3419 watchdog-timeout finalize); below giant threshold (<1000), but irreducible as one review-verified move.
 "src/services/discord/tmux_watcher/**" = 700
 "src/services/discord/turn_bridge/headless_delivery.rs" = 700
+"src/services/discord/turn_bridge/terminal_outcome_delivery.rs" = 1370 # 2026-07-10 #4230 S9: lowered after approved contiguous extraction of cancelled/prompt-too-long terminal replacement arms to terminal_outcome_delivery/cancel_prompt_replace.rs; still tracked in giant_file_registry.toml.
+"src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs" = 447 # 2026-07-10 #4230 S9 approved contiguous extraction of cancelled/prompt-too-long terminal replacement arms with both #3041 delivery-lease acquire/commit pairs intact.
 "src/services/discord/turn_bridge/stream_loop.rs" = 979 # 2026-07-10 #4230 S8: lowered after approved extraction of RetryBoundary/Init/Text/Thinking/Done/Error/StatusUpdate/StatusEvents arms to stream_loop/content_arms.rs; below the giant threshold.
 "src/services/discord/turn_bridge/stream_loop/content_arms.rs" = 635 # 2026-07-10 #4230 S8 approved extraction of content/status/terminal stream-loop arms, including explicit Text drain-continue outcome mapping.
 "src/services/discord/turn_bridge/stream_loop/tool_arms.rs" = 684 # 2026-07-10 #4230 S7 approved contiguous verbatim extraction of ToolUse/ToolResult/TaskNotification stream-loop arms.

@@ -33,7 +33,7 @@
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1051 | discord-relay | 2026-10-31 | #4019 |
 | `src/services/discord/tui_task_card.rs` | 1167 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/turn_bridge/mod.rs` | 1231 | discord-relay | 2026-08-31 | #3038 |
-| `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 1669 | discord-relay | 2026-08-31 | #4230 |
+| `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 1370 | discord-relay | 2026-08-31 | #4230 |
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/turn_view_reconciler.rs` | 2213 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2905 | voice-runtime | 2026-08-31 | #3405 |

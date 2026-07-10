@@ -497,10 +497,12 @@ decompose_issue = "#3038"
 
 [[entry]]
 # Created by #4230 S5 as the approved high-coupling terminal outcome delivery
-# extraction from turn_bridge/mod.rs. It remains over the giant threshold because
-# cancel, prompt-too-long, recovery retry, terminal delivery leases, controller
-# cutover, voice/TUI completion, dispatch completion, watcher-delivered marking,
-# and terminal readiness must stay together until the next decomposition stage.
+# extraction from turn_bridge/mod.rs; #4230 S9 moved the cancelled and
+# prompt-too-long arms, including both intact #3041 delivery-lease pairs, to
+# terminal_outcome_delivery/cancel_prompt_replace.rs. It remains over the giant
+# threshold because recovery retry, the main delivery core, controller cutover,
+# voice/TUI completion, dispatch completion, watcher-delivered marking, and the
+# post-commit epilogue remain until the next decomposition stage.
 file = "src/services/discord/turn_bridge/terminal_outcome_delivery.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
