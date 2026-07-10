@@ -210,6 +210,45 @@ impl PromptDraftPolicy {
         snapshot.composer_marker_detected
             && (matches!(self, Self::AcceptDraftForClear) || !snapshot.prompt_draft_detected)
     }
+
+    fn should_block_rollout_ready(self, snapshot: &PromptReadinessSnapshot) -> bool {
+        matches!(self, Self::RejectDraft)
+            && snapshot.capture_available
+            && snapshot.prompt_draft_detected
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RolloutReadySnapshotDecision {
+    Accept,
+    Ignore,
+    SessionDead,
+}
+
+fn decide_rollout_ready_snapshot(
+    snapshot: &PromptReadinessSnapshot,
+    draft_policy: PromptDraftPolicy,
+    warm_followup_enabled: bool,
+) -> RolloutReadySnapshotDecision {
+    if !warm_followup_enabled {
+        // Exact pre-#4411 ordering for the kill-switch path: a visible draft
+        // blocks first, then a captured dead pane fails, and an otherwise
+        // uncorroborated rollout-ready envelope is accepted.
+        if draft_policy.should_block_rollout_ready(snapshot) {
+            return RolloutReadySnapshotDecision::Ignore;
+        }
+        if snapshot.capture_available && !snapshot.tmux_pane_alive {
+            return RolloutReadySnapshotDecision::SessionDead;
+        }
+        return RolloutReadySnapshotDecision::Accept;
+    }
+    if snapshot.capture_available && !snapshot.tmux_pane_alive {
+        return RolloutReadySnapshotDecision::SessionDead;
+    }
+    if snapshot.capture_available && !draft_policy.accepts(snapshot) {
+        return RolloutReadySnapshotDecision::Ignore;
+    }
+    RolloutReadySnapshotDecision::Accept
 }
 
 /// Outcome of the provider hook-event fast path.
@@ -489,24 +528,29 @@ fn wait_until_codex_tui_input_ready_with_policy(
                 return Err(timeout_error(&snapshot));
             }
             let snapshot = prompt_readiness_snapshot(session_name);
-            if snapshot.capture_available && !snapshot.tmux_pane_alive {
-                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
-            }
-            if snapshot.capture_available && !draft_policy.accepts(&snapshot) {
-                tracing::warn!(
+            match decide_rollout_ready_snapshot(
+                &snapshot,
+                draft_policy,
+                super::warm_followup::codex_tui_warm_followup_enabled(),
+            ) {
+                RolloutReadySnapshotDecision::SessionDead => {
+                    return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+                }
+                RolloutReadySnapshotDecision::Ignore => tracing::warn!(
                     tmux_session_name = session_name,
                     readiness = readiness.label(),
                     pane_tail = %snapshot.pane_tail,
                     "codex_tui rollout composer_ready ignored because the captured pane is not input-ready"
-                );
-            } else {
-                tracing::debug!(
-                    tmux_session_name = session_name,
-                    readiness = readiness.label(),
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    "codex_tui prompt ready via rollout composer_ready envelope"
-                );
-                return Ok(());
+                ),
+                RolloutReadySnapshotDecision::Accept => {
+                    tracing::debug!(
+                        tmux_session_name = session_name,
+                        readiness = readiness.label(),
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "codex_tui prompt ready via rollout composer_ready envelope"
+                    );
+                    return Ok(());
+                }
             }
         }
         HookFastPathOutcome::PreSnapshotReady => {
@@ -585,24 +629,29 @@ fn wait_until_codex_tui_input_ready_with_policy(
         }
         if observe_rollout_composer_ready_for_prompt_wait(session_name) {
             let snapshot = prompt_readiness_snapshot(session_name);
-            if snapshot.capture_available && !snapshot.tmux_pane_alive {
-                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
-            }
-            if snapshot.capture_available && !draft_policy.accepts(&snapshot) {
-                tracing::warn!(
+            match decide_rollout_ready_snapshot(
+                &snapshot,
+                draft_policy,
+                super::warm_followup::codex_tui_warm_followup_enabled(),
+            ) {
+                RolloutReadySnapshotDecision::SessionDead => {
+                    return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+                }
+                RolloutReadySnapshotDecision::Ignore => tracing::warn!(
                     tmux_session_name = session_name,
                     readiness = readiness.label(),
                     pane_tail = %snapshot.pane_tail,
                     "codex_tui fallback rollout composer_ready ignored because the captured pane is not input-ready"
-                );
-            } else {
-                tracing::debug!(
-                    tmux_session_name = session_name,
-                    readiness = readiness.label(),
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    "codex_tui prompt ready via rollout composer_ready envelope during fallback loop"
-                );
-                return Ok(());
+                ),
+                RolloutReadySnapshotDecision::Accept => {
+                    tracing::debug!(
+                        tmux_session_name = session_name,
+                        readiness = readiness.label(),
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "codex_tui prompt ready via rollout composer_ready envelope during fallback loop"
+                    );
+                    return Ok(());
+                }
             }
         }
         // #2399 HIGH 1: deadline check BEFORE the capture so an
@@ -921,6 +970,11 @@ enum PromptSubmitConfirmation {
 #[derive(Debug)]
 pub(crate) enum CodexFollowupPromptSubmitOutcome {
     Submitted,
+    /// Planning or delivery failed before any Enter attempt. The caller may
+    /// cold-fallback only if the pinned rollout also remained unchanged.
+    NotSubmitted {
+        error: String,
+    },
     RetrySafeDraft {
         first: PromptReadinessSnapshot,
         second: PromptReadinessSnapshot,
@@ -1063,10 +1117,7 @@ pub(crate) fn submit_codex_followup_prompt(
     let actions = match plan_prompt_submit(prompt) {
         Ok(actions) => actions,
         Err(error) => {
-            return CodexFollowupPromptSubmitOutcome::Unconfirmed {
-                error,
-                snapshot: prompt_readiness_snapshot(session_name),
-            };
+            return CodexFollowupPromptSubmitOutcome::NotSubmitted { error };
         }
     };
     let mut executor = TmuxTuiActionExecutor::default();
@@ -1079,6 +1130,13 @@ pub(crate) fn submit_codex_followup_prompt(
     {
         clear_cancelled_partial_prompt_draft(session_name, prompt, &executor);
         return CodexFollowupPromptSubmitOutcome::Cancelled;
+    }
+    if let Err(error) = action_result.as_ref()
+        && !executor.enter_attempted
+    {
+        return CodexFollowupPromptSubmitOutcome::NotSubmitted {
+            error: error.clone(),
+        };
     }
 
     std::thread::sleep(PROMPT_SUBMIT_INITIAL_SETTLE);
@@ -1931,6 +1989,30 @@ mod tests {
                Esc to interrupt   Ctrl+J newline   ⏎ send"
         );
         snapshot
+    }
+
+    #[test]
+    fn rollout_ready_snapshot_tightening_is_disabled_with_warm_kill_switch() {
+        let marker_missing = submit_snapshot(true, true, false, false);
+        assert_eq!(
+            decide_rollout_ready_snapshot(&marker_missing, PromptDraftPolicy::RejectDraft, false,),
+            RolloutReadySnapshotDecision::Accept
+        );
+        assert_eq!(
+            decide_rollout_ready_snapshot(&marker_missing, PromptDraftPolicy::RejectDraft, true,),
+            RolloutReadySnapshotDecision::Ignore
+        );
+
+        let dead_with_draft = submit_snapshot(false, true, true, true);
+        assert_eq!(
+            decide_rollout_ready_snapshot(&dead_with_draft, PromptDraftPolicy::RejectDraft, false,),
+            RolloutReadySnapshotDecision::Ignore,
+            "legacy order blocks a draft before checking pane death"
+        );
+        assert_eq!(
+            decide_rollout_ready_snapshot(&dead_with_draft, PromptDraftPolicy::RejectDraft, true,),
+            RolloutReadySnapshotDecision::SessionDead
+        );
     }
 
     #[test]

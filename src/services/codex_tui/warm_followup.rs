@@ -213,6 +213,13 @@ fn submit_failure_allows_fallback(
         && rollout_len_after_submit == Some(rollout_len_before_submit)
 }
 
+fn pre_enter_failure_allows_fallback(
+    rollout_len_before_submit: u64,
+    rollout_len_after_submit: Option<u64>,
+) -> bool {
+    rollout_len_after_submit == Some(rollout_len_before_submit)
+}
+
 fn log_fallback(tmux_session_name: &str, reason: CodexWarmFallbackReason, detail: &str) {
     tracing::warn!(
         tmux_session_name,
@@ -347,6 +354,31 @@ pub(crate) fn try_codex_tui_warm_followup(
         cancel_token.as_deref(),
     ) {
         CodexFollowupPromptSubmitOutcome::Submitted => {}
+        CodexFollowupPromptSubmitOutcome::NotSubmitted { error } => {
+            let rollout_len_after_submit = std::fs::metadata(rollout_path)
+                .ok()
+                .map(|metadata| metadata.len());
+            if pre_enter_failure_allows_fallback(
+                rollout_len_before_submit,
+                rollout_len_after_submit,
+            ) {
+                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                    ProviderKind::Codex.as_str(),
+                    tmux_session_name,
+                    prompt,
+                );
+                let reason = CodexWarmFallbackReason::SubmitFailed;
+                log_fallback(
+                    tmux_session_name,
+                    reason,
+                    &format!("prompt delivery failed before Enter: {error}"),
+                );
+                return CodexWarmFollowupOutcome::Fallback(reason);
+            }
+            return CodexWarmFollowupOutcome::Terminal(Err(format!(
+                "Codex TUI warm follow-up failed before Enter but rollout advanced; refusing replay: {error}"
+            )));
+        }
         CodexFollowupPromptSubmitOutcome::Cancelled => {
             return CodexWarmFollowupOutcome::Terminal(Ok(()));
         }
@@ -580,6 +612,9 @@ mod tests {
         assert!(!submit_failure_allows_fallback(true, false, 100, Some(100)));
         assert!(!submit_failure_allows_fallback(true, true, 100, Some(101)));
         assert!(!submit_failure_allows_fallback(true, true, 100, None));
+        assert!(pre_enter_failure_allows_fallback(100, Some(100)));
+        assert!(!pre_enter_failure_allows_fallback(100, Some(101)));
+        assert!(!pre_enter_failure_allows_fallback(100, None));
     }
 
     #[test]
