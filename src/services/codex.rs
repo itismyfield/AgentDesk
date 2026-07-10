@@ -4,6 +4,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+#[cfg(unix)]
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
@@ -38,6 +40,21 @@ const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
 const TMUX_PROMPT_B64_CHUNK_SIZE: usize = 700;
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
+
+#[cfg(unix)]
+type CodexTuiSessionTurnLock = Arc<Mutex<()>>;
+
+#[cfg(unix)]
+static CODEX_TUI_SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, CodexTuiSessionTurnLock>> =
+    LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(unix)]
+fn codex_tui_session_turn_lock(tmux_session_name: &str) -> CodexTuiSessionTurnLock {
+    CODEX_TUI_SESSION_TURN_LOCKS
+        .entry(tmux_session_name.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CodexRuntimeKind {
@@ -406,7 +423,7 @@ fn codex_resume_supports_hook_trust_bypass(
     }
 }
 
-fn codex_direct_tui_hook_overrides_enabled() -> bool {
+pub(crate) fn codex_direct_tui_hook_overrides_enabled() -> bool {
     std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -1557,18 +1574,32 @@ fn cleanup_existing_codex_tui_session(
     tmux_session_name: &str,
     force_fresh_provider_session: bool,
     has_live_pane: bool,
+    warm_fallback_reason: Option<
+        crate::services::codex_tui::warm_followup::CodexWarmFallbackReason,
+    >,
+    pane_already_stopped: bool,
 ) {
-    let cleanup_reason =
-        codex_tui_existing_session_termination_reason(force_fresh_provider_session, has_live_pane);
+    let legacy_reason;
+    let (reason_code, reason_text) = if let Some(reason) = warm_fallback_reason {
+        (reason.reason_code(), reason.reason_text())
+    } else {
+        legacy_reason = codex_tui_existing_session_termination_reason(
+            force_fresh_provider_session,
+            has_live_pane,
+        );
+        (legacy_reason.reason_code, legacy_reason.reason_text)
+    };
     record_codex_tmux_termination(
         tmux_session_name,
         "codex_tui_provider",
-        cleanup_reason.reason_code,
-        cleanup_reason.reason_text,
+        reason_code,
+        reason_text,
         None,
     );
-    record_tmux_exit_reason(tmux_session_name, cleanup_reason.reason_text);
-    crate::services::platform::tmux::kill_session(tmux_session_name, cleanup_reason.reason_text);
+    record_tmux_exit_reason(tmux_session_name, reason_text);
+    if !pane_already_stopped {
+        crate::services::platform::tmux::kill_session(tmux_session_name, reason_text);
+    }
 }
 
 /// Paths and timing produced while preparing a Codex Direct TUI launch script.
@@ -1593,6 +1624,7 @@ fn prepare_codex_tui_launch_script(
     launch_options: &CodexLaunchOptions,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    warm_followup_enabled: bool,
 ) -> Result<CodexTuiLaunchScript, String> {
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
@@ -1646,6 +1678,14 @@ fn prepare_codex_tui_launch_script(
 
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
+    if warm_followup_enabled {
+        crate::services::codex_tui::session::write_codex_tui_launch_options_fingerprint(
+            tmux_session_name,
+            &crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint(
+                launch_options,
+            ),
+        )?;
+    }
     crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
         ProviderKind::Codex.as_str(),
         tmux_session_name,
@@ -1665,7 +1705,7 @@ fn prepare_codex_tui_launch_script(
 /// Wire the cancel token to the freshly created tmux session: record the
 /// session name and (best-effort) the pane PID so a later /stop can target it.
 #[cfg(unix)]
-fn wire_cancel_token_to_tmux_session(
+pub(crate) fn wire_cancel_token_to_tmux_session(
     cancel_token: Option<&std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
 ) {
@@ -1742,6 +1782,12 @@ fn execute_streaming_local_tui_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    let warm_followup_enabled =
+        crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled();
+    let turn_lock = warm_followup_enabled.then(|| codex_tui_session_turn_lock(tmux_session_name));
+    let _turn_guard = turn_lock
+        .as_ref()
+        .map(|lock| lock.lock().unwrap_or_else(|error| error.into_inner()));
     let session_selection = crate::services::codex_tui::session::resolve_codex_tui_session(
         session_id,
         std::path::Path::new(working_dir),
@@ -1786,12 +1832,47 @@ fn execute_streaming_local_tui_tmux(
 
     let session_exists = tmux_session_exists(tmux_session_name);
     let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let mut warm_fallback_reason = None;
+    let mut warm_fallback_pane_stopped = false;
+
+    // Emergency kill switch: when disabled, bypass the warm module entirely
+    // and retain the pre-#4411 cleanup/relaunch path below.
+    if warm_followup_enabled {
+        match crate::services::codex_tui::warm_followup::try_codex_tui_warm_followup(
+            &session_selection,
+            &launch_options,
+            force_fresh_provider_session,
+            session_exists,
+            has_live_pane,
+            prompt,
+            sender.clone(),
+            cancel_token.clone(),
+            tmux_session_name,
+            report_channel_id,
+        ) {
+            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::Terminal(
+                result,
+            ) => return result,
+            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::Fallback(
+                reason,
+            ) => warm_fallback_reason = Some(reason),
+            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::FallbackAfterPaneKill(
+                reason,
+            ) => {
+                warm_fallback_reason = Some(reason);
+                warm_fallback_pane_stopped = true;
+            }
+            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::LegacyPath => {}
+        }
+    }
 
     if session_exists {
         cleanup_existing_codex_tui_session(
             tmux_session_name,
             force_fresh_provider_session,
             has_live_pane,
+            warm_fallback_reason,
+            warm_fallback_pane_stopped,
         );
     }
 
@@ -1810,6 +1891,7 @@ fn execute_streaming_local_tui_tmux(
         &launch_options,
         report_channel_id,
         report_provider,
+        warm_followup_enabled,
     )?;
 
     let tmux_result = crate::services::platform::tmux::create_session(
@@ -1975,7 +2057,7 @@ fn resolve_codex_tui_tail_result(
 /// session-death / timeout outcomes). Always returns `Ok(())`; early returns
 /// stand in for the orchestrator's post-cancel suppression paths.
 #[cfg(unix)]
-fn emit_codex_tui_post_tail_handoff(
+pub(crate) fn emit_codex_tui_post_tail_handoff(
     tail_result: crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
     sender: Sender<StreamMessage>,
     cancel_token_for_post_tail: Option<std::sync::Arc<CancelToken>>,
@@ -3078,7 +3160,7 @@ mod tui_hosting_tests {
     use super::{
         CodexWrapperInputMode, codex_fifo_wrapper_session_usable,
         codex_input_mode_allows_live_session_preservation,
-        codex_tui_existing_session_termination_reason,
+        codex_tui_existing_session_termination_reason, codex_tui_session_turn_lock,
         codex_wrapper_existing_session_termination_reason, codex_wrapper_script_input_mode,
     };
     use crate::services::discord::restart_report::{
@@ -3452,6 +3534,17 @@ mod tui_hosting_tests {
         assert!(!codex_input_mode_allows_live_session_preservation(
             CodexWrapperInputMode::Pipe
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_tui_turn_lock_is_shared_only_by_the_same_tmux_session() {
+        let first = codex_tui_session_turn_lock("codex-warm-lock-shared");
+        let second = codex_tui_session_turn_lock("codex-warm-lock-shared");
+        let other = codex_tui_session_turn_lock("codex-warm-lock-other");
+
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(!std::sync::Arc::ptr_eq(&first, &other));
     }
 
     #[test]

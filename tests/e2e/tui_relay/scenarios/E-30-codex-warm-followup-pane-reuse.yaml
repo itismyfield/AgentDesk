@@ -1,0 +1,35 @@
+id: E-30
+title: Codex TUI warm follow-up reuses one live pane across turns (#4411)
+agent_mode: real_live
+coverage_class: live
+cells: [codex-tui]
+isolation: required
+notes: |
+  Optional live scenario; the matrix preflight may skip the codex-tui cell when
+  tmux is unavailable. This scenario is intentionally not a required CI gate.
+steps:
+  - send_prompt: "Reply with exactly [E2E:E30:TURN-1] and nothing else."
+  - wait_for_discord_text: "[E2E:E30:TURN-1]"
+    timeout_s: 240
+  - capture_session_identity:
+      label: warm_pane
+  - send_prompt: "Reply with exactly [E2E:E30:TURN-2] and nothing else."
+  - wait_for_discord_text: "[E2E:E30:TURN-2]"
+    timeout_s: 240
+  - assert_session_preserved:
+      label: warm_pane
+  - send_prompt: "Reply with exactly [E2E:E30:TURN-3] and nothing else."
+  - wait_for_discord_text: "[E2E:E30:TURN-3]"
+    timeout_s: 240
+  - assert_session_preserved:
+      label: warm_pane
+assertions:
+  - ordered_text_present:
+      - "[E2E:E30:TURN-1]"
+      - "[E2E:E30:TURN-2]"
+      - "[E2E:E30:TURN-3]"
+  - no_duplicate_marker: "[E2E:E30:TURN-1]"
+  - no_duplicate_marker: "[E2E:E30:TURN-2]"
+  - no_duplicate_marker: "[E2E:E30:TURN-3]"
+  - no_duplicate_content: true
+  - no_resume_prompt_chrome: true

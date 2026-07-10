@@ -400,7 +400,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
-│   │   └── session.rs
+│   │   ├── session.rs
+│   │   └── warm_followup.rs
 │   ├── discord/
 │   │   ├── catch_up/
 │   │   │   ├── classification.rs

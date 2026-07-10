@@ -154,6 +154,20 @@ pub struct ProcessIdentity {
     macos_lstart_hash: Option<u128>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessIdentityProbe {
+    Same,
+    GoneOrReused,
+    ProbeError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessGroupProbe {
+    Live,
+    Gone,
+    ProbeError,
+}
+
 impl ProcessIdentity {
     /// Capture identity for `pid` (best-effort; returns an empty snapshot on
     /// unsupported platforms or if the read fails).
@@ -203,6 +217,44 @@ impl ProcessIdentity {
         true
     }
 
+    /// Three-state identity probe for replay barriers. Unlike [`Self::matches`],
+    /// an unreadable identity for a still-present PID is `ProbeError`, not
+    /// evidence that the original process exited.
+    #[cfg(unix)]
+    pub fn probe(&self, pid: u32) -> ProcessIdentityProbe {
+        match unix_process_presence(pid) {
+            ProcessGroupProbe::Gone => return ProcessIdentityProbe::GoneOrReused,
+            ProcessGroupProbe::ProbeError => return ProcessIdentityProbe::ProbeError,
+            ProcessGroupProbe::Live => {}
+        }
+        if let Some(saved) = self.starttime {
+            return match read_process_starttime(pid) {
+                Some(current) if current == saved => ProcessIdentityProbe::Same,
+                Some(_) => ProcessIdentityProbe::GoneOrReused,
+                None => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(saved_lstart) = self.macos_lstart_hash {
+                        return match read_lstart_hash_macos(pid) {
+                            Some(current) if current == saved_lstart => ProcessIdentityProbe::Same,
+                            Some(_) => ProcessIdentityProbe::GoneOrReused,
+                            None => ProcessIdentityProbe::ProbeError,
+                        };
+                    }
+                    ProcessIdentityProbe::ProbeError
+                }
+            };
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(saved_lstart) = self.macos_lstart_hash {
+            return match read_lstart_hash_macos(pid) {
+                Some(current) if current == saved_lstart => ProcessIdentityProbe::Same,
+                Some(_) => ProcessIdentityProbe::GoneOrReused,
+                None => ProcessIdentityProbe::ProbeError,
+            };
+        }
+        ProcessIdentityProbe::ProbeError
+    }
+
     fn has_baseline(&self) -> bool {
         self.starttime.is_some() || {
             #[cfg(target_os = "macos")]
@@ -242,6 +294,29 @@ impl ProcessIdentity {
             macos_lstart_hash: None,
         }
     }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn unix_kill_zero_probe(target: libc::pid_t) -> ProcessGroupProbe {
+    if unsafe { libc::kill(target, 0) } == 0 {
+        return ProcessGroupProbe::Live;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => ProcessGroupProbe::Gone,
+        Some(libc::EPERM) => ProcessGroupProbe::Live,
+        _ => ProcessGroupProbe::ProbeError,
+    }
+}
+
+#[cfg(unix)]
+fn unix_process_presence(pid: u32) -> ProcessGroupProbe {
+    unix_kill_zero_probe(pid as libc::pid_t)
+}
+
+#[cfg(unix)]
+pub fn process_group_probe(pgid: u32) -> ProcessGroupProbe {
+    unix_kill_zero_probe(-(pgid as libc::pid_t))
 }
 
 /// Cross-platform starttime reader returning a stable monotonic-ish value
@@ -415,7 +490,7 @@ pub fn kill_pid_tree(pid: u32) {
 }
 
 #[cfg(unix)]
-fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
+pub(crate) fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if !identity.has_baseline() {
         tracing::debug!(
@@ -435,7 +510,7 @@ fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> boo
 }
 
 #[cfg(not(unix))]
-fn kill_pid_tree_if_identity_matches(pid: u32, _identity: ProcessIdentity) -> bool {
+pub(crate) fn kill_pid_tree_if_identity_matches(pid: u32, _identity: ProcessIdentity) -> bool {
     kill_pid_tree_with_identity(pid)
 }
 
@@ -702,6 +777,10 @@ mod process_group_tests {
         configure_child_process_group(&mut command);
         let mut child = command.spawn().expect("wrapper shell should spawn");
         let child_pid = child.id();
+        let child_identity = ProcessIdentity::capture(child_pid);
+
+        assert_eq!(child_identity.probe(child_pid), ProcessIdentityProbe::Same);
+        assert_eq!(process_group_probe(child_pid), ProcessGroupProbe::Live);
 
         let grandchild_pid =
             wait_for_pid_file(&grandchild_pid_path).expect("wrapper should write grandchild pid");
@@ -717,6 +796,11 @@ mod process_group_tests {
             wait_until_not_running(grandchild_pid, Duration::from_secs(3)),
             "grandchild should be reaped by process-group kill"
         );
+        assert_eq!(
+            child_identity.probe(child_pid),
+            ProcessIdentityProbe::GoneOrReused
+        );
+        assert_eq!(process_group_probe(child_pid), ProcessGroupProbe::Gone);
     }
 
     fn wait_for_pid_file(path: &std::path::Path) -> Option<u32> {

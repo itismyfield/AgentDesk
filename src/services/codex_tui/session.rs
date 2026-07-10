@@ -5,10 +5,14 @@ use std::time::SystemTime;
 use super::rollout_index::cached_indexed_rollouts;
 use super::rollout_tail::default_codex_sessions_dir;
 
+const CODEX_TUI_LAUNCH_OPTIONS_FINGERPRINT_TEMP_EXT: &str = "codex-tui-launch-options.sha256";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexTuiSessionFiles {
     pub codex_home_path: PathBuf,
     pub legacy_codex_home_path: PathBuf,
+    pub launch_options_fingerprint_path: PathBuf,
+    pub legacy_launch_options_fingerprint_path: PathBuf,
 }
 
 impl CodexTuiSessionFiles {
@@ -24,13 +28,47 @@ impl CodexTuiSessionFiles {
                     crate::services::tmux_common::CODEX_TUI_HOME_TEMP_EXT,
                 ),
             ),
+            launch_options_fingerprint_path: PathBuf::from(
+                crate::services::tmux_common::session_temp_path(
+                    tmux_session_name,
+                    CODEX_TUI_LAUNCH_OPTIONS_FINGERPRINT_TEMP_EXT,
+                ),
+            ),
+            legacy_launch_options_fingerprint_path: PathBuf::from(
+                crate::services::tmux_common::legacy_tmp_session_path(
+                    tmux_session_name,
+                    CODEX_TUI_LAUNCH_OPTIONS_FINGERPRINT_TEMP_EXT,
+                ),
+            ),
         }
     }
 
     pub fn cleanup_best_effort(&self) {
         let _ = std::fs::remove_dir_all(&self.codex_home_path);
         let _ = std::fs::remove_dir_all(&self.legacy_codex_home_path);
+        let _ = std::fs::remove_file(&self.launch_options_fingerprint_path);
+        let _ = std::fs::remove_file(&self.legacy_launch_options_fingerprint_path);
     }
+}
+
+pub fn write_codex_tui_launch_options_fingerprint(
+    tmux_session_name: &str,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let files = CodexTuiSessionFiles::for_tmux_session(tmux_session_name);
+    std::fs::write(&files.launch_options_fingerprint_path, fingerprint.trim())
+        .map_err(|error| format!("failed to write Codex TUI launch-options fingerprint: {error}"))
+}
+
+pub fn read_codex_tui_launch_options_fingerprint(tmux_session_name: &str) -> Option<String> {
+    let path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        CODEX_TUI_LAUNCH_OPTIONS_FINGERPRINT_TEMP_EXT,
+    )?;
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,6 +458,12 @@ mod tests {
         let legacy_nested_file = files.legacy_codex_home_path.join("nested/config.toml");
         std::fs::create_dir_all(legacy_nested_file.parent().unwrap()).unwrap();
         std::fs::write(&legacy_nested_file, "legacy-seed").unwrap();
+        std::fs::write(&files.launch_options_fingerprint_path, "fingerprint").unwrap();
+        std::fs::write(
+            &files.legacy_launch_options_fingerprint_path,
+            "legacy-fingerprint",
+        )
+        .unwrap();
 
         files.cleanup_best_effort();
         files.cleanup_best_effort();
@@ -431,6 +475,24 @@ mod tests {
         assert!(
             !files.legacy_codex_home_path.exists(),
             "cleanup_best_effort must remove the legacy Codex TUI temp home recursively"
+        );
+        assert!(!files.launch_options_fingerprint_path.exists());
+        assert!(!files.legacy_launch_options_fingerprint_path.exists());
+    }
+
+    #[test]
+    fn codex_tui_launch_options_fingerprint_round_trips() {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _env =
+            EnvRestore::set_agentdesk_root_and_host(dir.path(), "codex-tui-fingerprint-host");
+        let tmux_session = "AgentDesk-codex-fingerprint";
+
+        write_codex_tui_launch_options_fingerprint(tmux_session, " sha256-value \n").unwrap();
+
+        assert_eq!(
+            read_codex_tui_launch_options_fingerprint(tmux_session).as_deref(),
+            Some("sha256-value")
         );
     }
 

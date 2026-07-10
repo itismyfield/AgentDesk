@@ -659,20 +659,11 @@ pub fn system_prompt_for_provider_turn<'a>(
 }
 
 pub fn compact_resumed_provider_turn_prompt(
-    provider: &ProviderKind,
-    session_id: Option<&str>,
+    _provider: &ProviderKind,
+    _session_id: Option<&str>,
     prompt: String,
 ) -> String {
-    if !should_omit_repeated_system_prompt(provider, session_id) {
-        return prompt;
-    }
-
-    format!(
-        "[Provider Session Reuse]\n\
-         The prior authoritative Discord, role, and tool instructions already present in this \
-         Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
-         files, and memory recall below as new actionable input.\n\n{prompt}"
-    )
+    prompt
 }
 
 pub fn is_readonly_tool_policy(allowed_tools: Option<&[String]>) -> bool {
@@ -745,16 +736,15 @@ mod prompt_reuse_tests {
     }
 
     #[test]
-    fn codex_resume_context_gets_compact_reuse_note() {
+    fn codex_resume_context_preserves_payload_without_reuse_prologue() {
         let prompt = compact_resumed_provider_turn_prompt(
             &ProviderKind::Codex,
             Some("thread-1"),
             "[User Request]\nhello".to_string(),
         );
 
-        assert!(prompt.starts_with("[Provider Session Reuse]"));
-        assert!(prompt.contains("prior authoritative Discord"));
-        assert!(prompt.contains("[User Request]\nhello"));
+        assert_eq!(prompt, "[User Request]\nhello");
+        assert!(!prompt.contains("[Provider Session Reuse]"));
         assert!(!prompt.contains("[Authoritative Instructions]"));
 
         let fresh = compact_resumed_provider_turn_prompt(

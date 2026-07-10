@@ -1756,8 +1756,8 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2948; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1358),
-  `src/services/qwen.rs` (2198), `src/services/codex.rs` (3049),
-  `src/services/opencode.rs` (2760), `src/services/provider.rs` (1656) —
+  `src/services/qwen.rs` (2198), `src/services/codex.rs` (3131),
+  `src/services/opencode.rs` (2760), `src/services/provider.rs` (1647) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider. #3263 added the Codex max-of-cache
@@ -1782,8 +1782,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   resumed-session compaction path. #3823 adds Codex launch binary/version
   diagnostics so skills/list failures caused by CLI/app skew are traceable.
   #4047 adds typed fallback pane-readiness plumbing so structured JSONL sessions
-  cannot obtain a pane-scrape readiness value.)
-- `src/services/codex_tui/rollout_tail.rs` (1276) — Codex TUI rollout tail
+  cannot obtain a pane-scrape readiness value. #4411 adds the kill-switched
+  Codex TUI warm-followup gate and per-pane turn serialization; detailed reuse
+  policy remains isolated in `codex_tui/warm_followup.rs`.)
+- `src/services/codex_tui/rollout_tail.rs` (1329) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
   separator unified across the streamed `StreamMessage::Text` surface and the
@@ -1796,11 +1798,14 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   tail/replay entry points or completion heuristics;
   +59 from #3711 persisting rollout markers as soon as the live rollout is
   discovered and adding claimed-rollout candidate selection for restart
-  rehydrate.
-- `src/services/codex_tui/input.rs` (1366) — Codex TUI input readiness
+  rehydrate; #4411 adds a pinned-path warm tail entry point that carries the
+  Discord-origin prompt through turn-local dedupe.
+- `src/services/codex_tui/input.rs` (1659) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
-  non-bugfix behavior beyond the readiness/cancel contract.
+  non-bugfix behavior beyond the readiness/cancel contract. #4411 promotes the
+  existing action planner to production, consumes composer-ready signals once,
+  and requires two live draft snapshots before a warm submit may be replayed.
 - `src/services/claude_tui/input.rs` (1932) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
