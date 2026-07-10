@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::*;
 
 pub(super) enum CancelPromptReplaceMessage {
+    RecoveryRetry,
     Cancelled,
     PromptTooLong,
 }
@@ -25,6 +26,8 @@ pub(super) struct CancelPromptReplaceContext<'a> {
     pub(super) dispatch_id: &'a Option<String>,
     pub(super) adk_session_key: &'a Option<String>,
     pub(super) turn_id: &'a String,
+    pub(super) user_text_owned: &'a String,
+    pub(super) recovery_retry: bool,
     pub(super) watcher_owner_channel_id: ChannelId,
     pub(super) tmux_last_offset: Option<u64>,
     pub(super) response_sent_offset: usize,
@@ -33,6 +36,8 @@ pub(super) struct CancelPromptReplaceContext<'a> {
 
 pub(super) struct CancelPromptReplaceState<'a> {
     pub(super) full_response: &'a mut String,
+    pub(super) new_session_id: &'a mut Option<String>,
+    pub(super) new_raw_provider_session_id: &'a mut Option<String>,
     pub(super) active_background_child_session_ids: &'a mut Vec<i64>,
     pub(super) pending_long_running_open_after_state_save:
         &'a mut PendingLongRunningOpenAfterStateSave,
@@ -61,12 +66,16 @@ pub(super) async fn handle_cancel_prompt_replace(
     let dispatch_id = ctx.dispatch_id;
     let adk_session_key = ctx.adk_session_key;
     let turn_id = ctx.turn_id;
+    let user_text_owned = ctx.user_text_owned;
+    let recovery_retry = ctx.recovery_retry;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let tmux_last_offset = ctx.tmux_last_offset;
     let response_sent_offset = ctx.response_sent_offset;
     let inflight_generation = ctx.inflight_generation;
 
     let mut full_response = std::mem::take(state.full_response);
+    let mut new_session_id = state.new_session_id.take();
+    let mut new_raw_provider_session_id = state.new_raw_provider_session_id.take();
     let mut active_background_child_session_ids =
         std::mem::take(state.active_background_child_session_ids);
     let mut pending_long_running_open_after_state_save =
@@ -79,7 +88,50 @@ pub(super) async fn handle_cancel_prompt_replace(
     let mut bridge_skip_holder_owns_inflight = *state.bridge_skip_holder_owns_inflight;
     let mut status_panel_terminal_committed = *state.status_panel_terminal_committed;
 
+    // Recovery auto-retry: session died during restart recovery
+    if recovery_retry {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ↻ Recovery session died — triggering auto-retry with history (channel {})",
+            channel_id
+        );
+        reset_session_for_auto_retry(
+            &shared_owned,
+            channel_id,
+            &cancel_token,
+            adk_session_key.as_deref(),
+            &mut new_session_id,
+            &mut new_raw_provider_session_id,
+            &mut inflight_state,
+            "recovery session died",
+        )
+        .await;
+        // #2452 H6: schedule the auto-retry via the explicit
+        // completion path so the dedup lockout is released as soon
+        // as scheduling resolves (≤ 120s safety net inside helper).
+        // A recovery turn with no anchored user message (user_msg_id == 0)
+        // has no message to retry-with-history against, so skip scheduling.
+        if let Some(user_msg_id) = user_msg_id {
+            spawn_retry_with_history_with_release(
+                gateway.clone(),
+                channel_id,
+                user_msg_id,
+                user_text_owned.clone(),
+            );
+        }
+        // Replace placeholder with recovery notice (don't delete — avoids visual gap)
+        let _ = gateway
+            .edit_message(
+                channel_id,
+                current_msg_id,
+                "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
+            )
+            .await;
+        full_response = String::new();
+    }
+
     match message {
+        CancelPromptReplaceMessage::RecoveryRetry => {}
         CancelPromptReplaceMessage::Cancelled => {
         close_all_tracked_background_children(
             shared_owned.pg_pool.as_ref(),
@@ -433,6 +485,8 @@ pub(super) async fn handle_cancel_prompt_replace(
     }
 
     *state.full_response = full_response;
+    *state.new_session_id = new_session_id;
+    *state.new_raw_provider_session_id = new_raw_provider_session_id;
     *state.active_background_child_session_ids = active_background_child_session_ids;
     *state.pending_long_running_open_after_state_save =
         pending_long_running_open_after_state_save;
