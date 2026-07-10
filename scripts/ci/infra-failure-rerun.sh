@@ -4,6 +4,8 @@ set -euo pipefail
 SELF_NAME="$(basename "$0")"
 TMP_DIR="$(mktemp -d)"
 SUMMARY_ROWS="$TMP_DIR/summary-rows.md"
+PG_JOB_NAME="PostgreSQL tests (ubuntu-postgres)"
+WINDOWS_ADVISORY_JOB_NAME="Fast check + non-PG tests (windows-latest)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 : >"$SUMMARY_ROWS"
@@ -44,15 +46,23 @@ log_has_infra_failure() {
     "$log_path"
 }
 
-# Regression markers are checked across every failed job, not only the PG job.
-# This remains a separate guard from the infra predicate so mixed logs (a real
-# failure followed by shutdown noise) fail closed.
+# Regression markers are checked across every failed job except the explicitly
+# advisory Windows lane. This remains a separate guard from the infra predicate
+# so mixed logs from required-context upstream jobs fail closed.
 log_has_regression() {
   local log_path="$1"
   [[ -s "$log_path" ]] || return 1
   grep -a -E -i -q -- \
     'test result: FAILED|error\[E|panicked at' \
     "$log_path"
+}
+
+job_log_has_blocking_regression() {
+  local job_name="$1"
+  local log_path="$2"
+
+  [[ "$job_name" != "$WINDOWS_ADVISORY_JOB_NAME" ]] || return 1
+  log_has_regression "$log_path"
 }
 
 decide_retry() {
@@ -198,14 +208,16 @@ run_classifier() {
       continue
     fi
 
-    if log_has_regression "$log_path"; then
+    if job_log_has_blocking_regression "$job_name" "$log_path"; then
       regression_count=$((regression_count + 1))
       job_class="regression"
+    elif log_has_regression "$log_path"; then
+      job_class="advisory-regression"
     elif log_has_infra_failure "$log_path"; then
       job_class="infra-unrelated"
     fi
 
-    if [[ "$job_name" == "PostgreSQL tests (ubuntu-postgres)" ]]; then
+    if [[ "$job_name" == "$PG_JOB_NAME" ]]; then
       pg_failed_count=$((pg_failed_count + 1))
       pg_job_id="$job_id"
       if log_has_infra_failure "$log_path"; then
@@ -277,6 +289,8 @@ run_self_test() {
   local timeout_log="$TMP_DIR/selftest-timeout.log"
   local regression_log="$TMP_DIR/selftest-regression.log"
   local mixed_log="$TMP_DIR/selftest-mixed.log"
+  local run_29067936620_windows_log="$TMP_DIR/selftest-run-29067936620-windows.log"
+  local run_29067936620_pg_log="$TMP_DIR/selftest-run-29067936620-postgres.log"
 
   printf '%s\n' 'The runner has received a shutdown signal.' 'Error: Process completed with exit code 143.' >"$infra_log"
   printf '%s\n' "The action 'just test-postgres' has timed out after 15 minutes." >"$timeout_log"
@@ -286,12 +300,24 @@ run_self_test() {
   # guard in decide_retry must win.
   cp "$regression_log" "$mixed_log"
   printf '%s\n' 'The runner has received a shutdown signal.' >>"$mixed_log"
+  # Run 29067936620 attempt 1: the advisory Windows job panicked while the PG
+  # job exited 143 during runner shutdown. The PG failure remains rerunnable.
+  printf '%s\n' \
+    'thread panicked at src\services\routines\store.rs:4244:9' \
+    'test result: FAILED. 163 passed; 1 failed' \
+    >"$run_29067936620_windows_log"
+  printf '%s\n' \
+    'Error: Process completed with exit code 143.' \
+    'The runner has received a shutdown signal.' \
+    >"$run_29067936620_pg_log"
 
   log_has_infra_failure "$infra_log" || { echo "assertion failed: shutdown must be infrastructure" >&2; exit 1; }
   log_has_infra_failure "$timeout_log" || { echo "assertion failed: action timeout must be infrastructure" >&2; exit 1; }
   log_has_regression "$regression_log" || { echo "assertion failed: regression markers must be detected" >&2; exit 1; }
   log_has_infra_failure "$mixed_log" || { echo "assertion failed: mixed log must contain infrastructure" >&2; exit 1; }
   log_has_regression "$mixed_log" || { echo "assertion failed: mixed log must contain regression" >&2; exit 1; }
+  log_has_regression "$run_29067936620_windows_log" || { echo "assertion failed: run 29067936620 Windows fixture must contain regression" >&2; exit 1; }
+  log_has_infra_failure "$run_29067936620_pg_log" || { echo "assertion failed: run 29067936620 PG fixture must contain infrastructure" >&2; exit 1; }
 
   assert_equal "would-rerun:infra" "$(decide_retry 1 1 0 0)" "infra-only rerun"
   assert_equal "no-op:regression" "$(decide_retry 1 1 1 0)" "mixed regression guard"
@@ -299,6 +325,24 @@ run_self_test() {
   assert_equal "no-op:no-pg-failure" "$(decide_retry 0 0 0 0)" "vacuous truth guard"
   assert_equal "no-op:ambiguous-pg-jobs" "$(decide_retry 2 2 0 0)" "ambiguous target guard"
   assert_equal "no-op:unclassified-pg-failure" "$(decide_retry 1 0 0 0)" "unclassified guard"
+
+  local historical_regression_count=0
+  if job_log_has_blocking_regression "$WINDOWS_ADVISORY_JOB_NAME" "$run_29067936620_windows_log"; then
+    historical_regression_count=$((historical_regression_count + 1))
+  fi
+  assert_equal \
+    "would-rerun:infra" \
+    "$(decide_retry 1 1 "$historical_regression_count" 0)" \
+    "run 29067936620 advisory regression reclassification"
+
+  local pg_regression_count=0
+  if job_log_has_blocking_regression "$PG_JOB_NAME" "$regression_log"; then
+    pg_regression_count=$((pg_regression_count + 1))
+  fi
+  assert_equal \
+    "no-op:regression" \
+    "$(decide_retry 1 1 "$pg_regression_count" 0)" \
+    "PG regression remains fail-closed"
 
   echo "self-test passed"
 }
