@@ -111,7 +111,7 @@ async fn background_completion_target_prefers_voice_turn_link_by_dispatch_id() {
         },
     )
     .await
-    .expect("insert voice turn link");
+    .expect("upsert voice turn link");
 
     let resolved = voice_background_completion_target(
         Some(ChannelId::new(999)),
@@ -149,7 +149,7 @@ async fn voice_turn_link_playback_lookup_falls_back_to_announce_message() {
         },
     )
     .await
-    .expect("insert voice turn link");
+    .expect("upsert voice turn link");
 
     let resolved = resolve_voice_turn_link_for_playback(Some(&pool), None, Some(user_msg_id), None)
         .await

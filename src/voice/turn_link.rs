@@ -20,8 +20,8 @@
 //!     turn completes (TTS done, run_completed, etc.).
 //!   * [`gc_terminal_voice_turn_links_pg`] — leader-only maintenance sweep
 //!     for old terminal rows. Active and cancelled rows are intentionally
-//!     left in place to preserve audit/lookup behaviour for long-lived
-//!     background turns (24h+ runs are normal).
+//!     left in place to preserve durable history for long-lived background
+//!     turns (24h+ runs are normal).
 //!
 //! The live call sites are wired through voice background handoff, barge-in,
 //! final playback resolution, and leader maintenance.
