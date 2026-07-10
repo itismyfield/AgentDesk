@@ -115,7 +115,7 @@ def _lexical_absolute_path(value: str | Path) -> Path | None:
     """Normalize a path without requiring the target to exist."""
     try:
         candidate = Path(value).expanduser()
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, RuntimeError):
         return None
     if not candidate.is_absolute():
         return None
@@ -406,22 +406,17 @@ def parse_transcript_ts(ts: str) -> float | None:
 
 
 def is_harness_control_assistant_record(record: object) -> bool:
-    """Whether an assistant JSONL row is a synthetic rate-limit control row.
+    """Whether an assistant JSONL row is synthetic harness control data.
 
     The visible banner text is deliberately irrelevant: users and normal
-    assistant responses may legitimately discuss the same words.  Claude marks
-    the non-deliverable harness row with this exact structural tuple instead.
+    assistant responses may legitimately discuss the same words. Claude marks
+    every non-deliverable harness-authored assistant row with the synthetic
+    model identity, independent of API status/error shape.
     """
     if not isinstance(record, dict):
         return False
     message = record.get("message")
-    return (
-        isinstance(message, dict)
-        and message.get("model") == "<synthetic>"
-        and record.get("isApiErrorMessage") is True
-        and record.get("apiErrorStatus") == 429
-        and record.get("error") == "rate_limit"
-    )
+    return isinstance(message, dict) and message.get("model") == "<synthetic>"
 
 
 def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
@@ -653,12 +648,13 @@ def evaluate(
     gap_alert_secs: int,
     prior_delivered_ts: float = 0.0,
 ) -> Verdict:
-    """Core judgment, ported verbatim from the proven 07-09 logic (#4140→#4178→
-    #4181 lineage). The health watermark is the LAST SUCCESSFUL delivery, not
-    `any lost`: a historic gap (already reported, already recovered) must not
-    re-alert forever, and relay chunking can deliver a later block while an
-    earlier one is still missing. Both conditions — lost blocks exist AND the
-    watermark is older than gap_alert_secs — must hold to declare a gap.
+    """Core relay-gap judgment descended from the 07-09 logic and subsequently
+    extended through the #4140→#4178→#4181 lineage. The health watermark is the
+    LAST SUCCESSFUL delivery, not `any lost`: a historic gap (already reported,
+    already recovered) must not re-alert forever, and relay chunking can deliver
+    a later block while an earlier one is still missing. Both conditions — lost
+    blocks exist AND the watermark is older than gap_alert_secs — must hold to
+    declare a gap.
     """
     prior = (
         float(prior_delivered_ts)

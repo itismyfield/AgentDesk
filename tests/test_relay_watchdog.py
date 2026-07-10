@@ -279,6 +279,59 @@ class TranscriptParsingTests(unittest.TestCase):
         self.assertTrue(is_harness_control_assistant_record(record))
         self.assertEqual(assistant_blocks_from_lines([json.dumps(record)]), [])
 
+    def test_invariant_4435_all_synthetic_harness_error_shapes_are_excluded(self):
+        cases = [
+            (
+                "server_error_none",
+                {"error": "server_error", "apiErrorStatus": None},
+                "server error",
+            ),
+            (
+                "authentication_failed",
+                {"error": "authentication_failed", "apiErrorStatus": 401},
+                "auth failed",
+            ),
+            (
+                "overloaded_529",
+                {"error": "overloaded", "apiErrorStatus": 529},
+                "overloaded",
+            ),
+            ("unknown_idle_timeout", {"error": "idle_timeout"}, "unknown idle timeout"),
+            (
+                "non_api_no_response",
+                {"isApiErrorMessage": False, "apiErrorStatus": None},
+                "No response requested.",
+            ),
+            (
+                "rate_limit_none",
+                {"error": "rate_limit", "apiErrorStatus": None},
+                "rate limited",
+            ),
+        ]
+        for name, metadata, prose in cases:
+            with self.subTest(name=name):
+                record = {
+                    "type": "assistant",
+                    "timestamp": "2026-07-09T02:00:00Z",
+                    **metadata,
+                    "message": {
+                        "model": "<synthetic>",
+                        "content": [{"type": "text", "text": prose}],
+                    },
+                }
+                self.assertTrue(is_harness_control_assistant_record(record))
+                self.assertEqual(assistant_blocks_from_lines([json.dumps(record)]), [])
+
+                real_record = {
+                    **record,
+                    "message": {**record["message"], "model": "claude-opus-4-1"},
+                }
+                self.assertFalse(is_harness_control_assistant_record(real_record))
+                self.assertEqual(
+                    [text for _, text in assistant_blocks_from_lines([json.dumps(real_record)])],
+                    [prose],
+                )
+
     def test_invariant_4435_identical_normal_assistant_text_is_retained(self):
         record = {
             "type": "assistant",
@@ -520,6 +573,16 @@ class SelectorSyncEvaluationTests(unittest.TestCase):
     def test_invariant_4435_arbitrary_unequal_paths_are_not_comparable(self):
         verdict = evaluate_selector_sync(
             "/tmp/not-a-provider.jsonl", self.provider_path("f.jsonl"), True
+        )
+        self.assertEqual(verdict.state, SELECTOR_UNKNOWN)
+        self.assertEqual(verdict.reason, "selector_paths_uncomparable")
+        self.assertFalse(verdict.diverged)
+
+    def test_invariant_4435_nonexistent_tilde_user_is_unknown_uncomparable(self):
+        verdict = evaluate_selector_sync(
+            "~agentdesk-user-that-does-not-exist-4435/b.jsonl",
+            self.provider_path("f.jsonl"),
+            True,
         )
         self.assertEqual(verdict.state, SELECTOR_UNKNOWN)
         self.assertEqual(verdict.reason, "selector_paths_uncomparable")
