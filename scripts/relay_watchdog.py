@@ -56,7 +56,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 # ── Verdict states (pure judgment output, see evaluate()) ─────────────────────
 STATE_OK = "ok"
@@ -71,6 +71,17 @@ PG_UPSTREAM_DOWN = "upstream_or_half_dead"
 PG_UNCLASSIFIED_DOWN = "db_down_tunnel_unknown"
 PG_UNKNOWN = "unknown"
 PG_STATE_KEY = "_pg_tunnel"
+
+# Independent watcher-coverage states (#4408 phase 1).  Coverage is evaluated
+# in parallel with transcript-vs-Discord gap judgment; these states must never
+# suppress or replace STATE_GAP.
+COVERAGE_COVERED = "covered"
+COVERAGE_UNCOVERED = "uncovered"
+COVERAGE_UNKNOWN = "unknown"
+COVERAGE_CONFIRM_TICKS = 2
+
+PG_TOPOLOGY_TUNNEL = "tunnel"
+PG_TOPOLOGY_DIRECT = "direct"
 
 
 def adk_root() -> Path:
@@ -136,6 +147,10 @@ class Config:
     # after this many CONSECUTIVE failures instead of skipping forever.
     read_fail_alert_after: int = 5
     dcserver_port: int = 8791
+    # A direct PostgreSQL node does not expect an SSH -L listener on 15432.
+    # The topology changes only the CLOSED diagnosis text; db=false remains
+    # the sole PG failure signal in either topology.
+    pg_topology: str = PG_TOPOLOGY_TUNNEL
     # PG must remain end-to-end unhealthy for this long before alerting.  The
     # default is >3x the supervisor's normal recovery envelope, avoiding noise
     # while launchd+ssh are doing their job.  Override only for an approved T3
@@ -201,6 +216,12 @@ def parse_config(raw: dict[str, Any]) -> Config:
                 ) from e
     if "github_repo" in raw:
         kwargs["github_repo"] = str(raw["github_repo"])
+    pg_topology = raw.get("pg_topology", PG_TOPOLOGY_TUNNEL)
+    if pg_topology not in (PG_TOPOLOGY_TUNNEL, PG_TOPOLOGY_DIRECT):
+        raise ConfigError(
+            "config field 'pg_topology' must be 'tunnel' or 'direct'"
+        )
+    kwargs["pg_topology"] = pg_topology
     for key in ("pg_alert_after_secs", "pg_realert_secs"):
         if key in kwargs and kwargs[key] <= 0:
             raise ConfigError(f"config field {key!r} must be greater than zero")
@@ -258,16 +279,54 @@ def channel_project_dirs(root: Path, pattern: re.Pattern[str]) -> list[Path]:
         return []
 
 
-def newest_transcript(dirs: list[Path]) -> Path | None:
-    js: list[Path] = []
+@dataclass(frozen=True)
+class TranscriptCandidate:
+    path: Path
+    size: int
+    mtime: float
+
+
+def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
+    candidates: list[TranscriptCandidate] = []
     for d in dirs:
         try:
-            js.extend(d.glob("*.jsonl"))
+            paths = list(d.glob("*.jsonl"))
         except OSError:
             continue
-    if not js:
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            candidates.append(TranscriptCandidate(path, stat.st_size, stat.st_mtime))
+    return candidates
+
+
+def select_watch_transcript(
+    candidates: list[TranscriptCandidate], previous_sizes: Mapping[str, int]
+) -> Path | None:
+    """Choose a transcript by observed growth, falling back to newest mtime.
+
+    A newly discovered candidate has no growth proof yet.  Once a prior size
+    exists, any file that grew wins over a newer-but-stagnant file; mtime and
+    path provide deterministic tie-breaking within the chosen pool.  The
+    caller owns I/O and persistence, keeping this selector pure.
+    """
+    if not candidates:
         return None
-    return max(js, key=lambda f: f.stat().st_mtime)
+    growing = [
+        candidate
+        for candidate in candidates
+        if str(candidate.path) in previous_sizes
+        and candidate.size > previous_sizes[str(candidate.path)]
+    ]
+    pool = growing or candidates
+    return max(pool, key=lambda candidate: (candidate.mtime, str(candidate.path))).path
+
+
+def newest_transcript(dirs: list[Path]) -> Path | None:
+    """Backward-compatible mtime selector for callers without growth state."""
+    return select_watch_transcript(transcript_candidates(dirs), {})
 
 
 # ── Transcript parsing ─────────────────────────────────────────────────────────
@@ -347,6 +406,69 @@ class PgHealthVerdict:
     state: str
     db: bool | None
     tunnel_open: bool | None
+
+
+@dataclass(frozen=True)
+class CoverageVerdict:
+    state: str
+    reason: str
+    consecutive_uncovered: int
+    confirmed: bool
+
+
+@dataclass(frozen=True)
+class WatcherStateProbe:
+    status: int | None
+    attached: bool | None = None
+    desynced: bool | None = None
+
+
+def evaluate_coverage(
+    expected_alive: bool | None,
+    watcher_status: int | None,
+    attached: bool | None,
+    desynced: bool | None,
+    previous_uncovered: int,
+) -> CoverageVerdict:
+    """Pure I2 judgment for expected tmux coverage.
+
+    E is independently enumerated tmux liveness. A is exactly
+    ``attached and not desynced`` from watcher-state. Only E && !A advances
+    confirmation. Transport/schema uncertainty is unknown (never an alert),
+    while an authoritative watcher-state 404 is uncovered. Two consecutive
+    uncovered ticks are required.
+    """
+
+    def uncovered(reason: str) -> CoverageVerdict:
+        consecutive = max(0, previous_uncovered) + 1
+        return CoverageVerdict(
+            COVERAGE_UNCOVERED,
+            reason,
+            consecutive,
+            consecutive >= COVERAGE_CONFIRM_TICKS,
+        )
+
+    if expected_alive is None:
+        return CoverageVerdict(COVERAGE_UNKNOWN, "tmux_enumeration_unknown", 0, False)
+    if expected_alive is False:
+        # The reverse invariant (watcher exists but tmux is dead) belongs to
+        # the stall watchdog; do not manufacture a duplicate alert here.
+        return CoverageVerdict(COVERAGE_COVERED, "tmux_not_expected", 0, False)
+    if watcher_status is None:
+        return CoverageVerdict(COVERAGE_UNKNOWN, "dcserver_unreachable", 0, False)
+    if watcher_status == 404:
+        return uncovered("watcher_state_404")
+    if watcher_status != 200:
+        return CoverageVerdict(
+            COVERAGE_UNKNOWN, f"watcher_state_http_{watcher_status}", 0, False
+        )
+    if attached is True and desynced is False:
+        return CoverageVerdict(COVERAGE_COVERED, "attached", 0, False)
+    if attached is False:
+        return uncovered("detached")
+    if attached is True and desynced is True:
+        return uncovered("attached_but_desynced")
+    return CoverageVerdict(COVERAGE_UNKNOWN, "watcher_state_malformed", 0, False)
 
 
 def evaluate_pg_health(db: object, tunnel_open: bool | None) -> PgHealthVerdict:
@@ -469,6 +591,94 @@ class Runtime:
             return now - self.deploy_marker.stat().st_mtime < self.cfg.deploy_quiet_secs
         except OSError:
             return False
+
+    def live_tmux_sessions(self) -> set[str] | None:
+        """Independently enumerate sessions with at least one live pane.
+
+        This intentionally does not consult SessionRegistry/WatcherSupervisor:
+        I2 must still detect their own discovery or reconcile failures.
+        ``None`` means the independent expectation probe itself is unknown.
+        """
+        try:
+            p = subprocess.run(
+                [
+                    "tmux",
+                    "list-panes",
+                    "-a",
+                    "-F",
+                    "#{session_name}\t#{pane_dead}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if p.returncode != 0:
+            error = (p.stderr or p.stdout).lower()
+            if "no server running" in error or "failed to connect to server" in error:
+                return set()
+            return None
+        live: set[str] = set()
+        parsed = 0
+        for line in p.stdout.splitlines():
+            name, separator, pane_dead = line.partition("\t")
+            if not separator or pane_dead not in ("0", "1"):
+                continue
+            parsed += 1
+            if name and pane_dead == "0":
+                live.add(name)
+        if p.stdout.strip() and parsed == 0:
+            return None
+        return live
+
+    def watcher_state(self, channel_id: str) -> WatcherStateProbe:
+        """Read watcher-state without advancing any relay watermark."""
+        url = (
+            f"http://127.0.0.1:{self.cfg.dcserver_port}/api/channels/"
+            f"{channel_id}/watcher-state"
+        )
+        try:
+            p = subprocess.run(
+                [
+                    "curl",
+                    "-sS",
+                    "--max-time",
+                    "4",
+                    "-w",
+                    "\n%{http_code}",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return WatcherStateProbe(None)
+        if p.returncode != 0:
+            return WatcherStateProbe(None)
+        body, separator, status_text = p.stdout.rpartition("\n")
+        if not separator:
+            return WatcherStateProbe(None)
+        try:
+            status = int(status_text)
+        except ValueError:
+            return WatcherStateProbe(None)
+        if status != 200:
+            return WatcherStateProbe(status)
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return WatcherStateProbe(200)
+        if not isinstance(payload, dict):
+            return WatcherStateProbe(200)
+        attached = payload.get("attached")
+        desynced = payload.get("desynced")
+        return WatcherStateProbe(
+            200,
+            attached if isinstance(attached, bool) else None,
+            desynced if isinstance(desynced, bool) else None,
+        )
 
     def discord_haystack(self, channel_id: str) -> str | None:
         try:
@@ -796,11 +1006,18 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
             pgs.pop(key, None)
         return
 
-    cause_text = {
-        PG_TUNNEL_DOWN: (
+    tunnel_closed_text = (
+        "CLOSED — direct-node topology에서는 127.0.0.1:15432 리스너가 "
+        "필수가 아니므로 SSH -L 장애로 단정하지 않음; direct PostgreSQL "
+        "또는 upstream 경로 장애로 판정"
+        if rt.cfg.pg_topology == PG_TOPOLOGY_DIRECT
+        else (
             "CLOSED — 로컬 127.0.0.1:15432 리스너가 없어 "
             "SSH -L supervisor 재기동 루프 실패로 판정"
-        ),
+        )
+    )
+    cause_text = {
+        PG_TUNNEL_DOWN: tunnel_closed_text,
         PG_UPSTREAM_DOWN: (
             "OPEN — 로컬 리스너는 열렸지만 db=false; "
             "half-dead SSH 포워딩 또는 upstream PostgreSQL 장애로 판정"
@@ -865,15 +1082,120 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
     )
 
 
+def expected_tmux_session_name(ch: ChannelConfig) -> str:
+    """Canonical session name encoded by the configured worktree family."""
+    return f"AgentDesk-{ch.worktree_prefix}"
+
+
+def tick_coverage(
+    rt: Runtime,
+    ch: ChannelConfig,
+    chs: dict[str, Any],
+    now: float,
+) -> None:
+    """Observe I2 only; never repair, return early from, or suppress gap checks."""
+    expected_name = expected_tmux_session_name(ch)
+    live_sessions = rt.live_tmux_sessions()
+    expected_alive = None if live_sessions is None else expected_name in live_sessions
+    probe = (
+        rt.watcher_state(ch.channel_id)
+        if expected_alive is True
+        else WatcherStateProbe(None)
+    )
+    previous = chs.get("coverage_uncovered_ticks", 0)
+    if not isinstance(previous, int) or isinstance(previous, bool):
+        previous = 0
+    verdict = evaluate_coverage(
+        expected_alive,
+        probe.status,
+        probe.attached,
+        probe.desynced,
+        previous,
+    )
+    if verdict.consecutive_uncovered:
+        chs["coverage_uncovered_ticks"] = verdict.consecutive_uncovered
+    else:
+        chs.pop("coverage_uncovered_ticks", None)
+
+    cid = ch.channel_id
+    if verdict.state == COVERAGE_UNKNOWN:
+        rt.log(f"[{cid}] coverage unknown reason={verdict.reason} — no alert")
+        return
+    if verdict.state == COVERAGE_COVERED:
+        if chs.pop("coverage_alerting", None):
+            rt.log(f"[{cid}] coverage restored for {expected_name}")
+        chs.pop("last_coverage_alert", None)
+        return
+
+    if not verdict.confirmed:
+        rt.log(
+            f"[{cid}] coverage uncovered reason={verdict.reason} "
+            f"confirm={verdict.consecutive_uncovered}/{COVERAGE_CONFIRM_TICKS}"
+        )
+        return
+    raw_last_alert = chs.get("last_coverage_alert", 0)
+    last_alert = (
+        float(raw_last_alert)
+        if isinstance(raw_last_alert, (int, float))
+        and not isinstance(raw_last_alert, bool)
+        else 0.0
+    )
+    if now - last_alert < rt.cfg.realert_secs:
+        rt.log(
+            f"[{cid}] coverage violation persists reason={verdict.reason} "
+            "(alert suppressed, coverage cooldown)"
+        )
+        return
+    rt.alert(
+        ch,
+        "🚨 **릴레이 와쳐 커버리지 불변식 위반**\n\n"
+        f"독립 tmux 열거에서 `{expected_name}` 세션의 live pane을 확인했지만 "
+        f"watcher-state가 **{verdict.reason}** 상태입니다.\n"
+        f"`attached=true && desynced=false`가 아닌 상태가 "
+        f"**{verdict.consecutive_uncovered} tick 연속** 관측되었습니다.\n\n"
+        "워치독은 read-only이며 자동 수리를 수행하지 않습니다.\n"
+        f"런타임: {rt.dcserver_snapshot()}",
+    )
+    chs["last_coverage_alert"] = now
+    chs["coverage_alerting"] = True
+    rt.log(
+        f"[{cid}] COVERAGE ALERT session={expected_name} "
+        f"reason={verdict.reason} ticks={verdict.consecutive_uncovered}"
+    )
+
+
 def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: float) -> None:
     cfg = rt.cfg
     cid = ch.channel_id
     chs: dict[str, Any] = state.setdefault(cid, {})
 
+    # I2 is intentionally parallel to gap evaluation (#4424): this helper has
+    # no return value that can short-circuit the existing transcript/haystack
+    # verdict path and it owns a separate alert cooldown key.
+    try:
+        tick_coverage(rt, ch, chs, now)
+    except Exception as e:  # noqa: BLE001 — coverage must never suppress gap checks
+        rt.log(f"[{cid}] coverage tick error: {type(e).__name__}: {e}")
+
     pattern = main_channel_project_re(ch.worktree_root, ch.worktree_prefix)
     dirs = channel_project_dirs(projects_root(), pattern)
-    tr = newest_transcript(dirs)
-    idle = (now - tr.stat().st_mtime) if tr else float("inf")
+    candidates = transcript_candidates(dirs)
+    raw_previous_sizes = chs.get("transcript_sizes", {})
+    previous_sizes = {
+        str(path): size
+        for path, size in (
+            raw_previous_sizes.items()
+            if isinstance(raw_previous_sizes, dict)
+            else ()
+        )
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0
+    }
+    tr = select_watch_transcript(candidates, previous_sizes)
+    chs["transcript_sizes"] = {
+        str(candidate.path): candidate.size for candidate in candidates
+    }
+    selected = next((candidate for candidate in candidates if candidate.path == tr), None)
+    idle = (now - selected.mtime) if selected else float("inf")
     if idle >= cfg.idle_quiet_secs:
         # Stale transcript: any "gap" is historic, not live. Never alert.
         # (No self-uninstall here — see module docstring.)
