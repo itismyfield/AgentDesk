@@ -533,6 +533,30 @@ class TestOnlySubtreeTest(unittest.TestCase):
         self.assertIn("src/support/cfg_then_path.rs", test_only)
         self.assertIn("src/support/path_then_cfg.rs", test_only)
 
+    def test_inline_cfg_test_path_attr_uses_inline_module_base(self) -> None:
+        # Gap A x C / #4394: inside an inline mod, #[path] is relative to the
+        # inline module base, not to the parent file directory.
+        files = {
+            "src/widget.rs": (
+                """
+                pub fn production_surface() {}
+
+                #[cfg(test)]
+                mod tests {
+                    #[path = "harness_support.rs"]
+                    mod harness_support;
+                }
+                """
+            ),
+            "src/widget/tests/harness_support.rs": "pub fn helper() {}\n",
+        }
+        with self._with_src(files):
+            test_only = {GEN.rel_posix(p) for p in GEN.test_only_module_files()}
+            modules = {entry.file_path: entry for entry in GEN.collect_modules()}
+        self.assertIn("src/widget/tests/harness_support.rs", test_only)
+        row = modules["src/widget/tests/harness_support.rs"]
+        self.assertEqual((row.prod_line_count, row.test_line_count), (0, 1))
+
     def test_non_test_path_declaration_keeps_child_production(self) -> None:
         files = {
             "src/lib.rs": (

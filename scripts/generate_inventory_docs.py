@@ -720,7 +720,8 @@ def _declared_child_paths(
     """Resolve the file(s) a `mod <name>;` declaration in ``parent`` points to."""
 
     if path_attr is not None:
-        return ((parent.parent / path_attr).resolve(),)
+        path_base = base if base is not None else parent.parent
+        return ((path_base / path_attr).resolve(),)
     base = base or _file_module_dir(parent)
     return ((base / f"{name}.rs").resolve(), (base / name / "mod.rs").resolve())
 
@@ -758,7 +759,7 @@ def _module_file_declarations(
             )
             continue
 
-        base = contexts[-1].module_dir if contexts else _file_module_dir(parent)
+        base = contexts[-1].module_dir if contexts else None
         declarations.append(
             ModuleFileDeclaration(
                 parent=parent,
