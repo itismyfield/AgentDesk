@@ -158,9 +158,7 @@ pub(crate) fn codex_tui_launch_options_fingerprint(options: &CodexLaunchOptions)
     for add_dir in &options.add_dirs {
         hash_field(&mut hasher, "add_dir", add_dir);
     }
-    let hooks_enabled = std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"));
+    let hooks_enabled = crate::services::codex::codex_direct_tui_hook_overrides_enabled();
     hash_field(
         &mut hasher,
         "direct_tui_hooks",

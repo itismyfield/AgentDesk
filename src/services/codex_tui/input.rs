@@ -210,12 +210,6 @@ impl PromptDraftPolicy {
         snapshot.composer_marker_detected
             && (matches!(self, Self::AcceptDraftForClear) || !snapshot.prompt_draft_detected)
     }
-
-    fn should_block_rollout_ready(self, snapshot: &PromptReadinessSnapshot) -> bool {
-        matches!(self, Self::RejectDraft)
-            && snapshot.capture_available
-            && snapshot.prompt_draft_detected
-    }
 }
 
 /// Outcome of the provider hook-event fast path.
@@ -272,7 +266,6 @@ fn mark_rollout_composer_busy(session_name: &str) {
         .remove(session_name);
 }
 
-#[cfg(test)]
 fn rollout_composer_ready_observed(session_name: &str) -> bool {
     rollout_composer_ready_state()
         .ready_sessions
@@ -287,6 +280,16 @@ fn take_rollout_composer_ready(session_name: &str) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(session_name)
+}
+
+fn observe_rollout_composer_ready_for_prompt_wait(session_name: &str) -> bool {
+    if super::warm_followup::codex_tui_warm_followup_enabled() {
+        take_rollout_composer_ready(session_name)
+    } else {
+        // Kill-switch parity: preserve the pre-#4411 non-consuming readiness
+        // observation together with the legacy cleanup/relaunch path.
+        rollout_composer_ready_observed(session_name)
+    }
 }
 
 fn rollout_composer_ready_notify() -> Arc<Notify> {
@@ -486,15 +489,16 @@ fn wait_until_codex_tui_input_ready_with_policy(
                 return Err(timeout_error(&snapshot));
             }
             let snapshot = prompt_readiness_snapshot(session_name);
-            if draft_policy.should_block_rollout_ready(&snapshot) {
+            if snapshot.capture_available && !snapshot.tmux_pane_alive {
+                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+            }
+            if snapshot.capture_available && !draft_policy.accepts(&snapshot) {
                 tracing::warn!(
                     tmux_session_name = session_name,
                     readiness = readiness.label(),
                     pane_tail = %snapshot.pane_tail,
-                    "codex_tui rollout composer_ready ignored because a prompt draft is visible"
+                    "codex_tui rollout composer_ready ignored because the captured pane is not input-ready"
                 );
-            } else if snapshot.capture_available && !snapshot.tmux_pane_alive {
-                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
             } else {
                 tracing::debug!(
                     tmux_session_name = session_name,
@@ -579,17 +583,18 @@ fn wait_until_codex_tui_input_ready_with_policy(
         if let Some(err) = cancel_check() {
             return Err(err);
         }
-        if take_rollout_composer_ready(session_name) {
+        if observe_rollout_composer_ready_for_prompt_wait(session_name) {
             let snapshot = prompt_readiness_snapshot(session_name);
-            if draft_policy.should_block_rollout_ready(&snapshot) {
+            if snapshot.capture_available && !snapshot.tmux_pane_alive {
+                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+            }
+            if snapshot.capture_available && !draft_policy.accepts(&snapshot) {
                 tracing::warn!(
                     tmux_session_name = session_name,
                     readiness = readiness.label(),
                     pane_tail = %snapshot.pane_tail,
-                    "codex_tui fallback rollout composer_ready ignored because a prompt draft is visible"
+                    "codex_tui fallback rollout composer_ready ignored because the captured pane is not input-ready"
                 );
-            } else if snapshot.capture_available && !snapshot.tmux_pane_alive {
-                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
             } else {
                 tracing::debug!(
                     tmux_session_name = session_name,
@@ -674,7 +679,7 @@ fn run_prompt_ready_fast_path(
         if cancel_requested(cancel_token.as_deref()) {
             return (HookFastPathOutcome::Cancelled, None);
         }
-        if take_rollout_composer_ready(&session_name) {
+        if observe_rollout_composer_ready_for_prompt_wait(&session_name) {
             return (HookFastPathOutcome::RolloutComposerReady, None);
         }
         let pre_snapshot = prompt_readiness_snapshot(&session_name);
@@ -707,7 +712,7 @@ fn run_prompt_ready_fast_path(
 
         let fast_path = tokio::select! {
             _ = &mut rollout_ready_notified => {
-                if take_rollout_composer_ready(&session_name) {
+                if observe_rollout_composer_ready_for_prompt_wait(&session_name) {
                     HookFastPathOutcome::RolloutComposerReady
                 } else {
                     HookFastPathOutcome::Pending
@@ -1021,9 +1026,7 @@ fn clear_cancelled_partial_prompt_draft(
 }
 
 fn snapshot_confirms_prompt_left_editor(snapshot: &PromptReadinessSnapshot) -> bool {
-    snapshot.tmux_pane_alive
-        && snapshot.capture_available
-        && !snapshot_has_retry_safe_prompt_draft(snapshot)
+    snapshot.tmux_pane_alive && snapshot.capture_available && !snapshot.prompt_draft_detected
 }
 
 fn classify_prompt_submit_confirmation(
@@ -1929,7 +1932,8 @@ mod tests {
     #[test]
     fn submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots() {
         let draft = active_box_draft_snapshot("Discord follow-up");
-        let submitted = submit_snapshot(true, true, false, true);
+        let submitted = submit_snapshot(true, true, false, false);
+        let ambiguous_draft = submit_snapshot(true, true, true, true);
         let capture_missing = submit_snapshot(true, false, false, false);
         let pane_dead = submit_snapshot(false, false, false, false);
 
@@ -1944,6 +1948,11 @@ mod tests {
         assert_eq!(
             classify_prompt_submit_confirmation(&capture_missing, &pane_dead),
             PromptSubmitConfirmation::Unconfirmed
+        );
+        assert_eq!(
+            classify_prompt_submit_confirmation(&ambiguous_draft, &ambiguous_draft),
+            PromptSubmitConfirmation::Unconfirmed,
+            "a draft flag without active-composer evidence is never submitted or retry-safe"
         );
     }
 

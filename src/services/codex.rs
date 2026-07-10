@@ -423,7 +423,7 @@ fn codex_resume_supports_hook_trust_bypass(
     }
 }
 
-fn codex_direct_tui_hook_overrides_enabled() -> bool {
+pub(crate) fn codex_direct_tui_hook_overrides_enabled() -> bool {
     std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
