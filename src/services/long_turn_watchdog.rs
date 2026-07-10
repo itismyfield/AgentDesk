@@ -215,7 +215,11 @@ fn format_long_turn_alert(window: &LongTurnWindow) -> String {
 ///
 /// Returns `Ok(true)` when a new alert row was actually enqueued and `Ok(false)`
 /// when the cooldown suppressed it as a duplicate.
-async fn enqueue_alert(pool: &PgPool, target: &str, content: &str) -> Result<bool, sqlx::Error> {
+async fn enqueue_alert(
+    pool: &PgPool,
+    target: &str,
+    content: &str,
+) -> Result<bool, crate::services::message_outbox::OutboxEnqueueError> {
     crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
         pool,
         crate::services::message_outbox::OutboxMessage {

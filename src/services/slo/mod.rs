@@ -389,13 +389,18 @@ pub async fn record_alert_sent_pg(
 }
 
 pub async fn enqueue_alert_pg(pool: &PgPool, target: &str, content: &str) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO message_outbox (target, content, bot, source, reason_code, status)
-         VALUES ($1, $2, 'notify', 'slo_alerter', 'slo_threshold_breach', 'pending')",
+    crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_ttl(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target,
+            content,
+            bot: "notify",
+            source: "slo_alerter",
+            reason_code: Some("slo_threshold_breach"),
+            session_key: None,
+        },
+        0,
     )
-    .bind(target)
-    .bind(content)
-    .execute(pool)
     .await?;
     Ok(())
 }

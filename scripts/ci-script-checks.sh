@@ -48,6 +48,10 @@ echo "=== PG audit guard ==="
 echo "=== Postgres migration checksum guard ==="
 "$PYTHON" scripts/check_postgres_migration_checksums.py
 
+echo "=== message_outbox validated-insert guard (#4424) ==="
+"$PYTHON" scripts/check_message_outbox_inserts.py
+"$PYTHON" -m unittest tests.test_message_outbox_inserts
+
 echo "=== State/lint hardening guard ==="
 "$PYTHON" scripts/audit_state_lint_hardening.py
 
