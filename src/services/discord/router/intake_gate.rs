@@ -11,7 +11,6 @@ mod component_events;
 mod gate;
 mod node_override_routing;
 mod queue_effects;
-mod reaction_remove;
 mod stale_turn;
 
 pub(in crate::services::discord) use gate::should_process_turn_message;
@@ -378,9 +377,6 @@ pub(in crate::services::discord) async fn handle_event(
                     .await;
                 }
             }
-        }
-        serenity::FullEvent::ReactionRemove { removed_reaction } => {
-            reaction_remove::handle_reaction_remove(ctx, removed_reaction, data).await?;
         }
         serenity::FullEvent::Message { new_message } => {
             // ── Universal message-ID dedup ─────────────────────────────

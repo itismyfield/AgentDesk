@@ -574,7 +574,6 @@ src/
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── node_override_routing.rs
 │   │   │   │   ├── queue_effects.rs
-│   │   │   │   ├── reaction_remove.rs
 │   │   │   │   └── stale_turn.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── intake_turn/

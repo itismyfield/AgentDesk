@@ -58,10 +58,8 @@ pub(crate) struct RunBotContext {
 pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
     serenity::GatewayIntents::GUILDS
         | serenity::GatewayIntents::GUILD_MESSAGES
-        | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS
         | serenity::GatewayIntents::GUILD_VOICE_STATES
         | serenity::GatewayIntents::DIRECT_MESSAGES
-        | serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS
         | serenity::GatewayIntents::MESSAGE_CONTENT
 }
 
@@ -497,17 +495,33 @@ mod bootstrap_tests {
     }
 
     #[test]
-    fn discord_gateway_intents_snapshot_matches_bootstrap_contract() {
+    fn reaction_status_removal_cannot_cancel_gateway_contract() {
         let intents = discord_gateway_intents();
+        assert!(
+            !intents.contains(serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS),
+            "guild reaction events must stay unsubscribed so status removal cannot cancel work"
+        );
+        assert!(
+            !intents.contains(serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS),
+            "DM reaction events must stay unsubscribed so status removal cannot cancel work"
+        );
+
         let expected = serenity::GatewayIntents::GUILDS
             | serenity::GatewayIntents::GUILD_MESSAGES
-            | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS
             | serenity::GatewayIntents::GUILD_VOICE_STATES
             | serenity::GatewayIntents::DIRECT_MESSAGES
-            | serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS
             | serenity::GatewayIntents::MESSAGE_CONTENT;
-
         assert_eq!(intents, expected);
+
+        let intake_gate_source = include_str!("router/intake_gate.rs");
+        assert!(
+            !intake_gate_source.contains("FullEvent::ReactionRemove"),
+            "intake must not dispatch reaction-removal events"
+        );
+        assert!(
+            !intake_gate_source.contains("reaction_remove::handle_reaction_remove"),
+            "the destructive reaction-removal handler must not be reachable from intake"
+        );
     }
 
     struct RecordingStalePlaceholderDeleter {
