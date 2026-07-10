@@ -32,8 +32,6 @@ test-non-pg:
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
 test-postgres:
-    cargo test _pg -- --nocapture --test-threads=1
-    cargo test pg_ -- --nocapture --test-threads=1
-    cargo test postgres -- --nocapture --test-threads=1
+    cargo test -- _pg pg_ postgres --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test
