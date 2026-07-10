@@ -10,6 +10,11 @@
 > `QueuedCardPostFailed` referenced lifecycle notice, its outbound-v3 delivery
 > path, dedup identity, and every remaining callsite are unchanged.)
 
+> Last refreshed: 2026-07-11 (#4438 — the test-only default-OFF long-chunk
+> delivery-record check now holds the shared test-environment lock and resolves
+> `AGENTDESK_ROOT_DIR` inside a scoped temp root. Production delivery-record
+> authority, rollout defaults, writers, and outbound callsite coverage are unchanged.)
+
 > #3664 outbound bot-selection note: the outbox drain (`src/server/mod.rs`)
 > now resolves the delivery bot via `message_outbox::delivery_bot_for_target_session`.
 > For a private (DM) session — tmux name `AgentDesk-<provider>-dm-<digits>` with a

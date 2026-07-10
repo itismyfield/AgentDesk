@@ -2553,11 +2553,13 @@ mod tests {
 
     #[test]
     fn record_long_chunk_terminal_delivery_off_is_noop_3610c() {
-        // The REAL helper end-to-end under the default-OFF shadow flag: it must be a
+        // The REAL helper end-to-end under the forced-OFF shadow flag: it must be a
         // complete no-op (no panic, no write) regardless of the resolved anchor.
-        // (Tests never set AGENTDESK_DELIVERY_RECORD_SHADOW, so the OnceLock reads
-        // OFF; this exercises the helper's own short-circuit through
-        // `shadow_mirror_delivered_frontier`.)
+        // The scoped root holds the crate-wide test-env lock, so both the helper and
+        // the assertions stay inside one throw-away tree and can never inspect the
+        // operator's runtime.
+        let root = IsolatedRoot::new();
+        let _shadow_off = shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         // Does not panic; OFF → writes nothing.
         super::record_long_chunk_terminal_delivery(
@@ -2570,8 +2572,16 @@ mod tests {
             "",
         );
         // No durable record was created for either channel under the test root.
-        assert!(read_record(&ProviderKind::Claude, 100_200_300).is_none());
-        assert!(read_record(&ProviderKind::Claude, 900_800_700).is_none());
+        for channel_id in [100_200_300, 900_800_700] {
+            let path = delivery_record_path(&ProviderKind::Claude, channel_id)
+                .expect("isolated delivery-record path");
+            assert!(
+                path.starts_with(root.path()),
+                "delivery-record path escaped isolated root: {}",
+                path.display()
+            );
+            assert!(read_record(&ProviderKind::Claude, channel_id).is_none());
+        }
     }
 
     // ---- #3610 PR-1d: WATCHER legacy long-chunk arm (same-channel) --------------
@@ -2645,33 +2655,22 @@ mod tests {
     /// resolve through this root, so the whole read-authority wiring runs against a
     /// throw-away tree with zero cross-test interference.
     struct IsolatedRoot {
+        _env: crate::config::TestEnvVarGuard,
         _dir: tempfile::TempDir,
-        previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl IsolatedRoot {
         fn new() -> Self {
-            let lock = crate::config::shared_test_env_lock()
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
             let dir = tempfile::tempdir().expect("isolated runtime root");
-            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+            let env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", dir.path());
             Self {
+                _env: env,
                 _dir: dir,
-                previous,
-                _lock: lock,
             }
         }
-    }
 
-    impl Drop for IsolatedRoot {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
+        fn path(&self) -> &Path {
+            self._dir.path()
         }
     }
 
