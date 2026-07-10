@@ -787,6 +787,37 @@ class RuntimeCoverageProbeTests(unittest.TestCase):
             probe = self.make_rt().watcher_state("999")
         self.assertEqual(probe, WatcherStateProbe(200, None, None))
 
+    def test_direct_node_snapshot_does_not_report_tunnel_closed(self):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if argv[0] == "curl":
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout='{"db":false,"degraded":true}',
+                    stderr="",
+                )
+            if argv[0] == "/bin/ps":
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            raise AssertionError(f"unexpected direct-node probe: {argv}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(
+                Config(
+                    channels=(TICK_CHANNEL,), pg_topology=PG_TOPOLOGY_DIRECT
+                ),
+                Path(tmp),
+            )
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                snapshot = rt.dcserver_snapshot()
+        self.assertIn("pg-topology DIRECT", snapshot)
+        self.assertNotIn("pg-tunnel CLOSED", snapshot)
+        self.assertFalse(any(call[0] == "nc" for call in calls))
+
 
 TICK_CHANNEL = ChannelConfig(
     channel_id="999",
@@ -911,6 +942,13 @@ class TickPgTunnelTests(unittest.TestCase):
         self.assertIn("CLOSED", rt.alerts[0][0])
         self.assertIn("direct-node topology", rt.alerts[0][0])
         self.assertNotIn("SSH -L supervisor 재기동 루프 실패", rt.alerts[0][0])
+        self.assertEqual(state[PG_STATE_KEY]["cause"], "direct_postgres_down")
+        self.assertTrue(any("cause=direct_postgres_down" in l for l in rt.log_lines))
+
+        rt.verdict = evaluate_pg_health(True, None)
+        tick_pg_tunnel(rt, state, self.NOW + 1)
+        self.assertIn("direct_postgres_down", rt.alerts[1][0])
+        self.assertNotIn("tunnel_down", rt.alerts[1][0])
 
     def test_realert_cooldown_boundary_is_exact(self):
         verdict = evaluate_pg_health(False, False)
@@ -1089,6 +1127,53 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn("커버리지 불변식 위반", rt.alerts[0][0])
         self.assertIn("watcher_state_404", rt.alerts[0][0])
         self.assertIn("read-only", rt.alerts[0][0])
+        self.assertFalse(
+            rt.alerts[0][1], "read-only coverage alerts must not trigger a turn"
+        )
+
+    def test_coverage_alert_is_suppressed_during_deploy_window(self):
+        rt = self.make_rt()
+        self.arm_coverage(rt, WatcherStateProbe(404))
+        rt.deploy_marker.touch()
+        state = {"999": {"coverage_uncovered_ticks": 1}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state["999"])
+        self.assertTrue(any("deploy window" in l for l in rt.log_lines))
+
+    def test_coverage_recovery_keeps_antiflap_cooldown(self):
+        rt = self.make_rt()
+        self.arm_coverage(rt, WatcherStateProbe(404))
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        first_alert_at = self.now + rt.cfg.poll_secs
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at)
+        self.assertEqual(len(rt.alerts), 1)
+
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at + rt.cfg.poll_secs)
+        self.assertEqual(state["999"]["last_coverage_alert"], first_alert_at)
+
+        rt.watcher_probe = WatcherStateProbe(404)
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at + 2 * rt.cfg.poll_secs)
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at + 3 * rt.cfg.poll_secs)
+        self.assertEqual(
+            len(rt.alerts), 1, "flapping must not bypass the 900s cooldown"
+        )
+
+    def test_tmux_death_ends_expectation_without_claiming_recovery(self):
+        rt = self.make_rt()
+        state = {
+            "999": {
+                "coverage_alerting": True,
+                "last_coverage_alert": self.now - 60,
+                "coverage_uncovered_ticks": 2,
+            }
+        }
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertTrue(any("expectation ended" in l for l in rt.log_lines))
+        self.assertFalse(any("coverage restored" in l for l in rt.log_lines))
+        self.assertEqual(state["999"]["last_coverage_alert"], self.now - 60)
 
     def test_dcserver_unreachable_never_advances_coverage_alert(self):
         rt = self.make_rt()

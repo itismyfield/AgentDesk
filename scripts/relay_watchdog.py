@@ -820,15 +820,20 @@ class Runtime:
                 continue
         else:
             bits.append("health UNREACHABLE")
-        try:
-            p = subprocess.run(
-                ["nc", "-z", "-G", "3", "127.0.0.1", "15432"],
-                capture_output=True,
-                timeout=8,
-            )
-            bits.append("pg-tunnel " + ("OPEN" if p.returncode == 0 else "CLOSED"))
-        except (OSError, subprocess.SubprocessError):
-            bits.append("pg-tunnel UNKNOWN")
+        if self.cfg.pg_topology == PG_TOPOLOGY_DIRECT:
+            bits.append("pg-topology DIRECT (15432 listener not expected)")
+        else:
+            try:
+                p = subprocess.run(
+                    ["nc", "-z", "-G", "3", "127.0.0.1", "15432"],
+                    capture_output=True,
+                    timeout=8,
+                )
+                bits.append(
+                    "pg-tunnel " + ("OPEN" if p.returncode == 0 else "CLOSED")
+                )
+            except (OSError, subprocess.SubprocessError):
+                bits.append("pg-tunnel UNKNOWN")
         try:
             p = subprocess.run(
                 ["/bin/ps", "-axo", "pid=,etime=,command="],
@@ -1026,13 +1031,19 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
             "UNKNOWN — db=false이나 nc 원인 판별자를 실행하지 못함"
         ),
     }[verdict.state]
-    pgs["cause"] = verdict.state
+    cause_state = (
+        "direct_postgres_down"
+        if rt.cfg.pg_topology == PG_TOPOLOGY_DIRECT
+        and verdict.state == PG_TUNNEL_DOWN
+        else verdict.state
+    )
+    pgs["cause"] = cause_state
     if "unhealthy_since" not in pgs:
         pgs["unhealthy_since"] = now
     unhealthy_for = now - float(pgs["unhealthy_since"])
     if unhealthy_for < rt.cfg.pg_alert_after_secs:
         rt.log(
-            f"[pg-tunnel] db=false cause={verdict.state} for "
+            f"[pg-tunnel] db=false cause={cause_state} for "
             f"{int(unhealthy_for)}s (< {rt.cfg.pg_alert_after_secs}s threshold)"
         )
         return
@@ -1040,7 +1051,7 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
     last_alert = float(pgs.get("last_alert", 0))
     if now - last_alert < rt.cfg.pg_realert_secs:
         rt.log(
-            f"[pg-tunnel] db=false persists cause={verdict.state} "
+            f"[pg-tunnel] db=false persists cause={cause_state} "
             "(alert suppressed, cooldown)"
         )
         return
@@ -1077,7 +1088,7 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
     pgs.pop("dedup_deferred", None)
     pgs.pop("dcserver_alert_seen", None)
     rt.log(
-        f"[pg-tunnel] ALERT db=false cause={verdict.state} "
+        f"[pg-tunnel] ALERT db=false cause={cause_state} "
         f"duration={int(unhealthy_for)}s"
     )
 
@@ -1123,14 +1134,27 @@ def tick_coverage(
         return
     if verdict.state == COVERAGE_COVERED:
         if chs.pop("coverage_alerting", None):
-            rt.log(f"[{cid}] coverage restored for {expected_name}")
-        chs.pop("last_coverage_alert", None)
+            if verdict.reason == "tmux_not_expected":
+                rt.log(
+                    f"[{cid}] coverage expectation ended for {expected_name} "
+                    "— tmux session no longer live"
+                )
+            else:
+                rt.log(f"[{cid}] coverage restored for {expected_name}")
+        # Keep last_coverage_alert across recovery as an anti-flap cooldown,
+        # matching the independent PG monitor's persistence semantics.
         return
 
     if not verdict.confirmed:
         rt.log(
             f"[{cid}] coverage uncovered reason={verdict.reason} "
             f"confirm={verdict.consecutive_uncovered}/{COVERAGE_CONFIRM_TICKS}"
+        )
+        return
+    if rt.in_deploy_window(now):
+        rt.log(
+            f"[{cid}] coverage violation reason={verdict.reason} suppressed — "
+            f"deploy window (marker < {rt.cfg.deploy_quiet_secs}s old)"
         )
         return
     raw_last_alert = chs.get("last_coverage_alert", 0)
@@ -1155,6 +1179,7 @@ def tick_coverage(
         f"**{verdict.consecutive_uncovered} tick 연속** 관측되었습니다.\n\n"
         "워치독은 read-only이며 자동 수리를 수행하지 않습니다.\n"
         f"런타임: {rt.dcserver_snapshot()}",
+        trigger_turn=False,
     )
     chs["last_coverage_alert"] = now
     chs["coverage_alerting"] = True
