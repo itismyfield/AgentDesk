@@ -172,12 +172,10 @@ impl SharedData {
                 .load(Ordering::Acquire);
             if current == state.episode.reconnect_count.saturating_add(1) {
                 state.episode.reconnect_count = current;
-                if let Some(post) =
-                    crate::services::discord::inflight::load_inflight_state(
-                        provider,
-                        channel_id.get(),
-                    )
-                    && let Some(identity) = state.episode.self_reattach_identity(&post)
+                if let Some(post) = crate::services::discord::inflight::load_inflight_state(
+                    provider,
+                    channel_id.get(),
+                ) && let Some(identity) = state.episode.self_reattach_identity(&post)
                 {
                     state.episode.identity = Some(identity);
                 }
@@ -379,34 +377,35 @@ impl HealthRegistry {
             .watcher_owner_channel_id
             .map(ChannelId::new)
             .unwrap_or(channel_id);
-        let (applied, reattached, noop_cooldown_secs, shield_channel_id) = if nudge_existing_watcher_for_backlog(
-            &shared,
-            provider,
-            &snapshot,
-            channel_id,
-            now_unix_secs,
-        ) {
-            (true, false, None, watcher_owner_channel_id)
-        } else {
-            if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
-                return Ok(false);
-            }
-            let response = relay_recovery::auto_apply_relay_recovery_for_shared(
-                self,
-                shared.clone(),
+        let (applied, reattached, noop_cooldown_secs, shield_channel_id) =
+            if nudge_existing_watcher_for_backlog(
+                &shared,
                 provider,
-                channel_id.get(),
-                RelayRecoveryActionKind::ReattachWatcher,
-                RelayRecoveryApplySource::ProbeAutoHeal,
-            )
-            .await?;
-            (
-                response.applied,
-                true,
-                Some(response.decision.auto_heal.window_secs),
+                &snapshot,
                 channel_id,
-            )
-        };
+                now_unix_secs,
+            ) {
+                (true, false, None, watcher_owner_channel_id)
+            } else {
+                if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
+                    return Ok(false);
+                }
+                let response = relay_recovery::auto_apply_relay_recovery_for_shared(
+                    self,
+                    shared.clone(),
+                    provider,
+                    channel_id.get(),
+                    RelayRecoveryActionKind::ReattachWatcher,
+                    RelayRecoveryApplySource::ProbeAutoHeal,
+                )
+                .await?;
+                (
+                    response.applied,
+                    true,
+                    Some(response.decision.auto_heal.window_secs),
+                    channel_id,
+                )
+            };
         if applied {
             let committed = shared.commit_redrive_success(
                 provider,
@@ -1036,13 +1035,8 @@ mod tests {
                 .watcher_owner_channel_id
                 .map(ChannelId::new)
                 .unwrap_or(channel_id);
-            let committed = shared.commit_redrive_success(
-                provider,
-                channel_id,
-                shield_channel_id,
-                now,
-                false,
-            );
+            let committed =
+                shared.commit_redrive_success(provider, channel_id, shield_channel_id, now, false);
             trace_redrive_cap_if_needed(provider, channel_id, snapshot, committed);
             assert_eq!(committed.attempt, Some(reserved_attempt));
             return (true, committed.attempt);
