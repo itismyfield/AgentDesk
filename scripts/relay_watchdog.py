@@ -49,6 +49,7 @@ if sys.version_info < MIN_PYTHON:  # pragma: no cover - trivial guard
 
 import calendar
 import json
+import math
 import os
 import re
 import shutil
@@ -89,6 +90,13 @@ SELECTOR_SYNCED = "synced"
 SELECTOR_DIVERGED = "diverged"
 SELECTOR_UNKNOWN = "unknown"
 
+SELECTOR_PATH_PROVIDER_PROJECT = "provider_project"
+SELECTOR_PATH_RUNTIME_MIRROR = "runtime_session_mirror"
+SELECTOR_PATH_UNCOMPARABLE = "uncomparable"
+
+DELIVERED_WATERMARKS_KEY = "delivered_watermarks"
+MAX_DELIVERED_WATERMARKS = 16
+
 PG_TOPOLOGY_TUNNEL = "tunnel"
 PG_TOPOLOGY_DIRECT = "direct"
 
@@ -101,6 +109,44 @@ def projects_root() -> Path:
     return Path(
         os.environ.get("CLAUDE_PROJECTS_ROOT", str(Path.home() / ".claude/projects"))
     )
+
+
+def _lexical_absolute_path(value: str | Path) -> Path | None:
+    """Normalize a path without requiring the target to exist."""
+    try:
+        candidate = Path(value).expanduser()
+    except (TypeError, ValueError, OSError):
+        return None
+    if not candidate.is_absolute():
+        return None
+    return Path(os.path.normpath(str(candidate)))
+
+
+def _is_path_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def classify_selector_path(value: str) -> str:
+    """Classify paths by representation before comparing selector identity.
+
+    Provider project transcripts and AgentDesk runtime-session mirrors can
+    contain the same logical session while intentionally having different
+    paths.  Only two provider-project paths are identity-comparable.
+    """
+    path = _lexical_absolute_path(value)
+    provider_root = _lexical_absolute_path(projects_root())
+    mirror_root = _lexical_absolute_path(adk_root() / "runtime" / "sessions")
+    if path is None or provider_root is None or mirror_root is None:
+        return SELECTOR_PATH_UNCOMPARABLE
+    if _is_path_within(path, mirror_root):
+        return SELECTOR_PATH_RUNTIME_MIRROR
+    if _is_path_within(path, provider_root):
+        return SELECTOR_PATH_PROVIDER_PROJECT
+    return SELECTOR_PATH_UNCOMPARABLE
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -359,6 +405,25 @@ def parse_transcript_ts(ts: str) -> float | None:
         return None
 
 
+def is_harness_control_assistant_record(record: object) -> bool:
+    """Whether an assistant JSONL row is a synthetic rate-limit control row.
+
+    The visible banner text is deliberately irrelevant: users and normal
+    assistant responses may legitimately discuss the same words.  Claude marks
+    the non-deliverable harness row with this exact structural tuple instead.
+    """
+    if not isinstance(record, dict):
+        return False
+    message = record.get("message")
+    return (
+        isinstance(message, dict)
+        and message.get("model") == "<synthetic>"
+        and record.get("isApiErrorMessage") is True
+        and record.get("apiErrorStatus") == 429
+        and record.get("error") == "rate_limit"
+    )
+
+
 def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
     """(epoch, text) for every assistant text block in a transcript's lines."""
     out: list[tuple[float, str]] = []
@@ -367,12 +432,19 @@ def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
             r = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
-        if not isinstance(r, dict) or r.get("type") != "assistant":
+        if (
+            not isinstance(r, dict)
+            or r.get("type") != "assistant"
+            or is_harness_control_assistant_record(r)
+        ):
             continue
         epoch = parse_transcript_ts(r.get("timestamp", ""))
         if epoch is None:
             continue
-        for c in (r.get("message") or {}).get("content") or []:
+        message = r.get("message")
+        if not isinstance(message, dict):
+            continue
+        for c in message.get("content") or []:
             if isinstance(c, dict) and c.get("type") == "text":
                 t = (c.get("text") or "").strip()
                 if t:
@@ -522,6 +594,17 @@ def evaluate_selector_sync(
         return SelectorVerdict(SELECTOR_UNKNOWN, "no_transcript", False)
     if bound_output_path == selected_transcript:
         return SelectorVerdict(SELECTOR_SYNCED, "selector_synced", False)
+    bound_kind = classify_selector_path(bound_output_path)
+    selected_kind = classify_selector_path(selected_transcript)
+    if SELECTOR_PATH_RUNTIME_MIRROR in (bound_kind, selected_kind):
+        return SelectorVerdict(
+            SELECTOR_UNKNOWN, "runtime_session_mirror_uncomparable", False
+        )
+    if (
+        bound_kind != SELECTOR_PATH_PROVIDER_PROJECT
+        or selected_kind != SELECTOR_PATH_PROVIDER_PROJECT
+    ):
+        return SelectorVerdict(SELECTOR_UNKNOWN, "selector_paths_uncomparable", False)
     if not f_growing:
         return SelectorVerdict(SELECTOR_SYNCED, "f_not_growing", False)
     return SelectorVerdict(SELECTOR_DIVERGED, "selector_diverged", True)
@@ -568,6 +651,7 @@ def evaluate(
     now: float,
     grace_secs: int,
     gap_alert_secs: int,
+    prior_delivered_ts: float = 0.0,
 ) -> Verdict:
     """Core judgment, ported verbatim from the proven 07-09 logic (#4140→#4178→
     #4181 lineage). The health watermark is the LAST SUCCESSFUL delivery, not
@@ -576,7 +660,17 @@ def evaluate(
     earlier one is still missing. Both conditions — lost blocks exist AND the
     watermark is older than gap_alert_secs — must hold to declare a gap.
     """
-    delivered_ts = max((e for e, t in blocks if delivered(t, hay)), default=0.0)
+    prior = (
+        float(prior_delivered_ts)
+        if _is_finite_nonnegative_number(prior_delivered_ts)
+        else 0.0
+    )
+    current_delivered_ts = max(
+        (e for e, t in blocks if delivered(t, hay)), default=0.0
+    )
+    # Discord reads are bounded.  Absence from today's haystack cannot erase a
+    # delivery confirmed by an earlier tick or process lifetime.
+    delivered_ts = max(prior, current_delivered_ts)
     stale = [(e, t) for e, t in blocks if now - e > grace_secs]
     lost = [(e, t) for e, t in stale if e > delivered_ts and not delivered(t, hay)]
     gap_secs = (now - delivered_ts) if delivered_ts else float("inf")
@@ -597,6 +691,91 @@ def evaluate(
 
 
 # ── Persistent state (survives process restarts; launchd may respawn us) ──────
+
+
+def _is_finite_nonnegative_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def _bounded_delivered_watermarks(
+    entries: Mapping[str, tuple[float, float]], preferred_path: str | None = None
+) -> dict[str, tuple[float, float]]:
+    ordered = sorted(
+        entries.items(),
+        key=lambda item: (
+            -item[1][1],
+            0 if item[0] == preferred_path else 1,
+            item[0],
+        ),
+    )[:MAX_DELIVERED_WATERMARKS]
+    return dict(ordered)
+
+
+def delivered_watermarks(
+    channel_state: Mapping[str, Any],
+) -> dict[str, tuple[float, float]]:
+    """Return validated ``path -> (delivered_ts, updated_at)`` state.
+
+    Malformed legacy/operator-edited state is ignored fail-open.  The returned
+    map is deterministically bounded even if the persisted input was not.
+    """
+    raw = channel_state.get(DELIVERED_WATERMARKS_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    valid: dict[str, tuple[float, float]] = {}
+    for path, entry in raw.items():
+        if not isinstance(path, str) or not path or not isinstance(entry, dict):
+            continue
+        delivered_ts = entry.get("delivered_ts")
+        updated_at = entry.get("updated_at")
+        if not (
+            _is_finite_nonnegative_number(delivered_ts)
+            and _is_finite_nonnegative_number(updated_at)
+        ):
+            continue
+        valid[path] = (float(delivered_ts), float(updated_at))
+    return _bounded_delivered_watermarks(valid)
+
+
+def delivered_watermark_for_path(
+    channel_state: Mapping[str, Any], transcript: str | Path
+) -> float:
+    entry = delivered_watermarks(channel_state).get(str(transcript))
+    return entry[0] if entry is not None else 0.0
+
+
+def advance_delivered_watermark(
+    channel_state: dict[str, Any],
+    transcript: str | Path,
+    delivered_ts: object,
+    now: object,
+) -> bool:
+    """Persist a genuine per-path monotonic delivery advancement."""
+    if not (
+        _is_finite_nonnegative_number(delivered_ts)
+        and _is_finite_nonnegative_number(now)
+    ):
+        return False
+    path = str(transcript)
+    if not path:
+        return False
+    entries = delivered_watermarks(channel_state)
+    prior = entries.get(path, (0.0, 0.0))[0]
+    candidate = float(delivered_ts)
+    if candidate <= prior:
+        return False
+    entries[path] = (candidate, float(now))
+    bounded = _bounded_delivered_watermarks(entries, preferred_path=path)
+    channel_state[DELIVERED_WATERMARKS_KEY] = {
+        key: {"delivered_ts": watermark, "updated_at": updated_at}
+        for key, (watermark, updated_at) in bounded.items()
+    }
+    return True
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -1424,7 +1603,19 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     chs["read_failures"] = 0
 
     blocks = assistant_blocks(tr) if tr else []
-    v = evaluate(blocks, hay, now, cfg.grace_secs, cfg.gap_alert_secs)
+    prior_delivered_ts = (
+        delivered_watermark_for_path(chs, tr) if tr is not None else 0.0
+    )
+    v = evaluate(
+        blocks,
+        hay,
+        now,
+        cfg.grace_secs,
+        cfg.gap_alert_secs,
+        prior_delivered_ts,
+    )
+    if tr is not None and v.delivered_ts > prior_delivered_ts:
+        advance_delivered_watermark(chs, tr, v.delivered_ts, now)
 
     if v.state == STATE_GAP:
         if rt.in_deploy_window(now):

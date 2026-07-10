@@ -27,6 +27,8 @@ from scripts.relay_watchdog import (
     COVERAGE_COVERED,
     COVERAGE_UNCOVERED,
     COVERAGE_UNKNOWN,
+    DELIVERED_WATERMARKS_KEY,
+    MAX_DELIVERED_WATERMARKS,
     PG_OK,
     PG_STATE_KEY,
     PG_TOPOLOGY_DIRECT,
@@ -46,14 +48,18 @@ from scripts.relay_watchdog import (
     Runtime,
     TranscriptCandidate,
     WatcherStateProbe,
+    advance_delivered_watermark,
     assistant_blocks_from_lines,
     channel_project_dirs,
     delivered,
+    delivered_watermark_for_path,
+    delivered_watermarks,
     evaluate,
     evaluate_coverage,
     evaluate_pg_health,
     evaluate_selector_sync,
     expected_tmux_session_name,
+    is_harness_control_assistant_record,
     load_state,
     main_channel_project_re,
     newest_transcript,
@@ -256,6 +262,40 @@ class TranscriptParsingTests(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0][1], "hello world")
 
+    def test_invariant_4435_structural_synthetic_rate_limit_is_excluded(self):
+        record = {
+            "type": "assistant",
+            "timestamp": "2026-07-09T02:00:00Z",
+            "isApiErrorMessage": True,
+            "apiErrorStatus": 429,
+            "error": "rate_limit",
+            "message": {
+                "model": "<synthetic>",
+                "content": [
+                    {"type": "text", "text": "You've hit your session limit"}
+                ],
+            },
+        }
+        self.assertTrue(is_harness_control_assistant_record(record))
+        self.assertEqual(assistant_blocks_from_lines([json.dumps(record)]), [])
+
+    def test_invariant_4435_identical_normal_assistant_text_is_retained(self):
+        record = {
+            "type": "assistant",
+            "timestamp": "2026-07-09T02:00:00Z",
+            "isApiErrorMessage": False,
+            "apiErrorStatus": 200,
+            "message": {
+                "model": "claude-opus-4-1",
+                "content": [
+                    {"type": "text", "text": "You've hit your session limit"}
+                ],
+            },
+        }
+        self.assertFalse(is_harness_control_assistant_record(record))
+        blocks = assistant_blocks_from_lines([json.dumps(record)])
+        self.assertEqual([text for _, text in blocks], ["You've hit your session limit"])
+
 
 class DeliveredTests(unittest.TestCase):
     def test_short_text_requires_exact_normalized_substring(self):
@@ -343,6 +383,33 @@ class EvaluateBoundaryTests(unittest.TestCase):
         v = self._eval([], "")
         self.assertEqual(v.state, STATE_OK)
 
+    def test_invariant_4435_prior_watermark_survives_bounded_haystack_loss(self):
+        anchor = self.NOW - 2000
+        v = evaluate(
+            [(anchor, "previously delivered")],
+            "",
+            self.NOW,
+            self.GRACE,
+            self.GAP,
+            prior_delivered_ts=anchor,
+        )
+        self.assertEqual(v.state, STATE_OK)
+        self.assertEqual(v.lost, 0)
+        self.assertEqual(v.delivered_ts, anchor)
+
+    def test_invariant_4435_older_current_match_cannot_retreat_watermark(self):
+        older = self.NOW - 3000
+        prior = self.NOW - 1000
+        v = evaluate(
+            [(older, "old delivery")],
+            "old delivery",
+            self.NOW,
+            self.GRACE,
+            self.GAP,
+            prior_delivered_ts=prior,
+        )
+        self.assertEqual(v.delivered_ts, prior)
+
 
 class CoverageEvaluationTests(unittest.TestCase):
     def test_live_expected_session_with_healthy_watcher_is_covered(self):
@@ -398,6 +465,10 @@ class SelectorSyncEvaluationTests(unittest.TestCase):
     """Pure I1 judgment (#4408 phase 2): B (watcher-state bound_output_path) vs
     F (growth-aware transcript pick)."""
 
+    @staticmethod
+    def provider_path(name: str) -> str:
+        return str(relay_watchdog.projects_root() / "selector-tests" / name)
+
     def test_absent_bind_is_unknown_fail_closed(self):
         verdict = evaluate_selector_sync(None, "/tmp/f.jsonl", True)
         self.assertEqual(verdict.state, SELECTOR_UNKNOWN)
@@ -417,16 +488,42 @@ class SelectorSyncEvaluationTests(unittest.TestCase):
         self.assertFalse(verdict.diverged)
 
     def test_mismatch_without_growth_is_not_actionable(self):
-        verdict = evaluate_selector_sync("/tmp/b.jsonl", "/tmp/f.jsonl", False)
+        verdict = evaluate_selector_sync(
+            self.provider_path("b.jsonl"), self.provider_path("f.jsonl"), False
+        )
         self.assertEqual(verdict.state, SELECTOR_SYNCED)
         self.assertEqual(verdict.reason, "f_not_growing")
         self.assertFalse(verdict.diverged)
 
     def test_mismatch_with_growing_f_is_diverged(self):
-        verdict = evaluate_selector_sync("/tmp/b.jsonl", "/tmp/f.jsonl", True)
+        verdict = evaluate_selector_sync(
+            self.provider_path("b.jsonl"), self.provider_path("f.jsonl"), True
+        )
         self.assertEqual(verdict.state, SELECTOR_DIVERGED)
         self.assertEqual(verdict.reason, "selector_diverged")
         self.assertTrue(verdict.diverged)
+
+    def test_invariant_4435_runtime_mirror_is_unknown_uncomparable(self):
+        mirror = str(
+            relay_watchdog.adk_root()
+            / "runtime"
+            / "sessions"
+            / "agentdesk-channel.jsonl"
+        )
+        verdict = evaluate_selector_sync(
+            mirror, self.provider_path("f.jsonl"), True
+        )
+        self.assertEqual(verdict.state, SELECTOR_UNKNOWN)
+        self.assertEqual(verdict.reason, "runtime_session_mirror_uncomparable")
+        self.assertFalse(verdict.diverged)
+
+    def test_invariant_4435_arbitrary_unequal_paths_are_not_comparable(self):
+        verdict = evaluate_selector_sync(
+            "/tmp/not-a-provider.jsonl", self.provider_path("f.jsonl"), True
+        )
+        self.assertEqual(verdict.state, SELECTOR_UNKNOWN)
+        self.assertEqual(verdict.reason, "selector_paths_uncomparable")
+        self.assertFalse(verdict.diverged)
 
 
 class SelectorConfirmBoundaryTests(unittest.TestCase):
@@ -717,6 +814,47 @@ class StateTests(unittest.TestCase):
             p.write_text("garbage{", encoding="utf-8")
             self.assertEqual(load_state(p), {})
             self.assertEqual(load_state(Path(tmp) / "missing.json"), {})
+
+    def test_invariant_4435_malformed_watermarks_are_ignored_fail_open(self):
+        state = {
+            DELIVERED_WATERMARKS_KEY: {
+                "/bool": {"delivered_ts": True, "updated_at": 1.0},
+                "/negative": {"delivered_ts": -1.0, "updated_at": 1.0},
+                "/nan": {"delivered_ts": float("nan"), "updated_at": 1.0},
+                "/inf": {"delivered_ts": 1.0, "updated_at": float("inf")},
+                "/not-object": 123,
+                "/valid": {"delivered_ts": 12.5, "updated_at": 13.0},
+            }
+        }
+        self.assertEqual(delivered_watermarks(state), {"/valid": (12.5, 13.0)})
+        self.assertEqual(delivered_watermark_for_path(state, "/nan"), 0.0)
+        self.assertEqual(delivered_watermark_for_path(state, "/valid"), 12.5)
+
+    def test_invariant_4435_watermark_map_is_deterministically_bounded(self):
+        state: dict = {}
+        for index in range(MAX_DELIVERED_WATERMARKS + 1):
+            self.assertTrue(
+                advance_delivered_watermark(
+                    state,
+                    f"/transcript-{index:02}.jsonl",
+                    100.0 + index,
+                    1000.0 + index,
+                )
+            )
+        entries = delivered_watermarks(state)
+        self.assertEqual(len(entries), MAX_DELIVERED_WATERMARKS)
+        self.assertNotIn("/transcript-00.jsonl", entries)
+        self.assertEqual(
+            list(entries)[0],
+            f"/transcript-{MAX_DELIVERED_WATERMARKS:02}.jsonl",
+        )
+
+    def test_invariant_4435_watermark_advancement_is_path_scoped_and_monotonic(self):
+        state: dict = {}
+        self.assertTrue(advance_delivered_watermark(state, "/a.jsonl", 20.0, 30.0))
+        self.assertFalse(advance_delivered_watermark(state, "/a.jsonl", 19.0, 31.0))
+        self.assertEqual(delivered_watermark_for_path(state, "/a.jsonl"), 20.0)
+        self.assertEqual(delivered_watermark_for_path(state, "/b.jsonl"), 0.0)
 
 
 class RuntimePgProbeTests(unittest.TestCase):
@@ -1182,10 +1320,11 @@ class TickChannelTests(unittest.TestCase):
     def test_selector_divergence_alerts_only_after_swap_confirm(self):
         # One delivered block → gap verdict stays OK, isolating the selector path.
         self.write_transcript([(self.now - 30, "delivered block one")])
-        rt = self.make_rt(swap_confirm_secs=1)
+        rt = self.make_rt(swap_confirm_secs=300)
         rt.haystack = norm("delivered block one")
         # dcserver asserts a bind to a DIFFERENT transcript than F (s.jsonl).
-        rt.watcher_probe = WatcherStateProbe(200, True, False, "/tmp/stale-bind.jsonl")
+        stale_bind = str(self.projects / "other-provider" / "stale-bind.jsonl")
+        rt.watcher_probe = WatcherStateProbe(200, True, False, stale_bind)
         state: dict = {}
 
         tick_channel(rt, TICK_CHANNEL, state, self.now)
@@ -1196,7 +1335,7 @@ class TickChannelTests(unittest.TestCase):
         )
 
         self._grow_selected_transcript()
-        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
         self.assertEqual(
             [a for a in rt.alerts if "셀렉터" in a[0]],
             [],
@@ -1205,17 +1344,53 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn("selector_diverged_since", state["999"])
 
         self._grow_selected_transcript()
-        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 300)
+        self.assertEqual(
+            [a for a in rt.alerts if "셀렉터" in a[0]],
+            [],
+            "299 seconds of divergence is still below the boundary",
+        )
+
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 301)
         selector_alerts = [a for a in rt.alerts if "셀렉터 동기화" in a[0]]
         self.assertEqual(len(selector_alerts), 1)
         body, trigger_turn = selector_alerts[0]
-        self.assertIn("/tmp/stale-bind.jsonl", body)
+        self.assertIn(stale_bind, body)
         self.assertIn("/api/inflight/rebind", body)
         self.assertIn("sessions", body)
         self.assertTrue(
             trigger_turn,
             "actionable selector alerts must trigger an agent turn "
             "(send-to-agent handoff), not bot-direct delivery",
+        )
+
+    def test_invariant_4435_runtime_mirror_never_starts_swap_timer_or_alerts(self):
+        self.write_transcript([(self.now - 30, "delivered mirror case")])
+        rt = self.make_rt(swap_confirm_secs=300)
+        rt.haystack = norm("delivered mirror case")
+        mirror = str(
+            relay_watchdog.adk_root()
+            / "runtime"
+            / "sessions"
+            / "agentdesk-999.jsonl"
+        )
+        rt.watcher_probe = WatcherStateProbe(200, True, False, mirror)
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        state["999"]["selector_diverged_since"] = self.now - 1000
+
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertNotIn("selector_diverged_since", state["999"])
+
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 601)
+        self.assertEqual([a for a in rt.alerts if "셀렉터" in a[0]], [])
+        self.assertNotIn("selector_diverged_since", state["999"])
+        self.assertTrue(
+            any("runtime_session_mirror_uncomparable" in line for line in rt.log_lines)
         )
 
     def test_selector_bind_absent_is_fail_closed(self):
@@ -1349,6 +1524,92 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.alerts, [])
         self.assertIsInstance(state["999"]["transcript_sizes"][str(transcript)], int)
+
+    def test_invariant_4435_all_stale_restart_keeps_delivered_anchor(self):
+        anchor = float(int(self.now - 2000))
+        self.write_transcript([(anchor, "old delivered anchor")])
+        transcript = self.proj_dir / "s.jsonl"
+        rt = self.make_rt()
+        rt.haystack = norm("old delivered anchor")
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], transcript), anchor
+        )
+
+        state_path = self.root / "persisted-state.json"
+        save_state(state_path, state)
+        restarted_state = load_state(state_path)
+        restarted = self.make_rt()
+        restarted.haystack = ""
+        tick_channel(restarted, TICK_CHANNEL, restarted_state, self.now + 1)
+
+        self.assertEqual(restarted.alerts, [])
+        self.assertEqual(
+            delivered_watermark_for_path(restarted_state["999"], transcript), anchor
+        )
+        self.assertTrue(any("stale=1 lost=0" in line for line in restarted.log_lines))
+
+    def test_invariant_4435_older_haystack_cannot_regress_persisted_anchor(self):
+        older = float(int(self.now - 3000))
+        newer = float(int(self.now - 1000))
+        self.write_transcript(
+            [(older, "older delivered text"), (newer, "newer delivered text")]
+        )
+        transcript = self.proj_dir / "s.jsonl"
+        rt = self.make_rt()
+        state: dict = {}
+
+        rt.haystack = norm("newer delivered text")
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], transcript), newer
+        )
+
+        rt.haystack = norm("older delivered text")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], transcript), newer
+        )
+
+    def test_invariant_4435_new_transcript_does_not_inherit_old_path_anchor(self):
+        old_anchor = float(int(self.now - 1000))
+        self.write_transcript([(old_anchor, "old path delivered")])
+        old_transcript = self.proj_dir / "s.jsonl"
+        rt = self.make_rt()
+        rt.haystack = norm("old path delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        new_transcript = self.proj_dir / "new.jsonl"
+        new_ts = float(int(self.now - 2000))
+        new_transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(new_ts)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "new path missing"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(new_transcript, (self.now + 1, self.now + 1))
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], old_transcript), old_anchor
+        )
+        self.assertEqual(delivered_watermark_for_path(state["999"], new_transcript), 0.0)
 
     # (a) deploy-window suppression — REAL in_deploy_window runs against a real
     # marker file, so replacing it with `return False` fails this test.
