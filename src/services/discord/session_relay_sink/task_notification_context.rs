@@ -146,8 +146,8 @@ pub(super) fn answer_reference(
 }
 
 /// Release the watcher fail-closed gate only after the referenced response has
-/// been confirmed and its delivery frontier has advanced. Card confirmation by
-/// itself is not response confirmation.
+/// been confirmed and the sink's commit-fence decision has run. Card
+/// confirmation by itself is not response confirmation.
 pub(super) fn mark_response_delivered(
     delivery: &super::SessionRelayDelivery,
     task_card_message_id: Option<MessageId>,
@@ -326,6 +326,41 @@ mod tests {
     }
 
     #[test]
+    fn task_notification_fallback_gate_clears_only_after_referenced_answer_delivery() {
+        let delivery = super::super::SessionRelayDelivery {
+            provider: ProviderKind::Claude,
+            channel_id: 4_055_902,
+            session_name: "AgentDesk-claude-4055-response-commit".to_string(),
+            response_text: "answer".to_string(),
+            task_notification_kind: Some(TaskNotificationKind::Background),
+            task_notification_context: None,
+            terminal_consumed_end: None,
+            frame_turn_user_msg_id: 0,
+            frame_turn_started_at: String::new(),
+            frame_turn_start_offset: None,
+        };
+        block_unanchored_task_response_fallback(
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            delivery.channel_id,
+        );
+
+        mark_response_delivered(&delivery, None);
+        assert!(super::super::super::task_notification_delivery::unanchored_task_response_fallback_blocked(
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            delivery.channel_id,
+        ));
+
+        mark_response_delivered(&delivery, Some(MessageId::new(4_055_902)));
+        assert!(!super::super::super::task_notification_delivery::unanchored_task_response_fallback_blocked(
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            delivery.channel_id,
+        ));
+    }
+
+    #[test]
     fn giant_sink_wires_card_gate_before_reference_send() {
         let source = include_str!("../session_relay_sink.rs");
         let gate = source
@@ -351,7 +386,7 @@ mod tests {
         );
         assert!(
             advance < unblock,
-            "watcher fallback must stay blocked through answer confirmation and frontier advance"
+            "watcher fallback must stay blocked through answer confirmation and commit-fence decision"
         );
     }
 }

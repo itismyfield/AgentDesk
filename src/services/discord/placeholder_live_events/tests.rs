@@ -6092,7 +6092,7 @@ fn task_completion_card_suppression_quiets_background_xml_lifecycle() {
 }
 
 #[test]
-fn confirmed_task_card_evicts_only_exact_terminal_footer_slot() {
+fn confirmed_task_notification_card_evicts_only_exact_terminal_footer_slot() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_055_001);
     for (tool_use_id, description) in [

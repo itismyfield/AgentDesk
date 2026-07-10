@@ -119,20 +119,23 @@
     prompt observation/footer deferral; `session_relay_sink/task_notification_context.rs`
     owns card-before-answer promotion and exact reference selection.
   - `src/services/discord/gateway/outbound_messages.rs` adapts task-card
-    create/edit operations to outbound v3; the Serenity transport in
-    `gateway.rs` is the only raw Discord boundary and enforces create nonce.
+    create/edit operations to outbound v3. `gateway.rs` maps structured Discord
+    errors while `outbound/transport.rs` owns the nonce-aware Serenity create
+    boundary and enforces the create nonce.
 - durable_state: PostgreSQL `task_notification_card_state` is cluster-shared
   authority. The process-local store is a test/non-PG fallback only.
 - invariants: one logical event row and nonce; ambiguous creates retry the same
   enforced nonce; transient edits never repost; replacement requires structured
   Discord `404/10008`; a non-empty task response is sent only after card
   confirmation and references that card; watcher direct fallback stays blocked
-  until the referenced response is confirmed and its frontier advances; footer
-  eviction requires the exact terminal `tool_use_id`.
+  until the referenced response is confirmed and its commit-fence decision has
+  run; footer eviction requires the exact terminal `tool_use_id`.
 - tests: `task_notification_delivery/tests.rs`,
   `session_relay_sink/task_notification_context.rs`, and
   `placeholder_live_events/tests.rs`, plus
   `tmux_watcher/terminal_direct_fallback.rs` for the fail-closed retry gate.
+  `just test` runs the non-PG task/card filters; `just test-postgres` runs the
+  unique-winner and crash-window replay cases.
 - related_issues: #4055, #3654, #4097.
 
 ### `policy_engine`

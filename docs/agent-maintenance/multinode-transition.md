@@ -1284,8 +1284,9 @@
   eviction is node-local UI state keyed by `tool_use_id`; it occurs only after
   the shared card is confirmed. A worker-local fail-closed marker suppresses the
   watcher direct fallback from the first sink attempt until the referenced
-  answer is confirmed and its frontier advances; it is retry coordination, not
-  cluster authority, and replay re-enters the PG-backed sink after worker loss.
+  answer is confirmed and its commit-fence decision runs; it is retry
+  coordination, not cluster authority, and replay re-enters the PG-backed sink
+  after worker loss.
   The in-memory card store is used only when PG is absent (tests/non-release
   fallback), never as multi-worker authority. This adds no leader-only singleton
   assumption and touches only

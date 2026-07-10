@@ -939,7 +939,7 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn task_card_outbound_message_enforces_nonce_reconciliation() {
+    fn task_notification_card_outbound_message_enforces_nonce_reconciliation() {
         let message = task_card_outbound_message(ChannelId::new(4_055), "card", "adktn123");
         assert_eq!(message.create_nonce.as_deref(), Some("adktn123"));
         assert!(

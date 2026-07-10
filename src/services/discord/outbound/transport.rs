@@ -1,8 +1,8 @@
 //! Shared Discord outbound transport and in-process dedup primitives.
 //!
 //! The v3 envelope/policy/result modules own outbound delivery semantics.
-//! This module keeps the transport trait, HTTP implementation, and temporary
-//! in-memory deduper used by production callers and tests.
+//! This module keeps the transport trait, HTTP/Serenity implementations, and
+//! temporary in-memory deduper used by production callers and tests.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

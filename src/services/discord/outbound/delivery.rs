@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_replacement_requires_structured_discord_unknown_message() {
+    async fn task_notification_edit_replacement_requires_structured_discord_unknown_message() {
         assert!(matches!(
             classified_edit_result(reqwest::StatusCode::NOT_FOUND, Some(10_008)).await,
             DeliveryResult::ConfirmedMissing { .. }

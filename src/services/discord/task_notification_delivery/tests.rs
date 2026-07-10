@@ -515,6 +515,11 @@ async fn concurrent_ensure_card_unique_winner_pg() {
         left.expect("left").message_id,
         right.expect("right").message_id
     );
+    assert_eq!(
+        transport.post_calls.load(Ordering::Acquire),
+        1,
+        "PG uniqueness must elect one Discord create-attempt owner"
+    );
     assert_eq!(transport.physical_posts.load(Ordering::Acquire), 1);
     let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_notification_card_state")
         .fetch_one(&pool)

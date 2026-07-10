@@ -110,7 +110,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
             provider = watcher_provider.as_str(),
             channel_id = channel_id.get(),
             tmux_session = tmux_session_name,
-            "#4055: suppressed watcher direct fallback until task context card is confirmed"
+            "#4055: suppressed watcher direct fallback until the sink confirms the referenced task response"
         );
         return false;
     }
@@ -650,7 +650,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_response_fallback_waits_until_sink_commits_referenced_answer() {
+    fn task_notification_response_fallback_waits_until_sink_commits_referenced_answer() {
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_055_901);
         let session_name = "AgentDesk-claude-4055-fallback-gate";
