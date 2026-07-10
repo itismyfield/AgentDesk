@@ -479,21 +479,10 @@ decompose_issue = "#3405"
 # is no longer a prod-giant and its entry was removed to avoid a ghost
 # registration.
 
-[[entry]]
-# Surfaced as an 8417-prod-LoC giant only after #3028 fixed the prod/test
-# splitter: the first inline `#[cfg(test)] mod` block (an unterminated char
-# literal from a Rust lifetime `&'a self`) over-extended to EOF, so
-# `spawn_turn_bridge` and ~9000 lines of the turn-lifecycle surface were
-# mislabeled as test (the file reported only 626 prod). This entry is the
-# accounting correction; the production LoC is also frozen in
-# scripts/audit_maintainability_giant_baseline.toml (#3028 ratchet). #3038 S1
-# moved the helper-zone clusters out of the root while leaving the
-# `spawn_turn_bridge` async body byte-identical; remaining spawn/lifecycle
-# decomposition is tracked under #3038.
-file = "src/services/discord/turn_bridge/mod.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#3038"
+# RETIRED 2026-07-10 (#4230 S11): turn_bridge/mod.rs dropped from 1231 to
+# 998 production LoC after the remaining free-function helper zones and all
+# 460 inline test LoC moved to capped/natural child modules. The #3038-tagged
+# registry entry is retired; the root is below the 1000-prod-LoC giant threshold.
 
 # RETIRED 2026-07-10 (#4230 S10): terminal_outcome_delivery.rs dropped from
 # 1370 to 882 production LoC after recovery fallback, post-commit epilogue, and

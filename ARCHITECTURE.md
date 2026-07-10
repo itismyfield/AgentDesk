@@ -714,6 +714,7 @@ src/
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   └── process_table.rs
+│   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── bridge_latency_spans.rs
 │   │   │   ├── cancel_finalize_policy.rs
 │   │   │   ├── chunk_compose.rs
@@ -742,12 +743,14 @@ src/
 │   │   │   ├── status_panel.rs
 │   │   │   ├── status_panel_tests.rs
 │   │   │   ├── stream_loop.rs
+│   │   │   ├── stream_receiver.rs
 │   │   │   ├── stream_tick.rs
 │   │   │   ├── streaming_edit_text.rs
 │   │   │   ├── task_notification_lifecycle.rs
 │   │   │   ├── terminal_controller_cutover.rs
 │   │   │   ├── terminal_delivery.rs
 │   │   │   ├── terminal_outcome_delivery.rs
+│   │   │   ├── thinking.rs
 │   │   │   ├── tmux_runtime.rs
 │   │   │   ├── turn_analytics.rs
 │   │   │   ├── two_message_panel.rs

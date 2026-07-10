@@ -32,6 +32,9 @@
 "src/services/discord/tmux_watcher/no_result_exits.rs" = 814 # 2026-07-08 #4229 S6: approved contiguous verbatim extraction of the no-result exit handler (fresh ready-for-input idle structural finalize / tmux-death break / cancel-shutdown break / ready-for-input stall notice+dispatch-fail / #3419 watchdog-timeout finalize); below giant threshold (<1000), but irreducible as one review-verified move.
 "src/services/discord/tmux_watcher/**" = 700
 "src/services/discord/turn_bridge/headless_delivery.rs" = 700
+"src/services/discord/turn_bridge/activity_heartbeat.rs" = 77 # 2026-07-10 #4230 S11 landed production cap for the active-turn tmux activity-heartbeat helpers.
+"src/services/discord/turn_bridge/stream_receiver.rs" = 109 # 2026-07-10 #4230 S11 landed raw-LoC cap for the blocking-to-async stream receiver adapter, wait policy, and their inline tests.
+"src/services/discord/turn_bridge/thinking.rs" = 87 # 2026-07-10 #4230 S11 landed raw-LoC cap for the redacted thinking helpers and their inline tests; split from content_arms because its existing cap could not be raised.
 "src/services/discord/turn_bridge/terminal_outcome_delivery.rs" = 882 # 2026-07-10 #4230 S10: lowered 1370 -> 882 after extracting the recovery fallback, empty-response/silent-turn arm, and post-commit epilogue; no longer a prod giant.
 "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs" = 447 # 2026-07-10 #4230 S9 approved contiguous extraction of cancelled/prompt-too-long terminal replacement arms with both #3041 delivery-lease acquire/commit pairs intact.
 "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs" = 430 # 2026-07-10 #4230 S10 landed production cap for the post-commit epilogue.

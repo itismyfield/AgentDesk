@@ -417,6 +417,15 @@
 
 ### Audited touches
 
+- #4230 S11 turn-bridge helper-zone retirement: the remaining free helpers in
+  `turn_bridge/mod.rs` moved verbatim to `retry_state.rs`, `stream_receiver.rs`,
+  `activity_heartbeat.rs`, `tmux_runtime.rs`, `cancel_finalize_policy.rs`,
+  `panel_lifecycle.rs`, and `thinking.rs`; their inline tests
+  moved with the owning behavior. Classification: worker-local — this is a
+  module-boundary-only refactor of the existing per-turn receiver, retry,
+  heartbeat, panel, cancel, and transcript helpers. It adds no state field,
+  database/schema write, PG lease, leader-only effect, cross-node read, or
+  singleton assumption; call sites and side-effect ordering are unchanged.
 - #4275 watcher/jsonl segment-boundary separator: `tmux_output_stream.rs`
   (WATCHER) `process_watcher_lines_for_turn` now guards the bare
   `full_response.push_str(text)` for `assistant` text blocks — when the running

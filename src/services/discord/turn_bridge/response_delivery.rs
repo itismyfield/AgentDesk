@@ -151,3 +151,41 @@ mod streaming_edit_text_tests {
         assert!(full_response.is_empty());
     }
 }
+
+#[cfg(test)]
+mod headless_completion_footer_tests {
+    fn compact_ws(input: &str) -> String {
+        input.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// #4103: headless-dispatched turns (API / cron / routine, and E2E
+    /// E-1/E-22/E-23) never emitted single-message completion chrome because the
+    /// `enqueue_headless_delivery` SUCCESS arm set `terminal_delivery_committed`
+    /// / `terminal_body_visible` but NOT `completion_footer_terminal_text`, so
+    /// `note_turn_completed_footer` was never reached.
+    ///
+    /// The expected window is anchored on the `.await;` from the arm's
+    /// `cleanup_headless_streaming_placeholder_after_delivery(...).await;` — that
+    /// `.await; terminal_delivery_committed = true;` prefix occurs EXACTLY here.
+    /// The sibling non-headless replace arm produces the byte-identical footer
+    /// suffix but is prefixed by `if outcome {`, not `.await;`, so a bare-suffix
+    /// assertion would still pass off the sibling even if this write were deleted
+    /// or moved to the `Err` arm (the false-negative this anchor closes). The
+    /// searched source is only the included terminal-delivery module, so this
+    /// test's own expected literal cannot self-match.
+    #[test]
+    fn headless_enqueue_success_registers_completion_footer_text() {
+        let source = compact_ws(include_str!("terminal_outcome_delivery.rs"));
+        let expected = ".await; terminal_delivery_committed = true; \
+             terminal_body_visible = true; \
+             if single_message_panel_footer_mode { \
+             completion_footer_terminal_text = Some(delivery_response.clone()); }";
+
+        assert!(
+            source.contains(expected),
+            "headless enqueue_headless_delivery success arm must set \
+             completion_footer_terminal_text right after its post-delivery \
+             cleanup .await + terminal_body_visible commit (#4103 completion chrome)"
+        );
+    }
+}

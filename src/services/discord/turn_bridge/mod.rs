@@ -31,6 +31,7 @@ mod task_notification_lifecycle;
 mod terminal_controller_cutover;
 mod terminal_delivery;
 mod terminal_outcome_delivery;
+mod thinking;
 mod tmux_runtime;
 mod turn_analytics;
 // #3805 P2 (PR-B): two-message sink creation order (answer-first, panel below)
@@ -49,11 +50,6 @@ mod watcher_orphan_cleanup;
 // byte-identical; deps are reached via `use super::*;` (the two discord-level
 // `super::` refs become `super::super::` from the child).
 mod response_delivery;
-use response_delivery::{
-    done_result_requires_full_terminal_replay, push_transcript_event,
-    response_portion_after_offset, terminal_delivery_response_after_offset,
-};
-
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::turn_view_reconciler::{
@@ -81,8 +77,11 @@ pub(super) use panel_lifecycle::{
     record_placeholder_live_event, refresh_session_panel_line_from_lifecycle,
     refresh_task_panel_line_from_dispatch,
 };
+use response_delivery::{
+    done_result_requires_full_terminal_replay, push_transcript_event,
+    response_portion_after_offset, terminal_delivery_response_after_offset,
+};
 use std::collections::VecDeque;
-
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(super) use activity_heartbeat::maybe_refresh_active_turn_activity_heartbeat;
 use bridge_latency_spans::BridgeLatencySpans;
@@ -139,11 +138,11 @@ pub(super) use watcher_orphan_cleanup::{
     cleanup_or_preserve_watcher_orphan_spinner,
     should_delete_bridge_created_watcher_orphan_response,
 };
-
 // Re-export pub(crate) items
 pub(crate) use tmux_runtime::tmux_runtime_paths;
-
 // Items used by spawn_turn_bridge from submodules
+use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
+use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use guards::{CompletionGuard, InflightCleanupGuard};
@@ -170,6 +169,7 @@ pub(super) use retry_state::{
     sync_response_delivery_state, sync_terminal_error_delivery_state_for_bridge_owner,
 };
 use skill_usage::record_skill_usage_from_tool_use;
+use sqlx::Row;
 use stale_resume::{
     output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
     stream_error_requires_terminal_session_reset,
@@ -200,11 +200,6 @@ use voice_completion::{
     json_any_true_flag, resolve_voice_turn_link_for_playback, voice_background_completion_target,
 };
 use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
-
-use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
-use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
-use sqlx::Row;
-
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
     pub(super) gateway: Arc<dyn TurnGateway>,
@@ -245,19 +240,16 @@ pub(super) struct TurnBridgeContext {
     pub(super) is_external_input_tui_direct: bool,
     pub(super) inflight_state: InflightTurnState,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WatcherHandoffClaimOutcome {
     None,
     ReusedExisting,
     Spawned,
 }
-
 // Shared by the bridge task body below and the extracted stream_loop.rs
 // (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -326,7 +318,6 @@ pub(super) fn spawn_turn_bridge(
             } else {
                 None
             };
-
         let mut full_response = bridge.full_response.clone();
         let mut terminal_empty_response_notice: Option<String> = None;
         let mut last_edit_text = String::new();
