@@ -23,6 +23,12 @@ from unittest import mock
 
 import scripts.relay_watchdog as relay_watchdog
 from scripts.relay_watchdog import (
+    PG_OK,
+    PG_STATE_KEY,
+    PG_TUNNEL_DOWN,
+    PG_UNCLASSIFIED_DOWN,
+    PG_UNKNOWN,
+    PG_UPSTREAM_DOWN,
     STATE_GAP,
     STATE_LAGGING,
     STATE_OK,
@@ -34,6 +40,7 @@ from scripts.relay_watchdog import (
     channel_project_dirs,
     delivered,
     evaluate,
+    evaluate_pg_health,
     load_state,
     main_channel_project_re,
     newest_transcript,
@@ -43,6 +50,7 @@ from scripts.relay_watchdog import (
     project_slug,
     save_state,
     tick_channel,
+    tick_pg_tunnel,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -297,6 +305,31 @@ class EvaluateBoundaryTests(unittest.TestCase):
         self.assertEqual(v.state, STATE_OK)
 
 
+class PgHealthEvaluationTests(unittest.TestCase):
+    def test_db_true_is_authoritative_even_without_listener_probe(self):
+        self.assertEqual(evaluate_pg_health(True, None).state, PG_OK)
+
+    def test_db_false_and_closed_identifies_tunnel_down(self):
+        verdict = evaluate_pg_health(False, False)
+        self.assertEqual(verdict.state, PG_TUNNEL_DOWN)
+        self.assertFalse(verdict.tunnel_open)
+
+    def test_db_false_and_open_identifies_half_dead_or_pg(self):
+        verdict = evaluate_pg_health(False, True)
+        self.assertEqual(verdict.state, PG_UPSTREAM_DOWN)
+        self.assertTrue(verdict.tunnel_open)
+
+    def test_db_false_survives_nc_classifier_failure(self):
+        self.assertEqual(
+            evaluate_pg_health(False, None).state, PG_UNCLASSIFIED_DOWN
+        )
+
+    def test_missing_or_malformed_db_is_unknown_not_down(self):
+        for value in (None, "false", 0, {}, []):
+            with self.subTest(value=value):
+                self.assertEqual(evaluate_pg_health(value, False).state, PG_UNKNOWN)
+
+
 class ConfigTests(unittest.TestCase):
     def test_minimal_config_parses_with_defaults(self):
         cfg = parse_config(
@@ -315,6 +348,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.grace_secs, 600)
         self.assertEqual(cfg.gap_alert_secs, 900)
         self.assertEqual(cfg.github_repo, "")
+        self.assertEqual(cfg.pg_alert_after_secs, 300)
+        self.assertEqual(cfg.pg_realert_secs, 900)
 
     def test_overrides_apply(self):
         cfg = parse_config(
@@ -328,10 +363,14 @@ class ConfigTests(unittest.TestCase):
                     }
                 ],
                 "gap_alert_secs": 1200,
+                "pg_alert_after_secs": 60,
+                "pg_realert_secs": 180,
                 "github_repo": "owner/repo",
             }
         )
         self.assertEqual(cfg.gap_alert_secs, 1200)
+        self.assertEqual(cfg.pg_alert_after_secs, 60)
+        self.assertEqual(cfg.pg_realert_secs, 180)
         self.assertEqual(cfg.github_repo, "owner/repo")
         self.assertEqual(cfg.channels[0].announce_to, "project-agentdesk")
 
@@ -363,6 +402,10 @@ class ConfigTests(unittest.TestCase):
             parse_config({**base, "poll_secs": "bad"})
         with self.assertRaises(ConfigError):
             parse_config({**base, "gap_alert_secs": None})
+        with self.assertRaises(ConfigError):
+            parse_config({**base, "pg_alert_after_secs": 0})
+        with self.assertRaises(ConfigError):
+            parse_config({**base, "pg_realert_secs": -1})
 
     def test_load_config_surfaces_bad_numeric_as_config_error(self):
         # File-level proof that main()'s `except ConfigError` retry path (the
@@ -510,6 +553,59 @@ class StateTests(unittest.TestCase):
             self.assertEqual(load_state(Path(tmp) / "missing.json"), {})
 
 
+class RuntimePgProbeTests(unittest.TestCase):
+    def test_health_detail_db_false_is_classified_by_nc_closed(self):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if argv[0] == "curl":
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout='{"db": false}', stderr=""
+                )
+            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(Config(channels=(TICK_CHANNEL,)), Path(tmp))
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                verdict = rt.pg_health()
+        self.assertEqual(verdict.state, PG_TUNNEL_DOWN)
+        self.assertIn("/api/health/detail", calls[0][-1])
+        self.assertNotIn("-f", calls[0], "non-2xx health JSON must remain readable")
+        self.assertEqual(calls[1][-2:], ["127.0.0.1", "15432"])
+
+    def test_unknown_health_does_not_consult_nc_or_claim_tunnel_down(self):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout="not-json", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(Config(channels=(TICK_CHANNEL,)), Path(tmp))
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                verdict = rt.pg_health()
+        self.assertEqual(verdict.state, PG_UNKNOWN)
+        self.assertEqual(len(calls), 1)
+
+    def test_dcserver_alert_stamp_is_read_fail_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(
+                Config(channels=(TICK_CHANNEL,), pg_realert_secs=900), Path(tmp)
+            )
+            rt.dcserver_pg_alert_state.parent.mkdir(parents=True)
+            rt.dcserver_pg_alert_state.write_text("1000", encoding="utf-8")
+            self.assertTrue(rt.recent_dcserver_pg_alert(1899))
+            self.assertFalse(rt.recent_dcserver_pg_alert(1900))
+            self.assertFalse(rt.recent_dcserver_pg_alert(999))
+            rt.dcserver_pg_alert_state.write_text("rolled-back", encoding="utf-8")
+            self.assertFalse(rt.recent_dcserver_pg_alert(1001))
+
+
 TICK_CHANNEL = ChannelConfig(
     channel_id="999",
     sendmessage_key="k",
@@ -543,6 +639,127 @@ class FakeRuntime(Runtime):
     def file_github_issue(self, ch, gap_min: int, lost: int) -> str:
         self.issue_calls += 1
         return f"https://example.test/issues/{self.issue_calls}"
+
+
+class FakePgRuntime(Runtime):
+    def __init__(self, verdict, *, after: int = 300, cooldown: int = 900) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        cfg = Config(
+            channels=(TICK_CHANNEL,),
+            pg_alert_after_secs=after,
+            pg_realert_secs=cooldown,
+        )
+        super().__init__(cfg, Path(self._tmp.name))
+        self.verdict = verdict
+        self.dcserver_recent = False
+        self.alerts: list[tuple[str, bool]] = []
+        self.log_lines: list[str] = []
+
+    def cleanup(self) -> None:
+        self._tmp.cleanup()
+
+    def pg_health(self):
+        return self.verdict
+
+    def recent_dcserver_pg_alert(self, now: float) -> bool:
+        return self.dcserver_recent
+
+    def dcserver_snapshot(self) -> str:
+        return "stub-pg-snapshot"
+
+    def alert(self, ch, body: str, trigger_turn: bool = True) -> None:
+        self.alerts.append((body, trigger_turn))
+
+    def log(self, msg: str) -> None:
+        self.log_lines.append(msg)
+
+
+class TickPgTunnelTests(unittest.TestCase):
+    NOW = 10_000.0
+
+    def make_rt(self, verdict, **kwargs) -> FakePgRuntime:
+        rt = FakePgRuntime(verdict, **kwargs)
+        self.addCleanup(rt.cleanup)
+        return rt
+
+    def test_alerts_only_at_persistence_boundary(self):
+        rt = self.make_rt(evaluate_pg_health(False, False))
+        state: dict = {}
+        tick_pg_tunnel(rt, state, self.NOW)
+        tick_pg_tunnel(rt, state, self.NOW + 299)
+        self.assertEqual(rt.alerts, [])
+        tick_pg_tunnel(rt, state, self.NOW + 300)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("CLOSED", rt.alerts[0][0])
+        self.assertEqual(state[PG_STATE_KEY]["last_alert"], self.NOW + 300)
+
+    def test_open_listener_reports_half_dead_or_upstream(self):
+        rt = self.make_rt(evaluate_pg_health(False, True))
+        state = {PG_STATE_KEY: {"unhealthy_since": self.NOW - 300}}
+        tick_pg_tunnel(rt, state, self.NOW)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("OPEN", rt.alerts[0][0])
+        self.assertIn("half-dead", rt.alerts[0][0])
+
+    def test_realert_cooldown_boundary_is_exact(self):
+        verdict = evaluate_pg_health(False, False)
+        rt = self.make_rt(verdict)
+        state = {
+            PG_STATE_KEY: {
+                "unhealthy_since": self.NOW - 1000,
+                "last_alert": self.NOW - 899,
+                "alerting": True,
+            }
+        }
+        tick_pg_tunnel(rt, state, self.NOW)
+        self.assertEqual(rt.alerts, [])
+        tick_pg_tunnel(rt, state, self.NOW + 1)
+        self.assertEqual(len(rt.alerts), 1)
+
+    def test_recovery_notifies_and_keeps_antiflap_cooldown(self):
+        rt = self.make_rt(evaluate_pg_health(True, None))
+        state = {
+            PG_STATE_KEY: {
+                "unhealthy_since": self.NOW - 600,
+                "last_alert": self.NOW - 60,
+                "alerting": True,
+                "cause": PG_TUNNEL_DOWN,
+            }
+        }
+        tick_pg_tunnel(rt, state, self.NOW)
+        self.assertEqual(len(rt.alerts), 1)
+        body, trigger_turn = rt.alerts[0]
+        self.assertIn("복구", body)
+        self.assertFalse(trigger_turn)
+        self.assertEqual(state[PG_STATE_KEY], {"last_alert": self.NOW - 60})
+
+    def test_recent_dcserver_alert_defers_exactly_one_tick(self):
+        rt = self.make_rt(evaluate_pg_health(False, False))
+        rt.dcserver_recent = True
+        state = {PG_STATE_KEY: {"unhealthy_since": self.NOW - 300}}
+        tick_pg_tunnel(rt, state, self.NOW)
+        self.assertEqual(rt.alerts, [])
+        self.assertTrue(state[PG_STATE_KEY]["dedup_deferred"])
+        tick_pg_tunnel(rt, state, self.NOW + rt.cfg.poll_secs)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("1 tick 보류", rt.alerts[0][0])
+
+    def test_unknown_health_breaks_pending_timer_but_not_active_alert(self):
+        rt = self.make_rt(evaluate_pg_health(None, False))
+        pending = {PG_STATE_KEY: {"unhealthy_since": self.NOW - 299}}
+        tick_pg_tunnel(rt, pending, self.NOW)
+        self.assertNotIn("unhealthy_since", pending[PG_STATE_KEY])
+
+        active = {
+            PG_STATE_KEY: {
+                "unhealthy_since": self.NOW - 1000,
+                "last_alert": self.NOW - 10,
+                "alerting": True,
+            }
+        }
+        tick_pg_tunnel(rt, active, self.NOW)
+        self.assertTrue(active[PG_STATE_KEY]["alerting"])
+        self.assertEqual(rt.alerts, [])
 
 
 class TickChannelTests(unittest.TestCase):
@@ -823,6 +1040,12 @@ class DeploymentWiringTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("tests.test_relay_watchdog", script)
+
+    def test_main_loop_runs_independent_pg_tunnel_tick(self):
+        script = (REPO_ROOT / "scripts/relay_watchdog.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tick_pg_tunnel(rt, state, now)", script)
 
     def test_deploy_release_ships_watchdog_and_plist(self):
         deploy = (REPO_ROOT / "scripts" / "deploy-release.sh").read_text(

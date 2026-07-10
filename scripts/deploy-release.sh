@@ -1821,6 +1821,101 @@ else
     echo "⚠ Relay watchdog staging FAILED (source: $REPO/scripts/relay_watchdog.py)"
 fi
 
+# ── Consumer-owned PostgreSQL SSH tunnel supervisor (#4378) ──────────────────
+# This is deliberately a separate launchd lifetime from dcserver: dcserver may
+# crash-loop while PG is absent (#4379), but the process that restores PG must
+# remain alive.  Like the relay watchdog above, this block is after DEPLOY_OK
+# and entirely fail-open so an ops-side install failure cannot turn a healthy,
+# health-confirmed binary deploy into a rollback or skip peer propagation.
+PG_TUNNEL_LABEL="com.agentdesk.pg-tunnel"
+PG_TUNNEL_PLIST_PATH="$HOME/Library/LaunchAgents/$PG_TUNNEL_LABEL.plist"
+PG_TUNNEL_BIN="$ADK_REL/bin/pg-tunnel.sh"
+PG_TUNNEL_CONFIG="$ADK_REL/config/pg-tunnel.env"
+echo "▸ Staging consumer-owned PG tunnel supervisor (#4378)..."
+if install -m 0755 "$REPO/scripts/pg_tunnel.sh" "$PG_TUNNEL_BIN"; then
+    # Machine-local config is the node-identity gate.  It is intentionally not
+    # shipped by the repo: mac-mini and future nodes must never arm a tunnel
+    # pointed back at themselves merely because cluster deploy propagated.
+    if [ -f "$PG_TUNNEL_CONFIG" ]; then
+        _pg_xml_escape() {
+            local s=$1
+            s=${s//&/\&amp;}
+            s=${s//</\&lt;}
+            s=${s//>/\&gt;}
+            s=${s//\"/\&quot;}
+            s=${s//\'/\&apos;}
+            printf '%s' "$s"
+        }
+        _install_pg_tunnel_plist() {
+            local label_x bin_x config_x root_x
+            label_x=$(_pg_xml_escape "$PG_TUNNEL_LABEL") || return 1
+            bin_x=$(_pg_xml_escape "$PG_TUNNEL_BIN") || return 1
+            config_x=$(_pg_xml_escape "$PG_TUNNEL_CONFIG") || return 1
+            root_x=$(_pg_xml_escape "$ADK_REL") || return 1
+            mkdir -p "$HOME/Library/LaunchAgents" || return 1
+            cat > "$PG_TUNNEL_PLIST_PATH.tmp" <<PLIST_EOF || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label_x</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$bin_x</string>
+    <string>$config_x</string>
+    <string>-N</string>
+    <string>-T</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ConnectTimeout=10</string>
+    <string>-o</string><string>ServerAliveInterval=15</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-L</string><string>127.0.0.1:15432:127.0.0.1:5432</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$root_x/logs/pg-tunnel.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$root_x/logs/pg-tunnel.launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>AGENTDESK_ROOT_DIR</key><string>$root_x</string>
+  </dict>
+</dict>
+</plist>
+PLIST_EOF
+            # Atomic publish: launchd never observes a partially-written XML.
+            mv -f "$PG_TUNNEL_PLIST_PATH.tmp" "$PG_TUNNEL_PLIST_PATH" || return 1
+        }
+        if ! "$PG_TUNNEL_BIN" --check-config "$PG_TUNNEL_CONFIG"; then
+            echo "⚠ PG tunnel config invalid: $PG_TUNNEL_CONFIG — NOT armed"
+            echo "  Required: PG_TUNNEL_SSH_TARGET=mac-mini (or PG_TUNNEL_HOST alias)."
+        elif _install_pg_tunnel_plist; then
+            xattr -d com.apple.quarantine "$PG_TUNNEL_PLIST_PATH" 2>/dev/null || true
+            echo "⚠ PG tunnel deploy prerequisite: on mac-mini, bootout and remove BOTH"
+            echo "  reverse plists (com.agentdesk.macbook-pg-tunnel and"
+            echo "  com.agentdesk.macbook-memento-tunnel) before this job is activated."
+            # bootout+bootstrap (not kickstart): pick up both wrapper and plist.
+            launchctl bootout "$LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" 2>/dev/null || true
+            if launchctl bootstrap "$LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
+                echo "✓ PG tunnel supervisor armed ($PG_TUNNEL_LABEL)"
+            else
+                echo "⚠ PG tunnel bootstrap FAILED — dcserver PG path is unsupervised"
+            fi
+        else
+            rm -f "$PG_TUNNEL_PLIST_PATH.tmp" 2>/dev/null || true
+            echo "⚠ PG tunnel plist write FAILED ($PG_TUNNEL_PLIST_PATH) — not armed"
+            echo "  Deploy continues (fail-open): fix permissions/disk space and redeploy."
+        fi
+    else
+        echo "▸ PG tunnel config absent: $PG_TUNNEL_CONFIG"
+        echo "  Supervisor NOT armed on this node (machine-local node gate)."
+    fi
+else
+    echo "⚠ PG tunnel staging FAILED (source: $REPO/scripts/pg_tunnel.sh)"
+fi
+
 _write_release_source_manifest
 
 echo "═══ Deploy Complete ═══"

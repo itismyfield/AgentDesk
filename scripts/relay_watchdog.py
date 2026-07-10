@@ -63,6 +63,15 @@ STATE_OK = "ok"
 STATE_LAGGING = "lagging"  # lost blocks exist, but last good delivery is recent
 STATE_GAP = "gap"  # lost blocks exist AND last good delivery is old → relay down
 
+# Independent PostgreSQL path states (#4378).  `/api/health/detail db=false` is
+# the sole failure trigger; the TCP listener is only a cause discriminator.
+PG_OK = "ok"
+PG_TUNNEL_DOWN = "tunnel_down"
+PG_UPSTREAM_DOWN = "upstream_or_half_dead"
+PG_UNCLASSIFIED_DOWN = "db_down_tunnel_unknown"
+PG_UNKNOWN = "unknown"
+PG_STATE_KEY = "_pg_tunnel"
+
 
 def adk_root() -> Path:
     return Path(os.environ.get("AGENTDESK_ROOT_DIR", str(Path.home() / ".adk/release")))
@@ -127,6 +136,12 @@ class Config:
     # after this many CONSECUTIVE failures instead of skipping forever.
     read_fail_alert_after: int = 5
     dcserver_port: int = 8791
+    # PG must remain end-to-end unhealthy for this long before alerting.  The
+    # default is >3x the supervisor's normal recovery envelope, avoiding noise
+    # while launchd+ssh are doing their job.  Override only for an approved T3
+    # drill; the deploy does not ship machine-local config values.
+    pg_alert_after_secs: int = 300
+    pg_realert_secs: int = 900
 
 
 class ConfigError(Exception):
@@ -170,6 +185,8 @@ def parse_config(raw: dict[str, Any]) -> Config:
         "issue_after_secs",
         "read_fail_alert_after",
         "dcserver_port",
+        "pg_alert_after_secs",
+        "pg_realert_secs",
     ):
         if key in raw:
             # A malformed number must surface as ConfigError, never ValueError:
@@ -184,6 +201,9 @@ def parse_config(raw: dict[str, Any]) -> Config:
                 ) from e
     if "github_repo" in raw:
         kwargs["github_repo"] = str(raw["github_repo"])
+    for key in ("pg_alert_after_secs", "pg_realert_secs"):
+        if key in kwargs and kwargs[key] <= 0:
+            raise ConfigError(f"config field {key!r} must be greater than zero")
     return Config(channels=tuple(channels), **kwargs)
 
 
@@ -320,6 +340,38 @@ class Verdict:
     gap_secs: float
 
 
+@dataclass(frozen=True)
+class PgHealthVerdict:
+    """End-to-end PG health plus the listener-only cause discriminator."""
+
+    state: str
+    db: bool | None
+    tunnel_open: bool | None
+
+
+def evaluate_pg_health(db: object, tunnel_open: bool | None) -> PgHealthVerdict:
+    """Classify without letting a bare TCP listener claim PG is healthy.
+
+    `db is False` from the detailed dcserver health endpoint is the only down
+    signal.  OPEN then means the listener accepted TCP but forwarding or PG is
+    unhealthy (the 07-09 half-dead mode); CLOSED identifies the supervised
+    local tunnel itself.  Missing/malformed health is unknown, never a PG
+    alert, because the dcserver process could be unavailable for another cause.
+    """
+    if db is True:
+        return PgHealthVerdict(PG_OK, True, tunnel_open)
+    if db is not False:
+        return PgHealthVerdict(PG_UNKNOWN, None, tunnel_open)
+    if tunnel_open is False:
+        return PgHealthVerdict(PG_TUNNEL_DOWN, False, False)
+    if tunnel_open is True:
+        return PgHealthVerdict(PG_UPSTREAM_DOWN, False, True)
+    # The classifier being unavailable must not erase the primary db=false
+    # signal; alert with an explicit unknown cause after the same persistence
+    # threshold.
+    return PgHealthVerdict(PG_UNCLASSIFIED_DOWN, False, None)
+
+
 def evaluate(
     blocks: list[tuple[float, str]],
     hay: str,
@@ -401,6 +453,7 @@ class Runtime:
         self.log_path = root / "logs/relay-watchdog.log"
         self.state_path = root / "logs/relay-watchdog.state.json"
         self.deploy_marker = root / "logs/relay-watchdog.deploy-marker"
+        self.dcserver_pg_alert_state = root / "logs/dcserver-pg-alert.state"
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
@@ -476,6 +529,60 @@ class Runtime:
             )
         bot = [m for m in ok_msgs if (m.get("author") or {}).get("bot")]
         return norm(" ".join((m.get("content") or "") for m in bot))
+
+    def pg_health(self) -> PgHealthVerdict:
+        """Probe dcserver's end-to-end DB view, then classify with local TCP.
+
+        Do not use curl `--fail`: the health endpoint can legitimately return a
+        non-2xx status while still carrying the `db=false` JSON we need.
+        """
+        base = f"http://127.0.0.1:{self.cfg.dcserver_port}/api/health/detail"
+        db: object = None
+        try:
+            p = subprocess.run(
+                ["curl", "-sS", "--max-time", "4", base],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if p.returncode == 0 and p.stdout:
+                health = json.loads(p.stdout)
+                if isinstance(health, dict):
+                    db = health.get("db")
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
+
+        if db is not False:
+            # db=true is authoritative end-to-end health.  A missing/malformed
+            # health response is a dcserver probe failure, not evidence that
+            # the PG tunnel failed, so avoid manufacturing a P1 alert.
+            return evaluate_pg_health(db, None)
+
+        tunnel_open: bool | None
+        try:
+            p = subprocess.run(
+                ["nc", "-z", "-G", "3", "127.0.0.1", "15432"],
+                capture_output=True,
+                timeout=8,
+            )
+            tunnel_open = p.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            tunnel_open = None
+        return evaluate_pg_health(False, tunnel_open)
+
+    def recent_dcserver_pg_alert(self, now: float) -> bool:
+        """Read #4379's successful-alert stamp for one-tick de-duplication.
+
+        The Rust writer stores integer UNIX seconds.  Invalid/future content is
+        fail-open (not recent), matching its own rate-limit semantics so a bad
+        state file can never silence this independent watchdog.
+        """
+        try:
+            sent_at = float(self.dcserver_pg_alert_state.read_text().strip())
+        except (OSError, ValueError):
+            return False
+        elapsed = now - sent_at
+        return 0 <= elapsed < self.cfg.pg_realert_secs
 
     def dcserver_snapshot(self) -> str:
         bits = []
@@ -649,6 +756,115 @@ class Runtime:
 # ── Per-channel tick ───────────────────────────────────────────────────────────
 
 
+def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
+    """Independently monitor the end-to-end PG path once per watchdog tick."""
+    if not rt.cfg.channels:
+        return
+    ch = rt.cfg.channels[0]
+    pgs: dict[str, Any] = state.setdefault(PG_STATE_KEY, {})
+    verdict = rt.pg_health()
+
+    if verdict.state == PG_UNKNOWN:
+        # Unknown is not recovery from an already-alerting incident, but it
+        # breaks a pending "N minutes continuously db=false" interval.
+        if not pgs.get("alerting"):
+            for key in ("unhealthy_since", "dedup_deferred", "dcserver_alert_seen"):
+                pgs.pop(key, None)
+        rt.log("[pg-tunnel] health/detail db unknown — PG timer not advanced")
+        return
+
+    if verdict.state == PG_OK:
+        if pgs.get("alerting"):
+            previous = pgs.get("cause", "unknown")
+            rt.alert(
+                ch,
+                "✅ **PG 경로 복구 (relay watchdog)**\n\n"
+                "`/api/health/detail`에서 `db=true`를 확인했습니다. "
+                f"이전 판정: `{previous}`. PG 터널 장애 알림을 해제합니다.",
+                trigger_turn=False,
+            )
+            rt.log("[pg-tunnel] RECOVERED — db=true, alert state cleared")
+        # Keep last_alert across recovery to enforce the 15-minute anti-flap
+        # cooldown, but clear all incident-local state.
+        for key in (
+            "alerting",
+            "unhealthy_since",
+            "cause",
+            "dedup_deferred",
+            "dcserver_alert_seen",
+        ):
+            pgs.pop(key, None)
+        return
+
+    cause_text = {
+        PG_TUNNEL_DOWN: (
+            "CLOSED — 로컬 127.0.0.1:15432 리스너가 없어 "
+            "SSH -L supervisor 재기동 루프 실패로 판정"
+        ),
+        PG_UPSTREAM_DOWN: (
+            "OPEN — 로컬 리스너는 열렸지만 db=false; "
+            "half-dead SSH 포워딩 또는 upstream PostgreSQL 장애로 판정"
+        ),
+        PG_UNCLASSIFIED_DOWN: (
+            "UNKNOWN — db=false이나 nc 원인 판별자를 실행하지 못함"
+        ),
+    }[verdict.state]
+    pgs["cause"] = verdict.state
+    if "unhealthy_since" not in pgs:
+        pgs["unhealthy_since"] = now
+    unhealthy_for = now - float(pgs["unhealthy_since"])
+    if unhealthy_for < rt.cfg.pg_alert_after_secs:
+        rt.log(
+            f"[pg-tunnel] db=false cause={verdict.state} for "
+            f"{int(unhealthy_for)}s (< {rt.cfg.pg_alert_after_secs}s threshold)"
+        )
+        return
+
+    last_alert = float(pgs.get("last_alert", 0))
+    if now - last_alert < rt.cfg.pg_realert_secs:
+        rt.log(
+            f"[pg-tunnel] db=false persists cause={verdict.state} "
+            "(alert suppressed, cooldown)"
+        )
+        return
+
+    # #4379 may just have emitted its PG-independent boot alert.  Defer only
+    # the FIRST watchdog alert by exactly one tick; the next tick still sends
+    # (with correlation text) so de-duplication can never turn into silence.
+    if not pgs.get("alerting") and not pgs.get("dedup_deferred"):
+        if rt.recent_dcserver_pg_alert(now):
+            pgs["dedup_deferred"] = True
+            pgs["dcserver_alert_seen"] = True
+            rt.log(
+                "[pg-tunnel] dcserver PG boot alert is recent — "
+                "deferring watchdog alert by one tick"
+            )
+            return
+
+    correlation = (
+        "\n\n참고: dcserver 부트 PG 알림이 먼저 발화해 이 알림을 1 tick 보류했습니다."
+        if pgs.get("dcserver_alert_seen")
+        else ""
+    )
+    minutes = max(1, int(unhealthy_for // 60))
+    rt.alert(
+        ch,
+        "🚨 **PG 경로 지속 장애 (relay watchdog)**\n\n"
+        f"`/api/health/detail`의 `db=false`가 **{minutes}분** 지속되었습니다.\n"
+        f"원인 판별: **{cause_text}**.\n\n"
+        f"런타임: {rt.dcserver_snapshot()}"
+        f"{correlation}",
+    )
+    pgs["last_alert"] = now
+    pgs["alerting"] = True
+    pgs.pop("dedup_deferred", None)
+    pgs.pop("dcserver_alert_seen", None)
+    rt.log(
+        f"[pg-tunnel] ALERT db=false cause={verdict.state} "
+        f"duration={int(unhealthy_for)}s"
+    )
+
+
 def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: float) -> None:
     cfg = rt.cfg
     cid = ch.channel_id
@@ -795,6 +1011,10 @@ def main() -> int:
         if state is None:
             state = load_state(rt.state_path)
         now = time.time()
+        try:
+            tick_pg_tunnel(rt, state, now)
+        except Exception as e:  # noqa: BLE001 — infra probe must not kill relay checks
+            rt.log(f"[pg-tunnel] tick error: {type(e).__name__}: {e}")
         for ch in cfg.channels:
             try:
                 tick_channel(rt, ch, state, now)

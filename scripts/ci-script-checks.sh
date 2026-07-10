@@ -147,12 +147,12 @@ echo "=== Portable deployable path lint ==="
   tests.test_script_python_policy \
   tests.test_analyze_prs
 
-echo "=== Relay watchdog judgment + wiring tests (#4381) ==="
+echo "=== Relay watchdog + PG tunnel supervisor tests (#4381/#4378) ==="
 # The out-of-band relay watchdog is a deployable Python script; it is not
 # covered by shellcheck (only *.sh) nor by cargo, so this unittest run is its
 # ONLY CI gate. It also pins the deploy/plist wiring so the watchdog cannot
 # silently fall out of the deploy again (the 06-29 relay-gap-watch failure).
-"$PYTHON" -m unittest tests.test_relay_watchdog
+"$PYTHON" -m unittest tests.test_relay_watchdog tests.test_pg_tunnel
 
 echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036) ==="
 # Generic committed markdown freshness drift is warning-only for ordinary PRs

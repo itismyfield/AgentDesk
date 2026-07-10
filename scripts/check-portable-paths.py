@@ -22,6 +22,7 @@ DEFAULT_PATTERNS = (
     "scripts/queue-stability-batch.sh",
     "scripts/setup-hooks.sh",
     "scripts/resolve-python-runner.sh",
+    "scripts/pg_tunnel.sh",
     "scripts/launchd-migrated/*.sh",
     "scripts/launchd-migrated/*.py",
     "scripts/check-portable-paths.py",
