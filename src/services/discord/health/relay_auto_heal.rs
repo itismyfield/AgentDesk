@@ -46,16 +46,22 @@ impl RedriveEpisode {
     ) -> Option<(InflightTurnIdentity, Option<String>)> {
         let previous = self.identity.as_ref()?;
         let post_identity = InflightTurnIdentity::from_state(post);
-        let same_nonce = self.turn_nonce.is_some() && self.turn_nonce == post.turn_nonce;
+        let previous_nonce = self.turn_nonce.as_deref().filter(|nonce| !nonce.is_empty());
+        let post_nonce = post.turn_nonce.as_deref().filter(|nonce| !nonce.is_empty());
+        let same_nonce = previous_nonce.is_some() && previous_nonce == post_nonce;
         let same_managed_turn = previous.user_msg_id != 0
             && previous.user_msg_id == post_identity.user_msg_id
             && previous.started_at == post_identity.started_at
             && previous.tmux_session_name == post_identity.tmux_session_name;
         let synthetic_rebind = post.rebind_origin
             && post_identity.user_msg_id == 0
-            && previous.tmux_session_name == post_identity.tmux_session_name;
+            && previous.tmux_session_name == post_identity.tmux_session_name
+            && !matches!(
+                post.turn_source,
+                crate::services::discord::inflight::TurnSource::MonitorTriggered
+            );
         (same_nonce || same_managed_turn || synthetic_rebind)
-            .then_some((post_identity, post.turn_nonce.clone()))
+            .then_some((post_identity, post_nonce.map(str::to_string)))
     }
 }
 
@@ -66,6 +72,7 @@ struct RedriveAttemptState {
     last_attempt_unix: i64,
     capped_alarm_emitted: bool,
     retry_not_before_unix: Option<i64>,
+    shield_started_at_millis: Option<i64>,
 }
 
 impl RedriveAttemptState {
@@ -76,6 +83,7 @@ impl RedriveAttemptState {
             last_attempt_unix: now_unix,
             capped_alarm_emitted: false,
             retry_not_before_unix: None,
+            shield_started_at_millis: None,
         }
     }
 }
@@ -113,7 +121,7 @@ impl SharedData {
                         .as_ref()
                         .is_some_and(|identity| identity.matches_state(state))
                 })
-                .and_then(|state| state.turn_nonce);
+                .and_then(|state| state.turn_nonce.filter(|nonce| !nonce.is_empty()));
         RedriveEpisode {
             frontier: snapshot.last_relay_offset,
             identity: snapshot.inflight_identity.clone(),
@@ -179,12 +187,14 @@ impl SharedData {
         now_unix: i64,
         reattached: bool,
     ) -> RedriveAttemptDecision {
+        let now_millis = chrono::Utc::now().timestamp_millis();
         let key = self.redrive_key(provider, channel_id);
         let mut state = REDRIVE_ATTEMPTS
             .get_mut(&key)
             .expect("redrive success must follow an admitted attempt");
         state.attempts += 1;
         let first_attempt_of_episode = state.attempts == 1;
+        let shield_started_at_millis = *state.shield_started_at_millis.get_or_insert(now_millis);
         state.last_attempt_unix = now_unix;
         state.retry_not_before_unix = None;
         if reattached {
@@ -222,7 +232,8 @@ impl SharedData {
                 identity: owner_inflight
                     .as_ref()
                     .map(InflightTurnIdentity::from_state),
-                turn_nonce: owner_inflight.and_then(|post| post.turn_nonce),
+                turn_nonce: owner_inflight
+                    .and_then(|post| post.turn_nonce.filter(|nonce| !nonce.is_empty())),
                 reconnect_count: self
                     .tmux_relay_coord(shield_channel_id)
                     .reconnect_count
@@ -231,15 +242,15 @@ impl SharedData {
         };
         drop(state);
 
-        let now_millis = chrono::Utc::now().timestamp_millis();
         let mut shield = REDRIVE_PLACEHOLDER_SHIELDS
             .entry(self.redrive_key(provider, shield_channel_id))
-            .or_insert_with(|| (episode.clone(), now_millis));
+            .or_insert_with(|| (episode.clone(), shield_started_at_millis));
         if first_attempt_of_episode {
-            *shield = (episode, now_millis);
+            shield.0 = episode;
         } else if shield_channel_id == channel_id {
             shield.0 = episode;
         }
+        shield.1 = shield_started_at_millis;
         decision
     }
 
@@ -399,42 +410,36 @@ impl HealthRegistry {
             return Ok(false);
         }
 
-        let watcher_owner_channel_id = snapshot
-            .watcher_owner_channel_id
-            .map(ChannelId::new)
-            .unwrap_or(channel_id);
-        let (applied, reattached, noop_cooldown_secs, shield_channel_id) =
-            if nudge_existing_watcher_for_backlog(
-                &shared,
+        let (applied, reattached, noop_cooldown_secs) = if nudge_existing_watcher_for_backlog(
+            &shared,
+            provider,
+            &snapshot,
+            channel_id,
+            now_unix_secs,
+        ) {
+            (true, false, None)
+        } else {
+            if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
+                return Ok(false);
+            }
+            let response = relay_recovery::auto_apply_relay_recovery_for_shared(
+                self,
+                shared.clone(),
                 provider,
-                &snapshot,
-                channel_id,
-                now_unix_secs,
-            ) {
-                (true, false, None, watcher_owner_channel_id)
-            } else {
-                if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
-                    return Ok(false);
-                }
-                let response = relay_recovery::auto_apply_relay_recovery_for_shared(
-                    self,
-                    shared.clone(),
-                    provider,
-                    channel_id.get(),
-                    RelayRecoveryActionKind::ReattachWatcher,
-                    RelayRecoveryApplySource::ProbeAutoHeal,
-                )
-                .await?;
-                let shield_channel_id =
-                    redrive_shield_channel_after_reattach(&shared, &snapshot, channel_id);
-                (
-                    response.applied,
-                    true,
-                    Some(response.decision.auto_heal.window_secs),
-                    shield_channel_id,
-                )
-            };
+                channel_id.get(),
+                RelayRecoveryActionKind::ReattachWatcher,
+                RelayRecoveryApplySource::ProbeAutoHeal,
+            )
+            .await?;
+            (
+                response.applied,
+                true,
+                Some(response.decision.auto_heal.window_secs),
+            )
+        };
         if applied {
+            let shield_channel_id =
+                redrive_shield_channel_for_action(&shared, &snapshot, channel_id, reattached);
             let committed = shared.commit_redrive_success(
                 provider,
                 channel_id,
@@ -450,11 +455,18 @@ impl HealthRegistry {
     }
 }
 
-fn redrive_shield_channel_after_reattach(
+fn redrive_shield_channel_for_action(
     shared: &SharedData,
     snapshot: &WatcherStateSnapshot,
     fallback_channel_id: ChannelId,
+    reattached: bool,
 ) -> ChannelId {
+    if !reattached {
+        return snapshot
+            .watcher_owner_channel_id
+            .map(ChannelId::new)
+            .unwrap_or(fallback_channel_id);
+    }
     snapshot
         .tmux_session
         .as_deref()
@@ -1204,6 +1216,64 @@ mod tests {
     }
 
     #[test]
+    fn redrive_self_reattach_identity_rejects_unrelated_synthetic_turns_4299() {
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_299_008);
+        let tmux_session = "AgentDesk-codex-4299-synthetic-identity";
+        let output_path = "/tmp/agentdesk-4299-synthetic-identity.jsonl";
+        let mut previous = synthetic_rebind_state(
+            &provider,
+            channel_id,
+            tmux_session,
+            output_path,
+            "2026-06-12 00:00:01",
+            128,
+        );
+        previous.turn_nonce = Some("previous-turn".to_string());
+        let episode = RedriveEpisode {
+            frontier: 128,
+            identity: Some(InflightTurnIdentity::from_state(&previous)),
+            turn_nonce: previous.turn_nonce.clone(),
+            reconnect_count: 0,
+        };
+
+        let mut monitor = synthetic_rebind_state(
+            &provider,
+            channel_id,
+            tmux_session,
+            output_path,
+            "2026-06-12 00:00:02",
+            129,
+        );
+        monitor.turn_nonce = Some("monitor-turn".to_string());
+        monitor.turn_source = crate::services::discord::inflight::TurnSource::MonitorTriggered;
+        assert_eq!(
+            episode.self_reattach_identity(&monitor),
+            None,
+            "a monitor auto-turn is a successor, not reattach's synthetic row"
+        );
+
+        let mut explicit_rebind = monitor.clone();
+        explicit_rebind.turn_source =
+            crate::services::discord::inflight::TurnSource::ExternalAdopted;
+        assert!(
+            episode.self_reattach_identity(&explicit_rebind).is_some(),
+            "an explicit synthetic rebind must still be absorbed"
+        );
+
+        let mut empty_nonce_episode = episode;
+        empty_nonce_episode.turn_nonce = Some(String::new());
+        let mut empty_nonce_successor = previous;
+        empty_nonce_successor.turn_nonce = Some(String::new());
+        empty_nonce_successor.rebind_origin = false;
+        assert_eq!(
+            empty_nonce_episode.self_reattach_identity(&empty_nonce_successor),
+            None,
+            "empty nonce values are absent and must never authenticate a turn"
+        );
+    }
+
+    #[test]
     fn redrive_cap_resets_only_for_progress_identity_or_watcher_4299() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
@@ -1377,11 +1447,10 @@ mod tests {
             base + 4_000_030,
         );
         assert_eq!(second.attempt, Some(2));
-        let key = shared.redrive_key(&provider, channel_id);
-        REDRIVE_PLACEHOLDER_SHIELDS
-            .get_mut(&key)
+        let first_shield_started = shared
+            .redrive_placeholder_shield_context(&provider, channel_id)
             .expect("first reattach records shield")
-            .1 = 1_234;
+            .0;
         rebound.started_at = "2026-06-12 00:00:02".to_string();
         rebound.updated_at = rebound.started_at.clone();
         rebound.turn_start_offset = Some(snapshot.last_relay_offset + 1);
@@ -1405,7 +1474,10 @@ mod tests {
         let (shield_started, _, shield_identity) = shared
             .redrive_placeholder_shield_context(&provider, channel_id)
             .expect("self-reattach must preserve shield");
-        assert_eq!(shield_started, 1_234, "self-reattach must not extend 900s");
+        assert_eq!(
+            shield_started, first_shield_started,
+            "self-reattach must not extend 900s"
+        );
         assert_eq!(shield_identity, Some(second_rebound_identity.clone()));
         let mut twice_reattached = self_reattached.clone();
         twice_reattached.reconnect_count = 1;
@@ -1519,8 +1591,16 @@ mod tests {
         let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
         snapshot.watcher_owner_channel_id = Some(owner_channel_id.get());
         snapshot.relay_health.watcher_owner_channel_id = Some(owner_channel_id.get());
+        let stale_snapshot_owner = ChannelId::new(4_299_007);
+        let mut routing_snapshot = snapshot.clone();
+        routing_snapshot.watcher_owner_channel_id = Some(stale_snapshot_owner.get());
         assert_eq!(
-            redrive_shield_channel_after_reattach(&shared, &snapshot, channel_id),
+            redrive_shield_channel_for_action(&shared, &routing_snapshot, channel_id, false,),
+            stale_snapshot_owner,
+            "a nudge must shield the owner captured by its snapshot"
+        );
+        assert_eq!(
+            redrive_shield_channel_for_action(&shared, &routing_snapshot, channel_id, true),
             owner_channel_id,
             "reuse-existing reattach must shield the incumbent watcher owner"
         );
@@ -1548,6 +1628,19 @@ mod tests {
                 1_234,
             ),
         );
+        let request_key = shared.redrive_key(&provider, channel_id);
+        REDRIVE_PLACEHOLDER_SHIELDS.insert(
+            request_key,
+            (
+                RedriveEpisode {
+                    frontier: snapshot.last_relay_offset,
+                    identity: snapshot.inflight_identity.clone(),
+                    turn_nonce: None,
+                    reconnect_count: snapshot.reconnect_count,
+                },
+                5_678,
+            ),
+        );
         let base = 1_820_000_000;
         assert_eq!(
             gated_nudge(
@@ -1563,18 +1656,14 @@ mod tests {
             gated_nudge(&shared, &provider, &snapshot, channel_id, base),
             (true, Some(1))
         );
+        let episode_started = shared
+            .redrive_placeholder_shield_context(&provider, owner_channel_id)
+            .expect("first attempt re-arms the owner shield")
+            .0;
         assert_ne!(
-            shared
-                .redrive_placeholder_shield_context(&provider, owner_channel_id)
-                .expect("first attempt re-arms the owner shield")
-                .0,
-            1_234,
+            episode_started, 1_234,
             "the first action of a new request episode must replace a stale owner shield"
         );
-        REDRIVE_PLACEHOLDER_SHIELDS
-            .get_mut(&owner_key)
-            .expect("first owner nudge records a shield")
-            .1 = 1_234;
 
         shared
             .tmux_relay_coord(owner_channel_id)
@@ -1598,7 +1687,10 @@ mod tests {
         let (shield_started, frontier_at_first_nudge, shield_identity) = shared
             .redrive_placeholder_shield_context(&provider, owner_channel_id)
             .expect("owner shield survives the request-channel episode");
-        assert_eq!(shield_started, 1_234, "repeat nudge must not extend 900s");
+        assert_eq!(
+            shield_started, episode_started,
+            "repeat nudge must not extend 900s"
+        );
         assert_eq!(
             frontier_at_first_nudge, 0,
             "owner progress must not move the frozen first-nudge frontier"
@@ -1612,6 +1704,22 @@ mod tests {
         assert!(
             shared.committed_relay_offset(owner_channel_id) > frontier_at_first_nudge,
             "owner progress must restore reclaim against the frozen shield snapshot"
+        );
+
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 90)
+                .attempt,
+            Some(3)
+        );
+        shared.commit_redrive_success(&provider, channel_id, channel_id, base + 90, true);
+        assert_eq!(
+            shared
+                .redrive_placeholder_shield_context(&provider, channel_id)
+                .expect("shield follows a mid-episode owner move")
+                .0,
+            episode_started,
+            "a shield-key move must retain the first action's 900s anchor"
         );
 
         REDRIVE_PLACEHOLDER_SHIELDS.remove(&owner_key);
