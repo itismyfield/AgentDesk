@@ -82,6 +82,91 @@ pub(super) fn workflow_status_label(slot: &WorkflowSlot) -> String {
         .unwrap_or_else(|| "workflow".to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkflowEndTarget {
+    Existing(usize),
+    NewSlot,
+    Drop,
+}
+
+pub(super) fn workflow_end_target(
+    slots: &[WorkflowSlot],
+    task_id: Option<&str>,
+) -> WorkflowEndTarget {
+    match task_id {
+        Some(task_id) => {
+            if let Some(index) = slots
+                .iter()
+                .position(|slot| slot.task_id.as_deref() == Some(task_id))
+            {
+                return WorkflowEndTarget::Existing(index);
+            }
+            if slots.len() == 1 && slots[0].task_id.is_none() && slots[0].finished.is_none() {
+                WorkflowEndTarget::Existing(0)
+            } else {
+                WorkflowEndTarget::NewSlot
+            }
+        }
+        None => match slots {
+            [slot] if slot.task_id.is_none() => WorkflowEndTarget::Existing(0),
+            [slot] if slot.task_id.is_some() => WorkflowEndTarget::Drop,
+            _ => WorkflowEndTarget::NewSlot,
+        },
+    }
+}
+
+pub(super) fn apply_workflow_end(
+    slots: &mut Vec<WorkflowSlot>,
+    task_id: Option<String>,
+    success: bool,
+    summary: Option<String>,
+) -> bool {
+    match workflow_end_target(slots, task_id.as_deref()) {
+        WorkflowEndTarget::Existing(index) => {
+            let slot = &mut slots[index];
+            if slot.task_id.is_none() {
+                slot.task_id = task_id;
+            }
+            finish_workflow_slot(slot, success, summary);
+            true
+        }
+        WorkflowEndTarget::NewSlot => {
+            slots.push(WorkflowSlot {
+                task_id,
+                name: None,
+                phases: Vec::new(),
+                agents: Vec::new(),
+                recent: None,
+                finished: None,
+            });
+            finish_workflow_slot(
+                slots.last_mut().expect("workflow just pushed"),
+                success,
+                summary,
+            );
+            true
+        }
+        WorkflowEndTarget::Drop => {
+            tracing::info!(
+                live_task_id = slots
+                    .first()
+                    .and_then(|slot| slot.task_id.as_deref())
+                    .unwrap_or(""),
+                "#4407: dropped id-less WorkflowEnd for the only id-bearing workflow slot"
+            );
+            false
+        }
+    }
+}
+
+fn finish_workflow_slot(slot: &mut WorkflowSlot, success: bool, summary: Option<String>) {
+    if let Some(summary) = summary.filter(|value| !value.trim().is_empty()) {
+        slot.recent = Some(normalize_summary(&summary));
+    }
+    slot.finished = Some(success);
+    trim_workflow_slot(slot);
+}
+
 fn workflow_agent_label(agent: &WorkflowAgentSlot) -> String {
     agent
         .phase_title

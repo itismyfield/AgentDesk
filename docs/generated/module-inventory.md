@@ -543,14 +543,14 @@
 | `services::discord::placeholder_live_events::recent_events` | `src/services/discord/placeholder_live_events/recent_events.rs` | 321 | 321 | 0 |  |
 | `services::discord::placeholder_live_events::session_panel` | `src/services/discord/placeholder_live_events/session_panel.rs` | 262 | 262 | 0 |  |
 | `services::discord::placeholder_live_events::slot_rehydration` | `src/services/discord/placeholder_live_events/slot_rehydration.rs` | 525 | 447 | 78 |  |
-| `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 792 | 792 | 0 |  |
-| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 780 | 780 | 0 |  |
+| `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 791 | 791 | 0 |  |
+| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 774 | 774 | 0 |  |
 | `services::discord::placeholder_live_events::subagent_panel` | `src/services/discord/placeholder_live_events/subagent_panel.rs` | 368 | 318 | 50 |  |
 | `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 531 | 356 | 175 |  |
 | `services::discord::placeholder_live_events::subagent_summary` | `src/services/discord/placeholder_live_events/subagent_summary.rs` | 69 | 69 | 0 |  |
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 399 | 399 | 0 |  |
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
-| `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 185 | 185 | 0 |  |
+| `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 270 | 270 | 0 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1315 | 1020 | 295 | giant-file |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 436 | 436 | 0 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |

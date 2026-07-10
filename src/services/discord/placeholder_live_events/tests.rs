@@ -6808,6 +6808,239 @@ fn idless_end_after_eviction_with_new_agent_id_still_respects_desc_tombstone() {
     );
 }
 
+// #4407 codex repro: a late workflow-A completion XML must not close the only
+// live workflow-B slot just because the completion reached the bridge without
+// a usable id. Main closes wf-b here; the fixed path preserves wf-a's task-id
+// and appends a separate finished wf-a slot.
+#[test]
+fn issue_4407_workflow_xml_completion_with_mismatched_task_id_never_closes_live_workflow() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_407_001);
+
+    events.push_status_event(
+        channel_id,
+        StatusEvent::WorkflowStart {
+            task_id: Some("wf-b".to_string()),
+            name: Some("workflow B".to_string()),
+        },
+    );
+
+    let raw = "<task-notification><task-id>wf-a</task-id><status>completed</status>\
+        <summary>Dynamic workflow \"workflow A\" completed</summary></task-notification>";
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_xml_for_footer_mode(raw, true),
+    );
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let wf_b = guard
+        .workflows
+        .iter()
+        .find(|slot| slot.task_id.as_deref() == Some("wf-b"))
+        .unwrap_or_else(|| panic!("live wf-b slot missing: {:?}", guard.workflows));
+    assert_eq!(
+        wf_b.finished, None,
+        "late wf-a completion XML must not close live wf-b: {:?}",
+        guard.workflows
+    );
+    assert!(
+        guard
+            .workflows
+            .iter()
+            .any(|slot| slot.task_id.as_deref() == Some("wf-a") && slot.finished == Some(true)),
+        "late wf-a completion must render as its own finished slot: {:?}",
+        guard.workflows
+    );
+}
+
+#[test]
+fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
+    let events = PlaceholderLiveEvents::default();
+
+    for (channel, status, success) in [(4_407_002, "completed", true), (4_407_003, "failed", false)]
+    {
+        let channel_id = ChannelId::new(channel);
+        events.push_status_event(
+            channel_id,
+            StatusEvent::WorkflowStart {
+                task_id: Some("wf-same".to_string()),
+                name: Some("workflow same".to_string()),
+            },
+        );
+        let raw = format!(
+            "<task-notification><task-id>wf-same</task-id><status>{status}</status>\
+            <summary>Dynamic workflow \"workflow same\" {status}</summary></task-notification>"
+        );
+        events.push_status_events(
+            channel_id,
+            status_events_from_task_notification_xml_for_footer_mode(&raw, true),
+        );
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.workflows.len(),
+            1,
+            "same-id end must not add a ghost slot"
+        );
+        assert_eq!(guard.workflows[0].finished, Some(success));
+    }
+
+    let legacy_channel = ChannelId::new(4_407_004);
+    events.push_status_event(
+        legacy_channel,
+        StatusEvent::WorkflowStart {
+            task_id: None,
+            name: Some("legacy workflow".to_string()),
+        },
+    );
+    events.push_status_event(
+        legacy_channel,
+        StatusEvent::WorkflowEnd {
+            task_id: None,
+            success: true,
+            summary: None,
+        },
+    );
+    let legacy_entry = events
+        .status_by_channel
+        .get(&legacy_channel)
+        .expect("status panel state");
+    let legacy = legacy_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(
+        legacy.workflows[0].finished,
+        Some(true),
+        "id-less legacy end must still close the unique id-less slot"
+    );
+
+    let adopt_channel = ChannelId::new(4_407_005);
+    events.push_status_event(
+        adopt_channel,
+        StatusEvent::WorkflowStart {
+            task_id: None,
+            name: Some("adopted workflow".to_string()),
+        },
+    );
+    events.push_status_event(
+        adopt_channel,
+        StatusEvent::WorkflowEnd {
+            task_id: Some("wf-adopted".to_string()),
+            success: true,
+            summary: None,
+        },
+    );
+    let adopt_entry = events
+        .status_by_channel
+        .get(&adopt_channel)
+        .expect("status panel state");
+    let adopt = adopt_entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(adopt.workflows.len(), 1, "adopt must close in place");
+    assert_eq!(adopt.workflows[0].task_id.as_deref(), Some("wf-adopted"));
+    assert_eq!(adopt.workflows[0].finished, Some(true));
+}
+
+#[test]
+fn issue_4407_idless_workflow_end_for_unique_id_bearing_slot_drops_without_status_transition() {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_407_006);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::WorkflowStart {
+            task_id: Some("wf-live".to_string()),
+            name: Some("live workflow".to_string()),
+        },
+    );
+
+    let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(CapturingWriter {
+            buffer: buffer.clone(),
+        })
+        .finish();
+    {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        events.push_status_event(
+            channel_id,
+            StatusEvent::WorkflowEnd {
+                task_id: None,
+                success: true,
+                summary: Some("legacy completion".to_string()),
+            },
+        );
+    }
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(
+        guard.workflows.len(),
+        1,
+        "drop must not add a ghost workflow"
+    );
+    assert_eq!(guard.workflows[0].task_id.as_deref(), Some("wf-live"));
+    assert_eq!(
+        guard.workflows[0].finished, None,
+        "id-less end must not close the only id-bearing workflow"
+    );
+    assert!(
+        matches!(guard.status, DerivedStatus::WorkflowRunning { .. }),
+        "drop must not transition WorkflowRunning back to Running: {:?}",
+        guard.status
+    );
+    let logs = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 logs");
+    assert!(
+        logs.contains("#4407: dropped id-less WorkflowEnd"),
+        "drop must be logged, got: {logs}"
+    );
+}
+
 // #3393 finding 3: a workflow `<task-notification>` XML with a NON-terminal
 // status (e.g. running) must NOT emit `WorkflowEnd`; terminal statuses still map
 // success via `!is_error`, consistent with the subagent/background arms.
@@ -6828,9 +7061,14 @@ fn task_notification_xml_workflow_gates_workflow_end_on_terminal_status() {
     let completed_events =
         status_events_from_task_notification_xml_for_footer_mode(completed, true);
     assert!(
-        completed_events
-            .iter()
-            .any(|e| matches!(e, StatusEvent::WorkflowEnd { success: true, .. })),
+        completed_events.iter().any(|e| matches!(
+            e,
+            StatusEvent::WorkflowEnd {
+                task_id: Some(task_id),
+                success: true,
+                ..
+            } if task_id == "wf2"
+        )),
         "status=completed workflow XML must emit WorkflowEnd{{success:true}}: {completed_events:?}"
     );
 
@@ -6838,9 +7076,14 @@ fn task_notification_xml_workflow_gates_workflow_end_on_terminal_status() {
         <summary>Dynamic workflow \"probe\" failed</summary></task-notification>";
     let failed_events = status_events_from_task_notification_xml_for_footer_mode(failed, true);
     assert!(
-        failed_events
-            .iter()
-            .any(|e| matches!(e, StatusEvent::WorkflowEnd { success: false, .. })),
+        failed_events.iter().any(|e| matches!(
+            e,
+            StatusEvent::WorkflowEnd {
+                task_id: Some(task_id),
+                success: false,
+                ..
+            } if task_id == "wf3"
+        )),
         "status=failed workflow XML must emit WorkflowEnd{{success:false}}: {failed_events:?}"
     );
 }

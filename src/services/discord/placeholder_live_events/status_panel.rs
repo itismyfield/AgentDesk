@@ -19,8 +19,8 @@ use super::task_panel::{
     upsert_task_tool_slot,
 };
 use super::workflow_panel::{
-    WorkflowAgentSlot, WorkflowSlot, render_workflow_slot, trim_workflow_slot, trim_workflows,
-    upsert_workflow_agent, upsert_workflow_phase, workflow_status_label,
+    WorkflowAgentSlot, WorkflowSlot, apply_workflow_end, render_workflow_slot, trim_workflow_slot,
+    trim_workflows, upsert_workflow_agent, upsert_workflow_phase, workflow_status_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,17 +516,11 @@ impl StatusPanelState {
                 success,
                 summary,
             } => {
-                {
-                    let slot = self.workflow_slot_mut(task_id);
-                    if let Some(summary) = summary.filter(|value| !value.trim().is_empty()) {
-                        slot.recent = Some(normalize_summary(&summary));
+                if apply_workflow_end(&mut self.workflows, task_id, success, summary) {
+                    trim_workflows(&mut self.workflows);
+                    if matches!(self.status, DerivedStatus::WorkflowRunning { .. }) {
+                        self.status = DerivedStatus::Running;
                     }
-                    slot.finished = Some(success);
-                    trim_workflow_slot(slot);
-                }
-                trim_workflows(&mut self.workflows);
-                if matches!(self.status, DerivedStatus::WorkflowRunning { .. }) {
-                    self.status = DerivedStatus::Running;
                 }
             }
             StatusEvent::TurnCompleted {
