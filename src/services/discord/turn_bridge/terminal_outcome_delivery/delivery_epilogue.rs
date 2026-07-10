@@ -25,6 +25,7 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) adk_cwd: &'a Option<String>,
     pub(super) dispatch_id: &'a Option<String>,
     pub(super) turn_id: &'a String,
+    pub(super) user_text_owned: &'a String,
     pub(super) full_response: &'a String,
     pub(super) delivery_response: &'a String,
     pub(super) spoken_delivery_response: &'a String,
@@ -72,6 +73,7 @@ pub(super) async fn handle_delivery_epilogue(
     let adk_cwd = ctx.adk_cwd;
     let dispatch_id = ctx.dispatch_id;
     let turn_id = ctx.turn_id;
+    let user_text_owned = ctx.user_text_owned;
     let full_response = ctx.full_response.clone();
     let delivery_response = ctx.delivery_response.clone();
     let spoken_delivery_response = ctx.spoken_delivery_response.clone();

@@ -91,11 +91,18 @@ Turn bridge decomposition anchors:
   remaining stream event arms, long-running placeholder open/retarget state,
   runtime handoff delegation, stream/status ticks, and bridge latency span
   emission.
-- `turn_bridge/terminal_outcome_delivery.rs` — cancel, prompt-too-long,
-  recovery retry, empty response, terminal delivery lease commits,
-  terminal-controller cutover, voice completion, TUI completion gate, dispatch
-  completion/failure, watcher-delivered marking, `tv_done`, and terminal
-  status readiness.
+- `turn_bridge/terminal_outcome_delivery.rs` — terminal outcome ownership
+  dispatch, main terminal delivery/controller cutover, and child-handler state
+  threading.
+- `turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs` — recovery
+  retry fallback and cancelled/prompt-too-long replacement, including their
+  delivery lease commits.
+- `turn_bridge/terminal_outcome_delivery/empty_response_recovery.rs` — empty
+  response auto-retry/recovery, late response shaping, and silent-turn delivery
+  lease commit.
+- `turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` — post-commit
+  voice/TUI completion, dispatch completion/failure, watcher-delivered mark,
+  `tv_done`, and terminal status readiness.
 
 ### 2. Session + Provider Runtime (`src/services/`, `src/dispatch/`)
 

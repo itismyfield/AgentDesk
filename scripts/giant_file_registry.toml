@@ -495,18 +495,11 @@ owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3038"
 
-[[entry]]
-# Created by #4230 S5 as the approved high-coupling terminal outcome delivery
-# extraction from turn_bridge/mod.rs; #4230 S9 moved the cancelled and
-# prompt-too-long arms, including both intact #3041 delivery-lease pairs, to
-# terminal_outcome_delivery/cancel_prompt_replace.rs. It remains over the giant
-# threshold because recovery retry, the main delivery core, controller cutover,
-# voice/TUI completion, dispatch completion, watcher-delivered marking, and the
-# post-commit epilogue remain until the next decomposition stage.
-file = "src/services/discord/turn_bridge/terminal_outcome_delivery.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#4230"
+# RETIRED 2026-07-10 (#4230 S10): terminal_outcome_delivery.rs dropped from
+# 1370 to 856 production LoC after recovery fallback joined the S9 cancel/PTL
+# handler and the post-commit epilogue plus empty-response/silent-turn recovery
+# moved to child modules. The root is below the 1000-prod-LoC giant threshold,
+# so its promoted registry entry is removed and cannot remain as a ghost.
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3540: the durable pending

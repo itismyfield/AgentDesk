@@ -83,7 +83,7 @@ pub(super) async fn handle_cancel_prompt_replace(
     let mut pending_long_running_retarget_after_state_save =
         state.pending_long_running_retarget_after_state_save.take();
     let mut long_running_placeholder_active = state.long_running_placeholder_active.take();
-    let inflight_state = &mut *state.inflight_state;
+    let mut inflight_state = &mut *state.inflight_state;
     let mut preserve_inflight_for_cleanup_retry = *state.preserve_inflight_for_cleanup_retry;
     let mut bridge_skip_holder_owns_inflight = *state.bridge_skip_holder_owns_inflight;
     let mut status_panel_terminal_committed = *state.status_panel_terminal_committed;
