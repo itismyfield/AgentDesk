@@ -3,8 +3,49 @@
 /// Provides helpers to clear, reset, and manage the in-flight retry state
 /// during Gemini/Qwen auto-retry boundaries and session recovery.
 use super::super::*;
+use super::recovery_text::release_retry_pending;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
+
+/// #2452 H6 graduation: schedule the history-aware auto-retry via the
+/// gateway's `_with_completion` variant, then release the
+/// `RETRY_PENDING` dedup lockout AS SOON AS the gateway's completion
+/// oneshot resolves. A 120s `tokio::time::timeout` safety net guarantees
+/// the lockout cannot leak indefinitely even if the spawned scheduler
+/// panics or wedges before sending on `completion_tx`.
+///
+/// The legacy 30s sleep inside `auto_retry_with_history` is preserved as
+/// a back-compat fallback for callers that hit the trait's default
+/// `_with_completion` impl (which sends on `completion_tx` immediately
+/// after the inner `auto_retry_with_history` returns) — both paths
+/// remove the same `channel_id` from the `RETRY_PENDING` set, so a
+/// double-remove is a no-op.
+pub(super) fn spawn_retry_with_history_with_release(
+    gateway: std::sync::Arc<dyn gateway::TurnGateway>,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    retry_text: String,
+) {
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
+    super::super::task_supervisor::spawn_observed("retry_with_history_dispatch", async move {
+        gateway
+            .schedule_retry_with_history_with_completion(
+                channel_id,
+                user_msg_id,
+                &retry_text,
+                completion_tx,
+            )
+            .await;
+    });
+    super::super::task_supervisor::spawn_observed("retry_with_history_release", async move {
+        // 120s safety net: if completion_tx is dropped without a send
+        // (panic, wedged future), the recv resolves with Err and we still
+        // release. If 120s elapses with neither send nor drop, force
+        // release so the lockout cannot leak forever.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
+        release_retry_pending(channel_id);
+    });
+}
 
 pub(super) fn clear_local_session_state(
     new_session_id: &mut Option<String>,
@@ -749,5 +790,102 @@ mod tests {
             persisted.effective_relay_owner_kind(),
             super::super::super::inflight::RelayOwnerKind::None
         );
+    }
+}
+
+#[cfg(test)]
+mod sentinel_overwrite_clamp_tests {
+    use super::super::response_delivery::done_result_requires_full_terminal_replay;
+
+    // #3419 R3: the existing offset-reset gate requires a >DISCORD_MSG_LIMIT
+    // (8000-byte) authoritative replay, so a short sentinel NEVER trips it —
+    // which is exactly why the SEPARATE clamp at the swap site is needed. This
+    // pins that gap so a future refactor cannot silently make the clamp dead
+    // (e.g. by assuming the replay gate already handles sentinels).
+    #[test]
+    fn replay_gate_does_not_reset_offset_for_short_sentinel() {
+        let sentinel = "⚠ tool-only turn, no assistant text"; // ~40 bytes, < 8000
+        assert!(sentinel.len() <= super::super::super::DISCORD_MSG_LIMIT);
+        // streamed text this turn, prior offset > 0, sentinel == full_response:
+        // the replay gate STILL returns false because of the length floor.
+        assert!(!done_result_requires_full_terminal_replay(
+            sentinel, sentinel, 900, true,
+        ));
+    }
+
+    // #3419 R3 / codex MEDIUM: drive the REAL normalizer the bridge now calls
+    // (`sync_response_delivery_state` → `normalized_response_sent_offset`), not a
+    // re-implemented clamp, so a mutation that drops the clamp OR the char-boundary
+    // walk-back is caught against actual production behaviour.
+    #[test]
+    fn sync_clamps_offset_within_replaced_body() {
+        use crate::services::discord::InflightTurnState;
+        use crate::services::provider::ProviderKind;
+
+        let replaced = "⚠ tool-only turn, no assistant text".to_string();
+        let mut offset = 900usize; // tracked the long pre-swap body
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
+        // Clamped to len() (out-of-bounds prior offset) and char-boundary valid.
+        assert_eq!(offset, replaced.len());
+        assert!(replaced.is_char_boundary(offset));
+        assert_eq!(state.response_sent_offset, offset);
+        assert_eq!(state.full_response, replaced);
+        // Mutation guard: the UNCLAMPED prior offset is out of bounds (the wedge).
+        assert!(replaced.get(900..).is_none());
+        assert!(replaced.get(offset..).is_some());
+    }
+
+    // #3419 R3 / codex MEDIUM (the char-boundary case the bare `.min(len)` missed):
+    // a replacement BEGINNING with a multibyte sentinel (`⚠` = 3 bytes) with a
+    // prior offset of 1. `1 < len()`, so `.min(len)` would leave it UNCHANGED at 1
+    // — but byte 1 is INSIDE `⚠`, violating the char-boundary invariant and
+    // panicking any later `full_response[offset..]` slice. The normalizer must walk
+    // BACK to the nearest valid boundary (0).
+    #[test]
+    fn sync_normalizes_prior_offset_inside_leading_multibyte_char() {
+        use crate::services::discord::InflightTurnState;
+        use crate::services::provider::ProviderKind;
+
+        let replaced = "⚠ tool-only turn, no assistant text".to_string();
+        // Precondition: byte 1 is genuinely mid-multibyte (the bug surface).
+        assert!(!replaced.is_char_boundary(1));
+        let mut offset = 1usize; // prior valid offset that now lands mid-char
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
+        // Normalized back to the leading boundary (0) — NOT left at the mid-char 1.
+        assert_eq!(offset, 0);
+        assert!(replaced.is_char_boundary(offset));
+        assert_eq!(state.response_sent_offset, 0);
+        // Mutation guard: a bare `.min(len)` (no walk-back) would leave offset 1,
+        // which is NOT a char boundary and would panic on `&replaced[1..]`.
+        assert!(replaced.get(1..).is_none());
+        assert!(replaced.get(offset..).is_some());
     }
 }

@@ -1,3 +1,4 @@
+mod activity_heartbeat;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
 mod chunk_compose;
@@ -23,6 +24,7 @@ mod skill_usage;
 mod stale_resume;
 mod status_panel;
 mod stream_loop;
+mod stream_receiver;
 mod stream_tick;
 mod streaming_edit_text;
 mod task_notification_lifecycle;
@@ -64,9 +66,8 @@ use crate::db::session_observability::{
     BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
     mark_session_tool_use_pg,
 };
-use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
+use crate::db::session_transcripts::SessionTranscriptEvent;
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
 use crate::services::memory::{
     CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -75,18 +76,21 @@ use crate::services::observability::session_inventory::{
 };
 use crate::services::provider::cancel_requested;
 use output_lifecycle::BridgeOutputOwner;
-use panel_lifecycle::{
+pub(super) use panel_lifecycle::{
     child_progress_line, ensure_active_placeholder_card, first_request_line,
-    refresh_session_panel_line_from_lifecycle, refresh_task_panel_line_from_dispatch,
+    record_placeholder_live_event, refresh_session_panel_line_from_lifecycle,
+    refresh_task_panel_line_from_dispatch,
 };
 use std::collections::VecDeque;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
+pub(super) use activity_heartbeat::maybe_refresh_active_turn_activity_heartbeat;
 use bridge_latency_spans::BridgeLatencySpans;
 pub(super) use cancel_finalize_policy::{
     classify_turn_finished_dispatch_kind, is_done_setting_terminal_frame,
     resolve_bridge_owner_channel, should_finalize_cancel_after_recv,
     should_record_final_turn_transcript, should_suppress_headless_delivery_for_cancel,
+    sync_inflight_restart_mode_from_cancel,
 };
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
@@ -105,6 +109,10 @@ pub(in crate::services::discord) use status_panel::{
 // #3805 P2 (PR-C): the ONE generation staleness rule shared by the sink (here)
 // and the tmux WATCHER completion guard, so both paths supersede a stale
 // status edit by the SAME epoch semantics (parity).
+pub(super) use stream_receiver::{
+    StreamMessageReceiverAdapter, spawn_stream_message_receiver_adapter,
+    turn_bridge_stream_wait_duration,
+};
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
     bridge_streaming_edit_gate_open, bridge_streaming_rollover_should_skip,
@@ -123,6 +131,7 @@ pub(super) use tmux_runtime::cancel_token_has_tmux_session;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
+pub(super) use tmux_runtime::tmux_generation_file_mtime_ns;
 pub(in crate::services::discord) use two_message_panel::{
     two_message_should_reanchor_panel_on_rollover, two_message_status_edit_generation_is_stale,
 };
@@ -130,46 +139,6 @@ pub(super) use watcher_orphan_cleanup::{
     cleanup_or_preserve_watcher_orphan_spinner,
     should_delete_bridge_created_watcher_orphan_response,
 };
-
-/// #2452 H6 graduation: schedule the history-aware auto-retry via the
-/// gateway's `_with_completion` variant, then release the
-/// `RETRY_PENDING` dedup lockout AS SOON AS the gateway's completion
-/// oneshot resolves. A 120s `tokio::time::timeout` safety net guarantees
-/// the lockout cannot leak indefinitely even if the spawned scheduler
-/// panics or wedges before sending on `completion_tx`.
-///
-/// The legacy 30s sleep inside `auto_retry_with_history` is preserved as
-/// a back-compat fallback for callers that hit the trait's default
-/// `_with_completion` impl (which sends on `completion_tx` immediately
-/// after the inner `auto_retry_with_history` returns) — both paths
-/// remove the same `channel_id` from the `RETRY_PENDING` set, so a
-/// double-remove is a no-op.
-fn spawn_retry_with_history_with_release(
-    gateway: std::sync::Arc<dyn gateway::TurnGateway>,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    retry_text: String,
-) {
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
-    super::task_supervisor::spawn_observed("retry_with_history_dispatch", async move {
-        gateway
-            .schedule_retry_with_history_with_completion(
-                channel_id,
-                user_msg_id,
-                &retry_text,
-                completion_tx,
-            )
-            .await;
-    });
-    super::task_supervisor::spawn_observed("retry_with_history_release", async move {
-        // 120s safety net: if completion_tx is dropped without a send
-        // (panic, wedged future), the recv resolves with Err and we still
-        // release. If 120s elapses with neither send nor drop, force
-        // release so the lockout cannot leak forever.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
-        release_retry_pending(channel_id);
-    });
-}
 
 // Re-export pub(crate) items
 pub(crate) use tmux_runtime::tmux_runtime_paths;
@@ -194,11 +163,11 @@ use recall_feedback::{
     analyze_recall_feedback_turn, build_voluntary_feedback_reminder, reminder_transcript_event,
     transcript_contains_explicit_memento_tool_call,
 };
-use retry_state::{
+pub(super) use retry_state::{
     bridge_confirmed_response_sent_offset_seed, bridge_should_reclaim_relay_from_missing_watcher,
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
-    rewind_and_persist_delivery_on_reclaim, sync_response_delivery_state,
-    sync_terminal_error_delivery_state_for_bridge_owner,
+    rewind_and_persist_delivery_on_reclaim, spawn_retry_with_history_with_release,
+    sync_response_delivery_state, sync_terminal_error_delivery_state_for_bridge_owner,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use stale_resume::{
@@ -235,128 +204,6 @@ use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use sqlx::Row;
-
-#[cfg(unix)]
-fn tmux_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
-    super::tmux::read_generation_file_mtime_ns(tmux_session_name)
-}
-
-#[cfg(not(unix))]
-fn tmux_generation_file_mtime_ns(_tmux_session_name: &str) -> i64 {
-    0
-}
-
-fn sync_inflight_restart_mode_from_cancel(
-    cancel_token: &crate::services::provider::CancelToken,
-    inflight_state: &mut InflightTurnState,
-) -> bool {
-    let new_mode = cancel_token.restart_mode();
-    if inflight_state.restart_mode == new_mode {
-        return false;
-    }
-    match new_mode {
-        Some(mode) => inflight_state.set_restart_mode(mode),
-        None => inflight_state.clear_restart_mode(),
-    }
-    true
-}
-
-fn record_placeholder_live_event(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    event: Option<super::placeholder_live_events::RecentPlaceholderEvent>,
-) {
-    if (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
-        && let Some(event) = event
-    {
-        shared
-            .ui
-            .placeholder_live_events
-            .push_event(channel_id, event);
-    }
-}
-
-fn thinking_status_line() -> String {
-    "💭 Thinking...".to_string()
-}
-
-fn redacted_thinking_transcript_event(_summary: Option<String>) -> SessionTranscriptEvent {
-    SessionTranscriptEvent {
-        kind: SessionTranscriptEventKind::Thinking,
-        tool_name: None,
-        summary: None,
-        content: String::new(),
-        status: Some("info".to_string()),
-        is_error: false,
-    }
-}
-
-#[cfg(test)]
-mod thinking_redaction_tests {
-    use super::*;
-
-    // U-6 Policy clause 1 + clause 4: the transcript event we record for a
-    // Thinking stream message must carry no raw model reasoning. Both
-    // `summary` and `content` must be empty regardless of the input the
-    // model sent, and the kind must be `Thinking` (so consumers can apply
-    // the neutral marker policy in clause 2).
-    #[test]
-    fn redacted_thinking_event_drops_summary_and_keeps_content_blank() {
-        let event = redacted_thinking_transcript_event(Some(
-            "internal scratchpad reasoning that must not leak".to_string(),
-        ));
-
-        assert_eq!(event.kind, SessionTranscriptEventKind::Thinking);
-        assert!(event.tool_name.is_none());
-        assert!(
-            event.summary.is_none(),
-            "summary leaked: {:?}",
-            event.summary
-        );
-        assert!(
-            event.content.is_empty(),
-            "content leaked: {:?}",
-            event.content
-        );
-        assert_eq!(event.status.as_deref(), Some("info"));
-        assert!(!event.is_error);
-    }
-
-    // Calling the redaction function with `None` summary keeps the same
-    // invariants — defense in depth against future callers that might
-    // attempt to pass through model text accidentally.
-    #[test]
-    fn redacted_thinking_event_with_none_summary_still_blank() {
-        let event = redacted_thinking_transcript_event(None);
-
-        assert!(event.summary.is_none());
-        assert!(event.content.is_empty());
-    }
-
-    // U-6 Policy clause 2: the user-visible thinking marker is a single
-    // neutral string with no model text, no timers, no token counts.
-    // It must be a stable identifier that the relay can deduplicate on.
-    #[test]
-    fn thinking_status_line_is_neutral_single_marker() {
-        let line = thinking_status_line();
-
-        assert_eq!(line, "💭 Thinking...");
-    }
-
-    // U-6 Policy clause 2 (stability): repeated calls must return the
-    // exact same marker string. The Thinking dispatch path uses this for
-    // both `current_tool_line` replacement and dedupe — if it ever drifted
-    // into a non-deterministic form (timestamp, counter, locale variant),
-    // the relay could emit multiple markers per turn or fail to match the
-    // previous one.
-    #[test]
-    fn thinking_status_line_is_stable_across_repeated_calls() {
-        let baseline = thinking_status_line();
-        for _ in 0..10 {
-            assert_eq!(thinking_status_line(), baseline);
-        }
-    }
-}
 
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
@@ -399,542 +246,11 @@ pub(super) struct TurnBridgeContext {
     pub(super) inflight_state: InflightTurnState,
 }
 
-struct StreamMessageReceiverAdapter {
-    rx: tokio::sync::mpsc::UnboundedReceiver<StreamMessage>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl StreamMessageReceiverAdapter {
-    async fn recv(&mut self) -> Option<StreamMessage> {
-        self.rx.recv().await
-    }
-
-    fn try_recv(&mut self) -> Result<StreamMessage, tokio::sync::mpsc::error::TryRecvError> {
-        self.rx.try_recv()
-    }
-}
-
-impl Drop for StreamMessageReceiverAdapter {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
-fn spawn_stream_message_receiver_adapter(
-    rx: mpsc::Receiver<StreamMessage>,
-) -> StreamMessageReceiverAdapter {
-    let (tx, async_rx) = tokio::sync::mpsc::unbounded_channel();
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop_worker = stop.clone();
-    tokio::task::spawn_blocking(move || {
-        while !stop_worker.load(std::sync::atomic::Ordering::Acquire) {
-            match rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(message) => {
-                    if stop_worker.load(std::sync::atomic::Ordering::Acquire)
-                        || tx.send(message).is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-    });
-    StreamMessageReceiverAdapter { rx: async_rx, stop }
-}
-
-fn turn_bridge_stream_wait_duration(
-    done: bool,
-    terminal_control_drain_until: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> std::time::Duration {
-    if done {
-        return terminal_control_drain_until
-            .map(|deadline| deadline.saturating_duration_since(now))
-            .unwrap_or_else(|| std::time::Duration::from_millis(0));
-    }
-    std::time::Duration::from_secs(1)
-}
-
-#[cfg(test)]
-mod ready_drain_unit_tests {
-    use super::*;
-
-    #[test]
-    fn done_wait_uses_remaining_drain_window_as_safety_wake() {
-        let now = std::time::Instant::now();
-        assert_eq!(
-            turn_bridge_stream_wait_duration(
-                true,
-                Some(now + std::time::Duration::from_millis(123)),
-                now,
-            ),
-            std::time::Duration::from_millis(123)
-        );
-        assert_eq!(
-            turn_bridge_stream_wait_duration(true, None, now),
-            std::time::Duration::from_millis(0)
-        );
-        assert_eq!(
-            turn_bridge_stream_wait_duration(false, None, now),
-            std::time::Duration::from_secs(1)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stream_receiver_adapter_wakes_on_ready_frame() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut async_rx = spawn_stream_message_receiver_adapter(rx);
-        tx.send(StreamMessage::TmuxReady {
-            output_path: "/tmp/out.jsonl".to_string(),
-            input_fifo_path: "/tmp/in.fifo".to_string(),
-            tmux_session_name: "adk-test".to_string(),
-            last_offset: 12,
-        })
-        .expect("send ready frame");
-
-        let received = tokio::time::timeout(std::time::Duration::from_millis(50), async_rx.recv())
-            .await
-            .expect("ready frame should wake without a poll tick")
-            .expect("adapter should forward ready frame");
-
-        assert!(matches!(received, StreamMessage::TmuxReady { .. }));
-    }
-}
-
-#[cfg(test)]
-mod sentinel_overwrite_clamp_tests {
-    use super::done_result_requires_full_terminal_replay;
-
-    // #3419 R3: the existing offset-reset gate requires a >DISCORD_MSG_LIMIT
-    // (8000-byte) authoritative replay, so a short sentinel NEVER trips it —
-    // which is exactly why the SEPARATE clamp at the swap site is needed. This
-    // pins that gap so a future refactor cannot silently make the clamp dead
-    // (e.g. by assuming the replay gate already handles sentinels).
-    #[test]
-    fn replay_gate_does_not_reset_offset_for_short_sentinel() {
-        let sentinel = "⚠ tool-only turn, no assistant text"; // ~40 bytes, < 8000
-        assert!(sentinel.len() <= super::super::DISCORD_MSG_LIMIT);
-        // streamed text this turn, prior offset > 0, sentinel == full_response:
-        // the replay gate STILL returns false because of the length floor.
-        assert!(!done_result_requires_full_terminal_replay(
-            sentinel, sentinel, 900, true,
-        ));
-    }
-
-    // #3419 R3 / codex MEDIUM: drive the REAL normalizer the bridge now calls
-    // (`sync_response_delivery_state` → `normalized_response_sent_offset`), not a
-    // re-implemented clamp, so a mutation that drops the clamp OR the char-boundary
-    // walk-back is caught against actual production behaviour.
-    #[test]
-    fn sync_clamps_offset_within_replaced_body() {
-        use crate::services::discord::InflightTurnState;
-        use crate::services::provider::ProviderKind;
-
-        let replaced = "⚠ tool-only turn, no assistant text".to_string();
-        let mut offset = 900usize; // tracked the long pre-swap body
-        let mut state = InflightTurnState::new(
-            ProviderKind::Claude,
-            1,
-            Some("adk-cc".to_string()),
-            42,
-            5001,
-            5002,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-adk-cc-1".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            10,
-        );
-        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
-        // Clamped to len() (out-of-bounds prior offset) and char-boundary valid.
-        assert_eq!(offset, replaced.len());
-        assert!(replaced.is_char_boundary(offset));
-        assert_eq!(state.response_sent_offset, offset);
-        assert_eq!(state.full_response, replaced);
-        // Mutation guard: the UNCLAMPED prior offset is out of bounds (the wedge).
-        assert!(replaced.get(900..).is_none());
-        assert!(replaced.get(offset..).is_some());
-    }
-
-    // #3419 R3 / codex MEDIUM (the char-boundary case the bare `.min(len)` missed):
-    // a replacement BEGINNING with a multibyte sentinel (`⚠` = 3 bytes) with a
-    // prior offset of 1. `1 < len()`, so `.min(len)` would leave it UNCHANGED at 1
-    // — but byte 1 is INSIDE `⚠`, violating the char-boundary invariant and
-    // panicking any later `full_response[offset..]` slice. The normalizer must walk
-    // BACK to the nearest valid boundary (0).
-    #[test]
-    fn sync_normalizes_prior_offset_inside_leading_multibyte_char() {
-        use crate::services::discord::InflightTurnState;
-        use crate::services::provider::ProviderKind;
-
-        let replaced = "⚠ tool-only turn, no assistant text".to_string();
-        // Precondition: byte 1 is genuinely mid-multibyte (the bug surface).
-        assert!(!replaced.is_char_boundary(1));
-        let mut offset = 1usize; // prior valid offset that now lands mid-char
-        let mut state = InflightTurnState::new(
-            ProviderKind::Claude,
-            1,
-            Some("adk-cc".to_string()),
-            42,
-            5001,
-            5002,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-adk-cc-1".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            10,
-        );
-        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
-        // Normalized back to the leading boundary (0) — NOT left at the mid-char 1.
-        assert_eq!(offset, 0);
-        assert!(replaced.is_char_boundary(offset));
-        assert_eq!(state.response_sent_offset, 0);
-        // Mutation guard: a bare `.min(len)` (no walk-back) would leave offset 1,
-        // which is NOT a char boundary and would panic on `&replaced[1..]`.
-        assert!(replaced.get(1..).is_none());
-        assert!(replaced.get(offset..).is_some());
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WatcherHandoffClaimOutcome {
     None,
     ReusedExisting,
     Spawned,
-}
-
-#[cfg(test)]
-mod streaming_edit_text_tests {
-    use super::*;
-
-    #[test]
-    fn empty_response_notice_is_delivery_only_not_history_payload() {
-        let full_response = String::new();
-        let rendered =
-            terminal_delivery_response_after_offset(&full_response, 0, Some("(No response)"));
-
-        assert_eq!(rendered, "(No response)");
-        assert!(full_response.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod headless_completion_footer_tests {
-    fn compact_ws(input: &str) -> String {
-        input.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    /// #4103: headless-dispatched turns (API / cron / routine, and E2E
-    /// E-1/E-22/E-23) never emitted single-message completion chrome because the
-    /// `enqueue_headless_delivery` SUCCESS arm set `terminal_delivery_committed`
-    /// / `terminal_body_visible` but NOT `completion_footer_terminal_text`, so
-    /// `note_turn_completed_footer` was never reached.
-    ///
-    /// The expected window is anchored on the `.await;` from the arm's
-    /// `cleanup_headless_streaming_placeholder_after_delivery(...).await;` — that
-    /// `.await; terminal_delivery_committed = true;` prefix occurs EXACTLY here.
-    /// The sibling non-headless replace arm produces the byte-identical footer
-    /// suffix but is prefixed by `if outcome {`, not `.await;`, so a bare-suffix
-    /// assertion would still pass off the sibling even if this write were deleted
-    /// or moved to the `Err` arm (the false-negative this anchor closes). The
-    /// searched source is only the included terminal-delivery module, so this
-    /// test's own expected literal cannot self-match.
-    #[test]
-    fn headless_enqueue_success_registers_completion_footer_text() {
-        let source = compact_ws(include_str!("terminal_outcome_delivery.rs"));
-        let expected = ".await; terminal_delivery_committed = true; \
-             terminal_body_visible = true; \
-             if single_message_panel_footer_mode { \
-             completion_footer_terminal_text = Some(delivery_response.clone()); }";
-
-        assert!(
-            source.contains(expected),
-            "headless enqueue_headless_delivery success arm must set \
-             completion_footer_terminal_text right after its post-delivery \
-             cleanup .await + terminal_body_visible commit (#4103 completion chrome)"
-        );
-    }
-}
-
-#[cfg(test)]
-mod bridge_busy_turn_handoff_tests {
-    use super::*;
-    use output_lifecycle::{BridgeOutputOwner, classify_bridge_output_owner};
-    use watcher_handoff::{
-        bridge_should_hand_off_busy_turn_to_watcher, genuinely_live_watcher_for_relay,
-    };
-
-    // Build a watcher handle with controllable liveness for the #3268 FIX 1
-    // gate tests: `cancel` and the heartbeat age determine staleness.
-    fn watcher_handle_with_liveness(
-        tmux_session_name: &str,
-        cancel: bool,
-        heartbeat_ts_ms: i64,
-    ) -> TmuxWatcherHandle {
-        TmuxWatcherHandle {
-            tmux_session_name: tmux_session_name.to_string(),
-            output_path: format!("/tmp/{tmux_session_name}.jsonl"),
-            paused: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            resume_offset: Arc::new(std::sync::Mutex::new(None)),
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(cancel)),
-            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(heartbeat_ts_ms)),
-        }
-    }
-
-    // #3268 (Defect B) — the core regression. A NON-terminal turn whose early
-    // TUI quiescence gate TIMED OUT (the pane is genuinely still busy on a
-    // long-lived session) and that was NOT already delegated to the watcher,
-    // with a LIVE watcher registered, MUST hand off to the watcher instead of
-    // finalizing on the bridge. This is the exact condition that, when false in
-    // production, let the bridge `submit_terminal(Complete)` strand the turn and
-    // permanently stop relay.
-    #[test]
-    fn busy_timeout_with_live_watcher_hands_off() {
-        assert!(
-            bridge_should_hand_off_busy_turn_to_watcher(
-                /* bridge_early_gate_timed_out */ true, /* terminal_error_path */ false,
-                /* bridge_relay_delegated_to_watcher */ false,
-                /* live_watcher_registered */ true,
-            ),
-            "gate timeout + non-terminal + not-yet-delegated + live watcher must hand off"
-        );
-    }
-
-    // The handoff's relay-ownership promotion must route the rest of the turn
-    // through the WatcherRelay branches — the bridge skips its own delivery and
-    // (via `bridge_epilogue_marks_watcher_delivered`) does NOT mark the watcher
-    // delivered, so the still-streaming output is NOT suppressed.
-    #[test]
-    fn handoff_promotes_ownership_to_watcher_relay_without_marking_delivered() {
-        let handoff = bridge_should_hand_off_busy_turn_to_watcher(true, false, false, true);
-        assert!(handoff);
-        // After the promotion `bridge_relay_delegated_to_watcher == true`.
-        let promoted_delegated = handoff;
-        assert_eq!(
-            classify_bridge_output_owner(/* standby */ false, promoted_delegated),
-            Some(BridgeOutputOwner::WatcherRelay),
-            "promoted ownership must classify as WatcherRelay so the bridge skips delivery"
-        );
-        assert!(
-            !bridge_epilogue_marks_watcher_delivered(
-                /* preserve_inflight_for_cleanup_retry */ false,
-                promoted_delegated,
-            ),
-            "a handed-off (delegated) turn must NOT mark the watcher delivered — \
-             marking it delivered is exactly what suppresses the still-streaming output"
-        );
-    }
-
-    // A turn already delegated to the watcher needs no handoff (it is already
-    // watcher-owned) — avoid a redundant second register/unpause.
-    #[test]
-    fn already_delegated_turn_does_not_re_hand_off() {
-        assert!(
-            !bridge_should_hand_off_busy_turn_to_watcher(true, false, true, true),
-            "already-delegated turns are watcher-owned; no second handoff"
-        );
-    }
-
-    // Terminal-error paths (cancelled / prompt_too_long / transport_error /
-    // recovery_retry collapse into `terminal_error_path`) MUST still finalize on
-    // the bridge as before — never hand off.
-    #[test]
-    fn terminal_error_paths_still_finalize_on_bridge() {
-        assert!(
-            !bridge_should_hand_off_busy_turn_to_watcher(true, true, false, true),
-            "terminal-error turns finalize on the bridge, never hand off"
-        );
-    }
-
-    // No gate timeout → the pane reported idle (or the gate did not apply); the
-    // normal finalize path stands and there is nothing to hand off.
-    #[test]
-    fn quiesced_turn_does_not_hand_off() {
-        assert!(
-            !bridge_should_hand_off_busy_turn_to_watcher(false, false, false, true),
-            "a quiesced (non-timed-out) turn finalizes normally"
-        );
-    }
-
-    // No live watcher → there would be no authority to keep relaying or to
-    // finalize on idle, so the bridge must NOT hand off (it owns the finalize).
-    #[test]
-    fn missing_live_watcher_does_not_hand_off() {
-        assert!(
-            !bridge_should_hand_off_busy_turn_to_watcher(true, false, false, false),
-            "without a live watcher the bridge keeps finalize ownership"
-        );
-    }
-
-    // #3268 FIX 1 (codex blocker): the handoff liveness gate must reject a STALE
-    // watcher (heartbeat dead, not yet cancelled). Handing off to a stale handle
-    // re-strands the turn — the bridge suppresses its own finalize while the
-    // lingering handle has no real authority to finalize. A genuinely-live
-    // watcher (recent heartbeat, not cancelled) is the ONLY one that may pass.
-    #[test]
-    fn handoff_liveness_gate_rejects_stale_watcher() {
-        let registry = TmuxWatcherRegistry::new();
-        let tmux = "AgentDesk-claude-adk-cc-t1500000000000003268";
-        let channel = ChannelId::new(1_500_000_000_000_003_268);
-        // heartbeat_ts_ms = 1 → ancient → heartbeat_stale() == true, cancel=false.
-        registry.insert(channel, watcher_handle_with_liveness(tmux, false, 1));
-        assert!(
-            !genuinely_live_watcher_for_relay(&registry, channel),
-            "a heartbeat-stale watcher must NOT count as live for the handoff gate"
-        );
-        // The bridge therefore keeps finalize ownership (no handoff / no strand).
-        assert!(
-            !bridge_should_hand_off_busy_turn_to_watcher(
-                true,
-                false,
-                false,
-                genuinely_live_watcher_for_relay(&registry, channel),
-            ),
-            "a stale watcher on the timeout path must finalize on the bridge, not hand off"
-        );
-    }
-
-    // A cancelled handle (sweeper set cancel=true, cleanup deliberately keeps the
-    // handle) must also be rejected by the liveness gate.
-    #[test]
-    fn handoff_liveness_gate_rejects_cancelled_watcher() {
-        let registry = TmuxWatcherRegistry::new();
-        let tmux = "AgentDesk-claude-adk-cc-t1500000000000003269";
-        let channel = ChannelId::new(1_500_000_000_000_003_269);
-        registry.insert(
-            channel,
-            watcher_handle_with_liveness(
-                tmux,
-                true,
-                crate::services::discord::tmux_watcher_now_ms(),
-            ),
-        );
-        assert!(
-            !genuinely_live_watcher_for_relay(&registry, channel),
-            "a cancelled watcher must NOT count as live for the handoff gate"
-        );
-    }
-
-    // An absent handle (no live watcher at all) is rejected.
-    #[test]
-    fn handoff_liveness_gate_rejects_absent_watcher() {
-        let registry = TmuxWatcherRegistry::new();
-        let channel = ChannelId::new(1_500_000_000_000_003_270);
-        assert!(
-            !genuinely_live_watcher_for_relay(&registry, channel),
-            "an absent watcher must NOT count as live for the handoff gate"
-        );
-    }
-
-    // The positive case: a genuinely-live watcher (recent heartbeat, not
-    // cancelled) DOES pass the liveness gate, so the timeout path hands off.
-    #[test]
-    fn handoff_liveness_gate_accepts_genuinely_live_watcher() {
-        let registry = TmuxWatcherRegistry::new();
-        let tmux = "AgentDesk-claude-adk-cc-t1500000000000003271";
-        let channel = ChannelId::new(1_500_000_000_000_003_271);
-        registry.insert(
-            channel,
-            watcher_handle_with_liveness(
-                tmux,
-                false,
-                crate::services::discord::tmux_watcher_now_ms(),
-            ),
-        );
-        assert!(
-            genuinely_live_watcher_for_relay(&registry, channel),
-            "a present, non-cancelled, fresh-heartbeat watcher is genuinely live"
-        );
-        assert!(
-            bridge_should_hand_off_busy_turn_to_watcher(
-                true,
-                false,
-                false,
-                genuinely_live_watcher_for_relay(&registry, channel),
-            ),
-            "a genuinely-live watcher on the timeout path must hand off as before"
-        );
-    }
-}
-
-fn active_turn_thread_channel_id(
-    adk_session_name: Option<&str>,
-    inflight_state: &InflightTurnState,
-) -> Option<u64> {
-    adk_session_name
-        .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
-        .or_else(|| {
-            inflight_state
-                .channel_name
-                .as_deref()
-                .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
-        })
-        .or(inflight_state.thread_id)
-}
-
-fn maybe_refresh_active_turn_activity_heartbeat(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    inflight_state: &InflightTurnState,
-    adk_session_name: Option<&str>,
-    last_heartbeat_at: &mut Option<std::time::Instant>,
-) {
-    maybe_refresh_active_turn_activity_heartbeat_at(
-        shared,
-        provider,
-        inflight_state,
-        adk_session_name,
-        last_heartbeat_at,
-        std::time::Instant::now(),
-    );
-}
-
-#[cfg(unix)]
-fn maybe_refresh_active_turn_activity_heartbeat_at(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    inflight_state: &InflightTurnState,
-    adk_session_name: Option<&str>,
-    last_heartbeat_at: &mut Option<std::time::Instant>,
-    now: std::time::Instant,
-) {
-    if last_heartbeat_at.is_some_and(|last| {
-        now.duration_since(last) < super::tmux::WATCHER_ACTIVITY_HEARTBEAT_INTERVAL
-    }) {
-        return;
-    }
-
-    let Some(tmux_session_name) = inflight_state.tmux_session_name.as_deref() else {
-        return;
-    };
-    let thread_channel_id = active_turn_thread_channel_id(adk_session_name, inflight_state);
-
-    if super::tmux::refresh_session_heartbeat_from_tmux_output(
-        shared.pg_pool.as_ref(),
-        &shared.token_hash,
-        provider,
-        tmux_session_name,
-        thread_channel_id,
-    ) {
-        *last_heartbeat_at = Some(now);
-    }
-}
-
-#[cfg(not(unix))]
-fn maybe_refresh_active_turn_activity_heartbeat_at(
-    _shared: &SharedData,
-    _provider: &ProviderKind,
-    _inflight_state: &InflightTurnState,
-    _adk_session_name: Option<&str>,
-    _last_heartbeat_at: &mut Option<std::time::Instant>,
-    _now: std::time::Instant,
-) {
 }
 
 // Shared by the bridge task body below and the extracted stream_loop.rs

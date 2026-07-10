@@ -31,6 +31,16 @@ use process_table::{
 // `interrupt_policy` leaf module.
 pub(in crate::services::discord) use interrupt_policy::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON;
 
+#[cfg(unix)]
+pub(super) fn tmux_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
+    super::super::tmux::read_generation_file_mtime_ns(tmux_session_name)
+}
+
+#[cfg(not(unix))]
+pub(super) fn tmux_generation_file_mtime_ns(_tmux_session_name: &str) -> i64 {
+    0
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TmuxCleanupPolicy {
     PreserveSession,

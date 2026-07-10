@@ -10,6 +10,21 @@
 
 use super::*;
 
+pub(super) fn sync_inflight_restart_mode_from_cancel(
+    cancel_token: &crate::services::provider::CancelToken,
+    inflight_state: &mut InflightTurnState,
+) -> bool {
+    let new_mode = cancel_token.restart_mode();
+    if inflight_state.restart_mode == new_mode {
+        return false;
+    }
+    match new_mode {
+        Some(mode) => inflight_state.set_restart_mode(mode),
+        None => inflight_state.clear_restart_mode(),
+    }
+    true
+}
+
 pub(in crate::services::discord) fn classify_turn_finished_dispatch_kind(
     dispatch_context: Option<&str>,
     dispatch_type: Option<&str>,

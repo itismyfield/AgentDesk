@@ -4,6 +4,21 @@
 
 use super::*;
 
+pub(super) fn record_placeholder_live_event(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    event: Option<super::super::placeholder_live_events::RecentPlaceholderEvent>,
+) {
+    if (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
+        && let Some(event) = event
+    {
+        shared
+            .ui
+            .placeholder_live_events
+            .push_event(channel_id, event);
+    }
+}
+
 pub(super) fn first_request_line(user_text: &str) -> Option<String> {
     user_text
         .lines()

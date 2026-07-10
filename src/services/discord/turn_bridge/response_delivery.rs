@@ -137,3 +137,17 @@ mod tests {
         ));
     }
 }
+#[cfg(test)]
+mod streaming_edit_text_tests {
+    use super::*;
+
+    #[test]
+    fn empty_response_notice_is_delivery_only_not_history_payload() {
+        let full_response = String::new();
+        let rendered =
+            terminal_delivery_response_after_offset(&full_response, 0, Some("(No response)"));
+
+        assert_eq!(rendered, "(No response)");
+        assert!(full_response.is_empty());
+    }
+}
