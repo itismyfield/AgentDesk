@@ -2977,6 +2977,10 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 
 #[cfg(test)]
 pub(crate) mod test_env_lock {
+    //! Canonical acquisition path for the shared test-environment mutex.
+    //! New test sites must use `acquire_shared_test_env_lock`; directly locking
+    //! `shared_test_env_lock` is forbidden.
+
     thread_local! {
         static SHARED_TEST_ENV_LOCK_HELD: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
