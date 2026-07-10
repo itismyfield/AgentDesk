@@ -5,6 +5,7 @@ use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
 use super::redaction;
 use super::session_enrichment::SessionEnrichment;
+use super::stall_verdict;
 use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
@@ -776,6 +777,13 @@ async fn build_health_snapshot_with_options(
                 });
                 let relay_stall_state = RelayStallClassifier::classify(&relay_health);
                 trace_relay_health_classification(&relay_health, relay_stall_state);
+                let stall_shadow_verdict = stall_verdict::classify_health_snapshot_lossy(
+                    provider_kind.as_ref(),
+                    channel,
+                    &session,
+                    &relay_health,
+                    registry.started_at_unix(),
+                );
                 mailbox_entries.push(MailboxHealthSnapshot {
                     provider: entry.name.clone(),
                     channel_id: channel.get(),
@@ -794,6 +802,7 @@ async fn build_health_snapshot_with_options(
                     tmux_present,
                     process_present,
                     active_dispatch_present: session.active_dispatch_present(),
+                    stall_shadow_verdict,
                     relay_stall_state,
                     relay_health,
                 });

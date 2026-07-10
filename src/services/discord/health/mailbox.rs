@@ -9,6 +9,7 @@ use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 
 use super::HealthRegistry;
 use super::recovery::ProviderMailboxState;
+use super::stall_verdict::StallVerdict;
 
 #[derive(Debug, Serialize)]
 pub(super) struct MailboxHealthSnapshot {
@@ -25,6 +26,7 @@ pub(super) struct MailboxHealthSnapshot {
     pub(super) tmux_present: bool,
     pub(super) process_present: bool,
     pub(super) active_dispatch_present: bool,
+    pub(super) stall_shadow_verdict: Option<StallVerdict>,
     pub(super) relay_stall_state: RelayStallState,
     pub(super) relay_health: RelayHealthSnapshot,
 }

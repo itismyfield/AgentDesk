@@ -465,6 +465,7 @@ src/
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
 │   │   │   ├── stall_liveness.rs
+│   │   │   ├── stall_verdict.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
 │   │   │   ├── context_display.rs

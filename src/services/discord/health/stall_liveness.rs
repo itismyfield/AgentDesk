@@ -7,7 +7,7 @@ use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::relay_health::RelayActiveTurn;
 use crate::services::provider::ProviderKind;
 
-use super::snapshot::WatcherStateSnapshot;
+use super::{snapshot::WatcherStateSnapshot, stall_verdict};
 
 pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
 /// Historical deferral-budget field for force-clean deferrals while positive
@@ -248,7 +248,7 @@ impl StallWatchdogLivenessEvidence {
         }
     }
 
-    fn has_positive_liveness(&self, freshness_secs: u64) -> bool {
+    pub(super) fn has_positive_liveness(&self, freshness_secs: u64) -> bool {
         !self.reason_codes(freshness_secs).is_empty()
     }
 }
@@ -503,6 +503,8 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
     threshold_secs: u64,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
+    let (shadow_verdict, shadow_reasons) =
+        stall_verdict::judgment_log_fields(snapshot, Some(decision), freshness_secs);
     tracing::warn!(
         event = "stall_watchdog_force_cleanup_deferred",
         reason_code = "1446_stall_watchdog",
@@ -548,7 +550,10 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
         open_tool_execution_age_secs = ?decision.evidence.open_tool_execution_age_secs,
         deferral_count = ?decision.deferral_count(),
         max_deferrals = decision.max_deferrals,
-        "  [{ts}] 🌱 STALL-WATCHDOG: deferred forced cleanup for desynced channel {} (provider={}) due to positive liveness evidence",
+        shadow_verdict,
+        existing_decision = "defer_for_liveness",
+        shadow_reasons,
+        "  [{ts}] 🌱 STALL-WATCHDOG: shadow_verdict={shadow_verdict} existing_decision=defer_for_liveness; deferred forced cleanup for desynced channel {} (provider={}) due to positive liveness evidence",
         channel_id,
         provider.as_str(),
     );
@@ -575,6 +580,8 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
     let liveness_reasons = decision
         .map(|decision| decision.evidence.reason_codes_csv(freshness_secs))
         .unwrap_or_else(|| "not_evaluated".to_string());
+    let (shadow_verdict, shadow_reasons) =
+        stall_verdict::judgment_log_fields(snapshot, decision, freshness_secs);
     tracing::warn!(
         event = "stall_watchdog_force_cleanup_judgment",
         reason_code = "1446_stall_watchdog",
@@ -613,7 +620,10 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         open_tool_execution_age_secs = ?decision.and_then(|decision| decision.evidence.open_tool_execution_age_secs),
         deferral_count = ?decision.and_then(StallWatchdogLivenessDecision::deferral_count),
         max_deferrals = decision.map(|decision| decision.max_deferrals).unwrap_or(0),
-        "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for desynced channel {}",
+        shadow_verdict,
+        existing_decision = "force_cleanup",
+        shadow_reasons,
+        "  [{ts}] ⚡ STALL-WATCHDOG: shadow_verdict={shadow_verdict} existing_decision=force_cleanup; forced cleanup for desynced channel {}",
         channel_id,
     );
 }

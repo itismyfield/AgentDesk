@@ -32,6 +32,7 @@ mod runtime_resolve;
 mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
+mod stall_verdict;
 mod watcher_respawn;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
