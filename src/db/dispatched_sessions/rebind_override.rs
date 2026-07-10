@@ -47,7 +47,7 @@ mod tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
     #[tokio::test]
-    async fn health_rebind_override_upserts_selectors_with_recorded_at_guard() {
+    async fn health_rebind_override_upserts_selectors_with_recorded_at_guard_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let session_key = "claude/test/host:AgentDesk-claude-rebind-override";
