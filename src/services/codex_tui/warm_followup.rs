@@ -235,14 +235,36 @@ fn kill_pane_and_confirm_stopped(
     tmux_session_name: &str,
     reason: CodexWarmFallbackReason,
 ) -> Result<(), String> {
-    crate::services::platform::tmux::kill_session(tmux_session_name, reason.reason_text());
-    for _ in 0..20 {
-        if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name) {
+    let pane_pid =
+        crate::services::platform::tmux::pane_pid(tmux_session_name).ok_or_else(|| {
+            "Codex TUI warm follow-up could not pin the pane PID before kill".to_string()
+        })?;
+    let pane_identity = crate::services::process::ProcessIdentity::capture(pane_pid);
+    let kill_succeeded =
+        crate::services::platform::tmux::kill_session(tmux_session_name, reason.reason_text());
+    if !kill_succeeded {
+        tracing::warn!(
+            tmux_session_name,
+            pane_pid,
+            "Codex TUI warm follow-up kill command failed; requiring independent pane and PID death proof"
+        );
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let pane_stopped = matches!(
+            crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
+            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+        );
+        let process_stopped = !pane_identity.matches(pane_pid);
+        if pane_stopped && process_stopped {
             return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    Err("Codex TUI warm follow-up pane remained live after fallback kill barrier".to_string())
+    Err("Codex TUI warm follow-up could not prove both pane and process termination after fallback kill barrier".to_string())
 }
 
 #[cfg(unix)]

@@ -898,12 +898,6 @@ impl TuiActionExecutor for TmuxTuiActionExecutor {
     }
 
     fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String> {
-        if self.composer_mutated && keys.contains(&"Enter") {
-            // Match the Claude TUI precedent: let the composer apply the last
-            // literal/paste mutation before Enter so a re-mount cannot drop or
-            // reorder the submit key.
-            std::thread::sleep(PROMPT_INPUT_BEFORE_ENTER_SETTLE);
-        }
         self.enter_attempted |= keys.contains(&"Enter");
         crate::services::platform::tmux::send_keys(session_name, keys)
     }
@@ -917,6 +911,14 @@ fn run_actions_with_executor(
 ) -> Result<(), String> {
     for action in actions {
         check_prompt_cancel(cancel_token)?;
+        if matches!(action, TuiInputAction::Enter) {
+            // Match the Claude TUI precedent: let the composer apply the last
+            // literal/paste mutation before Enter so a re-mount cannot drop or
+            // reorder the submit key. Re-check cancellation after the settle
+            // so /stop cannot arrive inside this window and still submit.
+            std::thread::sleep(PROMPT_INPUT_BEFORE_ENTER_SETTLE);
+            check_prompt_cancel(cancel_token)?;
+        }
         let output = match action {
             TuiInputAction::Literal(text) => executor.send_literal(session_name, text)?,
             TuiInputAction::PasteBuffer(text) => {
@@ -1945,6 +1947,32 @@ mod tests {
 
         assert_eq!(error, PROMPT_READY_CANCELLED_ERROR);
         assert_eq!(executor.calls, vec!["literal:first"]);
+    }
+
+    #[test]
+    fn run_actions_rechecks_cancel_after_pre_enter_settle() {
+        let token = Arc::new(CancelToken::new());
+        let cancel_token = token.clone();
+        let cancel_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel_token.cancelled.store(true, Ordering::Relaxed);
+        });
+        let mut executor = RecordingExecutor::default();
+
+        let error = run_actions_with_executor(
+            "agentdesk-codex-tui-input-test",
+            &[
+                TuiInputAction::Literal("draft".to_string()),
+                TuiInputAction::Enter,
+            ],
+            Some(&token),
+            &mut executor,
+        )
+        .expect_err("cancel arriving during settle must stop before Enter");
+        cancel_thread.join().unwrap();
+
+        assert_eq!(error, PROMPT_READY_CANCELLED_ERROR);
+        assert_eq!(executor.calls, vec!["literal:draft"]);
     }
 
     #[test]
