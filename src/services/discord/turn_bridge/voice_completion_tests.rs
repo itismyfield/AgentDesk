@@ -97,7 +97,7 @@ async fn background_completion_target_prefers_voice_turn_link_by_dispatch_id() {
     let pool = pg_db.connect_and_migrate().await;
     let user_msg_id = MessageId::new(7_350_001);
 
-    crate::voice::turn_link::insert_voice_turn_link_pg(
+    crate::voice::turn_link::upsert_active_voice_turn_link_pg(
         &pool,
         &crate::voice::turn_link::VoiceTurnLinkInsert {
             guild_id: 101,
@@ -135,7 +135,7 @@ async fn voice_turn_link_playback_lookup_falls_back_to_announce_message() {
     let pool = pg_db.connect_and_migrate().await;
     let user_msg_id = MessageId::new(7_360_001);
 
-    crate::voice::turn_link::insert_voice_turn_link_pg(
+    crate::voice::turn_link::upsert_active_voice_turn_link_pg(
         &pool,
         &crate::voice::turn_link::VoiceTurnLinkInsert {
             guild_id: 101,

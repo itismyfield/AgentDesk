@@ -9,7 +9,6 @@ pub(crate) mod progress;
 pub(crate) mod prompt;
 pub(crate) mod receiver;
 pub(crate) mod runtime_boundary;
-pub(crate) mod runtime_process;
 pub(crate) mod sanitizer;
 pub(crate) mod stt;
 pub(crate) mod stt_streaming;
