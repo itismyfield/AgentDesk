@@ -581,7 +581,7 @@
 | `services::discord::recovery_engine::manual_rebind::adoption` | `src/services/discord/recovery_engine/manual_rebind/adoption.rs` | 304 | 95 | 209 |  |
 | `services::discord::recovery_engine::manual_rebind::codex_tui_replay` | `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs` | 944 | 233 | 711 |  |
 | `services::discord::recovery_engine::manual_rebind_output_path` | `src/services/discord/recovery_engine/manual_rebind_output_path.rs` | 562 | 352 | 210 |  |
-| `services::discord::recovery_engine::manual_rebind_override` | `src/services/discord/recovery_engine/manual_rebind_override.rs` | 306 | 196 | 110 |  |
+| `services::discord::recovery_engine::manual_rebind_override` | `src/services/discord/recovery_engine/manual_rebind_override.rs` | 551 | 251 | 300 |  |
 | `services::discord::recovery_engine::output_path_detect` | `src/services/discord/recovery_engine/output_path_detect.rs` | 177 | 177 | 0 |  |
 | `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 370 | 179 | 191 |  |
 | `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 2091 | 972 | 1119 |  |
@@ -601,9 +601,9 @@
 | `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 305 | 185 | 120 |  |
 | `services::discord::relay_owner_observability` | `src/services/discord/relay_owner_observability.rs` | 458 | 343 | 115 |  |
 | `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 3328 | 1471 | 1857 | giant-file |
-| `services::discord::relay_recovery_auto_heal_apply` | `src/services/discord/relay_recovery_auto_heal_apply.rs` | 208 | 114 | 94 |  |
-| `services::discord::relay_recovery_auto_heal_attempts` | `src/services/discord/relay_recovery_auto_heal_attempts.rs` | 260 | 195 | 65 |  |
-| `services::discord::relay_recovery_auto_heal_confirm` | `src/services/discord/relay_recovery_auto_heal_confirm.rs` | 191 | 142 | 49 |  |
+| `services::discord::relay_recovery_auto_heal_apply` | `src/services/discord/relay_recovery_auto_heal_apply.rs` | 262 | 127 | 135 |  |
+| `services::discord::relay_recovery_auto_heal_attempts` | `src/services/discord/relay_recovery_auto_heal_attempts.rs` | 374 | 220 | 154 |  |
+| `services::discord::relay_recovery_auto_heal_confirm` | `src/services/discord/relay_recovery_auto_heal_confirm.rs` | 312 | 167 | 145 |  |
 | `services::discord::relay_recovery_completion_footer` | `src/services/discord/relay_recovery_completion_footer.rs` | 9 | 9 | 0 |  |
 | `services::discord::replace_outcome_policy` | `src/services/discord/replace_outcome_policy.rs` | 691 | 371 | 320 |  |
 | `services::discord::response_sanitizer` | `src/services/discord/response_sanitizer.rs` | 177 | 177 | 0 |  |

@@ -615,13 +615,13 @@ fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
             | "reattached_watcher"
             | "reuse_existing_live_watcher"
             | "reattach_confirm_startup_grace"
+            | "reattach_confirm_emission_in_flight"
             | "cleared_idle_tmux_stale_turn"
             | "scheduled_pending_queue_drain"
     )
 }
 
-/// #3277 verify-2 (Defect D follow-up): report the reattach apply HONESTLY.
-/// `rebind_inflight_for_channel` routes through the single-watcher claim
+/// #3277 verify-2: `rebind_inflight_for_channel` reports apply honestly through the claim
 /// (`claim_or_reuse_watcher`, source `"recovery_restore_inflight"`), which
 /// REPLACES a cancelled / heartbeat-stale / paused / output-path-changed
 /// same-session incumbent (`find_watcher_by_tmux_session` folds

@@ -23,6 +23,11 @@ impl ManualRebindOverrides {
             .map(str::trim)
             .map(validate_session_id)
             .transpose()?;
+        validate_claude_override_coherence(
+            provider,
+            output_path.as_deref(),
+            session_id.as_deref(),
+        )?;
         Ok(Self {
             output_path,
             session_id,
@@ -111,19 +116,44 @@ fn validate_output_path(provider: &ProviderKind, output_path: &str) -> Result<St
     if !metadata.is_file() {
         return Err("output_path override must be a regular file".to_string());
     }
-    if provider == &ProviderKind::Claude && !is_under_claude_projects_dir(&canonical) {
-        return Err(
-            "Claude output_path override must be under a Claude projects directory".to_string(),
-        );
+    if !is_under_allowed_output_root(provider, &canonical) {
+        let error = match provider {
+            ProviderKind::Claude => {
+                "Claude output_path override must be under a Claude projects directory".to_string()
+            }
+            _ => format!(
+                "{} output_path override must be under an allowed session directory",
+                provider.as_str()
+            ),
+        };
+        return Err(error);
     }
     Ok(canonical.display().to_string())
 }
 
-fn is_under_claude_projects_dir(path: &Path) -> bool {
-    claude_projects_dir_candidates()
+fn is_under_allowed_output_root(provider: &ProviderKind, path: &Path) -> bool {
+    allowed_output_roots(provider)
         .into_iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .any(|root| path.starts_with(root))
+}
+
+fn allowed_output_roots(provider: &ProviderKind) -> Vec<PathBuf> {
+    match provider {
+        ProviderKind::Claude => claude_projects_dir_candidates(),
+        ProviderKind::Codex => {
+            crate::services::codex_tui::rollout_tail::default_codex_sessions_dir()
+                .into_iter()
+                .chain(crate::services::tmux_common::persistent_sessions_dir())
+                .collect()
+        }
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => {
+            crate::services::tmux_common::persistent_sessions_dir()
+                .into_iter()
+                .collect()
+        }
+        ProviderKind::Unsupported(_) => Vec::new(),
+    }
 }
 
 fn claude_projects_dir_candidates() -> Vec<PathBuf> {
@@ -148,6 +178,31 @@ fn claude_session_id_from_path(provider: &ProviderKind, output_path: &str) -> Op
     }
     let stem = Path::new(output_path).file_stem()?.to_str()?;
     uuid::Uuid::parse_str(stem).ok().map(|_| stem.to_string())
+}
+
+fn validate_claude_override_coherence(
+    provider: &ProviderKind,
+    output_path: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    if provider != &ProviderKind::Claude {
+        return Ok(());
+    }
+    let (Some(output_path), Some(session_id)) = (output_path, session_id) else {
+        return Ok(());
+    };
+    let path_session_id = Path::new(output_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| uuid::Uuid::parse_str(stem).ok());
+    let supplied_session_id = uuid::Uuid::parse_str(session_id)
+        .expect("validated session_id override must remain a UUID");
+    if path_session_id != Some(supplied_session_id) {
+        return Err(
+            "Claude output_path transcript UUID must match session_id override".to_string(),
+        );
+    }
+    Ok(())
 }
 
 pub(super) async fn upsert_rebind_session_id_override(
@@ -198,23 +253,6 @@ pub(super) async fn upsert_rebind_session_id_override(
 mod tests {
     use super::*;
 
-    struct EnvGuard(Option<std::ffi::OsString>);
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", value) },
-                None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
-            }
-        }
-    }
-
-    fn set_claude_home(path: &Path) -> EnvGuard {
-        let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
-        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", path) };
-        EnvGuard(previous)
-    }
-
     #[test]
     fn health_rebind_override_rejects_missing_and_non_regular_paths() {
         let root = tempfile::tempdir().expect("override root");
@@ -245,11 +283,8 @@ mod tests {
 
     #[test]
     fn health_rebind_override_rejects_claude_path_outside_projects() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let root = tempfile::tempdir().expect("Claude home");
-        let _env = set_claude_home(root.path());
+        let _env = crate::config::TestEnvVarGuard::set_path("CLAUDE_CONFIG_DIR", root.path());
         let outside = root.path().join("outside.jsonl");
         std::fs::write(&outside, b"{}\n").expect("outside transcript");
 
@@ -276,12 +311,9 @@ mod tests {
     }
 
     #[test]
-    fn health_rebind_override_accepts_claude_projects_file_and_canonicalizes_it() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+    fn health_rebind_override_accepts_parsed_equal_claude_path_and_session_id() {
         let root = tempfile::tempdir().expect("Claude home");
-        let _env = set_claude_home(root.path());
+        let _env = crate::config::TestEnvVarGuard::set_path("CLAUDE_CONFIG_DIR", root.path());
         let project = root.path().join("projects/-tmp-agentdesk");
         std::fs::create_dir_all(&project).expect("project dir");
         let transcript = project.join("4c474e5d-37e7-4b6a-bcf7-d68854a31c49.jsonl");
@@ -290,7 +322,7 @@ mod tests {
         let overrides = ManualRebindOverrides::validated(
             &ProviderKind::Claude,
             Some(transcript.to_str().expect("utf8 path")),
-            Some("4c474e5d-37e7-4b6a-bcf7-d68854a31c49"),
+            Some("4C474E5D-37E7-4B6A-BCF7-D68854A31C49"),
         )
         .expect("valid override");
         assert_eq!(
@@ -301,6 +333,219 @@ mod tests {
                     .to_str()
                     .expect("utf8 path")
             )
+        );
+        assert_eq!(
+            overrides.session_id(),
+            Some("4C474E5D-37E7-4B6A-BCF7-D68854A31C49")
+        );
+    }
+
+    #[test]
+    fn health_rebind_override_preserves_claude_path_only_and_session_only_forms() {
+        let root = tempfile::tempdir().expect("Claude home");
+        let _env = crate::config::TestEnvVarGuard::set_path("CLAUDE_CONFIG_DIR", root.path());
+        let project = root.path().join("projects/-tmp-agentdesk");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let transcript = project.join("4c474e5d-37e7-4b6a-bcf7-d68854a31c49.jsonl");
+        std::fs::write(&transcript, b"{}\n").expect("transcript");
+
+        let path_only = ManualRebindOverrides::validated(
+            &ProviderKind::Claude,
+            Some(transcript.to_str().expect("utf8 path")),
+            None,
+        )
+        .expect("path-only Claude override");
+        assert!(path_only.output_path().is_some());
+        assert!(path_only.session_id().is_none());
+
+        let session_only = ManualRebindOverrides::validated(
+            &ProviderKind::Claude,
+            None,
+            Some("5d585f6e-48e8-497c-94bc-16e9369e32c6"),
+        )
+        .expect("session-only Claude override");
+        assert!(session_only.output_path().is_none());
+        assert_eq!(
+            session_only.session_id(),
+            Some("5d585f6e-48e8-497c-94bc-16e9369e32c6")
+        );
+    }
+
+    #[test]
+    fn health_rebind_override_rejects_mismatched_claude_path_and_session_id() {
+        let root = tempfile::tempdir().expect("Claude home");
+        let _env = crate::config::TestEnvVarGuard::set_path("CLAUDE_CONFIG_DIR", root.path());
+        let project = root.path().join("projects/-tmp-agentdesk");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let transcript = project.join("4c474e5d-37e7-4b6a-bcf7-d68854a31c49.jsonl");
+        std::fs::write(&transcript, b"{}\n").expect("transcript");
+
+        let error = ManualRebindOverrides::validated(
+            &ProviderKind::Claude,
+            Some(transcript.to_str().expect("utf8 path")),
+            Some("5d585f6e-48e8-497c-94bc-16e9369e32c6"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Claude output_path transcript UUID must match session_id override"
+        );
+    }
+
+    #[test]
+    fn health_rebind_override_accepts_codex_rollout_under_canonical_sessions_dir() {
+        let root = tempfile::tempdir().expect("Codex home");
+        let _env = crate::config::TestEnvVarGuard::set_path("CODEX_HOME", root.path());
+        let sessions = root.path().join("sessions/2026/07/11");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        let rollout = sessions.join("rollout-valid.jsonl");
+        std::fs::write(&rollout, b"{}\n").expect("rollout");
+
+        let overrides = ManualRebindOverrides::validated(
+            &ProviderKind::Codex,
+            Some(rollout.to_str().expect("utf8 path")),
+            None,
+        )
+        .expect("in-root Codex rollout");
+        assert_eq!(
+            overrides.output_path(),
+            Some(
+                std::fs::canonicalize(rollout)
+                    .expect("canonical rollout")
+                    .to_str()
+                    .expect("utf8 path")
+            )
+        );
+    }
+
+    #[test]
+    fn health_rebind_override_rejects_codex_rollout_outside_canonical_sessions_dir() {
+        let root = tempfile::tempdir().expect("Codex home");
+        let _env = crate::config::TestEnvVarGuard::set_path("CODEX_HOME", root.path());
+        std::fs::create_dir_all(root.path().join("sessions")).expect("sessions dir");
+        let outside = root.path().join("outside.jsonl");
+        std::fs::write(&outside, b"{}\n").expect("outside rollout");
+
+        let error = ManualRebindOverrides::validated(
+            &ProviderKind::Codex,
+            Some(outside.to_str().expect("utf8 path")),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "codex output_path override must be under an allowed session directory"
+        );
+    }
+
+    #[test]
+    fn health_rebind_override_accepts_codex_persistent_wrapper_output() {
+        let root = tempfile::tempdir().expect("AgentDesk root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let sessions = crate::services::tmux_common::persistent_sessions_dir()
+            .expect("persistent sessions root");
+        std::fs::create_dir_all(&sessions).expect("persistent sessions dir");
+        let output = sessions.join("codex-wrapper.jsonl");
+        std::fs::write(&output, b"{}\n").expect("wrapper output");
+
+        let overrides = ManualRebindOverrides::validated(
+            &ProviderKind::Codex,
+            Some(output.to_str().expect("utf8 path")),
+            None,
+        )
+        .expect("Codex wrapper output under persistent root");
+        assert_eq!(
+            overrides.output_path(),
+            std::fs::canonicalize(output)
+                .expect("canonical wrapper output")
+                .to_str()
+        );
+    }
+
+    #[test]
+    fn health_rebind_override_other_providers_require_persistent_root() {
+        let root = tempfile::tempdir().expect("AgentDesk root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let sessions = crate::services::tmux_common::persistent_sessions_dir()
+            .expect("persistent sessions root");
+        std::fs::create_dir_all(&sessions).expect("persistent sessions dir");
+        let wrapper_output = sessions.join("wrapper.jsonl");
+        let outside = root.path().join("outside.jsonl");
+        std::fs::write(&wrapper_output, b"{}\n").expect("wrapper output");
+        std::fs::write(&outside, b"{}\n").expect("outside output");
+
+        for provider in [
+            ProviderKind::Gemini,
+            ProviderKind::OpenCode,
+            ProviderKind::Qwen,
+        ] {
+            ManualRebindOverrides::validated(
+                &provider,
+                Some(wrapper_output.to_str().expect("utf8 path")),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{} persistent output: {error}", provider.as_str()));
+            assert_eq!(
+                ManualRebindOverrides::validated(
+                    &provider,
+                    Some(outside.to_str().expect("utf8 path")),
+                    None,
+                )
+                .unwrap_err(),
+                format!(
+                    "{} output_path override must be under an allowed session directory",
+                    provider.as_str()
+                )
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn health_rebind_override_rejects_symlink_escape_from_allowed_root() {
+        let root = tempfile::tempdir().expect("Codex home");
+        let _env = crate::config::TestEnvVarGuard::set_path("CODEX_HOME", root.path());
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        let outside = root.path().join("outside.jsonl");
+        let escaped = sessions.join("escaped.jsonl");
+        std::fs::write(&outside, b"{}\n").expect("outside output");
+        std::os::unix::fs::symlink(&outside, &escaped).expect("escape symlink");
+
+        assert_eq!(
+            ManualRebindOverrides::validated(
+                &ProviderKind::Codex,
+                Some(escaped.to_str().expect("utf8 path")),
+                None,
+            )
+            .unwrap_err(),
+            "codex output_path override must be under an allowed session directory"
+        );
+    }
+
+    #[test]
+    fn health_rebind_override_fails_closed_when_allowed_root_is_missing() {
+        let root = tempfile::tempdir().expect("isolated root");
+        let missing_runtime_root = root.path().join("missing-runtime-root");
+        let _env =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", &missing_runtime_root);
+        let output = root.path().join("gemini.jsonl");
+        std::fs::write(&output, b"{}\n").expect("output");
+        assert!(
+            allowed_output_roots(&ProviderKind::Gemini)
+                .into_iter()
+                .all(|candidate| std::fs::canonicalize(candidate).is_err()),
+            "test requires every allowed root to be unavailable"
+        );
+
+        assert_eq!(
+            ManualRebindOverrides::validated(
+                &ProviderKind::Gemini,
+                Some(output.to_str().expect("utf8 path")),
+                None,
+            )
+            .unwrap_err(),
+            "gemini output_path override must be under an allowed session directory"
         );
     }
 }

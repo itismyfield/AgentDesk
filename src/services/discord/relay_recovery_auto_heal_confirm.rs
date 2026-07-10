@@ -16,6 +16,14 @@ pub(super) enum ReattachConfirmation {
     NotRequired,
     Confirmed,
     StartupGrace,
+    RelayEmissionInFlight,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpawnedWatcherConfirmation {
+    Confirmed,
+    RelayEmissionInFlight,
     Failed,
 }
 
@@ -41,7 +49,7 @@ pub(super) async fn classify_reattach_confirmation(
     {
         return ReattachConfirmation::NotRequired;
     }
-    let confirmed = match decision.affected.tmux_session.as_deref() {
+    let probe_result = match decision.affected.tmux_session.as_deref() {
         Some(tmux_session) if !tmux_session.is_empty() => {
             confirm_spawned_watcher(
                 shared,
@@ -51,22 +59,27 @@ pub(super) async fn classify_reattach_confirmation(
             )
             .await
         }
-        _ => false,
+        _ => SpawnedWatcherConfirmation::Failed,
     };
-    confirmation_after_probe(confirmed, process_started_at_unix, now_unix)
+    confirmation_after_probe(probe_result, process_started_at_unix, now_unix)
 }
 
 fn confirmation_after_probe(
-    confirmed: bool,
+    probe_result: SpawnedWatcherConfirmation,
     process_started_at_unix: i64,
     now_unix: i64,
 ) -> ReattachConfirmation {
-    if confirmed {
-        ReattachConfirmation::Confirmed
-    } else if startup_confirm_grace_active(process_started_at_unix, now_unix) {
-        ReattachConfirmation::StartupGrace
-    } else {
-        ReattachConfirmation::Failed
+    match probe_result {
+        SpawnedWatcherConfirmation::Confirmed => ReattachConfirmation::Confirmed,
+        SpawnedWatcherConfirmation::RelayEmissionInFlight => {
+            ReattachConfirmation::RelayEmissionInFlight
+        }
+        SpawnedWatcherConfirmation::Failed
+            if startup_confirm_grace_active(process_started_at_unix, now_unix) =>
+        {
+            ReattachConfirmation::StartupGrace
+        }
+        SpawnedWatcherConfirmation::Failed => ReattachConfirmation::Failed,
     }
 }
 
@@ -79,30 +92,42 @@ async fn confirm_spawned_watcher(
     channel_id: u64,
     tmux_session: &str,
     baseline_frontier: u64,
-) -> bool {
+) -> SpawnedWatcherConfirmation {
     let Some(probe) = spawned_watcher_probe(shared, ChannelId::new(channel_id), tmux_session)
     else {
-        return false;
+        return SpawnedWatcherConfirmation::Failed;
     };
     let deadline = Instant::now() + AUTO_HEAL_CONFIRM_TIMEOUT;
     let mut heartbeat_stable_since = None;
     loop {
         if shared.committed_relay_offset(ChannelId::new(channel_id)) > baseline_frontier {
-            return true;
+            return SpawnedWatcherConfirmation::Confirmed;
         }
         if !spawned_watcher_still_current(shared, &probe) {
-            return false;
+            return SpawnedWatcherConfirmation::Failed;
         }
         if probe.heartbeat.load(Ordering::Acquire) > probe.baseline_heartbeat_ms {
             let stable_since = heartbeat_stable_since.get_or_insert_with(Instant::now);
             if stable_since.elapsed() >= AUTO_HEAL_CONFIRM_STABLE_FOR {
-                return true;
+                return SpawnedWatcherConfirmation::Confirmed;
             }
         }
         if Instant::now() >= deadline {
-            return false;
+            return confirmation_at_deadline(shared, ChannelId::new(channel_id), &probe);
         }
         tokio::time::sleep(AUTO_HEAL_CONFIRM_POLL).await;
+    }
+}
+
+fn confirmation_at_deadline(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    probe: &SpawnedWatcherProbe,
+) -> SpawnedWatcherConfirmation {
+    if spawned_watcher_still_current(shared, probe) && shared.relay_emission_in_flight(channel_id) {
+        SpawnedWatcherConfirmation::RelayEmissionInFlight
+    } else {
+        SpawnedWatcherConfirmation::Failed
     }
 }
 
@@ -172,19 +197,115 @@ mod tests {
             heartbeat.store(101, Ordering::Release);
         });
 
-        assert!(confirm_spawned_watcher(&shared, channel.get(), tmux_session, 0).await);
+        assert_eq!(
+            confirm_spawned_watcher(&shared, channel.get(), tmux_session, 0).await,
+            SpawnedWatcherConfirmation::Confirmed
+        );
         advance.await.expect("heartbeat task");
+    }
+
+    #[test]
+    fn relay_recovery_same_watcher_emission_in_flight_is_not_confirmation_failure() {
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(4_423_202);
+        let tmux_session = "AgentDesk-codex-4423-emitting";
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session, Arc::new(AtomicI64::new(100))),
+        );
+        let probe = spawned_watcher_probe(&shared, channel, tmux_session).expect("watcher probe");
+        shared
+            .tmux_relay_coord(channel)
+            .relay_slot
+            .store(128, Ordering::Release);
+
+        assert_eq!(
+            confirmation_at_deadline(&shared, channel, &probe),
+            SpawnedWatcherConfirmation::RelayEmissionInFlight
+        );
+    }
+
+    #[test]
+    fn relay_recovery_same_watcher_without_emission_fails_at_deadline() {
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(4_423_203);
+        let tmux_session = "AgentDesk-codex-4423-not-emitting";
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session, Arc::new(AtomicI64::new(100))),
+        );
+        let probe = spawned_watcher_probe(&shared, channel, tmux_session).expect("watcher probe");
+
+        assert_eq!(
+            confirmation_at_deadline(&shared, channel, &probe),
+            SpawnedWatcherConfirmation::Failed
+        );
+    }
+
+    #[test]
+    fn relay_recovery_cancelled_watcher_fails_even_with_channel_emission() {
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(4_423_204);
+        let tmux_session = "AgentDesk-codex-4423-cancelled-emitting";
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session, Arc::new(AtomicI64::new(100))),
+        );
+        let probe = spawned_watcher_probe(&shared, channel, tmux_session).expect("watcher probe");
+        probe.cancel.store(true, Ordering::Release);
+        shared
+            .tmux_relay_coord(channel)
+            .relay_slot
+            .store(128, Ordering::Release);
+
+        assert_eq!(
+            confirmation_at_deadline(&shared, channel, &probe),
+            SpawnedWatcherConfirmation::Failed
+        );
+    }
+
+    #[test]
+    fn relay_recovery_replaced_watcher_fails_even_with_channel_emission() {
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(4_423_205);
+        let tmux_session = "AgentDesk-codex-4423-replaced-emitting";
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session, Arc::new(AtomicI64::new(100))),
+        );
+        let probe = spawned_watcher_probe(&shared, channel, tmux_session).expect("watcher probe");
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session, Arc::new(AtomicI64::new(100))),
+        );
+        shared
+            .tmux_relay_coord(channel)
+            .relay_slot
+            .store(128, Ordering::Release);
+
+        assert_eq!(
+            confirmation_at_deadline(&shared, channel, &probe),
+            SpawnedWatcherConfirmation::Failed
+        );
     }
 
     #[test]
     fn relay_recovery_restart_first_turn_gets_at_least_120_second_grace() {
         let started_at = 10_000;
         assert_eq!(
-            confirmation_after_probe(false, started_at, started_at + 119),
+            confirmation_after_probe(
+                SpawnedWatcherConfirmation::Failed,
+                started_at,
+                started_at + 119
+            ),
             ReattachConfirmation::StartupGrace
         );
         assert_eq!(
-            confirmation_after_probe(false, started_at, started_at + 120),
+            confirmation_after_probe(
+                SpawnedWatcherConfirmation::Failed,
+                started_at,
+                started_at + 120
+            ),
             ReattachConfirmation::Failed
         );
     }

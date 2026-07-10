@@ -63,29 +63,7 @@ pub(super) async fn apply_relay_recovery_plan(
         chrono::Utc::now().timestamp(),
     )
     .await;
-    match confirmation {
-        ReattachConfirmation::StartupGrace => {
-            apply_result.status = "reattach_confirm_startup_grace";
-            release_auto_heal_attempt(&key);
-        }
-        ReattachConfirmation::Failed => {
-            apply_result.status = "reattach_confirm_failed";
-            apply_result.reattach_error = Some(
-                "spawned watcher did not confirm heartbeat or relay-frontier progress".to_string(),
-            );
-            record_auto_heal_confirm_failure(&key, now_ms);
-        }
-        ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
-            if matches!(
-                apply_result.status,
-                "rebind_failed" | "provider_unavailable"
-            ) {
-                refund_auto_heal_attempt(&key, now_ms);
-            } else {
-                commit_auto_heal_attempt(&key);
-            }
-        }
-    }
+    settle_auto_heal_confirmation(&mut apply_result, confirmation, &key, now_ms);
     decision.auto_heal.remaining_attempts =
         remaining_auto_heal_attempts(&key, now_ms, decision.auto_heal.max_attempts_per_window);
     let applied = relay_recovery_status_counts_as_applied(apply_result.status);
@@ -112,6 +90,41 @@ pub(super) async fn apply_relay_recovery_plan(
     }
 }
 
+fn settle_auto_heal_confirmation(
+    apply_result: &mut RelayRecoveryApplyResult,
+    confirmation: ReattachConfirmation,
+    key: &str,
+    now_ms: i64,
+) {
+    match confirmation {
+        ReattachConfirmation::StartupGrace => {
+            apply_result.status = "reattach_confirm_startup_grace";
+            release_auto_heal_attempt(&key);
+        }
+        ReattachConfirmation::RelayEmissionInFlight => {
+            apply_result.status = "reattach_confirm_emission_in_flight";
+            release_auto_heal_attempt(&key);
+        }
+        ReattachConfirmation::Failed => {
+            apply_result.status = "reattach_confirm_failed";
+            apply_result.reattach_error = Some(
+                "spawned watcher did not confirm heartbeat or relay-frontier progress".to_string(),
+            );
+            record_auto_heal_confirm_failure(&key, now_ms);
+        }
+        ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
+            if matches!(
+                apply_result.status,
+                "rebind_failed" | "provider_unavailable"
+            ) {
+                refund_auto_heal_attempt(&key, now_ms);
+            } else {
+                commit_auto_heal_attempt(&key);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -119,7 +132,8 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
     use super::super::auto_heal_attempts::{
-        auto_heal_test_lock, clear_auto_heal_attempts_for_tests,
+        auto_heal_key, auto_heal_test_lock, clear_auto_heal_attempts_for_tests,
+        reserve_auto_heal_attempt,
     };
     use super::*;
     use crate::services::provider::CancelToken;
@@ -135,6 +149,46 @@ mod tests {
                 MessageId::new(message),
             )
             .await
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_recovery_emission_in_flight_releases_budget_without_success_or_backoff() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "codex",
+            4_423_302,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
+        let mut apply_result = RelayRecoveryApplyResult {
+            status: "reattached_watcher",
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: None,
+            post_mailbox_queue_depth: None,
+            reattach_watcher_spawned: Some(true),
+            reattach_watcher_replaced: Some(false),
+            reattach_initial_offset: Some(0),
+            reattach_error: None,
+        };
+
+        settle_auto_heal_confirmation(
+            &mut apply_result,
+            ReattachConfirmation::RelayEmissionInFlight,
+            &key,
+            2_000,
+        );
+
+        assert_eq!(apply_result.status, "reattach_confirm_emission_in_flight");
+        assert!(apply_result.reattach_error.is_none());
+        assert!(relay_recovery_status_counts_as_applied(apply_result.status));
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 3_000, 1),
+            Ok(0),
+            "in-flight relay must release the reservation without failure backoff"
         );
     }
 

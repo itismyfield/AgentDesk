@@ -10,6 +10,30 @@ pub(super) const AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW: u32 =
 pub(super) const AUTO_HEAL_REFUND_BACKOFF_THRESHOLD: u32 = 3;
 const AUTO_HEAL_MAX_REFUND_BACKOFF_EXPONENT: u32 = 4;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutoHealBudgetLane {
+    Manual,
+    Internal,
+}
+
+impl AutoHealBudgetLane {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl RelayRecoveryApplySource {
+    fn budget_lane(self) -> AutoHealBudgetLane {
+        match self {
+            Self::Manual => AutoHealBudgetLane::Manual,
+            Self::ProbeAutoHeal | Self::StallWatchdog => AutoHealBudgetLane::Internal,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct AttemptWindow {
     window_start_ms: i64,
@@ -66,7 +90,7 @@ pub(super) fn auto_heal_key(
         provider,
         channel_id,
         action.as_str(),
-        source.as_str()
+        source.budget_lane().as_str()
     )
 }
 
@@ -134,8 +158,9 @@ pub(super) fn refund_auto_heal_attempt(key: &str, now_ms: i64) {
     window.retry_not_before_ms = Some(now_ms.saturating_add(expanded_window_secs * 1000));
 }
 
-/// A startup-graced, not-yet-confirmed spawn is neither success nor failure.
-/// Release only the reservation and preserve the current failure episode.
+/// A startup-graced or actively-emitting, not-yet-confirmed spawn is neither
+/// success nor failure. Release only the reservation and preserve the current
+/// failure episode.
 pub(super) fn release_auto_heal_attempt(key: &str) {
     let mut attempts = auto_heal_attempts()
         .lock()
@@ -204,6 +229,95 @@ mod tests {
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::ProbeAutoHeal,
         )
+    }
+
+    #[test]
+    fn relay_recovery_internal_sources_share_budget_lane_manual_is_distinct() {
+        let probe = auto_heal_key(
+            "codex",
+            4_423_102,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+        let watchdog = auto_heal_key(
+            "codex",
+            4_423_102,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::StallWatchdog,
+        );
+        let manual = auto_heal_key(
+            "codex",
+            4_423_102,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::Manual,
+        );
+
+        assert_eq!(
+            probe, watchdog,
+            "internal actors must share one budget lane"
+        );
+        assert_ne!(manual, probe, "manual budget must remain operator-only");
+    }
+
+    #[tokio::test]
+    async fn relay_recovery_probe_exhaustion_blocks_watchdog_but_not_manual() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let probe = auto_heal_key(
+            "codex",
+            4_423_103,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+        let watchdog = auto_heal_key(
+            "codex",
+            4_423_103,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::StallWatchdog,
+        );
+        let manual = auto_heal_key(
+            "codex",
+            4_423_103,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::Manual,
+        );
+
+        assert_eq!(reserve_auto_heal_attempt(&probe, 1_000, 1), Ok(0));
+        assert_eq!(
+            reserve_auto_heal_attempt(&watchdog, 2_000, 1),
+            Err("auto_heal_rate_limited"),
+            "probe and watchdog must consume the same internal budget"
+        );
+        assert_eq!(
+            reserve_auto_heal_attempt(&manual, 2_000, 1),
+            Ok(0),
+            "internal exhaustion must not consume the manual budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_recovery_manual_exhaustion_does_not_block_internal_budget() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let manual = auto_heal_key(
+            "codex",
+            4_423_104,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::Manual,
+        );
+        let internal = auto_heal_key(
+            "codex",
+            4_423_104,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+
+        assert_eq!(reserve_auto_heal_attempt(&manual, 1_000, 1), Ok(0));
+        assert_eq!(
+            reserve_auto_heal_attempt(&internal, 2_000, 1),
+            Ok(0),
+            "manual exhaustion must not consume the internal budget"
+        );
     }
 
     #[tokio::test]
