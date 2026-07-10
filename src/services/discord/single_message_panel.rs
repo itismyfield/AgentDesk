@@ -1729,6 +1729,103 @@ mod tests {
     }
 
     #[test]
+    fn completion_footer_failed_final_edit_keeps_target_then_retry_commits_4025() {
+        let channel_id = ChannelId::new(4_025_001);
+        let message_id = MessageId::new(4_025_101);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_background_task(channel_id);
+        let _ = footer_registry::register_completion_footer_target(
+            channel_id,
+            message_id,
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: format!("tool-{}", channel_id.get()),
+                success: true,
+            },
+        );
+
+        let failed_edit = footer_registry::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠸",
+            1_800_000_001,
+        )
+        .expect("final terminal refresh should target the registered message");
+        assert_eq!(failed_edit.message_id, message_id);
+        assert!(failed_edit.text.contains("Bash Run background codex ✓"));
+        assert!(failed_edit.remove_after_edit);
+
+        assert!(
+            footer_registry::completion_footer_record_edit_result_for_edit(
+                shared.as_ref(),
+                channel_id,
+                &failed_edit,
+                false,
+            )
+        );
+        assert!(
+            footer_registry::completion_footer_has_registered_target(channel_id),
+            "failed final edit must retain its retry target"
+        );
+        assert_eq!(
+            footer_registry::completion_footer_registered_failure_count(channel_id),
+            Some(1),
+            "failed final edit must count toward the existing retry cap"
+        );
+        let retained = shared.ui.placeholder_live_events.render_completion_footer(
+            channel_id,
+            &ProviderKind::Claude,
+            "⠼",
+        );
+        assert!(
+            retained
+                .block
+                .as_deref()
+                .is_some_and(|block| block.contains("Bash Run background codex ✓")),
+            "failed delivery must not evict the terminal slot"
+        );
+
+        let retry = footer_registry::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠼",
+            1_800_000_002,
+        )
+        .expect("failed final edit should remain available for retry");
+        assert_eq!(retry.message_id, failed_edit.message_id);
+        assert_eq!(retry.text, failed_edit.text);
+        assert!(retry.remove_after_edit);
+
+        assert!(
+            footer_registry::completion_footer_record_edit_result_for_edit(
+                shared.as_ref(),
+                channel_id,
+                &retry,
+                true,
+            )
+        );
+        assert!(!footer_registry::completion_footer_has_registered_target(
+            channel_id
+        ));
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_live_events
+                .render_completion_footer(channel_id, &ProviderKind::Claude, "⠴")
+                .block,
+            None,
+            "terminal slot must be evicted only after successful recorded delivery"
+        );
+    }
+
+    #[test]
     fn completion_footer_evicts_all_terminal_marks_delivered_by_one_edit() {
         let channel_id = ChannelId::new(3_391_103);
         footer_registry::completion_footer_forget_registered_target(channel_id);
