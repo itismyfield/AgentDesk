@@ -3,6 +3,8 @@ pub mod auto_queue;
 pub mod automation_candidates;
 pub mod cancel_tombstones;
 pub mod dispatch_semaphores;
+#[path = "dispatched_sessions/rebind_override.rs"]
+pub(crate) mod dispatched_session_rebind_override;
 pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod idempotency;

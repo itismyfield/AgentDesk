@@ -184,7 +184,7 @@ pub(super) async fn upsert_rebind_session_id_override(
             Err(error) => return Err(RebindError::Internal(error)),
         }
     }
-    crate::db::dispatched_sessions::rebind_override::upsert_rebind_session_override_pg(
+    crate::db::dispatched_session_rebind_override::upsert_rebind_session_override_pg(
         pool,
         selected,
         provider.as_str(),

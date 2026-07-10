@@ -67,6 +67,8 @@ src/
 │   │   └── tests.rs
 │   ├── automation_candidates/
 │   │   └── verdict_tests.rs
+│   ├── dispatched_sessions/
+│   │   └── rebind_override.rs
 │   ├── dispatches/
 │   │   ├── outbox/
 │   │   │   ├── claim.rs
@@ -454,6 +456,7 @@ src/
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── provider_probe.rs
+│   │   │   ├── rebind_request.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
 │   │   │   ├── relay_auto_heal.rs
@@ -542,6 +545,7 @@ src/
 │   │   │   ├── crash_resume_guard.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind_output_path.rs
+│   │   │   ├── manual_rebind_override.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
@@ -839,7 +843,9 @@ src/
 │   │   ├── relay_health.rs
 │   │   ├── relay_owner_observability.rs
 │   │   ├── relay_recovery.rs
+│   │   ├── relay_recovery_auto_heal_apply.rs
 │   │   ├── relay_recovery_auto_heal_attempts.rs
+│   │   ├── relay_recovery_auto_heal_confirm.rs
 │   │   ├── relay_recovery_completion_footer.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs
