@@ -487,6 +487,7 @@ pub(super) fn watcher_should_reclaim_orphan_turn_placeholder(
 }
 
 const REDRIVE_PLACEHOLDER_SHIELD_MILLIS: i64 = 900_000;
+const REDRIVE_PLACEHOLDER_CLOCK_SKEW_MILLIS: i64 = 5_000;
 
 pub(super) fn redrive_shielded_placeholder(
     nudged_at_millis: i64,
@@ -494,7 +495,8 @@ pub(super) fn redrive_shielded_placeholder(
     frontier_not_advanced: bool,
     now_millis: i64,
 ) -> bool {
-    message_created_at_millis >= nudged_at_millis
+    message_created_at_millis.saturating_add(REDRIVE_PLACEHOLDER_CLOCK_SKEW_MILLIS)
+        >= nudged_at_millis
         && frontier_not_advanced
         && now_millis.saturating_sub(nudged_at_millis).max(0) < REDRIVE_PLACEHOLDER_SHIELD_MILLIS
 }
@@ -582,7 +584,7 @@ mod redrive_placeholder_shield_tests {
             "post-nudge placeholder at a frozen frontier must be preserved inside 900s"
         );
         assert!(
-            !redrive_shielded_placeholder(nudged_at, nudged_at - 1, true, nudged_at + 1),
+            !redrive_shielded_placeholder(nudged_at, nudged_at - 5_001, true, nudged_at + 1),
             "a pre-nudge orphan must retain the existing reclaim semantics"
         );
         assert!(

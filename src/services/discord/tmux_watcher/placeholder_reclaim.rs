@@ -266,6 +266,17 @@ mod redrive_reclaim_e2e_tests {
                         .await,
                         "shielded reclaim must preserve and defer"
                     );
+                    let preserved_msg_id = placeholder_msg_id
+                        .expect("shielded reclaim must preserve the placeholder id");
+                    assert!(
+                        !crate::services::discord::status_panel_orphan_store::is_queued(
+                            &provider,
+                            &shared.token_hash,
+                            channel_id.get(),
+                            preserved_msg_id.get(),
+                        ),
+                        "shield must return before delete and durable-retry enqueue"
+                    );
                     if placeholder_msg_id.is_none() {
                         deletes += 1;
                     }

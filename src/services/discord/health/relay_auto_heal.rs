@@ -14,7 +14,9 @@ use crate::services::provider::ProviderKind;
 
 // Delay after each admitted attempt. The sixth (960s) is the terminal capped
 // horizon from the issue contract; no seventh action is admitted. Consequently
-// the six actual action times are cumulative +0/+30/+90/+210/+450/+930.
+// the six actual action times are cumulative +0/+30/+90/+210/+450/+930. The
+// hard placeholder shield expires at +900, so the final action intentionally
+// runs under the reclaim semantics restored by that bound.
 const REDRIVE_BACKOFF_SECS: [i64; 6] = [30, 60, 120, 240, 480, 960];
 const REDRIVE_MAX_NO_PROGRESS_ATTEMPTS: u8 = 6;
 const _: () = assert!(REDRIVE_BACKOFF_SECS.len() == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS as usize);
@@ -33,11 +35,6 @@ impl RedriveEpisode {
         self.frontier > previous.frontier
             || (self.identity.is_some() && self.identity != previous.identity)
             || self.reconnect_count != previous.reconnect_count
-    }
-
-    fn refreshes_shield(&self, previous: &Self) -> bool {
-        self.frontier > previous.frontier
-            || (self.identity.is_some() && self.identity != previous.identity)
     }
 }
 
@@ -106,7 +103,8 @@ impl SharedData {
             *state = RedriveAttemptState::new(episode, now_unix);
         }
         if state.attempts >= REDRIVE_MAX_NO_PROGRESS_ATTEMPTS {
-            debug_assert_eq!(REDRIVE_BACKOFF_SECS[usize::from(state.attempts - 1)], 960);
+            debug_assert_eq!(state.attempts, REDRIVE_MAX_NO_PROGRESS_ATTEMPTS);
+            debug_assert_eq!(REDRIVE_BACKOFF_SECS[REDRIVE_BACKOFF_SECS.len() - 1], 960);
             let emit_capped_alarm = !state.capped_alarm_emitted;
             state.capped_alarm_emitted = true;
             return RedriveAttemptDecision {
@@ -150,6 +148,7 @@ impl SharedData {
             .get_mut(&key)
             .expect("redrive success must follow an admitted attempt");
         state.attempts += 1;
+        let first_attempt_of_episode = state.attempts == 1;
         state.last_attempt_unix = now_unix;
         state.retry_not_before_unix = None;
         if reattached {
@@ -175,7 +174,7 @@ impl SharedData {
         let mut shield = REDRIVE_PLACEHOLDER_SHIELDS
             .entry(key)
             .or_insert_with(|| (episode.clone(), now_millis));
-        if episode.refreshes_shield(&shield.0) {
+        if first_attempt_of_episode {
             *shield = (episode, now_millis);
         } else {
             shield.0 = episode;
@@ -1166,6 +1165,11 @@ mod tests {
 
         let mut next_watcher = next_identity.clone();
         next_watcher.reconnect_count += 1;
+        let key = shared.redrive_key(&provider, channel_id);
+        REDRIVE_PLACEHOLDER_SHIELDS
+            .get_mut(&key)
+            .expect("the previous episode records a shield")
+            .1 = 1_234;
         assert_eq!(
             shared
                 .redrive_attempt_decision(&provider, channel_id, &next_watcher, base + 3_000_000,),
@@ -1174,6 +1178,21 @@ mod tests {
                 emit_capped_alarm: false,
             },
             "replacing the live watcher instance must re-arm the episode"
+        );
+        assert_eq!(
+            shared.commit_redrive_success(&provider, channel_id, base + 3_000_000, false,),
+            RedriveAttemptDecision {
+                attempt: Some(1),
+                emit_capped_alarm: false,
+            }
+        );
+        assert_ne!(
+            shared
+                .redrive_placeholder_shield_context(&provider, channel_id)
+                .expect("watcher replacement starts a new shield")
+                .0,
+            1_234,
+            "an external watcher replacement must refresh the shield start"
         );
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
 
