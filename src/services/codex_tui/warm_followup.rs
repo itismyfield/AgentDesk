@@ -240,13 +240,17 @@ fn kill_pane_and_confirm_stopped(
             "Codex TUI warm follow-up could not pin the pane PID before kill".to_string()
         })?;
     let pane_identity = crate::services::process::ProcessIdentity::capture(pane_pid);
+    let process_tree_kill_started =
+        crate::services::process::kill_pid_tree_if_identity_matches(pane_pid, pane_identity);
     let kill_succeeded =
         crate::services::platform::tmux::kill_session(tmux_session_name, reason.reason_text());
-    if !kill_succeeded {
+    if !process_tree_kill_started || !kill_succeeded {
         tracing::warn!(
             tmux_session_name,
             pane_pid,
-            "Codex TUI warm follow-up kill command failed; requiring independent pane and PID death proof"
+            process_tree_kill_started,
+            kill_succeeded,
+            "Codex TUI warm follow-up kill command was incomplete; requiring independent pane, PID, and process-group death proof"
         );
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -255,8 +259,15 @@ fn kill_pane_and_confirm_stopped(
             crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
             crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
         );
-        let process_stopped = !pane_identity.matches(pane_pid);
-        if pane_stopped && process_stopped {
+        let process_stopped = matches!(
+            pane_identity.probe(pane_pid),
+            crate::services::process::ProcessIdentityProbe::GoneOrReused
+        );
+        let process_group_stopped = matches!(
+            crate::services::process::process_group_probe(pane_pid),
+            crate::services::process::ProcessGroupProbe::Gone
+        );
+        if pane_stopped && process_stopped && process_group_stopped {
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
@@ -264,7 +275,7 @@ fn kill_pane_and_confirm_stopped(
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    Err("Codex TUI warm follow-up could not prove both pane and process termination after fallback kill barrier".to_string())
+    Err("Codex TUI warm follow-up could not prove pane, process, and process-group termination after fallback kill barrier".to_string())
 }
 
 #[cfg(unix)]
