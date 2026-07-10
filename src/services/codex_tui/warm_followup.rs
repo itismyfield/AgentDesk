@@ -50,6 +50,7 @@ impl CodexWarmFallbackReason {
 pub(crate) enum CodexWarmFollowupOutcome {
     Terminal(Result<(), String>),
     Fallback(CodexWarmFallbackReason),
+    FallbackAfterPaneKill(CodexWarmFallbackReason),
     LegacyPath,
 }
 
@@ -229,6 +230,22 @@ fn log_fallback(tmux_session_name: &str, reason: CodexWarmFallbackReason, detail
     );
 }
 
+#[cfg(unix)]
+fn kill_pane_and_confirm_stopped(
+    tmux_session_name: &str,
+    reason: CodexWarmFallbackReason,
+) -> Result<(), String> {
+    crate::services::platform::tmux::kill_session(tmux_session_name, reason.reason_text());
+    for _ in 0..20 {
+        if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Err("Codex TUI warm follow-up pane remained live after fallback kill barrier".to_string())
+}
+
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_codex_tui_warm_followup(
     selection: &CodexTuiSessionSelection,
@@ -392,18 +409,30 @@ pub(crate) fn try_codex_tui_warm_followup(
                 rollout_len_before_submit,
                 rollout_len_after_submit,
             ) {
+                let reason = CodexWarmFallbackReason::SubmitFailed;
+                if let Err(error) = kill_pane_and_confirm_stopped(tmux_session_name, reason) {
+                    return CodexWarmFollowupOutcome::Terminal(Err(error));
+                }
+                let rollout_len_after_kill = std::fs::metadata(rollout_path)
+                    .ok()
+                    .map(|metadata| metadata.len());
+                if rollout_len_after_kill != Some(rollout_len_before_submit) {
+                    return CodexWarmFollowupOutcome::Terminal(Err(
+                        "Codex TUI warm follow-up rollout advanced across the pane-kill barrier; refusing replay"
+                            .to_string(),
+                    ));
+                }
                 crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
                     ProviderKind::Codex.as_str(),
                     tmux_session_name,
                     prompt,
                 );
-                let reason = CodexWarmFallbackReason::SubmitFailed;
                 log_fallback(
                     tmux_session_name,
                     reason,
-                    "draft persisted in two snapshots and rollout did not advance",
+                    "draft persisted in two snapshots and rollout stayed unchanged through the pane-kill barrier",
                 );
-                return CodexWarmFollowupOutcome::Fallback(reason);
+                return CodexWarmFollowupOutcome::FallbackAfterPaneKill(reason);
             }
             return CodexWarmFollowupOutcome::Terminal(Err(
                 "Codex TUI warm follow-up submit was unconfirmed; refusing replay".to_string(),

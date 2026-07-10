@@ -97,6 +97,7 @@ use tokio::sync::Notify;
 // final Enter as a distinct action is what lets submission confirmation reason
 // about a visible, still-stranded composer draft without ever double-submitting.
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
+const PROMPT_INPUT_BEFORE_ENTER_SETTLE: Duration = Duration::from_millis(200);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
@@ -897,6 +898,12 @@ impl TuiActionExecutor for TmuxTuiActionExecutor {
     }
 
     fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String> {
+        if self.composer_mutated && keys.contains(&"Enter") {
+            // Match the Claude TUI precedent: let the composer apply the last
+            // literal/paste mutation before Enter so a re-mount cannot drop or
+            // reorder the submit key.
+            std::thread::sleep(PROMPT_INPUT_BEFORE_ENTER_SETTLE);
+        }
         self.enter_attempted |= keys.contains(&"Enter");
         crate::services::platform::tmux::send_keys(session_name, keys)
     }

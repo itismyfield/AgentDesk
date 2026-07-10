@@ -1577,6 +1577,7 @@ fn cleanup_existing_codex_tui_session(
     warm_fallback_reason: Option<
         crate::services::codex_tui::warm_followup::CodexWarmFallbackReason,
     >,
+    pane_already_stopped: bool,
 ) {
     let legacy_reason;
     let (reason_code, reason_text) = if let Some(reason) = warm_fallback_reason {
@@ -1596,7 +1597,9 @@ fn cleanup_existing_codex_tui_session(
         None,
     );
     record_tmux_exit_reason(tmux_session_name, reason_text);
-    crate::services::platform::tmux::kill_session(tmux_session_name, reason_text);
+    if !pane_already_stopped {
+        crate::services::platform::tmux::kill_session(tmux_session_name, reason_text);
+    }
 }
 
 /// Paths and timing produced while preparing a Codex Direct TUI launch script.
@@ -1830,6 +1833,7 @@ fn execute_streaming_local_tui_tmux(
     let session_exists = tmux_session_exists(tmux_session_name);
     let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
     let mut warm_fallback_reason = None;
+    let mut warm_fallback_pane_stopped = false;
 
     // Emergency kill switch: when disabled, bypass the warm module entirely
     // and retain the pre-#4411 cleanup/relaunch path below.
@@ -1852,6 +1856,12 @@ fn execute_streaming_local_tui_tmux(
             crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::Fallback(
                 reason,
             ) => warm_fallback_reason = Some(reason),
+            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::FallbackAfterPaneKill(
+                reason,
+            ) => {
+                warm_fallback_reason = Some(reason);
+                warm_fallback_pane_stopped = true;
+            }
             crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::LegacyPath => {}
         }
     }
@@ -1862,6 +1872,7 @@ fn execute_streaming_local_tui_tmux(
             force_fresh_provider_session,
             has_live_pane,
             warm_fallback_reason,
+            warm_fallback_pane_stopped,
         );
     }
 
