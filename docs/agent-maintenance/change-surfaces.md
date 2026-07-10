@@ -1236,11 +1236,11 @@
     helpers, so headless Codex honors its 4h ceiling end to end).
   - `src/services/discord/meeting_orchestrator.rs` (3222 lines after #3034
     dead-code sweep removed `is_meeting_channel`).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (964 prod lines; provider
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (993 prod lines; provider
     stop-token/tmux binding runtime + the async interrupt/cancel/hard-stop
     orchestration + session-teardown. #3169: the claude-anonymous-teardown
     SIGINT suppression guard (death #3) lives in the `interrupt_policy` child.
-    #3479 decomposed the giant 1545 -> 964 by moving three cohesive, verbatim
+    #3479 initially decomposed the giant 1545 -> 964 by moving three cohesive, verbatim
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
@@ -1322,7 +1322,7 @@
     `work_dispatch_completion_context`, `build_work_dispatch_completion_result`,
     and the `noop`/tracked-change context builders. Reads git history + Postgres
     completion hints; not a giant-file).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (964 prod lines; no longer
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (993 prod lines; no longer
     a giant-file after #3479 — see the description above and the three child
     entries below).
   - `src/services/discord/turn_bridge/tmux_runtime/interrupt_policy.rs` (225 prod
@@ -1354,16 +1354,14 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
-  - `src/services/discord/turn_bridge/stream_loop.rs` (1638 prod lines; #4230 S6
-    main stream loop shell extracted verbatim from `turn_bridge/mod.rs`: cancel
-    gates, ready-frame drain, `RetryBoundary`/`Init`/`Text`/`Thinking`/`ToolUse`/
-    `ToolResult`/`TaskNotification`/`Done`/`Error`/status arms, runtime handoff
-    delegation, stream/status ticks, long-running placeholder open/retarget
-    state, and bridge latency span emission. Registered giant-file (#4230
-    decompose target continuation — see `giant-file-registry.md`, owner
-    `discord-relay`, deadline 2026-08-31); plan-marked irreducible because the
-    arms share placeholder state, background-child tracking, transcript events,
-    and inflight persistence. Bugfix only outside the #4230 decompose plan).
+  - `src/services/discord/turn_bridge/stream_loop.rs` (979 prod lines; #4230 S6
+    extracted the main stream-loop shell from `turn_bridge/mod.rs`, S7 moved the
+    tool/result/task-notification arms to `stream_loop/tool_arms.rs`, and S8 moved
+    the content/status/terminal arms to `stream_loop/content_arms.rs`. The root
+    now retains the cancel gates, ready-frame drain, runtime-handoff delegation,
+    stream/status ticks, and long-running placeholder state wiring. Its #4230
+    giant registry entry was retired after S8; the measured 979-line cap remains
+    below the 1000-prod-LoC threshold).
   - `src/services/discord/outbound/turn_output_controller.rs` (1034 prod lines;
     crossed the giant threshold in #3998 E13 when the controller-facing lease
     guard moved from `TurnKey` to `DeliveryLeaseKey` for id-0 disambiguation.

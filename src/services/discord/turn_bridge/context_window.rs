@@ -130,11 +130,10 @@ mod tests {
     }
 
     // #3419 R3: a tool-only turn replaces a LONG streamed `full_response` with a
-    // SHORT sentinel `result`. The turn_bridge clamp at mod.rs:~3372
-    // (`response_sent_offset = response_sent_offset.min(full_response.len())`)
-    // must keep the offset inside the replaced body so the watcher slice
-    // `full_response.get(offset..)` is non-empty (no relay wedge) and the
-    // `response_sent_offset_in_bounds` invariant (inflight.rs) holds.
+    // SHORT sentinel `result`. `retry_state::sync_response_delivery_state`
+    // clamps the prior offset to the replaced length and walks it back to a UTF-8
+    // char boundary, keeping the watcher slice valid (no relay wedge) and the
+    // `response_sent_offset_in_bounds` invariant (inflight.rs) intact.
     #[test]
     fn sentinel_overwrite_clamps_response_sent_offset_within_bounds() {
         // A long streamed pre-tool narration, then a Done with a short sentinel.
