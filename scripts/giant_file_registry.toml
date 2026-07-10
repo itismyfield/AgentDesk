@@ -508,10 +508,10 @@ decompose_issue = "#4230"
 
 [[entry]]
 # Created by #4230 S6 as the approved stream-loop shell extraction from
-# turn_bridge/mod.rs. It remains over the giant threshold because the event arms
-# share placeholder state, background-child tracking, transcript events, inflight
-# persistence, cancel gates, and stream-tick state; the approved plan marks this
-# loop shell irreducible for this stage.
+# turn_bridge/mod.rs; #4230 S7 moved the ToolUse/ToolResult/TaskNotification
+# arms to stream_loop/tool_arms.rs. It remains over the giant threshold because
+# the remaining event arms still share cancel gates, terminal drain control,
+# runtime handoff, stream-tick state, and terminal outcome state until S8.
 file = "src/services/discord/turn_bridge/stream_loop.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"

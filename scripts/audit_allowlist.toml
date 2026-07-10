@@ -49,9 +49,9 @@ direct_discord_sends = [
   # #4230 S1: existing turn_bridge direct gateway calls re-fingerprinted after
   # the stream/status tick block moved verbatim to turn_bridge/stream_tick.rs.
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:40a1288799a3f040",
-  # #4230 S6: existing restart-handoff direct gateway edit moved verbatim from
-  # turn_bridge/mod.rs to turn_bridge/stream_loop.rs.
-  "src/services/discord/turn_bridge/stream_loop.rs#direct_discord_sends:467c7c8834b1cebb",
+  # #4230 S7: existing tool-result direct gateway edit moved verbatim from
+  # turn_bridge/stream_loop.rs to turn_bridge/stream_loop/tool_arms.rs.
+  "src/services/discord/turn_bridge/stream_loop/tool_arms.rs#direct_discord_sends:49054cadcdb1b240",
   # #4230 S5: existing recovery-notice direct gateway edit moved verbatim from
   # turn_bridge/mod.rs to turn_bridge/terminal_outcome_delivery.rs.
   "src/services/discord/turn_bridge/terminal_outcome_delivery.rs#direct_discord_sends:17077162223368f0",

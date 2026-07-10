@@ -645,7 +645,7 @@ mod headless_completion_footer_tests {
     /// keeps the backslash and does not self-match the `include_str!` include.
     #[test]
     fn headless_enqueue_success_registers_completion_footer_text() {
-        let source = compact_ws(include_str!("mod.rs"));
+        let source = compact_ws(include_str!("terminal_outcome_delivery.rs"));
         let expected = ".await; terminal_delivery_committed = true; \
              terminal_body_visible = true; \
              if single_message_panel_footer_mode { \
