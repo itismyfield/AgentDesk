@@ -2926,6 +2926,7 @@ mod stall_watchdog_pure_tests {
         preserve_cancel_should_skip_provider_interrupt_for_idle_tui,
         revalidate_and_clear_explicit_background_inflight,
     };
+    use crate::config::TestEnvVarGuard;
     use crate::services::discord::inflight::{
         self, GuardedClearOutcome, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState,
         RelayOwnerKind,
@@ -2935,29 +2936,6 @@ mod stall_watchdog_pure_tests {
     use crate::services::provider::ProviderKind;
     use chrono::TimeZone;
     use poise::serenity_prelude::ChannelId;
-    use std::ffi::OsString;
-
-    struct EnvVarReset {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarReset {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarReset {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
 
     fn test_ledger_identity(chunks: &[String]) -> LeakRecoveryLedgerIdentity {
         LeakRecoveryLedgerIdentity {
@@ -3125,11 +3103,12 @@ mod stall_watchdog_pure_tests {
 
     #[test]
     fn chunk_ledger_survives_restart_and_resumes_tail_without_live_fetch() {
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("temp runtime root");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let chunks: Vec<String> = (0..64).map(|index| format!("chunk-{index}")).collect();
         let identity = test_ledger_identity(&chunks);
 
@@ -3151,11 +3130,12 @@ mod stall_watchdog_pure_tests {
 
     #[test]
     fn chunk_ledger_records_send_failure_boundary_without_offset_loss() {
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("temp runtime root");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let chunks: Vec<String> = (0..5).map(|index| format!("chunk-{index}")).collect();
         let identity = test_ledger_identity(&chunks);
 
@@ -3174,11 +3154,12 @@ mod stall_watchdog_pure_tests {
 
     #[test]
     fn chunk_ledger_ignores_stale_identity_or_changed_confirmed_chunk() {
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("temp runtime root");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let chunks = vec!["chunk-0".to_string(), "chunk-1".to_string()];
         let identity = test_ledger_identity(&chunks);
 
@@ -3218,11 +3199,12 @@ mod stall_watchdog_pure_tests {
         // `full_response`, moving `byte_end` and appending chunk fingerprints. The
         // already-confirmed prefix (whose fingerprints are byte-identical) must
         // remain confirmed so recovery never re-sends already-delivered chunks.
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("temp runtime root");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
 
         let chunks = vec!["chunk-0".to_string(), "chunk-1".to_string()];
         let identity = test_ledger_identity(&chunks);
@@ -3267,11 +3249,12 @@ mod stall_watchdog_pure_tests {
 
     #[test]
     fn leak_recovery_offset_patch_preserves_concurrent_relay_watermark_update() {
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("temp runtime root");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
 
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(4_111_001);
@@ -3336,11 +3319,12 @@ mod stall_watchdog_pure_tests {
 
     #[test]
     fn explicit_background_watchdog_abort_preserves_new_identity_after_snapshot() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
 
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_019_230_001);
@@ -3385,11 +3369,12 @@ mod stall_watchdog_pure_tests {
 
     #[test]
     fn idle_tmux_stale_turn_clear_preserves_fresh_inflight_after_finish_window() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
 
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_030_601);
@@ -4307,34 +4292,12 @@ mod stall_watchdog_pure_tests {
 #[cfg(test)]
 mod stall_watchdog_auto_heal_tests {
     use super::super::HealthRegistry;
+    use crate::config::TestEnvVarGuard;
     use crate::services::provider::{CancelToken, ProviderKind};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
-    use std::ffi::OsString;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
-
-    struct EnvVarReset {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarReset {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarReset {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
 
     struct IdleTmuxCandidateHookGuard {
         previous: Option<super::IdleTmuxStaleTurnInflightCandidateHook>,
@@ -4515,11 +4478,12 @@ mod stall_watchdog_auto_heal_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
@@ -4576,11 +4540,12 @@ mod stall_watchdog_auto_heal_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn idle_tmux_stale_turn_guarded_finish_preserves_new_mailbox_claim() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
@@ -4657,11 +4622,12 @@ mod stall_watchdog_auto_heal_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn idle_tmux_stale_turn_guarded_finish_preserves_new_same_id_mailbox_claim() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
@@ -4737,11 +4703,12 @@ mod stall_watchdog_auto_heal_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn idle_tmux_stale_turn_tail_recheck_preserves_mailbox_after_precheck_passed() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
@@ -4797,11 +4764,12 @@ mod stall_watchdog_auto_heal_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn force_clean_guarded_finish_preserves_new_same_id_mailbox_claim() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let provider = ProviderKind::Codex;
         let mut registry = HealthRegistry::new();
         registry.started_at_unix =
@@ -4903,11 +4871,12 @@ mod stall_watchdog_auto_heal_tests {
 
     #[tokio::test]
     async fn stall_watchdog_cleanup_releases_residual_orphan_pending_token() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let provider = ProviderKind::Codex;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
@@ -4979,38 +4948,9 @@ mod hard_stop_completion_event_tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::super::HealthRegistry;
+    use crate::config::TestEnvVarGuard;
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
-
-    struct EnvVarReset {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarReset {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let lock = crate::config::shared_test_env_lock()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self {
-                _lock: lock,
-                key,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for EnvVarReset {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
 
     #[derive(Clone)]
     struct CapturingWriter {
@@ -5086,7 +5026,7 @@ mod hard_stop_completion_event_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn providerless_hard_stop_with_runtime_publishes_completion_event_for_pending_queue() {
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
@@ -5135,7 +5075,7 @@ mod hard_stop_completion_event_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn providerless_stale_repair_uses_strict_per_runtime_mailbox_ownership() {
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let first = super::super::super::make_shared_data_for_tests();
@@ -5232,11 +5172,12 @@ mod hard_stop_completion_event_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn providerless_strict_repair_ignores_empty_mailbox_created_by_snapshot_scan() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let first = super::super::super::make_shared_data_for_tests();
@@ -5345,7 +5286,7 @@ mod hard_stop_completion_event_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn unresolvable_raw_hard_stop_warns_about_potentially_stranded_pending_queue() {
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let _env = TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Claude;
         let shared = super::super::super::make_shared_data_for_tests();
         let channel = ChannelId::new(4_048_240);

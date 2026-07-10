@@ -2976,8 +2976,39 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_env_lock {
+    thread_local! {
+        static SHARED_TEST_ENV_LOCK_HELD: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    pub(crate) struct SharedTestEnvLockGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for SharedTestEnvLockGuard {
+        fn drop(&mut self) {
+            SHARED_TEST_ENV_LOCK_HELD.with(|held| held.set(false));
+        }
+    }
+
+    pub(crate) fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
+        SHARED_TEST_ENV_LOCK_HELD.with(|held| {
+            if held.get() {
+                panic!("shared_test_env_lock re-entry detected before mutex acquisition");
+            }
+            held.set(true);
+        });
+        let lock = super::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        SharedTestEnvLockGuard { _lock: lock }
+    }
+}
+
+#[cfg(test)]
 pub(crate) struct TestEnvVarGuard {
-    _lock: Option<std::sync::MutexGuard<'static, ()>>,
+    _lock: Option<test_env_lock::SharedTestEnvLockGuard>,
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
@@ -2985,9 +3016,7 @@ pub(crate) struct TestEnvVarGuard {
 #[cfg(test)]
 impl TestEnvVarGuard {
     pub(crate) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
-        let lock = shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let lock = test_env_lock::acquire_shared_test_env_lock();
         let previous = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
         Self {
@@ -3061,5 +3090,29 @@ mod remote_settings_tests {
             settings.remote_profiles.is_empty(),
             "remote profiles are not loaded from AgentDesk config; use the #2193 remote_hosts ADR"
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_test_env_lock_tests {
+    #[test]
+    fn acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _lock = super::test_env_lock::acquire_shared_test_env_lock();
+            let reentry = std::panic::catch_unwind(|| {
+                let _nested = super::test_env_lock::acquire_shared_test_env_lock();
+            });
+            tx.send(reentry.is_err()).expect("send reentry result");
+        });
+
+        let panicked = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("same-thread reentry must panic before waiting on the mutex");
+        assert!(
+            panicked,
+            "same-thread reentry should fail before attempting the mutex lock"
+        );
+        handle.join().expect("reentry proof thread should finish");
     }
 }
