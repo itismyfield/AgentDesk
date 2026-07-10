@@ -1994,7 +1994,7 @@ mod tests {
             select_recap_context(&snapshot, Utc::now()),
             RecapContextDisplay::Known {
                 used: 42_000,
-                window: ProviderKind::Codex.default_context_window()
+                window: ProviderKind::Codex.resolve_context_window(None)
             }
         );
     }
