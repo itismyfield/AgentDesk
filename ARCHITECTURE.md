@@ -368,6 +368,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
 │   │   ├── hook_bundle.rs
+│   │   ├── hook_output_guard.rs
+│   │   ├── hook_output_guard_tests.rs
 │   │   ├── hook_registry.rs
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs
@@ -641,6 +643,8 @@ src/
 │   │   │   └── write.rs
 │   │   ├── tmux/
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
+│   │   ├── tmux_output_stream/
+│   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/
 │   │   │   ├── evidence.rs
 │   │   │   ├── mod.rs
@@ -662,6 +666,7 @@ src/
 │   │   │   ├── placeholder_reclaim.rs
 │   │   │   ├── post_stream_exit.rs
 │   │   │   ├── prompt_observe.rs
+│   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
@@ -1080,6 +1085,8 @@ src/
 │   ├── provider_auth.rs
 │   ├── provider_exec.rs
 │   ├── provider_hosting.rs
+│   ├── provider_output_guard.rs
+│   ├── provider_output_guard_tests.rs
 │   ├── provider_runtime.rs
 │   ├── queue.rs
 │   ├── qwen.rs

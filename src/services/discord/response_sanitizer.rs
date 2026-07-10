@@ -99,6 +99,38 @@ pub(crate) fn sanitize_hidden_context_and_strip_chrome(input: &str) -> String {
         .unwrap_or(stripped)
 }
 
+pub(crate) fn sanitize_provider_response(
+    input: &str,
+    provider: &crate::services::provider::ProviderKind,
+) -> String {
+    let sanitized = sanitize_hidden_context_and_strip_chrome(input);
+    match crate::services::provider_output_guard::inspect_provider_output(provider, &sanitized) {
+        crate::services::provider_output_guard::ProviderOutputVerdict::Clean => sanitized,
+        crate::services::provider_output_guard::ProviderOutputVerdict::Hold { kind } => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                verdict = "hold",
+                kind = kind.as_str(),
+                output_bytes = sanitized.len(),
+                output_chars = sanitized.chars().count(),
+                "held provider output at Discord formatting boundary"
+            );
+            crate::services::provider_output_guard::safe_held_body(kind).to_string()
+        }
+        crate::services::provider_output_guard::ProviderOutputVerdict::Blocked { kind } => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                verdict = "blocked",
+                kind = kind.as_str(),
+                output_bytes = sanitized.len(),
+                output_chars = sanitized.chars().count(),
+                "blocked provider output at Discord formatting boundary"
+            );
+            crate::services::provider_output_guard::safe_blocked_body(kind).to_string()
+        }
+    }
+}
+
 /// Remove leading Claude/Codex TUI housekeeping text that can be emitted by
 /// resume/meta prompts before the real assistant body. Preserve legitimate
 /// prose like "No response requested. But ..." where the phrase is part of

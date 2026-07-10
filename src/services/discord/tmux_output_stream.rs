@@ -760,6 +760,10 @@ mod tests {
     use super::*;
     use crate::services::session_backend::StreamLineState;
 
+    mod provider_output_guard_tests {
+        include!("tmux_output_stream/provider_output_guard_tests.rs");
+    }
+
     #[test]
     fn watcher_status_panel_fallback_inlines_events_without_status_message() {
         assert!(

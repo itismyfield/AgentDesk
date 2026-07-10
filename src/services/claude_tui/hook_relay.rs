@@ -88,8 +88,12 @@ fn run_cli_with_name(
     Ok(())
 }
 
-fn should_wait_for_stop_response(provider: &str, event: &str) -> bool {
-    provider.trim().eq_ignore_ascii_case("claude") && event.trim().eq_ignore_ascii_case("Stop")
+pub(super) fn should_wait_for_stop_response(provider: &str, event: &str) -> bool {
+    provider.trim().eq_ignore_ascii_case("claude")
+        && matches!(
+            event.trim().to_ascii_lowercase().as_str(),
+            "stop" | "subagentstop" | "subagent_stop"
+        )
 }
 
 fn claude_stop_stdout_after_relay(
@@ -131,9 +135,20 @@ fn stop_stdout_from_relay_result(
     stop_stdout_from_receiver_response(provider, event, response)
 }
 
-fn stop_stdout_from_receiver_response(provider: &str, event: &str, response: &Value) -> String {
+pub(super) fn stop_stdout_from_receiver_response(
+    provider: &str,
+    event: &str,
+    response: &Value,
+) -> String {
     if !should_wait_for_stop_response(provider, event) {
         return hook_success_stdout(provider).to_string();
+    }
+    if response.get("decision").and_then(Value::as_str) == Some("block") {
+        return json!({
+            "decision": "block",
+            "reason": crate::services::claude_tui::hook_output_guard::CLAUDE_HOOK_BLOCK_REASON,
+        })
+        .to_string();
     }
     response
         .get("memento_tool_feedback_flush")

@@ -46,6 +46,35 @@
 
 ## Surface Map (by feature)
 
+### `provider_output_guard`
+
+- canonical_modules:
+  - `src/services/provider_output_guard.rs` — pure, provider-aware,
+    Markdown-aware whole-response classifier (`Clean` / `Hold` / `Blocked`).
+  - `src/services/claude_tui/hook_output_guard.rs` — bounded Claude
+    Stop/SubagentStop transcript-tail reader with canonical-path containment.
+  - `src/services/discord/response_sanitizer.rs::sanitize_provider_response` —
+    terminal Discord fail-closed boundary.
+  - `src/services/discord/tmux_watcher/provider_output_guard.rs` and
+    `src/services/discord/turn_bridge/stream_tick.rs::guarded_bridge_rollover_edit`
+    — raw streaming-rollover boundaries.
+- legacy_modules: none. Do not add substring replacement or partial redaction
+  for provider harness control data; classify and hold/block the whole response.
+- invariants: inspect prose outside fenced and inline Markdown code; scope
+  Claude fingerprints to Claude; require compound high-confidence markers for
+  terminal blocking; hold partial/standalone control markers while streaming;
+  never advance a rollover offset after a held or blocked frame; never log or
+  echo matched raw text, transcript paths, or provider-supplied block reasons.
+- hook_boundary: transcript path/read/parse failures fail open so the provider
+  is not trapped in a Stop-hook retry loop; a classified Claude completion
+  returns only the static block decision/reason and enters neither prompt-ready,
+  broadcast, nor hook-registry delivery. `stop_hook_active=true` bypasses the
+  second inspection to bound the retry.
+- tests: `cargo test invariant_4371 --lib`; raw JSONL fixture coverage crosses
+  the real watcher parser and Discord formatter, while gateway seams pin both
+  streaming rollover paths to safe bodies/no offset progression.
+- related_issues: #4371.
+
 ### `discord_outbound`
 
 - canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery,source_registry}.rs`

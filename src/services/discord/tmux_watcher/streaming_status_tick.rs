@@ -3,6 +3,8 @@ use crate::services::discord::http::{edit_channel_message, send_channel_message}
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod provider_output_guard;
+use provider_output_guard::guard_rollover;
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -735,10 +737,6 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
-        // #3805 P2 (PR-D): track whether an answer rollover created a
-        // fresh tail message this interval, so the two-message status
-        // panel is re-anchored BELOW it exactly once (not on quiet
-        // intervals). OFF-inert.
         let mut watcher_did_rollover_this_interval = false;
         loop {
             let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
@@ -766,7 +764,9 @@ pub(super) async fn update_streaming_status_tick(
             let Some(plan) = plan_streaming_rollover(current_portion, &status_block) else {
                 break;
             };
-
+            if !guard_rollover(ctx, msg_id, current_portion, &plan.frozen_chunk).await {
+                break;
+            }
             rate_limit_wait(&shared, channel_id).await;
             match crate::services::discord::http::edit_channel_message(
                 &http,

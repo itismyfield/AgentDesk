@@ -84,6 +84,7 @@ which = "8.0.2"
 unicode-width = "0.2"
 textwrap = "0.16"
 regex = "1"
+pulldown-cmark = "0.9.6"
 unicode-normalization = "0.1"
 
 # From RCC — crypto/encoding

@@ -46,8 +46,6 @@ direct_discord_sends = [
   # announce-token fallback is removed; deliver_outbound currently collapses
   # HTTP status / Discord error code into a string on edit failures.
   "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
-  # #4230 S1: existing turn_bridge direct gateway calls re-fingerprinted after
-  # the stream/status tick block moved verbatim to turn_bridge/stream_tick.rs.
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:40a1288799a3f040",
   # #4230 S7: existing ToolUse restart-handoff direct gateway edit moved verbatim from
   # turn_bridge/stream_loop.rs to turn_bridge/stream_loop/tool_arms.rs.
@@ -55,10 +53,6 @@ direct_discord_sends = [
   # #4230 S10: existing recovery-notice direct gateway edit moved verbatim from
   # terminal_outcome_delivery.rs to the recovery_retry child handler.
   "src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs#direct_discord_sends:912eabdb5dce46d2",
-  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:7aef9562406e0468",
-  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:3749de8c4b7edb9e",
-  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:029e6a0f4f88558e",
-  "src/services/discord/turn_bridge/stream_tick.rs#direct_discord_sends:c82e55fb11948939",
   # #3560: footer-mode migration reconcile — edits a pre-default-ON *separate*
   # status panel to a migration notice before dropping its handle (behaviorally
   # the same direct resume-notice edit already allowlisted in mod.rs; extracted

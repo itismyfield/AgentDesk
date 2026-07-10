@@ -947,7 +947,7 @@ pub(super) fn format_for_discord_with_provider(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::sanitize_hidden_context_and_strip_chrome(s);
+    let sanitized = super::response_sanitizer::sanitize_provider_response(s, provider);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = filter_codex_tool_logs(&sanitized);
@@ -964,7 +964,7 @@ pub(super) fn format_for_discord_with_status_panel(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::sanitize_hidden_context_and_strip_chrome(s);
+    let sanitized = super::response_sanitizer::sanitize_provider_response(s, provider);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = strip_codex_tool_log_lines(&sanitized);

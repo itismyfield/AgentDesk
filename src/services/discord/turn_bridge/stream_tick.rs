@@ -125,6 +125,60 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) last_inflight_long_run_heartbeat: &'a mut std::time::Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuardedRolloverEditOutcome {
+    Clean,
+    Held,
+    Blocked,
+}
+
+async fn guarded_bridge_rollover_edit<G: TurnGateway + ?Sized>(
+    gateway: &G,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    unsent_response: &str,
+    frozen_chunk: &str,
+) -> Result<GuardedRolloverEditOutcome, String> {
+    use crate::services::provider_output_guard::{
+        ProviderOutputVerdict, inspect_provider_streaming_rollover, safe_blocked_body,
+    };
+
+    match inspect_provider_streaming_rollover(provider, unsent_response, frozen_chunk) {
+        ProviderOutputVerdict::Clean => {
+            TurnGateway::edit_message(gateway, channel_id, message_id, frozen_chunk)
+                .await
+                .map(|()| GuardedRolloverEditOutcome::Clean)
+        }
+        ProviderOutputVerdict::Hold { kind } => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                verdict = "hold",
+                kind = kind.as_str(),
+                output_bytes = frozen_chunk.len(),
+                output_chars = frozen_chunk.chars().count(),
+                "held turn-bridge streaming rollover frame"
+            );
+            Ok(GuardedRolloverEditOutcome::Held)
+        }
+        ProviderOutputVerdict::Blocked { kind } => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                verdict = "blocked",
+                kind = kind.as_str(),
+                output_bytes = frozen_chunk.len(),
+                output_chars = frozen_chunk.chars().count(),
+                "blocked turn-bridge streaming rollover frame"
+            );
+            TurnGateway::edit_message(gateway, channel_id, message_id, safe_blocked_body(kind))
+                .await
+                .map(|()| GuardedRolloverEditOutcome::Blocked)
+        }
+    }
+}
+
 pub(super) async fn run_bridge_stream_tick(
     ctx: BridgeStreamTickContext<'_>,
     state: BridgeStreamTickState<'_>,
@@ -224,9 +278,13 @@ pub(super) async fn run_bridge_stream_tick(
             status_panel_started_at,
         );
         if panel_text != last_status_panel_text {
-            match gateway
-                .edit_message(channel_id, status_msg_id, &panel_text)
-                .await
+            match TurnGateway::edit_message(
+                gateway.as_ref(),
+                channel_id,
+                status_msg_id,
+                &panel_text,
+            )
+            .await
             {
                 Ok(()) => {
                     last_status_panel_text = panel_text;
@@ -289,90 +347,106 @@ pub(super) async fn run_bridge_stream_tick(
                 break;
             };
 
-            match gateway
-                .edit_message(channel_id, current_msg_id, &plan.frozen_chunk)
-                .await
+            match guarded_bridge_rollover_edit(
+                gateway.as_ref(),
+                &provider,
+                channel_id,
+                current_msg_id,
+                current_portion,
+                &plan.frozen_chunk,
+            )
+            .await
             {
-                Ok(()) => match gateway.send_message(channel_id, &status_block).await {
-                    Ok(next_msg_id) => {
-                        let next_response_sent_offset = response_sent_offset + plan.split_at;
-                        assert_response_sent_offset_progress(
-                            &provider,
-                            channel_id,
-                            dispatch_id.as_deref(),
-                            adk_session_key.as_deref(),
-                            &turn_id,
-                            response_sent_offset,
-                            next_response_sent_offset,
-                            &full_response,
-                            "src/services/discord/turn_bridge/mod.rs:rollover_response_sent_offset",
-                        );
-                        response_sent_offset = next_response_sent_offset;
-                        bridge_confirmed_response_sent_offset = response_sent_offset;
-                        streaming_rollover_frozen_msg_ids.push(current_msg_id);
-                        mirror_frozen_prefix_ids(
-                            &streaming_rollover_frozen_msg_ids,
-                            &mut *inflight_state,
-                        );
-                        current_msg_id = next_msg_id;
-                        rolled_over_this_interval = true;
-                        last_edit_text = status_block;
-                        last_status_edit = tokio::time::Instant::now() - status_interval;
-                        inflight_state.current_msg_id = current_msg_id.get();
-                        inflight_state.current_msg_len = last_edit_text.len();
-                        inflight_state.response_sent_offset = response_sent_offset;
-                        inflight_state.full_response = full_response.clone();
-                        state_dirty = true;
-                        // #3813 AC#1 tail: rollover send = bridge first relay.
-                        bridge_spans.mark_first_relay(true);
-                        if let Some((_, _, _, _, pending_new_key)) =
-                            pending_long_running_retarget_after_state_save.as_mut()
-                        {
-                            *pending_new_key =
-                                super::super::placeholder_controller::PlaceholderKey {
-                                    provider: provider.clone(),
-                                    channel_id,
-                                    message_id: current_msg_id,
-                                };
-                        }
-                        if let Some((pending_key, _, _, _)) =
-                            pending_long_running_open_after_state_save.as_mut()
-                        {
-                            pending_key.message_id = current_msg_id;
-                        }
-                        // #1255: rollover retargets the controller to the
-                        // new message and detaches the old key first.
-                        if let Some((old_key, snapshot, close_trigger, ack_consumed)) =
-                            long_running_placeholder_active.as_ref()
-                        {
-                            let new_key = super::super::placeholder_controller::PlaceholderKey {
-                                provider: provider.clone(),
+                Ok(GuardedRolloverEditOutcome::Clean) => {
+                    match TurnGateway::send_message(gateway.as_ref(), channel_id, &status_block)
+                        .await
+                    {
+                        Ok(next_msg_id) => {
+                            let next_response_sent_offset = response_sent_offset + plan.split_at;
+                            assert_response_sent_offset_progress(
+                                &provider,
                                 channel_id,
-                                message_id: current_msg_id,
-                            };
-                            pending_long_running_retarget_after_state_save = Some((
-                                old_key.clone(),
-                                snapshot.clone(),
-                                *close_trigger,
-                                *ack_consumed,
-                                new_key,
-                            ));
+                                dispatch_id.as_deref(),
+                                adk_session_key.as_deref(),
+                                &turn_id,
+                                response_sent_offset,
+                                next_response_sent_offset,
+                                &full_response,
+                                "src/services/discord/turn_bridge/mod.rs:rollover_response_sent_offset",
+                            );
+                            response_sent_offset = next_response_sent_offset;
+                            bridge_confirmed_response_sent_offset = response_sent_offset;
+                            streaming_rollover_frozen_msg_ids.push(current_msg_id);
+                            mirror_frozen_prefix_ids(
+                                &streaming_rollover_frozen_msg_ids,
+                                &mut *inflight_state,
+                            );
+                            current_msg_id = next_msg_id;
+                            rolled_over_this_interval = true;
+                            last_edit_text = status_block;
+                            last_status_edit = tokio::time::Instant::now() - status_interval;
+                            inflight_state.current_msg_id = current_msg_id.get();
+                            inflight_state.current_msg_len = last_edit_text.len();
+                            inflight_state.response_sent_offset = response_sent_offset;
+                            inflight_state.full_response = full_response.clone();
                             state_dirty = true;
+                            // #3813 AC#1 tail: rollover send = bridge first relay.
+                            bridge_spans.mark_first_relay(true);
+                            if let Some((_, _, _, _, pending_new_key)) =
+                                pending_long_running_retarget_after_state_save.as_mut()
+                            {
+                                *pending_new_key =
+                                    super::super::placeholder_controller::PlaceholderKey {
+                                        provider: provider.clone(),
+                                        channel_id,
+                                        message_id: current_msg_id,
+                                    };
+                            }
+                            if let Some((pending_key, _, _, _)) =
+                                pending_long_running_open_after_state_save.as_mut()
+                            {
+                                pending_key.message_id = current_msg_id;
+                            }
+                            // #1255: rollover retargets the controller to the
+                            // new message and detaches the old key first.
+                            if let Some((old_key, snapshot, close_trigger, ack_consumed)) =
+                                long_running_placeholder_active.as_ref()
+                            {
+                                let new_key =
+                                    super::super::placeholder_controller::PlaceholderKey {
+                                        provider: provider.clone(),
+                                        channel_id,
+                                        message_id: current_msg_id,
+                                    };
+                                pending_long_running_retarget_after_state_save = Some((
+                                    old_key.clone(),
+                                    snapshot.clone(),
+                                    *close_trigger,
+                                    *ack_consumed,
+                                    new_key,
+                                ));
+                                state_dirty = true;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "[discord] failed to create rollover placeholder in channel {}: {}",
+                                channel_id,
+                                error
+                            );
+                            let _ = TurnGateway::edit_message(
+                                gateway.as_ref(),
+                                channel_id,
+                                current_msg_id,
+                                &plan.display_snapshot,
+                            )
+                            .await;
+                            last_edit_text = plan.display_snapshot;
+                            break;
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!(
-                            "[discord] failed to create rollover placeholder in channel {}: {}",
-                            channel_id,
-                            error
-                        );
-                        let _ = gateway
-                            .edit_message(channel_id, current_msg_id, &plan.display_snapshot)
-                            .await;
-                        last_edit_text = plan.display_snapshot;
-                        break;
-                    }
-                },
+                }
+                Ok(GuardedRolloverEditOutcome::Held | GuardedRolloverEditOutcome::Blocked) => break,
                 Err(error) => {
                     tracing::warn!(
                         "[discord] failed to freeze rollover chunk for message {} in channel {}: {}",
@@ -677,4 +751,126 @@ pub(super) async fn run_bridge_stream_tick(
     *state.long_running_placeholder_active = long_running_placeholder_active;
     *state.last_adk_heartbeat = last_adk_heartbeat;
     *state.last_inflight_long_run_heartbeat = last_inflight_long_run_heartbeat;
+}
+
+#[cfg(test)]
+mod provider_output_guard_tests {
+    use super::*;
+    use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use crate::services::discord::gateway::GatewayFuture;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingGateway {
+        edits: Mutex<Vec<String>>,
+    }
+
+    impl TurnGateway for CapturingGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async { Ok(MessageId::new(2)) })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            self.edits
+                .lock()
+                .expect("edits lock")
+                .push(content.to_string());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            Some(ProviderKind::Claude)
+        }
+    }
+
+    #[tokio::test]
+    async fn invariant_4371_turn_bridge_rollover_never_edits_raw_control_data() {
+        let gateway = CapturingGateway::default();
+        let blocked =
+            "prefix [SYSTEM NOTIFICATION - NOT USER INPUT] <output-file>/private/x</output-file>";
+        let outcome = guarded_bridge_rollover_edit(
+            &gateway,
+            &ProviderKind::Claude,
+            ChannelId::new(1),
+            MessageId::new(1),
+            blocked,
+            blocked,
+        )
+        .await
+        .expect("blocked edit");
+        assert_eq!(outcome, GuardedRolloverEditOutcome::Blocked);
+        let edits = gateway.edits.lock().expect("edits lock");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0],
+            crate::services::provider_output_guard::BLOCKED_PROVIDER_OUTPUT_BODY
+        );
+        assert!(!edits[0].contains("<output-file>"));
+        drop(edits);
+
+        let partial = guarded_bridge_rollover_edit(
+            &gateway,
+            &ProviderKind::Claude,
+            ChannelId::new(1),
+            MessageId::new(1),
+            "safe prefix [SYSTEM NOTIF",
+            "safe prefix [SYSTEM NOTIF",
+        )
+        .await
+        .expect("held edit");
+        assert_eq!(partial, GuardedRolloverEditOutcome::Held);
+        assert_eq!(gateway.edits.lock().expect("edits lock").len(), 1);
+    }
 }

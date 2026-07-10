@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -110,6 +111,7 @@ pub struct HookEvent {
 pub struct HookServerState {
     event_tx: broadcast::Sender<HookEvent>,
     memento_feedback: PendingMementoFeedbackTracker,
+    claude_projects_root: Option<PathBuf>,
 }
 
 impl HookServerState {
@@ -118,7 +120,16 @@ impl HookServerState {
         Self {
             event_tx,
             memento_feedback: PendingMementoFeedbackTracker::default(),
+            claude_projects_root:
+                crate::services::claude_tui::hook_output_guard::configured_claude_projects_root(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_claude_projects_root(claude_projects_root: PathBuf) -> Self {
+        let mut state = Self::new();
+        state.claude_projects_root = Some(claude_projects_root);
+        state
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<HookEvent> {
@@ -212,6 +223,46 @@ async fn receive_hook(
     };
 
     let kind = HookEventKind::from_path(&event);
+    if provider == "claude"
+        && matches!(kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+        && !crate::services::claude_tui::memento_feedback::stop_hook_active(&payload)
+    {
+        match crate::services::claude_tui::hook_output_guard::inspect_claude_hook_output(
+            &payload,
+            state.claude_projects_root.as_deref(),
+        ) {
+            Ok(inspection) => match inspection.verdict {
+                crate::services::provider_output_guard::ProviderOutputVerdict::Clean => {}
+                crate::services::provider_output_guard::ProviderOutputVerdict::Hold { kind }
+                | crate::services::provider_output_guard::ProviderOutputVerdict::Blocked { kind } =>
+                {
+                    tracing::warn!(
+                        provider,
+                        hook_event = event,
+                        verdict_kind = kind.as_str(),
+                        session_id,
+                        output_bytes = inspection.byte_len,
+                        output_chars = inspection.char_len,
+                        "blocked Claude completion containing harness control data"
+                    );
+                    return (
+                        StatusCode::ACCEPTED,
+                        Json(json!({
+                            "decision": "block",
+                            "reason": crate::services::claude_tui::hook_output_guard::CLAUDE_HOOK_BLOCK_REASON,
+                        })),
+                    );
+                }
+            },
+            Err(error) => tracing::warn!(
+                provider,
+                event = kind.as_str(),
+                session_id,
+                reason = error.as_str(),
+                "Claude completion transcript guard unavailable; failing open at hook boundary"
+            ),
+        }
+    }
     let payload_is_noise = is_informational_empty_payload(&payload);
     let event = HookEvent {
         provider: provider.clone(),
