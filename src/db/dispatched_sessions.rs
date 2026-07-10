@@ -8,6 +8,9 @@ use crate::db::session_agent_resolution::{
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::session_activity::SessionActivityResolver;
 
+#[path = "dispatched_sessions/rebind_override.rs"]
+pub(crate) mod rebind_override;
+
 pub(crate) async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Option<String> {
     let thread_id = sqlx::query_scalar::<_, Option<String>>(
         "SELECT thread_id FROM task_dispatches WHERE id = $1",

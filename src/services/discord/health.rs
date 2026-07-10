@@ -22,6 +22,8 @@ use crate::services::provider::ProviderKind;
 mod headless_turn;
 mod mailbox;
 mod provider_probe;
+#[path = "health/rebind_request.rs"]
+mod rebind_request;
 mod recovery;
 mod redaction;
 mod relay_auto_heal;
@@ -379,6 +381,7 @@ impl HealthRegistry {
         provider: &crate::services::provider::ProviderKind,
         channel_id: u64,
         tmux_override: Option<String>,
+        overrides: super::recovery_engine::ManualRebindOverrides,
     ) -> Option<Result<super::recovery_engine::RebindOutcome, super::recovery_engine::RebindError>>
     {
         // Channel-aware: multi-bot deployments register several runtimes
@@ -400,6 +403,7 @@ impl HealthRegistry {
                 provider,
                 channel_id,
                 tmux_override,
+                overrides,
             )
             .await,
         )

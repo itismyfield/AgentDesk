@@ -1411,6 +1411,7 @@ async fn apply_relay_recovery_decision(
                     provider,
                     decision.channel_id,
                     decision.affected.tmux_session.clone(),
+                    super::recovery_engine::ManualRebindOverrides::default(),
                 )
                 .await
             {

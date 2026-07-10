@@ -16,6 +16,7 @@
 //! module. Moved verbatim — zero logic change.
 
 use super::manual_rebind_output_path::saved_output_path_for_rebind_resolution;
+use super::manual_rebind_override::upsert_rebind_session_id_override;
 use super::*;
 
 mod adoption;
@@ -109,6 +110,7 @@ pub(crate) async fn rebind_inflight_for_channel(
     provider: &ProviderKind,
     channel_id: u64,
     tmux_session_override: Option<String>,
+    overrides: ManualRebindOverrides,
 ) -> Result<RebindOutcome, RebindError> {
     rebind_inflight_for_channel_inner(
         http,
@@ -116,6 +118,7 @@ pub(crate) async fn rebind_inflight_for_channel(
         provider,
         channel_id,
         tmux_session_override,
+        overrides,
         None,
     )
     .await
@@ -135,6 +138,7 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
         provider,
         channel_id,
         tmux_session_override,
+        ManualRebindOverrides::default(),
         minimum_initial_offset,
     )
     .await
@@ -146,6 +150,7 @@ async fn rebind_inflight_for_channel_inner(
     provider: &ProviderKind,
     channel_id: u64,
     tmux_session_override: Option<String>,
+    overrides: ManualRebindOverrides,
     minimum_initial_offset: Option<u64>,
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id = ChannelId::new(channel_id);
@@ -177,9 +182,11 @@ async fn rebind_inflight_for_channel_inner(
         );
     }
 
-    let existing_session_id = existing_inflight
-        .as_ref()
-        .and_then(|state| state.session_id.clone());
+    let existing_session_id = overrides.session_id().map(str::to_string).or_else(|| {
+        existing_inflight
+            .as_ref()
+            .and_then(|state| state.session_id.clone())
+    });
     let existing_saved_output_path = existing_inflight
         .as_ref()
         .and_then(|state| state.output_path.clone());
@@ -253,20 +260,28 @@ async fn rebind_inflight_for_channel_inner(
         return Err(RebindError::ChannelNotBound);
     }
 
+    upsert_rebind_session_id_override(shared, provider, &tmux_session_name, overrides.session_id())
+        .await?;
+
     let existing_saved_output_path_for_resolution = saved_output_path_for_rebind_resolution(
         shared,
         provider,
         existing_saved_output_path.as_deref(),
         existing_session_id.as_deref(),
         &tmux_session_name,
+        overrides.output_path(),
     )
     .await;
-    let runtime_state = resolve_rebind_runtime_state(
-        provider,
-        &tmux_session_name,
-        existing_saved_output_path_for_resolution.as_deref(),
-        existing_session_id.clone(),
-    )?;
+    let runtime_state =
+        match overrides.runtime_state(provider, &tmux_session_name, existing_session_id.clone())? {
+            Some(runtime_state) => runtime_state,
+            None => resolve_rebind_runtime_state(
+                provider,
+                &tmux_session_name,
+                existing_saved_output_path_for_resolution.as_deref(),
+                existing_session_id.clone(),
+            )?,
+        };
     let mut output_path = runtime_state.output_path;
     let mut synthetic_initial_offset = runtime_state.synthetic_initial_offset;
     let input_fifo_for_state = runtime_state.input_fifo_path;
@@ -617,6 +632,9 @@ async fn rebind_inflight_for_channel_inner(
         session.last_active = tokio::time::Instant::now();
         if session.channel_name.is_none() {
             session.channel_name = channel_name.clone();
+        }
+        if session_id_for_state.is_some() {
+            session.session_id = session_id_for_state.clone();
         }
         restore_recovered_session_worktree(session, &recovered_state_for_session);
     }
@@ -1151,6 +1169,7 @@ mod stall_watchdog_respawn_deadlock_tests {
             &provider,
             channel_id,
             Some(tmux_session.clone()),
+            ManualRebindOverrides::default(),
         ));
 
         // Synchronous assertion window: on a current-thread runtime the

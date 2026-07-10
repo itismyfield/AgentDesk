@@ -63,7 +63,11 @@ pub(super) async fn saved_output_path_for_rebind_resolution<'a>(
     existing_saved_output_path: Option<&'a str>,
     existing_session_id: Option<&str>,
     tmux_session_name: &str,
+    output_path_override: Option<&str>,
 ) -> Option<String> {
+    if let Some(output_path) = output_path_override {
+        return Some(output_path.to_string());
+    }
     let session_cache_selector_state =
         session_cache_selector_state_for_rebind(shared, provider, tmux_session_name).await;
     let session_cache_selector_present = session_cache_selector_state
@@ -349,6 +353,25 @@ fn provider_session_ids_have_any_selector(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn health_rebind_output_override_bypasses_saved_path_and_selector_resolution() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let selected = saved_output_path_for_rebind_resolution(
+            &shared,
+            &crate::services::provider::ProviderKind::Claude,
+            Some("/stale/saved/transcript.jsonl"),
+            Some("00000000-0000-4000-8000-000000000001"),
+            "AgentDesk-claude-override-bypass",
+            Some("/operator/selected/transcript.jsonl"),
+        )
+        .await;
+
+        assert_eq!(
+            selected.as_deref(),
+            Some("/operator/selected/transcript.jsonl")
+        );
+    }
 
     #[test]
     fn cleared_cache_or_zero_growth_saved_path_re_resolves_manual_rebind() {

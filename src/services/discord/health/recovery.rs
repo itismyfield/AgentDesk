@@ -12,6 +12,7 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::HealthRegistry;
+use super::rebind_request::{ParsedRebindRequest, parse_rebind_body};
 use super::{relay_auto_heal, relay_dead_reattach, stall_liveness, watcher_respawn};
 
 mod leak_recovery_ledger;
@@ -1365,66 +1366,6 @@ pub async fn clear_provider_channel_runtime(
     true
 }
 
-/// #896: Parsed `/api/inflight/rebind` body, extracted for unit-test
-/// coverage of input validation without spinning up a `HealthRegistry`.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct ParsedRebindRequest {
-    pub(super) provider: crate::services::provider::ProviderKind,
-    pub(super) channel_id: u64,
-    pub(super) tmux_session: Option<String>,
-}
-
-/// #896: Parse and validate the rebind request body. Returns a status-tuple
-/// error on malformed input so the caller can surface it verbatim.
-pub(super) fn parse_rebind_body(body: &str) -> Result<ParsedRebindRequest, (&'static str, String)> {
-    let json: serde_json::Value = serde_json::from_str(body).map_err(|_| {
-        (
-            "400 Bad Request",
-            r#"{"ok":false,"error":"invalid JSON"}"#.to_string(),
-        )
-    })?;
-
-    let provider_raw = json
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let provider =
-        crate::services::provider::ProviderKind::from_str(provider_raw).ok_or_else(|| {
-            (
-                "400 Bad Request",
-                r#"{"ok":false,"error":"provider must be one of: claude, codex, gemini, opencode, qwen"}"#.to_string(),
-            )
-        })?;
-
-    // Accept channel_id as either a JSON number or a decimal string so
-    // callers can forward snowflake IDs without precision loss.
-    let channel_id: u64 = match json.get("channel_id") {
-        Some(v) if v.is_u64() => v.as_u64().unwrap_or(0),
-        Some(v) if v.is_string() => v.as_str().unwrap_or("").trim().parse::<u64>().unwrap_or(0),
-        _ => 0,
-    };
-    if channel_id == 0 {
-        return Err((
-            "400 Bad Request",
-            r#"{"ok":false,"error":"channel_id is required (non-zero u64)"}"#.to_string(),
-        ));
-    }
-
-    let tmux_session = json
-        .get("tmux_session")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    Ok(ParsedRebindRequest {
-        provider,
-        channel_id,
-        tmux_session,
-    })
-}
-
 /// #896: Handle `POST /api/inflight/rebind` — rebind a live tmux session to
 /// a freshly-created inflight state and respawn the watcher. Used to recover
 /// orphan states where tmux is still running but turn_bridge has no inflight
@@ -1435,7 +1376,9 @@ pub(super) fn parse_rebind_body(body: &str) -> Result<ParsedRebindRequest, (&'st
 /// ```json
 /// { "provider": "claude" | "codex" | "gemini" | "opencode" | "qwen",
 ///   "channel_id": "1234567890",
-///   "tmux_session": "AgentDesk-codex-foo"   // optional — derived otherwise
+///   "tmux_session": "AgentDesk-codex-foo",  // optional — derived otherwise
+///   "output_path": "/path/to/live.jsonl",   // optional operator override
+///   "session_id": "provider-session-uuid"   // optional operator override
 /// }
 /// ```
 pub async fn handle_rebind_inflight<'a>(
@@ -1450,10 +1393,11 @@ pub async fn handle_rebind_inflight<'a>(
         provider,
         channel_id,
         tmux_session: tmux_override,
+        overrides,
     } = parsed;
 
     let Some(result) = registry
-        .rebind_inflight(&provider, channel_id, tmux_override)
+        .rebind_inflight(&provider, channel_id, tmux_override, overrides)
         .await
     else {
         // #897 counter-model review: dcserver bootstrap registers the

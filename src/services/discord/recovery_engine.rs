@@ -62,6 +62,8 @@ mod state_extractors;
 mod manual_rebind;
 #[path = "recovery_engine/manual_rebind_output_path.rs"]
 mod manual_rebind_output_path;
+#[path = "recovery_engine/manual_rebind_override.rs"]
+mod manual_rebind_override;
 #[path = "recovery_engine/routing_orphan.rs"] // #3869 routing-orphan finalize
 mod routing_orphan;
 #[path = "recovery_engine/terminal_text_idempotency.rs"]
@@ -155,6 +157,7 @@ pub(super) use self::state_extractors::save_missing_session_handoff;
 pub(crate) use self::manual_rebind::{
     rebind_inflight_for_channel, rebind_inflight_for_channel_with_minimum_start_offset,
 };
+pub(crate) use self::manual_rebind_override::ManualRebindOverrides;
 // #3834: `reregister_active_turn_from_inflight` is re-exported (not just
 // re-imported) so the `recovery_engine::reregister_active_turn_from_inflight`
 // path stays valid for its `watchers::lifecycle` caller (via the `recovery`
