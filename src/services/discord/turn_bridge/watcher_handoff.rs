@@ -736,6 +736,7 @@ mod tests {
 #[cfg(test)]
 mod bridge_busy_turn_handoff_tests {
     use super::super::output_lifecycle::{BridgeOutputOwner, classify_bridge_output_owner};
+    use super::super::terminal_delivery::bridge_epilogue_marks_watcher_delivered;
     use super::*;
 
     // Build a watcher handle with controllable liveness for the #3268 FIX 1

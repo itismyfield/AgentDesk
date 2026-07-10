@@ -803,7 +803,7 @@
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 419 | 348 | 71 |  |
 | `services::discord::turn_bridge::two_message_panel` | `src/services/discord/turn_bridge/two_message_panel.rs` | 800 | 270 | 530 |  |
 | `services::discord::turn_bridge::voice_completion` | `src/services/discord/turn_bridge/voice_completion.rs` | 385 | 385 | 0 |  |
-| `services::discord::turn_bridge::watcher_handoff` | `src/services/discord/turn_bridge/watcher_handoff.rs` | 934 | 532 | 402 |  |
+| `services::discord::turn_bridge::watcher_handoff` | `src/services/discord/turn_bridge/watcher_handoff.rs` | 935 | 532 | 403 |  |
 | `services::discord::turn_bridge::watcher_orphan_cleanup` | `src/services/discord/turn_bridge/watcher_orphan_cleanup.rs` | 475 | 233 | 242 |  |
 | `services::discord::turn_completion_events` | `src/services/discord/turn_completion_events.rs` | 85 | 85 | 0 |  |
 | `services::discord::turn_end_wip_warning` | `src/services/discord/turn_end_wip_warning.rs` | 344 | 145 | 199 |  |
