@@ -2,57 +2,16 @@
 
 use super::*;
 
-/// #3016 S3 (the A2 / phase-5 enabler): the fresh-idle finalize DECISION,
-/// factored out of the production watcher loop so the EXACT production routing is
-/// unit-testable end-to-end (the enclosing `tmux_output_watcher_with_restore` is
-/// not). It fuses two independent disambiguators:
+/// #3016 S3 fresh-idle finalize decision, extracted so the production routing is
+/// unit-testable. Structural completion is authoritative: `Done` finalizes even
+/// with empty text, `PausedLive` defers, and non-JSONL `Unknown` uses the proven
+/// pane-idle fallback (empty `Unknown` retains the 1800s safety backstop).
 ///
-///   1. The STRUCTURAL completion signal (`CompletionSignal`, S1) — the
-///      authority that finally distinguishes "turn done" from "paused-live",
-///      which the old flag-only path could not:
-///        * `Done`       — a structural JSONL terminator is proven on disk
-///                         (Claude `result`/`system`, Codex `turn.completed`).
-///                         Even when the committed response text is EMPTY/
-///                         suppressed, this is a genuine completed turn → finalize.
-///        * `PausedLive` — NO terminator (Busy/Inconclusive): paused at a
-///                         selector / permission prompt, a subagent still running,
-///                         or a long silent tool call. NEVER finalize → defer.
-///        * `Unknown`    — non-JSONL runtime (LegacyTmuxWrapper / ProcessBackend /
-///                         ClaudeEAdapter, or a non-JSONL provider): the transcript
-///                         probe cannot speak, so the pane-idle proxy is the sole
-///                         terminal authority. #3016 phase-5b1 routes `Unknown` to
-///                         the SAME finalize path as `Done` (flag-independent): the
-///                         fresh-idle gate already PROVES pane idle (it only fires
-///                         after `watcher_session_ready_for_input` — the SAME
-///                         `FallbackPaneReadiness` predicate the 5a far-backstop
-///                         uses for `Unknown` — held
-///                         over the idle timeout), so finalizing promptly here is
-///                         behaviour-equivalent to the old `mailbox_finalize_owed`
-///                         flag (owed was ~always true at this arm), without the
-///                         1800s far-backstop latency.
-///
-///   2. The A2-banked wrong-turn-race defenses (only relevant once the signal
-///      says we *would* finalize): a follow-up turn can claim the same session
-///      during the cleanup `.await`s, so before the destructive clear we
-///        * `AbortFollowupTookOver` — `paused_now || epoch_changed` (the SAME
-///          predicate as the canonical pause/epoch guard at tmux.rs:7806, but
-///          evaluated HERE because this branch `continue`s before that guard
-///          would run); and
-///        * `SkipStale` — the PINNED pre-cleanup snapshot is a NEWER turn that
-///          began AT/AFTER this committed range (`committed_completion_is_stale_for_newer_turn`,
-///          or `pinned_finalize_user_msg_id == 0`). Finalizing would release the
-///          follow-up; skip and preserve inflight.
-///
-/// The two combine so that the defer decision keys on the STRUCTURAL TERMINATOR,
-/// not on response emptiness — which is the fix for the contradiction that killed
-/// the first A2 attempt (the old defer guard deferred `delegated && empty`, the
-/// SAME condition as the empty completion it wanted to finalize, so finalize was
-/// unreachable). Here an empty-but-TERMINATED completion routes to `Finalize`.
-///
-/// Degenerate-empty-offset safety: a genuine current-turn fresh idle always has
-/// `turn_start_offset < current_offset` (`FreshIdle` requires `output_ever_grew`,
-/// and the watcher resumes at `turn_start_offset`), so the pinned id is its real,
-/// non-zero id and `SkipStale` cannot misfire on the current turn.
+/// Before a destructive clear, the A2 race guards preserve a follow-up that took
+/// the session during cleanup: pause/epoch change yields `AbortFollowupTookOver`,
+/// while a pinned newer turn yields `SkipStale`. Thus response emptiness never
+/// contradicts a proven terminator, and a current fresh-idle turn's non-zero
+/// pinned identity cannot be mistaken for a stale follow-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FreshIdleFinalizeDecision {
     /// `PausedLive` (no terminator) — defer; preserve inflight, keep waiting.
@@ -526,6 +485,19 @@ pub(super) fn watcher_should_reclaim_orphan_turn_placeholder(
         )
 }
 
+const REDRIVE_PLACEHOLDER_SHIELD_SECS: i64 = 900;
+
+pub(super) fn redrive_shielded_placeholder(
+    nudged_at_unix: i64,
+    message_created_at_unix: i64,
+    frontier_not_advanced: bool,
+    now_unix: i64,
+) -> bool {
+    message_created_at_unix >= nudged_at_unix
+        && frontier_not_advanced
+        && now_unix.saturating_sub(nudged_at_unix).max(0) < REDRIVE_PLACEHOLDER_SHIELD_SECS
+}
+
 /// #3107 (CHANGE 3): pure decision for the `load_inflight_state == None` arm of
 /// `watcher_external_input_turn_abandoned`. A missing inflight is abandonment
 /// ONLY when the pane is not actively streaming; an actively-streaming pane is a
@@ -596,3 +568,29 @@ pub(super) fn watcher_external_input_completion_footer_suppressed(
 #[cfg(test)]
 #[path = "panel_decisions_tests.rs"]
 mod completion_footer_suppression_tests;
+
+#[cfg(test)]
+mod redrive_placeholder_shield_tests {
+    use super::redrive_shielded_placeholder;
+
+    #[test]
+    fn redrive_placeholder_shield_truth_table_4299() {
+        let nudged_at = 1_800_000_000;
+        assert!(
+            redrive_shielded_placeholder(nudged_at, nudged_at + 1, true, nudged_at + 899),
+            "post-nudge placeholder at a frozen frontier must be preserved inside 900s"
+        );
+        assert!(
+            !redrive_shielded_placeholder(nudged_at, nudged_at - 1, true, nudged_at + 1),
+            "a pre-nudge orphan must retain the existing reclaim semantics"
+        );
+        assert!(
+            !redrive_shielded_placeholder(nudged_at, nudged_at + 1, true, nudged_at + 900),
+            "the shield must expire at its hard 900s bound"
+        );
+        assert!(
+            !redrive_shielded_placeholder(nudged_at, nudged_at + 1, false, nudged_at + 1),
+            "frontier progress must restore the existing reclaim semantics"
+        );
+    }
+}
