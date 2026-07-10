@@ -419,6 +419,13 @@
 
 ### Audited touches
 
+- #4247 S0 reaction status-only containment removes the guild and DM reaction
+  gateway subscriptions plus the only destructive `ReactionRemove` intake
+  route. This narrows connection-level event intake on every node; it does not
+  change gateway lease acquisition, singleton ownership, worker routing, or
+  node-local/shared-Postgres authority. Explicit authenticated `/steer` and
+  `/stop` cancellation remain on their existing owners.
+
 - #4424 message_outbox source-contract recovery: the protected
   `GET /api/message-outbox/failed` inspection route is read-only on any control
   node, while `POST /api/message-outbox/failed/redrive` is classified as a

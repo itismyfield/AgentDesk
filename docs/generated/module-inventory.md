@@ -530,7 +530,7 @@
 | `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1176 | 580 | 596 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 426 | 426 | 0 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 124 | 124 | 0 |  |
-| `services::discord::outbound::reaction_control` | `src/services/discord/outbound/reaction_control.rs` | 105 | 72 | 33 |  |
+| `services::discord::outbound::reaction_control` | `src/services/discord/outbound/reaction_control.rs` | 92 | 70 | 22 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 151 | 151 | 0 |  |
 | `services::discord::outbound::send_api` | `src/services/discord/outbound/send_api.rs` | 591 | 295 | 296 |  |
 | `services::discord::outbound::send_gate` | `src/services/discord/outbound/send_gate.rs` | 555 | 349 | 206 |  |
@@ -625,9 +625,9 @@
 | `services::discord::router::intake_gate::queue_effects` | `src/services/discord/router/intake_gate/queue_effects.rs` | 953 | 745 | 208 |  |
 | `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 632 | 283 | 349 |  |
 | `services::discord::router::intake_queue_transaction` | `src/services/discord/router/intake_queue_transaction.rs` | 832 | 474 | 358 |  |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 83 | 83 | 0 |  |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 80 | 80 | 0 |  |
 | `services::discord::router::message_handler::attachments` | `src/services/discord/router/message_handler/attachments.rs` | 142 | 114 | 28 |  |
-| `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 149 | 149 | 0 |  |
+| `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 84 | 84 | 0 |  |
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 250 | 211 | 39 |  |
 | `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1544 | 1337 | 207 | giant-file |
 | `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3070 | 2834 | 236 | giant-file |

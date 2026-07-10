@@ -7,14 +7,12 @@ use crate::services::discord::SharedData;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReactionControlReplyReason {
     QueuedCardPostFailed,
-    AlreadyStopping,
 }
 
 impl ReactionControlReplyReason {
     fn key(self) -> &'static str {
         match self {
             Self::QueuedCardPostFailed => "queued_card_post_failed",
-            Self::AlreadyStopping => "already_stopping",
         }
     }
 }
@@ -76,7 +74,7 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId};
 
     #[test]
-    fn reaction_control_reply_ids_are_stable_per_message_and_reason() {
+    fn reaction_control_reply_ids_are_stable_for_queued_card_failure() {
         let channel_id = ChannelId::new(123);
         let message_id = MessageId::new(456);
 
@@ -85,21 +83,10 @@ mod tests {
             message_id,
             ReactionControlReplyReason::QueuedCardPostFailed,
         );
-        let stopping = reaction_control_reply_delivery_ids(
-            channel_id,
-            message_id,
-            ReactionControlReplyReason::AlreadyStopping,
-        );
-
         assert_eq!(queued.0, "intake-reaction-control:123:456");
         assert_eq!(
             queued.1,
             "intake-reaction-control:123:456:queued_card_post_failed"
-        );
-        assert_eq!(stopping.0, "intake-reaction-control:123:456");
-        assert_eq!(
-            stopping.1,
-            "intake-reaction-control:123:456:already_stopping"
         );
     }
 }

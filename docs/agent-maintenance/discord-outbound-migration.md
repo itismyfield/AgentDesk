@@ -4,6 +4,12 @@
 
 > Last refreshed: 2026-07-11 (#4424 — `outbound/source_registry.rs` is now the single typed, caller-class-scoped authorization table for send and message_outbox enqueue; eight verified producers are added for LoopbackInternal only. Delivery verbs and v3 callsite migration status are unchanged.)
 
+> Last refreshed: 2026-07-11 (#4247 S0 review follow-up — removing the sole
+> destructive reaction-removal intake route also retires the unreachable
+> `AlreadyStopping` reaction-control reply reason. The live
+> `QueuedCardPostFailed` referenced lifecycle notice, its outbound-v3 delivery
+> path, dedup identity, and every remaining callsite are unchanged.)
+
 > #3664 outbound bot-selection note: the outbox drain (`src/server/mod.rs`)
 > now resolves the delivery bot via `message_outbox::delivery_bot_for_target_session`.
 > For a private (DM) session — tmux name `AgentDesk-<provider>-dm-<digits>` with a

@@ -60,10 +60,7 @@ use self::turn_lifecycle::*;
 use self::watchdog::*;
 
 pub(super) use self::attachments::handle_file_upload;
-pub(super) use self::control::{
-    TextStopLookup, cancel_text_stop_token_mailbox, cancel_text_stop_token_mailbox_if_current,
-    handle_shell_command_raw, handle_text_command,
-};
+pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{
     start_headless_turn, start_reserved_headless_turn, start_voice_headless_turn,
