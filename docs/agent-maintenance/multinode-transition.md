@@ -629,6 +629,14 @@
   effective authority. Classification: PG-lease-backed worker-local execution;
   no new gateway owner, no extra leader election surface.
 
+- #4350 session-owner intake affinity: leader-only routing resolves the existing
+  PG `sessions.instance_id` owner before `/node` or preferred labels, and every
+  Discord/skill/queued producer shares one admission path. Stale or conflicting
+  owners, distinct open routes, and foreign-owner node-local attachments fail
+  safe without local execution; queued items are front-requeued before marker
+  teardown. Worker execution remains instance-local and is the one intentional
+  admission bypass after an outbox claim. No new lease or migration.
+
 - #3630 frontier mirror for cancel/stop + prompt_too_long terminal arms:
   turn_bridge now mirrors only Delivered+committed terminal-replace lease ranges
   into the durable delivery-record frontier keyed by `watcher_owner_channel_id`.

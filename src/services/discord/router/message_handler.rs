@@ -65,7 +65,7 @@ pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 pub(in crate::services::discord) use self::headless_turn::{
     start_headless_turn, start_reserved_headless_turn, start_voice_headless_turn,
 };
-pub(in crate::services::discord) use self::intake_turn::{IntakeDeps, handle_text_message};
+pub(in crate::services::discord) use self::intake_turn::IntakeDeps;
 pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core};
 // #4270 — pre-teardown hosted-TUI readiness probe + live-dispatch defer for the
 // queued-turn promote entrypoints (idle kickoff in discord/mod.rs, live
@@ -75,6 +75,48 @@ pub(in crate::services::discord) use self::tui_followup::set_hosted_tui_promote_
 pub(in crate::services::discord) use self::tui_followup::{
     defer_promoted_dispatch_if_hosted_tui_busy, hosted_tui_promote_readiness_blocked,
 };
+
+pub(super) async fn finish_admitted_local(
+    deps: &IntakeDeps<'_>,
+    request: IntakeRequest,
+    preloaded_uploads: Vec<String>,
+    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+) -> Result<(), Error> {
+    let IntakeRequest {
+        channel_id,
+        user_msg_id,
+        request_owner,
+        request_owner_name,
+        user_text,
+        reply_to_user_message,
+        defer_watcher_resume,
+        wait_for_completion,
+        merge_consecutive,
+        reply_context,
+        has_reply_boundary,
+        dm_hint,
+        turn_kind,
+    } = request;
+    intake_turn::handle_text_message(
+        deps,
+        channel_id,
+        user_msg_id,
+        request_owner,
+        &request_owner_name,
+        &user_text,
+        reply_to_user_message,
+        defer_watcher_resume,
+        wait_for_completion,
+        merge_consecutive,
+        reply_context,
+        has_reply_boundary,
+        dm_hint,
+        turn_kind,
+        preloaded_uploads,
+        voice_announcement,
+    )
+    .await
+}
 
 #[cfg(test)]
 mod session_strategy_lifecycle_tests;

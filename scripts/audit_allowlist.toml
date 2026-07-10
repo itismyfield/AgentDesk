@@ -31,8 +31,8 @@ route_srp_violations = [
 # fail the hard gate because they produce different keys.
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs#direct_discord_sends:9cf1f42bcb8abe4f",
-  "src/services/discord/commands/text_commands.rs#direct_discord_sends:db5444d305a41f96",
-  "src/services/discord/commands/text_commands.rs#direct_discord_sends:e1dff75fe79e7d70",
+  "src/services/discord/commands/text_commands.rs#direct_discord_sends:5f57ad69f61fc0d9",
+  "src/services/discord/commands/text_commands.rs#direct_discord_sends:08f62d5d5d316f20",
   "src/services/discord/discord_io.rs#direct_discord_sends:2f398342de1e7cd7",
   "src/services/discord/gateway.rs#direct_discord_sends:b61365ed28b915b2",
   "src/services/discord/gateway.rs#direct_discord_sends:ddb44ff4289daaf5",

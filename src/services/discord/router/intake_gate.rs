@@ -9,7 +9,6 @@ use super::intake_queue_transaction::{
 mod busy_duplicate_notice;
 mod component_events;
 mod gate;
-mod node_override_routing;
 mod queue_effects;
 mod stale_turn;
 
@@ -855,18 +854,34 @@ pub(in crate::services::discord) async fn handle_event(
             // `LazyLock`, avoiding a per-message compile cost in the hot path.
             let cmd_text = strip_leading_bot_mention(text);
             if cmd_text.starts_with('!') {
-                upload_records_appended_to_session =
-                    append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                // Skill prompts enter central admission with their upload paths
+                // still in the submission. Do not inject them into this
+                // gateway's local session before owner routing has admitted
+                // local execution.
+                let mut command_parts = cmd_text.split_whitespace();
+                let command = command_parts.next().unwrap_or_default();
+                let skill_name = command_parts.next().unwrap_or_default();
+                let is_skill_command = matches!(command, "!skill" | "!cc")
+                    && !skill_name.is_empty()
+                    && !matches!(
+                        skill_name,
+                        "clear" | "stop" | "pwd" | "health" | "status" | "inflight" | "help"
+                    );
+                if !is_skill_command {
+                    upload_records_appended_to_session =
+                        append_pending_uploads(&data.shared, channel_id, &upload_records).await;
+                }
                 let handled = super::message_handler::handle_text_command(
                     ctx,
                     new_message,
                     &data,
                     channel_id,
                     &cmd_text,
+                    &upload_records,
                 )
                 .await?;
                 if handled {
-                    if !upload_records_appended_to_session {
+                    if !is_skill_command && !upload_records_appended_to_session {
                         let _ =
                             append_pending_uploads(&data.shared, channel_id, &upload_records).await;
                     }
@@ -1481,86 +1496,6 @@ pub(in crate::services::discord) async fn handle_event(
                 notify_bot_id,
             );
 
-            let route_decision = node_override_routing::try_route_intake_for_message(
-                data,
-                channel_id,
-                new_message.id,
-                !new_message.attachments.is_empty(),
-                user_id,
-                user_name,
-                text,
-                reply_context.as_deref(),
-                has_reply_boundary,
-                is_dm,
-                merge_consecutive,
-                turn_kind,
-            )
-            .await;
-
-            // Branch on the decision:
-            // - `Forwarded` → worker has it, skip local.
-            // - `SkippedDuplicate` → Discord redelivery, skip local
-            //   (running locally would double-emit).
-            // - `ObservedWouldForward` → log the would-be target,
-            //   fall through to local (dark-launch).
-            // - `RanLocal { reason }` → log the reason for Phase 5
-            //   observability, then fall through to local.
-            match &route_decision {
-                Some(
-                    crate::services::cluster::intake_router_hook::IntakeRouterDecision::Forwarded {
-                        target_instance_id,
-                        outbox_id,
-                    },
-                ) => {
-                    tracing::info!(
-                        target_instance_id = %target_instance_id,
-                        outbox_id = outbox_id,
-                        channel_id = %channel_id,
-                        user_msg_id = %new_message.id,
-                        "[intake_router] ENFORCE: forwarded intake to worker — skipping local execution"
-                    );
-                    return Ok(());
-                }
-                Some(crate::services::cluster::intake_router_hook::IntakeRouterDecision::SkippedDuplicate) => {
-                    tracing::info!(
-                        channel_id = %channel_id,
-                        user_msg_id = %new_message.id,
-                        "[intake_router] SKIPPED_DUPLICATE: Discord redelivered known message — skipping local execution"
-                    );
-                    return Ok(());
-                }
-                Some(
-                    crate::services::cluster::intake_router_hook::IntakeRouterDecision::ObservedWouldForward {
-                        target_instance_id,
-                    },
-                ) => {
-                    tracing::info!(
-                        target_instance_id = %target_instance_id,
-                        channel_id = %channel_id,
-                        user_msg_id = %new_message.id,
-                        "[intake_router] OBSERVE: would forward — running locally"
-                    );
-                }
-                Some(crate::services::cluster::intake_router_hook::IntakeRouterDecision::RanLocal { reason }) => {
-                    if let crate::services::cluster::intake_router_hook::RanLocalReason::DbErrorFellBackToLocal { detail } = &reason {
-                        tracing::warn!(
-                            channel_id = %channel_id,
-                            user_msg_id = %new_message.id,
-                            detail = %detail,
-                            "[intake_router] DB error during routing decision — falling back to local"
-                        );
-                    } else {
-                        tracing::debug!(
-                            ?reason,
-                            channel_id = %channel_id,
-                            user_msg_id = %new_message.id,
-                            "[intake_router] ran locally"
-                        );
-                    }
-                }
-                None => {} // hook not active (no PG pool)
-            }
-
             let deps = super::message_handler::IntakeDeps {
                 http: &ctx.http,
                 cache: Some(&ctx.cache),
@@ -1573,28 +1508,31 @@ pub(in crate::services::discord) async fn handle_event(
             } else {
                 upload_records.clone()
             };
-            super::message_handler::handle_text_message(
-                &deps,
-                channel_id,
-                new_message.id,
-                user_id,
-                user_name,
-                text,
-                false,
-                false,
-                false,
-                merge_consecutive,
-                reply_context,
-                has_reply_boundary,
-                Some(is_dm),
-                turn_kind,
+            let submission = super::IntakeSubmission {
+                provider: data.provider.clone(),
+                request: super::IntakeRequest {
+                    channel_id,
+                    user_msg_id: new_message.id,
+                    request_owner: user_id,
+                    request_owner_name: user_name.to_string(),
+                    user_text: text.to_string(),
+                    reply_to_user_message: false,
+                    defer_watcher_resume: false,
+                    wait_for_completion: false,
+                    merge_consecutive,
+                    reply_context,
+                    has_reply_boundary,
+                    dm_hint: Some(is_dm),
+                    turn_kind,
+                },
+                origin: super::IntakeOrigin::LiveMessage,
+                has_nonportable_uploads: !new_message.attachments.is_empty(),
                 preloaded_uploads,
-                // #3905: carry the gate's already-authorized, non-consuming voice
-                // resolution into direct dispatch so intake trusts it instead of
-                // racily re-deriving (and losing to a sibling-gateway consume).
-                resolved_voice_announcement,
-            )
-            .await?;
+                // #3905: carry the gate's already-authorized, non-consuming
+                // voice resolution into direct dispatch.
+                voice_announcement: resolved_voice_announcement,
+            };
+            super::dispatch_text_intake(&deps, submission).await?;
         }
         _ => {}
     }

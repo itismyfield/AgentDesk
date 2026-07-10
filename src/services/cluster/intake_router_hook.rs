@@ -4,19 +4,10 @@
 //! Sits in the leader's Discord intake gate immediately before
 //! `handle_text_message`. For each incoming message, decides:
 //!
-//! 1. Does the agent for this channel opt into worker forwarding
-//!    (`agents.preferred_intake_node_labels` non-empty)?
-//! 2. If yes, is there an eligible worker right now (online +
-//!    superset of the requested labels)?
-//! 3. If yes AND mode is `Enforce`, INSERT a row into `intake_outbox`
-//!    and signal the caller to skip local execution. The worker's
-//!    poll loop (Phase 3) picks it up.
-//! 4. If yes AND mode is `Observe`, log the would-be forward but let
-//!    the leader run it locally — that's how we dark-launch the
-//!    routing decisions before flipping `Enforce`.
-//! 5. If anything fails (no eligible worker, INSERT conflict on the
-//!    partial unique index, DB timeout), fall back to local execution
-//!    so a routing failure can never lose an intake.
+//! In `Enforce`, durable live session ownership wins over `/node` and
+//! preferred labels. Unknown, stale, or conflicting ownership fails safe:
+//! the gateway must not start a same-named tmux on another host. A distinct
+//! already-open route is deferred instead of executed locally.
 //!
 //! `cluster.intake_routing` is the primary authority for disabled /
 //! observe / enforce mode. `ADK_INTAKE_ROUTING_MODE` remains as an
@@ -30,6 +21,10 @@ use crate::services::cluster::intake_routing::{
     IntakeRouteTarget, LocalRouteReason, candidates_from_worker_nodes_json, pick_intake_target,
 };
 use sqlx::PgPool;
+
+mod session_owner;
+
+use session_owner::SessionOwnerResolution;
 
 /// How aggressively to apply the Phase-2 routing decision in front of
 /// the existing leader intake path.
@@ -207,9 +202,9 @@ pub(crate) fn intake_routing_status_json() -> serde_json::Value {
 /// to `handle_text_message` as today".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeRouterDecision {
-    /// No forwarding happened (Disabled mode, no preference, no
-    /// eligible worker, OpenRoute conflict, DB error). The caller
-    /// MUST run the turn locally.
+    /// No forwarding happened (Disabled mode, a confirmed ownerless channel
+    /// with no usable preference, or an availability fallback after that
+    /// ownerless state was proven). The caller MUST run the turn locally.
     RanLocal { reason: RanLocalReason },
     /// Observe mode would have forwarded but the caller MUST still
     /// run locally. The chosen target is reported for logging only.
@@ -228,6 +223,23 @@ pub(crate) enum IntakeRouterDecision {
     /// would double-emit. Distinct from `RanLocal { DbErrorFellBack }`
     /// because the gate's response differs (skip vs run-local).
     SkippedDuplicate,
+    /// A different message already owns the channel's single open outbox
+    /// route. The producer must preserve/retry queued work and MUST NOT run it
+    /// locally while the predecessor is open.
+    DeferredOpenRoute { target_instance_id: String },
+    /// Ownership or placement could not be proven safe. Caller MUST NOT run
+    /// the local execution body.
+    Blocked { reason: IntakeBlockedReason },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum IntakeBlockedReason {
+    OwnerLookupFailed { detail: String },
+    StaleSessionOwners { instance_ids: Vec<String> },
+    ConflictingLiveSessionOwners { instance_ids: Vec<String> },
+    OverrideUnavailable { target_instance_id: String },
+    NonPortableAttachment { owner_instance_id: String },
+    RoutingDependencyFailed { detail: String },
 }
 
 /// Diagnostic enum for `RanLocal` — keeps the metric surface and
@@ -243,11 +255,6 @@ pub(crate) enum RanLocalReason {
     /// Agent opted in and a worker matched, but the only eligible
     /// candidate IS the leader.
     LeaderIsOnlyEligible,
-    /// Routing decision succeeded and `Enforce` tried to INSERT, but
-    /// the partial unique index says another row for this channel is
-    /// already OPEN. Falling back to local is the design's chosen
-    /// recovery path.
-    OpenRouteAlreadyExists,
     /// Some DB or schema error during the routing decision. Reported
     /// so operators see WHY a forward turned into a local fallback.
     DbErrorFellBackToLocal { detail: String },
@@ -262,12 +269,14 @@ pub(crate) enum RanLocalReason {
     /// Channel has an explicit `/node` override to this leader, so the
     /// leader should keep the turn local.
     NodeOverrideIsLeader,
-    /// Channel has an explicit `/node` override, but that worker is not
-    /// currently online or does not advertise a matching intake consumer.
-    NodeOverrideUnavailable,
     /// Channel has an explicit `/node` override, but the intake worker is only
     /// spawned in `Enforce` mode. Running locally avoids pending-row loss.
     NodeOverrideRoutingDisabled,
+    /// This instance is the durable live owner for the session.
+    LiveSessionOwnerIsLocal,
+    /// A channel without an existing owner establishes its first placement
+    /// locally when the payload contains node-local upload paths.
+    NoOwnerWithNonPortableAttachment,
 }
 
 /// Inputs to the hook. Bundled into a struct so the intake gate can
@@ -295,41 +304,30 @@ pub(crate) struct IntakeRouterContext<'a> {
     pub defer_watcher_resume: bool,
     pub wait_for_completion: bool,
     pub node_override_instance_id: Option<&'a str>,
+    pub has_nonportable_uploads: bool,
 }
 
 fn worker_heartbeat_lease_secs() -> u64 {
     crate::config::load_graceful().cluster.lease_ttl_secs.max(1)
 }
 
-/// Run the hook. Never fails — every error path turns into
-/// `RanLocal { reason: DbErrorFellBackToLocal }` because losing an
-/// intake message is a strictly worse failure mode than executing
-/// it on the leader.
+/// Run the leader-side placement hook. Enforce mode fails safe whenever a
+/// local execution could split an existing session or duplicate an open route.
 pub(crate) async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
-    if let Some(target) = ctx
+    let node_override = ctx
         .node_override_instance_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if !matches!(ctx.mode, IntakeRoutingMode::Enforce) {
-            tracing::info!(
-                target_instance_id = %target,
-                channel_id = ctx.channel_id,
-                user_msg_id = ctx.user_msg_id,
-                mode = ?ctx.mode,
-                "[intake_router] /node override ignored because intake routing is not enforce"
-            );
+        .filter(|value| !value.is_empty());
+
+    if matches!(ctx.mode, IntakeRoutingMode::Disabled) {
+        if node_override.is_some() {
             return IntakeRouterDecision::RanLocal {
                 reason: RanLocalReason::NodeOverrideRoutingDisabled,
             };
         }
-        return try_route_node_override(pool, ctx, target).await;
-    }
-
-    if matches!(ctx.mode, IntakeRoutingMode::Disabled) {
         // Disabled-but-preference-set is reported separately so Phase 5
         // operators can spot agents whose label preferences are set
         // but the global mode hasn't been flipped yet.
@@ -346,6 +344,166 @@ pub(crate) async fn try_route_intake(
         };
     }
 
+    if matches!(ctx.mode, IntakeRoutingMode::Observe) {
+        if node_override.is_some() {
+            return IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideRoutingDisabled,
+            };
+        }
+        if ctx.has_nonportable_uploads {
+            return IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NoOwnerWithNonPortableAttachment,
+            };
+        }
+        return route_by_preferred_labels(pool, ctx).await;
+    }
+
+    // Enforce precedence: live session owner -> explicit /node -> preferred
+    // labels. The owner lookup must complete before any placement fallback.
+    let owner = match session_owner::resolve_session_owner(
+        pool,
+        ctx.provider,
+        ctx.channel_id,
+        ctx.leader_instance_id,
+        worker_heartbeat_lease_secs(),
+    )
+    .await
+    {
+        Ok(owner) => owner,
+        Err(detail) => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OwnerLookupFailed { detail },
+            };
+        }
+    };
+
+    // Owner-safety failures outrank the open-route ordering fence. In
+    // particular, a live attachment ingress must receive the explicit blocked
+    // outcome instead of being silently deferred into a queue whose foreign
+    // owner can never consume this gateway-local path.
+    match &owner {
+        SessionOwnerResolution::StaleOwners { instance_ids } => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::StaleSessionOwners {
+                    instance_ids: instance_ids.clone(),
+                },
+            };
+        }
+        SessionOwnerResolution::ConflictingLiveOwners { instance_ids } => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::ConflictingLiveSessionOwners {
+                    instance_ids: instance_ids.clone(),
+                },
+            };
+        }
+        SessionOwnerResolution::LiveForeign { instance_id, .. } if ctx.has_nonportable_uploads => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachment {
+                    owner_instance_id: instance_id.clone(),
+                },
+            };
+        }
+        SessionOwnerResolution::NoOwner
+        | SessionOwnerResolution::LiveLocal { .. }
+        | SessionOwnerResolution::LiveForeign { .. } => {}
+    }
+
+    // The durable single-open-route fence surrounds every placement branch,
+    // including a local live owner and attachment-first placement.
+    match existing_open_route(pool, ctx.channel_id).await {
+        Ok(Some((_, existing_user_msg_id))) if existing_user_msg_id == ctx.user_msg_id => {
+            return IntakeRouterDecision::SkippedDuplicate;
+        }
+        Ok(Some((target_instance_id, _))) => {
+            return IntakeRouterDecision::DeferredOpenRoute { target_instance_id };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed {
+                    detail: format!("open route lookup: {error}"),
+                },
+            };
+        }
+    }
+
+    match owner {
+        SessionOwnerResolution::LiveLocal {
+            instance_id,
+            stale_instance_ids,
+        } => {
+            log_shadowed_owner_state(ctx, &instance_id, node_override, &stale_instance_ids);
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::LiveSessionOwnerIsLocal,
+            }
+        }
+        SessionOwnerResolution::LiveForeign {
+            instance_id,
+            stale_instance_ids,
+        } => {
+            log_shadowed_owner_state(ctx, &instance_id, node_override, &stale_instance_ids);
+            let agent_id = match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
+                Ok(Some((agent_id, _, _))) => agent_id,
+                Ok(None) => String::new(),
+                Err(error) => {
+                    return IntakeRouterDecision::Blocked {
+                        reason: IntakeBlockedReason::RoutingDependencyFailed {
+                            detail: format!("agent lookup for live owner: {error}"),
+                        },
+                    };
+                }
+            };
+            route_to_instance(pool, ctx, &instance_id, &[], &agent_id).await
+        }
+        SessionOwnerResolution::StaleOwners { .. }
+        | SessionOwnerResolution::ConflictingLiveOwners { .. } => {
+            unreachable!("owner fail-safe outcomes return before the open-route fence")
+        }
+        SessionOwnerResolution::NoOwner => {
+            if ctx.has_nonportable_uploads {
+                return IntakeRouterDecision::RanLocal {
+                    reason: RanLocalReason::NoOwnerWithNonPortableAttachment,
+                };
+            }
+            if let Some(target) = node_override {
+                route_node_override_without_owner(pool, ctx, target).await
+            } else {
+                route_by_preferred_labels(pool, ctx).await
+            }
+        }
+    }
+}
+
+fn log_shadowed_owner_state(
+    ctx: &IntakeRouterContext<'_>,
+    owner_instance_id: &str,
+    node_override: Option<&str>,
+    stale_instance_ids: &[String],
+) {
+    if !stale_instance_ids.is_empty() {
+        tracing::warn!(
+            channel_id = ctx.channel_id,
+            provider = ctx.provider,
+            owner_instance_id,
+            ?stale_instance_ids,
+            "[intake_router] live session owner selected over stale duplicate owners"
+        );
+    }
+    if node_override.is_some_and(|target| target != owner_instance_id) {
+        tracing::info!(
+            channel_id = ctx.channel_id,
+            provider = ctx.provider,
+            owner_instance_id,
+            node_override_instance_id = node_override,
+            "[intake_router] override_shadowed_by_live_owner"
+        );
+    }
+}
+
+async fn route_by_preferred_labels(
+    pool: &PgPool,
+    ctx: &IntakeRouterContext<'_>,
+) -> IntakeRouterDecision {
     // Resolve agent + preference. NoAgentForChannel is NOT an error —
     // many channels (DMs, ad-hoc cross-bot) have no agent row.
     //
@@ -431,47 +589,10 @@ pub(crate) async fn try_route_intake(
         };
     }
 
-    // Enforce mode: INSERT the row. Live ingress is always
-    // `attempt_no = 1` (codex Phase 4 blocker #3) — the
-    // `family_max + 1` retry shape is reserved for the
-    // `failed_pre_accept` retry path with a `parent_outbox_id`. A
-    // `DuplicateMessageAttempt` 23505 here means Discord redelivered
-    // the same message and we already accepted it once; running it
-    // again would double-emit, so fall back to local-no-op rather
-    // than allocating a fresh attempt_no.
-    let payload = build_payload_for_insert(ctx, &target, &preferred_labels, &agent_id);
-
-    match insert_pending(pool, &payload, 1, None).await {
-        Ok(outbox_id) => IntakeRouterDecision::Forwarded {
-            target_instance_id: target,
-            outbox_id,
-        },
-        Err(error) => match classify_insert_pending_error(&error) {
-            Some(IntakeInsertConflict::OpenRoutePerChannel) => IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::OpenRouteAlreadyExists,
-            },
-            Some(IntakeInsertConflict::DuplicateMessageAttempt) => {
-                // Discord delivered the same message twice (or the leader
-                // received it via two different intake paths). The first
-                // delivery already produced a row; honour at-most-once
-                // and skip — running it again would double-emit.
-                tracing::info!(
-                    channel_id = ctx.channel_id,
-                    user_msg_id = ctx.user_msg_id,
-                    "[intake_router] duplicate Discord message — existing row already covers it; skipping local execution"
-                );
-                IntakeRouterDecision::SkippedDuplicate
-            }
-            None => IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::DbErrorFellBackToLocal {
-                    detail: format!("insert_pending: {error}"),
-                },
-            },
-        },
-    }
+    route_to_instance(pool, ctx, &target, &preferred_labels, &agent_id).await
 }
 
-async fn try_route_node_override(
+async fn route_node_override_without_owner(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
     target: &str,
@@ -481,15 +602,11 @@ async fn try_route_node_override(
     let (agent_id, _agent_provider, _) =
         match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
             Ok(Some((agent_id, provider, labels))) => (agent_id, provider, labels),
-            Ok(None) => {
-                return IntakeRouterDecision::RanLocal {
-                    reason: RanLocalReason::NoAgentForChannel,
-                };
-            }
+            Ok(None) => (String::new(), String::new(), Vec::new()),
             Err(error) => {
-                return IntakeRouterDecision::RanLocal {
-                    reason: RanLocalReason::DbErrorFellBackToLocal {
-                        detail: format!("agent lookup: {error}"),
+                return IntakeRouterDecision::Blocked {
+                    reason: IntakeBlockedReason::RoutingDependencyFailed {
+                        detail: format!("agent lookup for node override: {error}"),
                     },
                 };
             }
@@ -508,10 +625,10 @@ async fn try_route_node_override(
     .await
     {
         Ok(nodes) => nodes,
-        Err(error) => {
-            return IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::DbErrorFellBackToLocal {
-                    detail: format!("list worker_nodes: {error}"),
+        Err(_) => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OverrideUnavailable {
+                    target_instance_id: target.to_string(),
                 },
             };
         }
@@ -528,22 +645,84 @@ async fn try_route_node_override(
             )
     });
     if !target_online {
-        return IntakeRouterDecision::RanLocal {
-            reason: RanLocalReason::NodeOverrideUnavailable,
+        return IntakeRouterDecision::Blocked {
+            reason: IntakeBlockedReason::OverrideUnavailable {
+                target_instance_id: target.to_string(),
+            },
         };
     }
 
     let required_labels: Vec<String> = Vec::new();
-    let payload = build_payload_for_insert(ctx, target, &required_labels, &agent_id);
+    route_to_instance(pool, ctx, target, &required_labels, &agent_id).await
+}
+
+async fn existing_open_route(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT target_instance_id, user_msg_id
+           FROM intake_outbox
+          WHERE channel_id = $1
+            AND status IN ('pending', 'claimed', 'accepted', 'spawned')
+          ORDER BY id
+          LIMIT 1",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn route_to_instance(
+    pool: &PgPool,
+    ctx: &IntakeRouterContext<'_>,
+    target: &str,
+    required_labels: &[String],
+    agent_id: &str,
+) -> IntakeRouterDecision {
+    match existing_open_route(pool, ctx.channel_id).await {
+        Ok(Some((_, existing_user_msg_id))) if existing_user_msg_id == ctx.user_msg_id => {
+            return IntakeRouterDecision::SkippedDuplicate;
+        }
+        Ok(Some((existing_target, _))) => {
+            return IntakeRouterDecision::DeferredOpenRoute {
+                target_instance_id: existing_target,
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed {
+                    detail: format!("open route lookup: {error}"),
+                },
+            };
+        }
+    }
+
+    // Live ingress is always attempt 1. Retry-family allocation belongs only
+    // to the failed-pre-accept worker recovery path.
+    let payload = build_payload_for_insert(ctx, target, required_labels, agent_id);
     match insert_pending(pool, &payload, 1, None).await {
         Ok(outbox_id) => IntakeRouterDecision::Forwarded {
             target_instance_id: target.to_string(),
             outbox_id,
         },
         Err(error) => match classify_insert_pending_error(&error) {
-            Some(IntakeInsertConflict::OpenRoutePerChannel) => IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::OpenRouteAlreadyExists,
-            },
+            Some(IntakeInsertConflict::OpenRoutePerChannel) => {
+                match existing_open_route(pool, ctx.channel_id).await {
+                    Ok(Some((_, existing_user_msg_id)))
+                        if existing_user_msg_id == ctx.user_msg_id =>
+                    {
+                        IntakeRouterDecision::SkippedDuplicate
+                    }
+                    Ok(Some((existing_target, _))) => IntakeRouterDecision::DeferredOpenRoute {
+                        target_instance_id: existing_target,
+                    },
+                    Ok(None) | Err(_) => IntakeRouterDecision::DeferredOpenRoute {
+                        target_instance_id: target.to_string(),
+                    },
+                }
+            }
             Some(IntakeInsertConflict::DuplicateMessageAttempt) => {
                 tracing::info!(
                     channel_id = ctx.channel_id,
@@ -552,8 +731,8 @@ async fn try_route_node_override(
                 );
                 IntakeRouterDecision::SkippedDuplicate
             }
-            None => IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::DbErrorFellBackToLocal {
+            None => IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed {
                     detail: format!("insert_pending: {error}"),
                 },
             },
@@ -709,6 +888,7 @@ mod pg_tests {
             defer_watcher_resume: false,
             wait_for_completion: false,
             node_override_instance_id: None,
+            has_nonportable_uploads: false,
         }
     }
 
@@ -771,6 +951,29 @@ mod pg_tests {
         .execute(pool)
         .await
         .expect("seed worker_nodes");
+    }
+
+    async fn seed_session_owner(
+        pool: &PgPool,
+        session_key: &str,
+        provider: &str,
+        channel_id: &str,
+        instance_id: &str,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions (
+                session_key, provider, channel_id, instance_id, status, last_heartbeat
+             ) VALUES ($1, $2, $3, $4, $5, NOW())",
+        )
+        .bind(session_key)
+        .bind(provider)
+        .bind(channel_id)
+        .bind(instance_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed session owner");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -926,6 +1129,621 @@ mod pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_beats_override_and_labels_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-owner-first",
+            "ch-owner-first",
+            serde_json::json!(["preferred"]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-override",
+            serde_json::json!(["preferred"]),
+            "online",
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-owner",
+            serde_json::json!(["owner"]),
+            "online",
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "claude:owner-first",
+            "claude",
+            "ch-owner-first",
+            "worker-owner",
+            "turn_active",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-owner-first");
+        ctx.node_override_instance_id = Some("worker-override");
+        let decision = try_route_intake(&pool, &ctx).await;
+        let outbox_id = match decision {
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                outbox_id,
+            } => {
+                assert_eq!(target_instance_id, "worker-owner");
+                outbox_id
+            }
+            other => panic!("live owner must beat /node and labels, got {other:?}"),
+        };
+        let required_labels: serde_json::Value =
+            sqlx::query_scalar("SELECT required_labels FROM intake_outbox WHERE id = $1")
+                .bind(outbox_id)
+                .fetch_one(&pool)
+                .await
+                .expect("owner row");
+        assert_eq!(required_labels, serde_json::json!([]));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gateway_moves_but_tmux_owner_stays_a_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-gateway-move",
+            "ch-gateway-move",
+            serde_json::json!(["gateway-b"]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-owner-a",
+            serde_json::json!(["owner-a"]),
+            "online",
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "gateway-b",
+            serde_json::json!(["gateway-b"]),
+            "online",
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "claude:gateway-move",
+            "claude",
+            "ch-gateway-move",
+            "worker-owner-a",
+            "idle",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-gateway-move");
+        ctx.leader_instance_id = "gateway-b";
+        let decision = try_route_intake(&pool, &ctx).await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                ..
+            } if target_instance_id == "worker-owner-a"
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_live_owner_executes_locally_without_outbox_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_session_owner(
+            &pool,
+            "claude:local-owner",
+            "claude",
+            "ch-local-owner",
+            "leader-1",
+            "idle",
+        )
+        .await;
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-local-owner"),
+        )
+        .await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::LiveSessionOwnerIsLocal
+            }
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = 'ch-local-owner'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_session_rows_collapse_to_one_owner_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-owner-dupe",
+            "ch-owner-dupe",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_worker_node(&pool, "worker-one", serde_json::json!([]), "online").await;
+        for session_key in ["legacy:owner-dupe", "namespaced:owner-dupe"] {
+            seed_session_owner(
+                &pool,
+                session_key,
+                "claude",
+                "ch-owner-dupe",
+                "worker-one",
+                "turn_active",
+            )
+            .await;
+        }
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-owner-dupe"),
+        )
+        .await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                ..
+            } if target_instance_id == "worker-one"
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_owner_never_falls_to_preference_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-stale-owner",
+            "ch-stale-owner",
+            serde_json::json!(["preferred"]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-preferred",
+            serde_json::json!(["preferred"]),
+            "online",
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "claude:stale-owner",
+            "claude",
+            "ch-stale-owner",
+            "worker-missing",
+            "turn_active",
+        )
+        .await;
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-stale-owner"),
+        )
+        .await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::StaleSessionOwners {
+                    instance_ids: vec!["worker-missing".to_string()]
+                }
+            }
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = 'ch-stale-owner'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_or_provider_incapable_owner_is_stale_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_worker_node(&pool, "worker-expired", serde_json::json!([]), "online").await;
+        sqlx::query(
+            "UPDATE worker_nodes
+                SET last_heartbeat_at = NOW() - INTERVAL '1 day'
+              WHERE instance_id = 'worker-expired'",
+        )
+        .execute(&pool)
+        .await
+        .expect("expire worker");
+        seed_worker_node_with_capabilities(
+            &pool,
+            "worker-no-provider",
+            serde_json::json!([]),
+            "online",
+            serde_json::json!({}),
+        )
+        .await;
+
+        for (channel_id, owner) in [
+            ("ch-owner-expired", "worker-expired"),
+            ("ch-owner-no-provider", "worker-no-provider"),
+        ] {
+            seed_session_owner(
+                &pool,
+                &format!("claude:{channel_id}"),
+                "claude",
+                channel_id,
+                owner,
+                "turn_active",
+            )
+            .await;
+            let decision = try_route_intake(
+                &pool,
+                &ctx_for_channel(IntakeRoutingMode::Enforce, channel_id),
+            )
+            .await;
+            assert_eq!(
+                decision,
+                IntakeRouterDecision::Blocked {
+                    reason: IntakeBlockedReason::StaleSessionOwners {
+                        instance_ids: vec![owner.to_string()]
+                    }
+                }
+            );
+        }
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_owner_recovers_when_worker_is_fresh_again_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node(&pool, "worker-recovering", serde_json::json!([]), "offline").await;
+        seed_session_owner(
+            &pool,
+            "claude:recovering-owner",
+            "claude",
+            "ch-recovering-owner",
+            "worker-recovering",
+            "turn_active",
+        )
+        .await;
+        let ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-recovering-owner");
+        assert!(matches!(
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::StaleSessionOwners { .. }
+            }
+        ));
+
+        sqlx::query(
+            "UPDATE worker_nodes
+                SET status = 'online', last_heartbeat_at = NOW()
+              WHERE instance_id = 'worker-recovering'",
+        )
+        .execute(&pool)
+        .await
+        .expect("recover worker");
+        assert!(matches!(
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                ..
+            } if target_instance_id == "worker-recovering"
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflicting_live_owners_block_arbitrary_placement_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        for owner in ["worker-a", "worker-b"] {
+            seed_worker_node(&pool, owner, serde_json::json!([]), "online").await;
+            seed_session_owner(
+                &pool,
+                &format!("claude:{owner}"),
+                "claude",
+                "ch-owner-conflict",
+                owner,
+                "turn_active",
+            )
+            .await;
+        }
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-owner-conflict"),
+        )
+        .await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::ConflictingLiveSessionOwners {
+                    instance_ids: vec!["worker-a".to_string(), "worker-b".to_string()]
+                }
+            }
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_live_owner_beats_stale_duplicate_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-live-stale",
+            "ch-live-stale",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_worker_node(&pool, "worker-live", serde_json::json!([]), "online").await;
+        for (key, owner) in [
+            ("claude:live-owner", "worker-live"),
+            ("claude:stale-dupe", "worker-stale"),
+        ] {
+            seed_session_owner(&pool, key, "claude", "ch-live-stale", owner, "turn_active").await;
+        }
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-live-stale"),
+        )
+        .await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                ..
+            } if target_instance_id == "worker-live"
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paired_provider_owner_and_outbox_use_current_bot_provider_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-paired-provider",
+            "ch-paired-provider",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "claude:paired",
+            "claude",
+            "ch-paired-provider",
+            "worker-claude",
+            "turn_active",
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "codex:paired",
+            "codex",
+            "ch-paired-provider",
+            "worker-codex",
+            "turn_active",
+        )
+        .await;
+        seed_worker_node_with_capabilities(
+            &pool,
+            "worker-codex",
+            serde_json::json!([]),
+            "online",
+            serde_json::json!({
+                "intake_worker": { "enabled": true, "providers": ["codex"] }
+            }),
+        )
+        .await;
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-paired-provider");
+        ctx.provider = "codex";
+        let decision = try_route_intake(&pool, &ctx).await;
+        let outbox_id = match decision {
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                outbox_id,
+            } => {
+                assert_eq!(target_instance_id, "worker-codex");
+                outbox_id
+            }
+            other => panic!("expected codex owner, got {other:?}"),
+        };
+        let provider: String =
+            sqlx::query_scalar("SELECT provider FROM intake_outbox WHERE id = $1")
+                .bind(outbox_id)
+                .fetch_one(&pool)
+                .await
+                .expect("provider");
+        assert_eq!(provider, "codex");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn foreign_owner_attachment_is_blocked_without_outbox_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node(
+            &pool,
+            "worker-upload-owner",
+            serde_json::json!([]),
+            "online",
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "claude:upload-owner",
+            "claude",
+            "ch-upload-owner",
+            "worker-upload-owner",
+            "turn_active",
+        )
+        .await;
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-upload-owner");
+        ctx.has_nonportable_uploads = true;
+        let decision = try_route_intake(&pool, &ctx).await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachment {
+                    owner_instance_id: "worker-upload-owner".to_string()
+                }
+            }
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = 'ch-upload-owner'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 0);
+
+        sqlx::query(
+            "INSERT INTO intake_outbox (
+                target_instance_id, forwarded_by_instance_id, required_labels,
+                channel_id, user_msg_id, request_owner_id, user_text,
+                turn_kind, agent_id, status, attempt_no
+             ) VALUES (
+                'worker-upload-owner', 'leader-1', '[]'::JSONB,
+                'ch-upload-owner', 'prior-upload-message', '50', 'prior',
+                'foreground', '', 'pending', 1
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed prior open route");
+        assert_eq!(
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachment {
+                    owner_instance_id: "worker-upload-owner".to_string()
+                }
+            },
+            "a prior open route must not hide a live ingress attachment block"
+        );
+        let count_with_prior: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = 'ch-upload-owner'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count prior route");
+        assert_eq!(count_with_prior, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_owner_attachment_establishes_local_first_placement_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-new-upload");
+        ctx.has_nonportable_uploads = true;
+        let decision = try_route_intake(&pool, &ctx).await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NoOwnerWithNonPortableAttachment
+            }
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enforce_owner_lookup_error_blocks_local_execution_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query("DROP TABLE sessions")
+            .execute(&pool)
+            .await
+            .expect("drop sessions for lookup error");
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-owner-error"),
+        )
+        .await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OwnerLookupFailed { .. }
+            }
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn confirmed_no_owner_keeps_preference_lookup_availability_fallback_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query("DROP TABLE agents CASCADE")
+            .execute(&pool)
+            .await
+            .expect("drop agents for preference lookup error");
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-preference-error"),
+        )
+        .await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::DbErrorFellBackToLocal { .. }
+            }
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn node_override_disabled_mode_runs_local_without_inserting() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
@@ -944,7 +1762,6 @@ mod pg_tests {
             "online",
         )
         .await;
-
         let mut ctx = ctx_for_channel(IntakeRoutingMode::Disabled, "ch-node-override");
         ctx.node_override_instance_id = Some("worker-selected");
         let decision = try_route_intake(&pool, &ctx).await;
@@ -976,7 +1793,14 @@ mod pg_tests {
             &pool,
             "agent-node-override",
             "ch-node-override",
-            serde_json::json!([]),
+            serde_json::json!(["preferred"]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-preferred-but-not-selected",
+            serde_json::json!(["preferred"]),
+            "online",
         )
         .await;
         seed_worker_node(
@@ -1067,7 +1891,7 @@ mod pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn node_override_unavailable_runs_local_without_inserting() {
+    async fn node_override_unavailable_blocks_without_inserting() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
@@ -1091,8 +1915,10 @@ mod pg_tests {
         let decision = try_route_intake(&pool, &ctx).await;
         assert_eq!(
             decision,
-            IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::NodeOverrideUnavailable
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OverrideUnavailable {
+                    target_instance_id: "worker-offline".to_string()
+                }
             }
         );
 
@@ -1109,7 +1935,7 @@ mod pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn node_override_without_intake_capability_runs_local_without_inserting() {
+    async fn node_override_without_intake_capability_blocks_without_inserting() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
@@ -1134,8 +1960,10 @@ mod pg_tests {
         let decision = try_route_intake(&pool, &ctx).await;
         assert_eq!(
             decision,
-            IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::NodeOverrideUnavailable
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OverrideUnavailable {
+                    target_instance_id: "worker-online-no-consumer".to_string()
+                }
             }
         );
 
@@ -1152,7 +1980,7 @@ mod pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn enforce_mode_with_open_route_conflict_falls_back_to_local() {
+    async fn distinct_open_route_never_executes_local_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
@@ -1195,8 +2023,8 @@ mod pg_tests {
         .await;
         assert_eq!(
             decision,
-            IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::OpenRouteAlreadyExists
+            IntakeRouterDecision::DeferredOpenRoute {
+                target_instance_id: "worker-conflict".to_string()
             }
         );
 

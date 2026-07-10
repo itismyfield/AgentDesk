@@ -76,8 +76,8 @@ pub(crate) struct IntakeRequest {
 /// (workers have no live gateway shard) and delegates to the existing
 /// intake body.
 ///
-/// Leader code keeps using `handle_text_message` directly with a
-/// fully-populated `IntakeDeps` — leader behaviour is unchanged.
+/// Leader producers use `router::intake_dispatch`; a claimed worker bypasses
+/// admission so it cannot recursively create another outbox row.
 pub(crate) async fn execute_intake_turn_core(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
@@ -114,7 +114,7 @@ pub(crate) async fn execute_intake_turn_core(
     .await
 }
 
-pub(in crate::services::discord) async fn handle_text_message(
+pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     channel_id: ChannelId,
     user_msg_id: MessageId,

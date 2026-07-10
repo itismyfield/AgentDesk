@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::outbound::confirmation::send_command_confirmation_message;
-use super::super::router::{IntakeDeps, TurnKind, handle_text_message};
+use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
 use super::super::{
     Context, Error, auto_restore_session, check_auth, mailbox_cancel_active_turn,
     mailbox_has_active_turn,
@@ -275,23 +275,16 @@ async fn run_skill_slash_command(
             shared: &data.shared,
             token: &data.token,
         };
-        handle_text_message(
+        dispatch_skill_intake(
             &deps,
+            data.provider.clone(),
             channel_id,
             confirm_id,
             ctx.author().id,
-            &ctx.author().name,
-            &full_text,
-            false,
-            false,
-            false,
-            false,
-            None,
-            false,
-            None,
-            TurnKind::Foreground,
+            ctx.author().name.clone(),
+            full_text,
+            IntakeOrigin::SlashSkill,
             Vec::new(),
-            None, // #3905: slash skill dispatch is not a voice announcement.
         )
         .await?;
         return Ok(());
@@ -347,23 +340,16 @@ async fn run_skill_slash_command(
         shared: &data.shared,
         token: &data.token,
     };
-    handle_text_message(
+    dispatch_skill_intake(
         &deps,
+        data.provider.clone(),
         ctx.channel_id(),
         confirm_id,
         ctx.author().id,
-        &ctx.author().name,
-        &skill_prompt,
-        false,
-        false,
-        false,
-        false,
-        None,
-        false,
-        None,
-        TurnKind::Foreground,
+        ctx.author().name.clone(),
+        skill_prompt,
+        IntakeOrigin::SlashSkill,
         Vec::new(),
-        None, // #3905: slash skill dispatch is not a voice announcement.
     )
     .await?;
 

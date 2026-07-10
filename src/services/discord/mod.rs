@@ -4110,6 +4110,33 @@ async fn kickoff_idle_queue_channel(
         channel_id
     );
 
+    let deps = router::IntakeDeps {
+        http: &ctx.http,
+        cache: Some(&ctx.cache),
+        ctx_for_chained_dispatch: Some(ctx),
+        shared,
+        token,
+    };
+    let admitted = match router::admit_queued_intake(
+        &deps,
+        provider.clone(),
+        channel_id,
+        &intervention,
+        intervention.author_id,
+        owner_name,
+        has_more,
+        false,
+        "intake_admission_pre_kickoff_defer",
+    )
+    .await
+    {
+        router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
+        router::QueuedAdmissionDisposition::Deferred => {
+            drop(dispatch_lease);
+            return IdleQueueKickoffChannelOutcome::default();
+        }
+    };
+
     let source_message_generations = intervention.source_message_queued_generations();
     queue_marker::start_and_drain_kickoff_markers(
         shared,
@@ -4133,36 +4160,8 @@ async fn kickoff_idle_queue_channel(
             .await;
     }
 
-    let deps = router::IntakeDeps {
-        http: &ctx.http,
-        cache: Some(&ctx.cache),
-        ctx_for_chained_dispatch: Some(ctx),
-        shared,
-        token,
-    };
-    if let Some(announcement) = intervention.voice_announcement.as_ref() {
-        crate::voice::announce_meta::global_store()
-            .insert_accepted_replay(intervention.message_id, announcement.clone());
-    }
-    let dispatch_result = router::handle_text_message(
-        &deps,
-        channel_id,
-        intervention.message_id,
-        intervention.author_id,
-        &owner_name,
-        &intervention.text,
-        true,
-        has_more,
-        false,
-        intervention.merge_consecutive,
-        intervention.reply_context.clone(),
-        intervention.has_reply_boundary,
-        None,
-        router::TurnKind::Foreground,
-        intervention.pending_uploads.clone(),
-        None,
-    )
-    .await;
+    let dispatch_result =
+        router::finish_admitted_queued_intake(&deps, admitted, &intervention).await;
     match dispatch_result {
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");

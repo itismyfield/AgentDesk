@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
-use super::super::router::{IntakeDeps, TurnKind, handle_text_message};
+use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
 use super::super::*;
 use super::build_provider_skill_prompt;
 use crate::services::provider::CancelToken;
@@ -129,6 +129,17 @@ pub(in crate::services::discord) async fn handle_text_command(
     data: &Data,
     channel_id: serenity::ChannelId,
     text: &str,
+) -> Result<bool, Error> {
+    handle_text_command_with_uploads(ctx, msg, data, channel_id, text, &[]).await
+}
+
+pub(in crate::services::discord) async fn handle_text_command_with_uploads(
+    ctx: &serenity::Context,
+    msg: &serenity::Message,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    text: &str,
+    preloaded_uploads: &[String],
 ) -> Result<bool, Error> {
     let parts: Vec<&str> = text.splitn(3, char::is_whitespace).collect();
     let cmd = parts[0];
@@ -1447,23 +1458,16 @@ Any other message is sent to {p}.
                 shared: &data.shared,
                 token: &data.token,
             };
-            handle_text_message(
+            dispatch_skill_intake(
                 &deps,
+                data.provider.clone(),
                 channel_id,
                 confirm.id,
                 msg.author.id,
-                &msg.author.name,
-                &skill_prompt,
-                false,
-                false,
-                false,
-                false,
-                None,
-                false,
-                None,
-                TurnKind::Foreground,
-                Vec::new(),
-                None, // #3905: text-command skill dispatch is not a voice announcement.
+                msg.author.name.clone(),
+                skill_prompt,
+                IntakeOrigin::TextSkill,
+                preloaded_uploads.to_vec(),
             )
             .await?;
             return Ok(true);

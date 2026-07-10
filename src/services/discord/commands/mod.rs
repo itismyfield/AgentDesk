@@ -69,7 +69,7 @@ pub(super) use sidecar::cmd_sidecar;
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
 pub(super) use skill::{cmd_cc, cmd_skill};
 pub(super) use steer::cmd_steer;
-pub(in crate::services::discord) use text_commands::handle_text_command;
+pub(in crate::services::discord) use text_commands::handle_text_command_with_uploads;
 pub(in crate::services::discord) use tui_passthrough::is_local_only_slash_command_kind; // #3305
 pub(super) use tui_passthrough::{cmd_compact, cmd_context, cmd_cost, cmd_effort};
 pub(in crate::services::discord) use voice::{

@@ -43,9 +43,10 @@ Draft v2 incorporates codex round-1 review findings (Appendix A).
 2. When the leader receives an intake message and a healthy worker
    matches the agent's preferred labels, the leader forwards the work
    item via PG and the worker spawns the tmux turn locally. The
-   leader's `handle_text_message` returns early.
-3. When no matching worker is online, intake stays on the leader (no
-   pending wait queue — the human is waiting for a reply).
+   leader's central admission path does not grant a local-execution permit.
+3. When owner lookup proves `NoOwner` and no matching worker is online,
+   intake stays on the leader. A stale or conflicting owner never uses this
+   availability fallback.
 4. Worker-side turn output reaches Discord through the worker's own
    `serenity::http::Http` REST client (the bot token already lives on
    every node; only IDENTIFY is leader-only).
@@ -634,7 +635,7 @@ opt-in only.
 
 ```
                         ┌──────────────────────────────────┐
-       Discord intake → │ leader: handle_text_message()    │
+       Discord intake → │ leader: central intake admission │
                         └─────────────┬────────────────────┘
                                       ▼
                   ┌───────────────────────────────────────┐
@@ -647,8 +648,8 @@ opt-in only.
         └────────────────────┬────────────────────────────────┘
                              ▼
             ┌───────────────────────────────────┐
-            │ target == Local? → continue       │
-            │ existing handle_text_message body │
+            │ target == Local? → consume the    │
+            │ local permit, then run the body   │
             └───────────────────────────────────┘
                              OR
             ┌───────────────────────────────────────────────┐
@@ -717,13 +718,14 @@ The forwardable subset is (a)+(d). Worker has no (b)/(c).
    where `IntakeDeps` carries only what the REST-safe path needs:
    `Arc<serenity::http::Http>`, `Arc<SharedData>`, provider, token,
    PG pool, instance_id.
-3. Leader's existing `handle_text_message` becomes a thin wrapper:
-   builds `IntakeDeps` from `serenity::Context`, calls
-   `execute_intake_turn_core`. **No behaviour change for unforwarded
-   messages.**
-4. Worker's `handle_forwarded_intake` builds `IntakeDeps` from its
-   own gateway-less HTTP client + bot token, calls the same
-   `execute_intake_turn_core`.
+3. Every leader producer builds an owned `IntakeSubmission` and calls the
+   central admission module. Only its non-constructible local permit can enter
+   the private `handle_text_message` body; forwarded, duplicate, blocked, and
+   deferred outcomes never execute locally.
+4. Worker's `handle_forwarded_intake` builds `IntakeDeps` from its own
+   gateway-less HTTP client + bot token and calls `execute_intake_turn_core`
+   directly. This post-claim boundary is the intentional admission bypass, so
+   a worker cannot recursively create another outbox row.
 
 This refactor PR ships independently and is verified by all
 existing intake tests passing on the leader path.
@@ -754,26 +756,29 @@ enum IntakeTarget {
 Decision tree (evaluation order is important):
 
 1. **Kill switch**: `cluster.intake_routing.enabled = false` → `Local`.
-2. **No cluster context**: leader running standalone (no PG, single
-   node) → `Local`.
-3. **Pending uploads on the message**: forwarded uploads not
-   supported in v1 → `Local`. (Operator can opt in once we ship
-   upload portability.)
-4. **Active session affinity**: existing `sessions` row for
-   `(provider, channel_id, status IN active-set)` with
-   `instance_id != local && worker is online && fresh heartbeat` →
-   forward to that worker.
-5. **Stale-affinity guard** (codex round-1 recommendation): if step
-   4 finds a session pinned to an offline / stale foreign worker,
-   **do not auto-re-pick**; instead surface as a degraded state via
-   observability and fall through to `Local`. Re-pinning to a new
-   worker requires explicit operator action (CLI command in Phase 5)
-   because we do not know whether the foreign worker's tmux is truly
-   dead. Routing pre-emptively could spawn a duplicate turn.
-6. **Per-agent preference**: `agents.preferred_intake_node_labels`
+2. **No cluster context**: `Enforce` without a PG pool cannot prove owner
+   absence and therefore blocks; `Disabled`/`Observe` preserve their local
+   availability behavior.
+3. **Active session affinity**: resolve distinct non-terminal
+   `sessions.instance_id` values for the current bot's
+   `(provider, channel_id)`. One live local owner runs locally; one
+   live foreign owner is forwarded to that exact instance. The owner
+   wins over `/node` and preferred labels.
+4. **Stale/conflicting-owner guard**: an owner missing a fresh,
+   provider-capable worker advertisement, or two live owners, blocks
+   intake. It never falls through to local or preference placement;
+   only an explicit session stop/clear makes a new placement safe.
+5. **Non-portable uploads**: a foreign live owner plus raw attachments
+   or queued `pending_uploads` blocks intake. A local owner handles the
+   upload locally; a channel with no owner establishes its first
+   placement locally.
+6. **Explicit `/node`**: only after owner lookup proves `NoOwner`.
+   An unavailable explicit target blocks rather than silently falling
+   through. `/node` does not migrate an existing tmux session.
+7. **Per-agent preference**: `agents.preferred_intake_node_labels`
    non-empty → match against online fresh workers. If local matches
    → `Local`. If a foreign worker matches → forward.
-7. **No match** → `Local` (leader fallback; user never waits).
+8. **No match** → `Local` (safe because owner lookup proved no owner).
 
 ### Per-channel ordering lock (codex round-2 P1 #5)
 
@@ -818,17 +823,9 @@ match (existing_open, candidate_target) {
         /* idempotent retransmission: do nothing */
     }
     // Distinct user_msg_id on a channel that already has an open
-    // forwarded route → fall back to local handling. The existing
-    // forwarded turn will eventually finish and the user's next
-    // message proceeds normally. Queueing a second forwarded turn
-    // for the same channel would race the worker's mailbox/turn
-    // bridge in undefined ways; we keep ordering simple.
-    (Some(_), ForwardToWorker { .. }) => return Ok(IntakeOutcome::Local),
-    // Channel already has an open forwarded route, but we resolved
-    // to Local for this message (e.g. preference flipped while a
-    // previous forward is still in flight). Honor the existing
-    // forward to preserve session affinity.
-    (Some(open), Local) => return Ok(IntakeOutcome::Forwarded(open.target_instance_id)),
+    // forwarded route → preserve/defer the original Intervention.
+    // Running it locally would split ordering and possibly the tmux.
+    (Some(open), _) => return Ok(IntakeOutcome::DeferredOpenRoute(open.target_instance_id)),
     // Fresh channel: insert.
     (None, ForwardToWorker { instance_id, .. })
         if still_eligible(&worker_snapshot, &instance_id) => {
@@ -948,8 +945,12 @@ during `handle_text_message` (today) and stores temp paths in
 `shared.pending_uploads`. **These local paths are not portable to
 worker.**
 
-v1 policy: rule 3 of the decision tree returns `Local` whenever
-`message.attachments.is_empty() == false`. Leader handles uploads.
+Current policy is owner-aware. A local live owner handles uploads
+locally, and `NoOwner` establishes the first session locally. A live
+foreign owner returns `BlockedNonPortableAttachment`; queued drains
+front-requeue the original Intervention before marker teardown and arm
+only the slow backstop. Stale/conflicting owner blocks take precedence.
+No local absolute upload path is written to `intake_outbox`.
 
 v2 (out of scope for this PR): forward upload bytes through
 `message_outbox`-style payload table, or have worker re-download
@@ -991,10 +992,11 @@ which is REST-safe and identical on both sides.
 | Worker dies in `spawned` | row stuck without `done` > 24h | operator alert; **no auto recovery** (round-2 P0 #2). Operator runs `force-fail <row>` (terminal failure) or `retry-as-new <row>` (fresh row, leader-targeted) |
 | Worker post-accept turn failure (provider error, panic in tmux) | worker writes `failed_post_accept` via transition 6b | terminal; operator decides via CLI |
 | Discord token revoked on worker (REST 401) | worker writes `failed_post_accept` (we already POSTed placeholder under that token) | terminal; operator rotates token + `retry-as-new` |
-| Pending uploads on message | rule 3 of decision tree | always `Local`; leader handles |
-| Active session pinned to stale foreign worker | rule 5 of decision tree | `Local`, observability alert; operator decides via CLI whether to clear session pin |
+| PG pool/owner query unavailable in `Enforce` | central admission dependency guard | block local execution and emit a throttled operator-facing notice; retry after PG/owner visibility recovers |
+| Pending uploads on message | owner-aware admission | local owner/`NoOwner` runs local; foreign owner blocks and queued work is front-requeued |
+| Active session pinned to stale foreign worker | owner classification | block local/label fallback; operator stops/clears the old session before retry |
 | Single-PG-primary assumption violated | startup self-check at boot | refuse to start with intake_routing.enabled=true; log error |
-| Two same-channel forward attempts (round-2 P0 #1) | partial unique index `intake_outbox_one_open_route_per_channel` | second INSERT fails unique-violation; leader catches, re-evaluates against existing row. **Round-4 P0 #1 fix**: only the same `(channel_id, user_msg_id)` is treated as idempotent no-op; a different `user_msg_id` returns `Local` (the existing forwarded turn proceeds, the new message is handled locally — never silently dropped) |
+| Two same-channel forward attempts (round-2 P0 #1) | partial unique index `intake_outbox_one_open_route_per_channel` | same `(channel_id, user_msg_id)` is an idempotent skip; a distinct message returns `DeferredOpenRoute` and is preserved/retried, never executed locally |
 | Two leader instances both decide to forward (e.g. failover transition) | partial unique index | same as above; only one wins |
 | `observe → enforce` flip mid-flight | leader snapshots config inside the short insert transaction | inserts that began under `observe` complete locally; first insert under `enforce` writes a row |
 | `enforce → observe` rollback (incident) | leader snapshots config; new intakes go `Local` | already-inserted rows in `pending`/`claimed` continue per the state machine — they are not cancelled by config flip. Operator may run `force-fail` to drain. `accepted`/`spawned` rows always finish on the worker. |
@@ -1605,10 +1607,9 @@ and naming patches landed in this same v5 file (no v6 spin-up):
 - PostgreSQL surfaces both unique violations as SQLSTATE 23505;
   the constraint/index name discriminates. The v5 explicit naming
   closes the gap.
-- Same-channel different-`user_msg_id` returning `Local` is an
-  acceptable v1 caveat (cross-node interleaving). Recorded as open
-  question 9; pilot data will inform whether a queued-successor
-  model is worth shipping post-v1.
+- Same-channel different-`user_msg_id` no longer falls back locally:
+  central admission returns `DeferredOpenRoute`, and queue-capable
+  producers preserve the Intervention until the existing route closes.
 
 ---
 *End of draft v5 (post-round-5 patches). Phase 1 PR can now ship

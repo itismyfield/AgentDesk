@@ -15,7 +15,6 @@ use super::outbound::policy::DiscordOutboundPolicy;
 use super::outbound::result::DeliveryResult;
 use super::outbound::{DiscordOutboundClient, shared_outbound_deduper};
 use super::router;
-use super::router::handle_text_message;
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
     Intervention, SharedData, formatting, queue_marker, rate_limit_wait,
@@ -733,6 +732,34 @@ impl TurnGateway for DiscordGateway {
                 return Err("missing live Discord context".to_string());
             };
 
+            // #2266: voice-tagged queue items retain the original announce-bot
+            // author; ordinary queued items retain the live-turn owner.
+            let dispatch_request_owner =
+                queued_intervention_request_owner(intervention, live_turn.request_owner);
+            let deps = router::IntakeDeps {
+                http: &live_turn.ctx.http,
+                cache: Some(&live_turn.ctx.cache),
+                ctx_for_chained_dispatch: Some(&live_turn.ctx),
+                shared: &self.shared,
+                token: &live_turn.token,
+            };
+            let admitted = match router::admit_queued_intake(
+                &deps,
+                self.provider.clone(),
+                channel_id,
+                intervention,
+                dispatch_request_owner,
+                request_owner_name.to_string(),
+                has_more_queued_turns,
+                true,
+                "intake_admission_pre_drain_defer",
+            )
+            .await
+            {
+                router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
+                router::QueuedAdmissionDisposition::Deferred => return Ok(()),
+            };
+
             let source_message_generations = intervention.source_message_queued_generations();
             queue_marker::drain_dispatched_queue_markers(
                 &self.shared,
@@ -775,72 +802,12 @@ impl TurnGateway for DiscordGateway {
                 );
             }
 
-            let deps = router::IntakeDeps {
-                http: &live_turn.ctx.http,
-                cache: Some(&live_turn.ctx.cache),
-                ctx_for_chained_dispatch: Some(&live_turn.ctx),
-                shared: &self.shared,
-                token: &live_turn.token,
-            };
-            // #2266 compatibility: older queued interventions may already
-            // carry a voice-transcript accepted-replay payload. If present,
-            // reinsert it into the per-process `voice::announce_meta` store
-            // keyed by the intervention's HEAD `message_id`. New queue commits
-            // strip that payload and rely on the readable announcement text to
-            // resolve and claim the durable row at dispatch time.
-            if let Some(announcement) = intervention.voice_announcement.as_ref() {
-                crate::voice::announce_meta::global_store()
-                    .insert_accepted_replay(intervention.message_id, announcement.clone());
-            }
-            // #2266: for voice-transcript queued items, the
-            // `handle_text_message` voice-author authorization check at
-            // line ~2274 requires `announce_bot_id == Some(request_owner)`.
-            // The queued `Intervention.author_id` was captured at intake or
-            // race-loss enqueue time as the ORIGINAL Discord author (the
-            // announce bot), so pass it through here instead of
-            // `live_turn.request_owner` (which is the previous turn's
-            // owner). Non-voice queued items kept the legacy behavior of
-            // routing via the live-turn owner so the user attribution does
-            // not silently swap mid-chain; we only override the
-            // request_owner when the intervention is voice-tagged. New queue
-            // commits deliberately avoid embedding the full voice payload; the
-            // readable announce text still needs the announce-bot author so
-            // `handle_text_message` can resolve and claim the durable row at
-            // processing time.
-            let dispatch_request_owner =
-                queued_intervention_request_owner(intervention, live_turn.request_owner);
-            if !intervention.pending_uploads.is_empty() {
-                let mut data = self.shared.core.lock().await;
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session
-                        .pending_uploads
-                        .extend(intervention.pending_uploads.iter().cloned());
-                }
-            }
-            handle_text_message(
-                &deps,
-                channel_id,
-                intervention.message_id,
-                dispatch_request_owner,
-                request_owner_name,
-                &intervention.text,
-                true,
-                has_more_queued_turns,
-                true,
-                intervention.merge_consecutive,
-                intervention.reply_context.clone(),
-                intervention.has_reply_boundary,
-                None,
-                // Queued turn kickoff: the prior turn already finished, so
-                // this dispatch is not racing the placeholder-delete path.
-                router::TurnKind::Foreground,
-                Vec::new(),
-                // #3905: queued dispatch carries the voice payload via the
-                // accepted-replay store reinsert above, not the gate carry-forward.
-                None,
-            )
-            .await
-            .map_err(|e| e.to_string())
+            router::finish_admitted_queued_intake(&deps, admitted, intervention)
+                .await
+                .map_err(|e| e.to_string())?;
+            // Forwarded and duplicate-covered queue items are consumed after
+            // their queued markers/cards are drained; no local body runs.
+            Ok(())
         })
     }
 

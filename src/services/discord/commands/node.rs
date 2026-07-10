@@ -432,8 +432,9 @@ pub(in crate::services::discord) async fn handle_node_picker_interaction(
     } else {
         "이미 같은 설정입니다"
     };
-    let content =
-        format!("`/node` {change_note}: 이 채널의 다음 세션/turn 대상은 `{target}` 입니다.");
+    let content = format!(
+        "`/node` {change_note}: 새 세션의 대상은 `{target}` 입니다. 기존 live 세션은 현재 owner 노드에 계속 고정됩니다."
+    );
 
     component
         .create_response(

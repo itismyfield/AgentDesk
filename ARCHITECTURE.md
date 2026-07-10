@@ -380,6 +380,8 @@ src/
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
+│   │   ├── intake_router_hook/
+│   │   │   └── session_owner.rs
 │   │   ├── stream_relay/
 │   │   │   └── identity.rs
 │   │   ├── capability_routing.rs
@@ -568,11 +570,15 @@ src/
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs
 │   │   ├── router/
+│   │   │   ├── intake_dispatch/
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── queued.rs
+│   │   │   │   ├── skill.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
-│   │   │   │   ├── node_override_routing.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   └── stale_turn.rs
 │   │   │   ├── message_handler/
@@ -595,6 +601,7 @@ src/
 │   │   │   │   └── watchdog.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
+│   │   │   ├── intake_dispatch.rs
 │   │   │   ├── intake_gate.rs
 │   │   │   ├── intake_queue_transaction.rs
 │   │   │   ├── message_handler.rs
