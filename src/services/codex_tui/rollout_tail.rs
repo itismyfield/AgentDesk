@@ -293,6 +293,59 @@ pub fn tail_rollout_file_from_offset(
     .map(|result| result.0)
 }
 
+/// Tail exactly the rollout already bound to a live Codex TUI pane.
+///
+/// Unlike the cold resume path, warm follow-up never discovers or switches to
+/// another rollout. Eligibility has already pinned `(path, session_id)`, and
+/// the caller captures `start_offset` before prompt submission. Keeping the
+/// Discord-origin prompt in the turn-local parser state preserves dedupe even
+/// if the global pending ledger expires during a long response.
+#[allow(clippy::too_many_arguments)]
+pub fn tail_warm_followup_rollout_for_tmux(
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: &str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    tmux_session_name: &str,
+    discord_origin_prompt: &str,
+) -> Result<CodexTuiTailResult, String> {
+    persist_codex_tui_rollout_marker(
+        Some(tmux_session_name),
+        rollout_path,
+        Some(session_id),
+        Some(start_offset),
+    );
+    let options = RolloutTailOptions {
+        tmux_session_name: Some(tmux_session_name.to_string()),
+        discord_origin_prompt: Some(discord_origin_prompt.to_string()),
+        ..RolloutTailOptions::default()
+    };
+    tail_rollout_file_until_assistant_response(
+        rollout_path,
+        start_offset,
+        Some(session_id.to_string()),
+        &sender,
+        cancel_token,
+        is_alive,
+        options.terminal_drain,
+        options.assistant_response_deadline,
+        options.pending_tool_call_deadline,
+        options.enable_task_complete_fast_path,
+        options.legacy_terminal_drain,
+        options.apply_pending_tool_deadline_without_assistant_text,
+        options.tmux_session_name,
+        options.discord_origin_prompt,
+    )
+    .map(|(read_result, outcome)| CodexTuiTailResult {
+        read_result,
+        rollout_path: rollout_path.to_path_buf(),
+        final_offset: outcome.final_offset,
+        session_id: outcome.session_id,
+    })
+}
+
 pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     cwd: &Path,
     session_id: &str,

@@ -93,13 +93,12 @@ use crate::services::provider::{CancelToken, cancel_requested};
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
-// #3034: test-only — the `TuiInputAction` action-plan layer below (plan/run/
-// validate/executor) is exercised by this module's regression suite but no
-// longer has a production caller; live codex input drives tmux directly through
-// the readiness-gated path. Retained as the pinned contract for that test
-// surface; individual `#[allow(dead_code)]` markers below.
-#[allow(dead_code)]
+// #4411: warm follow-up uses the action-plan layer in production. Keeping the
+// final Enter as a distinct action is what lets submission confirmation reason
+// about a visible, still-stranded composer draft without ever double-submitting.
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
+const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
+const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
 const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
 const PROMPT_READY_DEBUG_TAIL_BYTES: usize = 4096;
@@ -264,7 +263,7 @@ pub(crate) fn record_rollout_composer_ready(session_name: &str) {
     state.notify.notify_waiters();
 }
 
-#[allow(dead_code)] // #3034: test-only; consumed by composer-ready state tests.
+#[cfg(test)]
 fn mark_rollout_composer_busy(session_name: &str) {
     rollout_composer_ready_state()
         .ready_sessions
@@ -273,12 +272,21 @@ fn mark_rollout_composer_busy(session_name: &str) {
         .remove(session_name);
 }
 
+#[cfg(test)]
 fn rollout_composer_ready_observed(session_name: &str) -> bool {
     rollout_composer_ready_state()
         .ready_sessions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains(session_name)
+}
+
+fn take_rollout_composer_ready(session_name: &str) -> bool {
+    rollout_composer_ready_state()
+        .ready_sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(session_name)
 }
 
 fn rollout_composer_ready_notify() -> Arc<Notify> {
@@ -295,7 +303,6 @@ pub struct PromptReadinessSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // #3034: test-only action taxonomy (see header note).
 pub enum TuiInputAction {
     Literal(String),
     PasteBuffer(String),
@@ -306,7 +313,6 @@ pub enum TuiInputAction {
 /// Plan the sequence of tmux input actions required to deliver `prompt`
 /// to a Codex TUI composer. Multiline prompts use a paste buffer so
 /// embedded newlines do not get interpreted as `Enter` submissions.
-#[allow(dead_code)] // #3034: test-only (see header note).
 pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     let normalized_prompt;
     let prompt = if prompt.contains('\r') {
@@ -573,7 +579,7 @@ fn wait_until_codex_tui_input_ready_with_policy(
         if let Some(err) = cancel_check() {
             return Err(err);
         }
-        if rollout_composer_ready_observed(session_name) {
+        if take_rollout_composer_ready(session_name) {
             let snapshot = prompt_readiness_snapshot(session_name);
             if draft_policy.should_block_rollout_ready(&snapshot) {
                 tracing::warn!(
@@ -668,7 +674,7 @@ fn run_prompt_ready_fast_path(
         if cancel_requested(cancel_token.as_deref()) {
             return (HookFastPathOutcome::Cancelled, None);
         }
-        if rollout_composer_ready_observed(&session_name) {
+        if take_rollout_composer_ready(&session_name) {
             return (HookFastPathOutcome::RolloutComposerReady, None);
         }
         let pre_snapshot = prompt_readiness_snapshot(&session_name);
@@ -701,7 +707,7 @@ fn run_prompt_ready_fast_path(
 
         let fast_path = tokio::select! {
             _ = &mut rollout_ready_notified => {
-                if rollout_composer_ready_observed(&session_name) {
+                if take_rollout_composer_ready(&session_name) {
                     HookFastPathOutcome::RolloutComposerReady
                 } else {
                     HookFastPathOutcome::Pending
@@ -795,7 +801,6 @@ impl FastPathFallback for (HookFastPathOutcome, Option<PromptReadinessSnapshot>)
     }
 }
 
-#[allow(dead_code)] // #3034: test-only executor abstraction (see header note).
 trait TuiActionExecutor {
     fn send_literal(&mut self, session_name: &str, text: &str) -> Result<Output, String>;
     fn load_buffer(&mut self, buffer_name: &str, text: &str) -> Result<Output, String>;
@@ -808,13 +813,17 @@ trait TuiActionExecutor {
     fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String>;
 }
 
-#[allow(dead_code)] // #3034: production executor impl, only reached via the
-// test-only action layer; kept as the real tmux backing for `run_actions_with_executor`.
-struct TmuxTuiActionExecutor;
+#[derive(Default)]
+struct TmuxTuiActionExecutor {
+    composer_mutated: bool,
+    enter_attempted: bool,
+}
 
 impl TuiActionExecutor for TmuxTuiActionExecutor {
     fn send_literal(&mut self, session_name: &str, text: &str) -> Result<Output, String> {
-        crate::services::platform::tmux::send_literal(session_name, text)
+        let output = crate::services::platform::tmux::send_literal(session_name, text)?;
+        self.composer_mutated |= output.status.success();
+        Ok(output)
     }
 
     fn load_buffer(&mut self, buffer_name: &str, text: &str) -> Result<Output, String> {
@@ -827,15 +836,18 @@ impl TuiActionExecutor for TmuxTuiActionExecutor {
         buffer_name: &str,
         delete: bool,
     ) -> Result<Output, String> {
-        crate::services::platform::tmux::paste_buffer(session_name, buffer_name, delete)
+        let output =
+            crate::services::platform::tmux::paste_buffer(session_name, buffer_name, delete)?;
+        self.composer_mutated |= output.status.success();
+        Ok(output)
     }
 
     fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String> {
+        self.enter_attempted |= keys.contains(&"Enter");
         crate::services::platform::tmux::send_keys(session_name, keys)
     }
 }
 
-#[allow(dead_code)] // #3034: test-only (see header note).
 fn run_actions_with_executor(
     session_name: &str,
     actions: &[TuiInputAction],
@@ -861,7 +873,6 @@ fn run_actions_with_executor(
     Ok(())
 }
 
-#[allow(dead_code)] // #3034: test-only (reached via run_actions_with_executor).
 fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String> {
     if cancel_requested(cancel_token) {
         Err(PROMPT_READY_CANCELLED_ERROR.to_string())
@@ -870,7 +881,6 @@ fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String>
     }
 }
 
-#[allow(dead_code)] // #3034: test-only (reached via run_actions_with_executor).
 fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
@@ -886,6 +896,179 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
         Err(format!("tmux send {action_name} failed: {}", output.status))
     } else {
         Err(format!("tmux send {action_name} failed: {stderr}"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptSubmitConfirmation {
+    Submitted,
+    RetrySafeDraft,
+    Unconfirmed,
+}
+
+/// Result of the one-shot warm-follow-up submit attempt. Only
+/// `RetrySafeDraft` authorizes the caller to relaunch and submit again: it means
+/// two post-Enter pane snapshots both showed the live composer holding a draft.
+/// `Unconfirmed` is deliberately terminal so an Enter that may have reached
+/// Codex is never replayed.
+#[derive(Debug)]
+pub(crate) enum CodexFollowupPromptSubmitOutcome {
+    Submitted,
+    RetrySafeDraft {
+        first: PromptReadinessSnapshot,
+        second: PromptReadinessSnapshot,
+    },
+    Cancelled,
+    Unconfirmed {
+        error: String,
+        snapshot: PromptReadinessSnapshot,
+    },
+}
+
+fn snapshot_has_retry_safe_prompt_draft(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive
+        && snapshot.capture_available
+        && snapshot.composer_marker_detected
+        && snapshot.prompt_draft_detected
+}
+
+pub(crate) fn prompt_draft_matches(
+    snapshot: &PromptReadinessSnapshot,
+    expected_prompt: &str,
+) -> bool {
+    if !snapshot_has_retry_safe_prompt_draft(snapshot) {
+        return false;
+    }
+    visible_prompt_draft(snapshot).is_some_and(|draft| draft.trim() == expected_prompt.trim())
+}
+
+fn visible_prompt_draft(snapshot: &PromptReadinessSnapshot) -> Option<&str> {
+    snapshot
+        .pane_tail
+        .lines()
+        .rev()
+        .find_map(codex_visible_prompt_draft_text)
+}
+
+fn clear_cancelled_partial_prompt_draft(
+    session_name: &str,
+    expected_prompt: &str,
+    executor: &TmuxTuiActionExecutor,
+) {
+    if !executor.composer_mutated || executor.enter_attempted {
+        return;
+    }
+    let snapshot = prompt_readiness_snapshot(session_name);
+    let matches_partial = snapshot_has_retry_safe_prompt_draft(&snapshot)
+        && visible_prompt_draft(&snapshot).is_some_and(|draft| {
+            !draft.trim().is_empty() && expected_prompt.trim().starts_with(draft.trim())
+        });
+    if !matches_partial {
+        return;
+    }
+    match crate::services::platform::tmux::send_keys(session_name, &["C-u"]) {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => tracing::warn!(
+            tmux_session_name = session_name,
+            status = %output.status,
+            "failed to clear cancelled Codex TUI partial prompt draft"
+        ),
+        Err(error) => tracing::warn!(
+            tmux_session_name = session_name,
+            error,
+            "failed to clear cancelled Codex TUI partial prompt draft"
+        ),
+    }
+}
+
+fn snapshot_confirms_prompt_left_editor(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive
+        && snapshot.capture_available
+        && !snapshot_has_retry_safe_prompt_draft(snapshot)
+}
+
+fn classify_prompt_submit_confirmation(
+    first: &PromptReadinessSnapshot,
+    second: &PromptReadinessSnapshot,
+) -> PromptSubmitConfirmation {
+    if snapshot_has_retry_safe_prompt_draft(first) && snapshot_has_retry_safe_prompt_draft(second) {
+        PromptSubmitConfirmation::RetrySafeDraft
+    } else if snapshot_confirms_prompt_left_editor(first)
+        || snapshot_confirms_prompt_left_editor(second)
+    {
+        PromptSubmitConfirmation::Submitted
+    } else {
+        PromptSubmitConfirmation::Unconfirmed
+    }
+}
+
+/// Submit one Discord follow-up to an already-live Codex composer.
+///
+/// The Enter key is sent at most once. A possible delivery error never causes
+/// another Enter. After the action plan finishes, the pane is sampled twice
+/// when the first sample still contains a live draft (or cannot be captured).
+/// This makes relaunch/replay legal only with positive evidence that the prompt
+/// remained in the editor.
+pub(crate) fn submit_codex_followup_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> CodexFollowupPromptSubmitOutcome {
+    let actions = match plan_prompt_submit(prompt) {
+        Ok(actions) => actions,
+        Err(error) => {
+            return CodexFollowupPromptSubmitOutcome::Unconfirmed {
+                error,
+                snapshot: prompt_readiness_snapshot(session_name),
+            };
+        }
+    };
+    let mut executor = TmuxTuiActionExecutor::default();
+    let action_result =
+        run_actions_with_executor(session_name, &actions, cancel_token, &mut executor);
+    if action_result
+        .as_ref()
+        .err()
+        .is_some_and(|error| is_prompt_ready_cancelled_error(error))
+    {
+        clear_cancelled_partial_prompt_draft(session_name, prompt, &executor);
+        return CodexFollowupPromptSubmitOutcome::Cancelled;
+    }
+
+    std::thread::sleep(PROMPT_SUBMIT_INITIAL_SETTLE);
+    if cancel_requested(cancel_token) {
+        return CodexFollowupPromptSubmitOutcome::Cancelled;
+    }
+    let first = prompt_readiness_snapshot(session_name);
+    let needs_recheck = snapshot_has_retry_safe_prompt_draft(&first)
+        || !first.tmux_pane_alive
+        || !first.capture_available;
+    let second = if needs_recheck {
+        std::thread::sleep(PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE);
+        if cancel_requested(cancel_token) {
+            return CodexFollowupPromptSubmitOutcome::Cancelled;
+        }
+        prompt_readiness_snapshot(session_name)
+    } else {
+        first.clone()
+    };
+
+    match (
+        action_result,
+        classify_prompt_submit_confirmation(&first, &second),
+    ) {
+        (_, PromptSubmitConfirmation::RetrySafeDraft) => {
+            CodexFollowupPromptSubmitOutcome::RetrySafeDraft { first, second }
+        }
+        (Ok(()), PromptSubmitConfirmation::Submitted) => {
+            CodexFollowupPromptSubmitOutcome::Submitted
+        }
+        (action_result, confirmation) => CodexFollowupPromptSubmitOutcome::Unconfirmed {
+            error: action_result.err().unwrap_or_else(|| {
+                format!("codex tui prompt submit confirmation was {confirmation:?}")
+            }),
+            snapshot: second,
+        },
     }
 }
 
@@ -1318,7 +1501,6 @@ fn prompt_ready_debug_tail(pane: &str) -> String {
     crate::utils::format::safe_suffix(tail.trim(), PROMPT_READY_DEBUG_TAIL_BYTES).to_string()
 }
 
-#[allow(dead_code)] // #3034: test-only (reached via plan_prompt_submit).
 fn validate_prompt_text(input: &str) -> Result<(), String> {
     // Block terminal control channels such as ESC bracketed-paste markers,
     // DEL, and C1 controls before either literal send or tmux paste-buffer
@@ -1333,7 +1515,6 @@ fn validate_prompt_text(input: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(dead_code)] // #3034: test-only (reached via plan_prompt_submit).
 fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
     if input.trim().is_empty() {
         return Err("prompt must contain non-whitespace text".to_string());
@@ -1341,7 +1522,6 @@ fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(dead_code)] // #3034: test-only (reached via plan_prompt_submit).
 fn split_literal_chunks(input: &str, max_chars: usize) -> Vec<String> {
     if input.is_empty() {
         return Vec::new();
@@ -1678,6 +1858,51 @@ mod tests {
 
         assert_eq!(error, PROMPT_READY_CANCELLED_ERROR);
         assert_eq!(executor.calls, vec!["load-buffer:multi\nline"]);
+    }
+
+    fn submit_snapshot(
+        pane_alive: bool,
+        capture_available: bool,
+        composer_marker_detected: bool,
+        prompt_draft_detected: bool,
+    ) -> PromptReadinessSnapshot {
+        PromptReadinessSnapshot {
+            composer_marker_detected,
+            prompt_draft_detected,
+            tmux_pane_alive: pane_alive,
+            capture_available,
+            pane_tail: String::new(),
+        }
+    }
+
+    #[test]
+    fn submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots() {
+        let draft = submit_snapshot(true, true, true, true);
+        let submitted = submit_snapshot(true, true, false, true);
+        let capture_missing = submit_snapshot(true, false, false, false);
+        let pane_dead = submit_snapshot(false, false, false, false);
+
+        assert_eq!(
+            classify_prompt_submit_confirmation(&draft, &draft),
+            PromptSubmitConfirmation::RetrySafeDraft
+        );
+        assert_eq!(
+            classify_prompt_submit_confirmation(&draft, &submitted),
+            PromptSubmitConfirmation::Submitted
+        );
+        assert_eq!(
+            classify_prompt_submit_confirmation(&capture_missing, &pane_dead),
+            PromptSubmitConfirmation::Unconfirmed
+        );
+    }
+
+    #[test]
+    fn retry_safe_draft_must_match_the_discord_prompt() {
+        let mut snapshot = submit_snapshot(true, true, true, true);
+        snapshot.pane_tail = "old output\n› earlier prompt\n› exact Discord prompt".to_string();
+
+        assert!(prompt_draft_matches(&snapshot, "exact Discord prompt"));
+        assert!(!prompt_draft_matches(&snapshot, "different prompt"));
     }
 
     // ------------------------------------------------------------------
@@ -2029,7 +2254,10 @@ The diagram shows ╭ here.\n\
             result.is_ok(),
             "explicit rollout composer_ready must be accepted before pane fallback, got {result:?}"
         );
-        mark_rollout_composer_busy(&session);
+        assert!(
+            !rollout_composer_ready_observed(&session),
+            "composer-ready must be one-shot so a later warm turn cannot consume stale readiness"
+        );
     }
 
     #[test]
@@ -2044,6 +2272,18 @@ The diagram shows ╭ here.\n\
         mark_rollout_composer_busy(&session);
 
         assert!(!rollout_composer_ready_observed(&session));
+    }
+
+    #[test]
+    fn taking_composer_ready_signal_is_one_shot() {
+        let session = format!(
+            "agentdesk-codex-tui-rollout-take-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        record_rollout_composer_ready(&session);
+
+        assert!(take_rollout_composer_ready(&session));
+        assert!(!take_rollout_composer_ready(&session));
     }
 
     // ------------------------------------------------------------------

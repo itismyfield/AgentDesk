@@ -1,0 +1,30 @@
+id: E-31
+title: Codex TUI stranded draft forces one resume fallback without duplicate submit (#4411)
+agent_mode: real_live
+coverage_class: live
+cells: [codex-tui]
+isolation: required
+notes: |
+  Optional live scenario; the matrix preflight may skip the codex-tui cell when
+  tmux is unavailable. A draft is placed without Enter so the next Discord turn
+  must take the structured stranded_draft fallback exactly once. This scenario
+  is intentionally not a required CI gate.
+steps:
+  - send_prompt: "Reply with exactly [E2E:E31:READY] and nothing else."
+  - wait_for_discord_text: "[E2E:E31:READY]"
+    timeout_s: 240
+  - send_keys_no_enter: "E31_STRANDED_DRAFT_MUST_NOT_SUBMIT"
+  - send_prompt: "Reply with exactly [E2E:E31:FALLBACK-OK] and nothing else."
+  - wait_for_discord_text: "[E2E:E31:FALLBACK-OK]"
+    timeout_s: 240
+assertions:
+  - ordered_text_present:
+      - "[E2E:E31:READY]"
+      - "[E2E:E31:FALLBACK-OK]"
+  - no_duplicate_marker: "[E2E:E31:READY]"
+  - no_duplicate_marker: "[E2E:E31:FALLBACK-OK]"
+  - marker_absent:
+      marker: "E31_STRANDED_DRAFT_MUST_NOT_SUBMIT"
+      surface: relay
+  - no_duplicate_content: true
+  - no_resume_prompt_chrome: true
