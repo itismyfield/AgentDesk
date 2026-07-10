@@ -965,7 +965,6 @@ fn is_recent_age(age_secs: Option<u64>, freshness_secs: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
 
@@ -976,30 +975,6 @@ mod tests {
     use crate::services::discord::relay_health::{RelayHealthSnapshot, RelayStallState};
 
     use super::*;
-
-    /// Restores an env var to its prior value on drop (mirrors the helper in the
-    /// sibling `recovery.rs` test module).
-    struct EnvVarReset {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarReset {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarReset {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
 
     /// The liveness evidence path reaches `latest_runtime_activity_unix_nanos`,
     /// which trips the #3293 runtime-store guard when `AGENTDESK_ROOT_DIR` points
@@ -1014,15 +989,16 @@ mod tests {
     /// still holding the lock.
     #[must_use]
     fn isolated_runtime_root() -> (
-        EnvVarReset,
+        crate::config::TestEnvVarGuard,
         tempfile::TempDir,
-        std::sync::MutexGuard<'static, ()>,
+        crate::config::test_env_lock::SharedTestEnvLockGuard,
     ) {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().expect("temp runtime root");
-        let env = EnvVarReset::set("AGENTDESK_ROOT_DIR", dir.path());
+        let env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            dir.path(),
+        );
         (env, dir, lock)
     }
 

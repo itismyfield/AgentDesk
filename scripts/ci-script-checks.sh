@@ -79,6 +79,9 @@ echo "=== CI runner hardening guard ==="
 echo "=== PR infrastructure failure rerun classifier (#4392) ==="
 ./scripts/ci/infra-failure-rerun.sh --self-test
 
+echo "=== CI timeout wrapper tests (#4413) ==="
+"$PYTHON" -m unittest tests.test_ci_timeout
+
 echo "=== Scratch file guard ==="
 FAIL=0
 for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql; do
