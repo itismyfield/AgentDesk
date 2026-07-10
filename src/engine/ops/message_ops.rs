@@ -56,18 +56,21 @@ pub(crate) fn queue_message(
                 let bot = bot.to_string();
                 let source = source.to_string();
                 move |bridge_pool| async move {
-                    sqlx::query_scalar::<_, i64>(
-                        "INSERT INTO message_outbox (target, content, bot, source)
-                         VALUES ($1, $2, $3, $4)
-                         RETURNING id",
+                    crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_ttl(
+                        &bridge_pool,
+                        crate::services::message_outbox::OutboxMessage {
+                            target: &target,
+                            content: &content,
+                            bot: &bot,
+                            source: &source,
+                            reason_code: None,
+                            session_key: None,
+                        },
+                        0,
                     )
-                    .bind(&target)
-                    .bind(&content)
-                    .bind(&bot)
-                    .bind(&source)
-                    .fetch_one(&bridge_pool)
                     .await
-                    .map_err(|e| format!("insert postgres message_outbox: {e}"))
+                    .map_err(|error| format!("enqueue postgres message_outbox: {error}"))?
+                    .ok_or_else(|| "enqueue postgres message_outbox returned no id".to_string())
                 }
             },
             |error| error,
@@ -99,5 +102,45 @@ fn message_queue_raw(
         // JS wrapper's `JSON.parse` cannot trip on backslashes / newlines
         // that Postgres or sqlx error messages may include.
         Err(error) => crate::engine::ops::ensure_js_error_json(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::queue_message;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_dynamic_source_rejected_before_insert_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_policy_message_source",
+            "policy message source validation tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let blocking_pool = pool.clone();
+        let error = tokio::task::spawn_blocking(move || {
+            queue_message(
+                Some(&blocking_pool),
+                "channel:4424",
+                "must not insert",
+                "notify",
+                "unregistered_policy_source",
+            )
+        })
+        .await
+        .expect("join policy queue_message test")
+        .expect_err("forbidden dynamic source must be rejected");
+        assert!(
+            error.contains("not registered for LoopbackInternal"),
+            "policy error must be actionable: {error}"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .expect("count policy message_outbox rows");
+        assert_eq!(count, 0);
     }
 }

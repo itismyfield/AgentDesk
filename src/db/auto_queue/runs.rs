@@ -38,13 +38,18 @@ async fn queue_run_completion_notify_on_pg(
     let content = format!("자동큐 완료: {repo_label} / run {short_run_id} / {entry_count}개");
 
     for channel_id in targets {
-        sqlx::query(
-            "INSERT INTO message_outbox (target, content, bot, source)
-             VALUES ($1, $2, 'notify', 'system')",
+        let target = format!("channel:{channel_id}");
+        crate::services::message_outbox::enqueue_outbox_pg_on_tx(
+            tx,
+            crate::services::message_outbox::OutboxMessage {
+                target: &target,
+                content: &content,
+                bot: "notify",
+                source: "system",
+                reason_code: None,
+                session_key: None,
+            },
         )
-        .bind(format!("channel:{channel_id}"))
-        .bind(&content)
-        .execute(&mut **tx)
         .await
         .map_err(|error| {
             format!(

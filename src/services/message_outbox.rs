@@ -17,6 +17,49 @@ pub(crate) struct OutboxMessage<'a> {
     pub session_key: Option<&'a str>,
 }
 
+#[derive(Debug)]
+pub(crate) enum OutboxEnqueueError {
+    SourceNotAllowed { source: String },
+    Database(sqlx::Error),
+}
+
+impl std::fmt::Display for OutboxEnqueueError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceNotAllowed { source } => write!(
+                formatter,
+                "message_outbox source `{source}` is not registered for LoopbackInternal"
+            ),
+            Self::Database(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for OutboxEnqueueError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SourceNotAllowed { .. } => None,
+            Self::Database(error) => Some(error),
+        }
+    }
+}
+
+impl From<sqlx::Error> for OutboxEnqueueError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
+    crate::services::discord::outbound::source_registry::validate_send_source_for(
+        source,
+        crate::services::discord::outbound::source_registry::SendCallerClass::LoopbackInternal,
+    )
+    .map_err(|_| OutboxEnqueueError::SourceNotAllowed {
+        source: source.to_string(),
+    })
+}
+
 fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<String> {
     session_key
         .map(str::trim)
@@ -353,7 +396,7 @@ async fn release_expired_outbox_dedupe_key_pg(
 pub(crate) async fn enqueue_outbox_pg_returning_id(
     pool: &PgPool,
     message: OutboxMessage<'_>,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<i64>, OutboxEnqueueError> {
     enqueue_outbox_pg_returning_id_with_ttl(pool, message, LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS).await
 }
 
@@ -361,7 +404,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_cancel(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     cancel_token: Option<&CancelToken>,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<i64>, OutboxEnqueueError> {
     enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
         pool,
         message,
@@ -379,7 +422,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<i64>, OutboxEnqueueError> {
     enqueue_outbox_pg_returning_id_with_ttl_and_cancel(pool, message, dedupe_ttl_secs, None).await
 }
 
@@ -388,7 +431,8 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
     cancel_token: Option<&CancelToken>,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<i64>, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
     let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
     let dedupe_key = (dedupe_ttl_secs > 0)
@@ -402,15 +446,19 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
         })
         .flatten();
 
-    let duplicate_id = find_duplicate_outbox_message_pg(
-        pool,
-        message.target,
-        message.content,
-        reason_code,
-        session_key.as_deref(),
-        dedupe_ttl_secs,
-    )
-    .await?;
+    let duplicate_id = if dedupe_ttl_secs > 0 {
+        find_duplicate_outbox_message_pg(
+            pool,
+            message.target,
+            message.content,
+            reason_code,
+            session_key.as_deref(),
+            dedupe_ttl_secs,
+        )
+        .await?
+    } else {
+        None
+    };
 
     if let Some(existing_id) = duplicate_id {
         tracing::info!(
@@ -481,7 +529,7 @@ pub(crate) async fn enqueue_outbox_pg_with_ttl(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, OutboxEnqueueError> {
     Ok(
         enqueue_outbox_pg_returning_id_with_ttl(pool, message, dedupe_ttl_secs)
             .await?
@@ -492,7 +540,7 @@ pub(crate) async fn enqueue_outbox_pg_with_ttl(
 pub(crate) async fn enqueue_outbox_pg(
     pool: &PgPool,
     message: OutboxMessage<'_>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, OutboxEnqueueError> {
     Ok(enqueue_outbox_pg_returning_id(pool, message)
         .await?
         .is_some())
@@ -504,18 +552,43 @@ pub(crate) async fn enqueue_outbox_pg(
 pub(crate) async fn enqueue_outbox_best_effort(
     pg_pool: Option<&PgPool>,
     message: OutboxMessage<'_>,
-) -> bool {
+) -> Result<bool, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
     if let Some(pool) = pg_pool {
         return match enqueue_outbox_pg(pool, message).await {
-            Ok(enqueued) => enqueued,
+            Ok(enqueued) => Ok(enqueued),
             Err(error) => {
                 warn_outbox_enqueue_failure("postgres", message, &error);
-                false
+                Err(error)
             }
         };
     }
 
-    false
+    Ok(false)
+}
+
+/// Validated no-dedupe insert for callers already holding a PostgreSQL transaction.
+pub(crate) async fn enqueue_outbox_pg_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+) -> Result<i64, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
+    let reason_code = normalized_reason_code(message.reason_code);
+    let session_key = normalized_session_key(message.target, message.session_key);
+    Ok(sqlx::query_scalar::<_, i64>(
+        "INSERT INTO message_outbox
+         (target, content, bot, source, reason_code, session_key)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id",
+    )
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(session_key.as_deref())
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 pub(crate) async fn enqueue_lifecycle_notification_pg(
@@ -524,7 +597,8 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     session_key: Option<&str>,
     reason_code: &str,
     content: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, OutboxEnqueueError> {
+    validate_outbox_source(LIFECYCLE_NOTIFIER_SOURCE)?;
     let reason_code = normalized_reason_code(Some(reason_code));
     let session_key = normalized_session_key(target, session_key);
     let dedupe_key = dedupe_key_for_message(target, content, reason_code, session_key.as_deref());
@@ -585,6 +659,156 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod postgres_source_contract_tests {
+    use super::*;
+
+    async fn row_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+            .fetch_one(pool)
+            .await
+            .expect("count message_outbox rows")
+    }
+
+    fn forbidden_message() -> OutboxMessage<'static> {
+        OutboxMessage {
+            target: "channel:4424",
+            content: "must not insert",
+            bot: "notify",
+            source: "unregistered_policy_source",
+            reason_code: Some("issue_4424_test"),
+            session_key: Some("issue-4424-forbidden"),
+        }
+    }
+
+    fn assert_source_error<T>(result: Result<T, OutboxEnqueueError>) {
+        assert!(matches!(
+            result,
+            Err(OutboxEnqueueError::SourceNotAllowed { source })
+                if source == "unregistered_policy_source"
+        ));
+    }
+
+    #[tokio::test]
+    async fn every_enqueue_variant_rejects_forbidden_source_with_zero_rows_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_message_outbox_source_contract",
+            "message_outbox source contract tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        assert_eq!(row_count(&pool).await, 0);
+
+        assert_source_error(enqueue_outbox_pg_returning_id(&pool, forbidden_message()).await);
+        assert_source_error(
+            enqueue_outbox_pg_returning_id_with_cancel(&pool, forbidden_message(), None).await,
+        );
+        assert_source_error(
+            enqueue_outbox_pg_returning_id_with_ttl(&pool, forbidden_message(), 60).await,
+        );
+        assert_source_error(
+            enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
+                &pool,
+                forbidden_message(),
+                60,
+                None,
+            )
+            .await,
+        );
+        assert_source_error(enqueue_outbox_pg_with_ttl(&pool, forbidden_message(), 60).await);
+        assert_source_error(enqueue_outbox_pg(&pool, forbidden_message()).await);
+        assert_source_error(enqueue_outbox_best_effort(Some(&pool), forbidden_message()).await);
+
+        let mut tx = pool.begin().await.expect("begin outbox source test tx");
+        assert_source_error(enqueue_outbox_pg_on_tx(&mut tx, forbidden_message()).await);
+        tx.rollback().await.expect("rollback outbox source test tx");
+        assert_eq!(row_count(&pool).await, 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_acceptance_matches_worker_loopback_source_gate_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_message_outbox_source_parity",
+            "message_outbox enqueue/send parity tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let sources = [
+            "system",
+            "lifecycle_notifier",
+            "routine-runtime",
+            "headless_turn",
+            "slo_alerter",
+            "quality_regression_alerter",
+            "github_sync",
+            "catch_up_too_old",
+            "queue_overflow_notice",
+            "outbox_delivery_alert",
+            "long_turn_watchdog",
+            "agent_quality_rollup",
+            "relay_signal_rollup",
+            "dispatch_watchdog",
+            "unregistered_policy_source",
+            "SYSTEM",
+            " system",
+            "",
+        ];
+        for (index, source) in sources.into_iter().enumerate() {
+            let target = format!("channel:{}", 4400 + index);
+            let content = format!("source parity {index}");
+            let message = OutboxMessage {
+                target: &target,
+                content: &content,
+                bot: "notify",
+                source,
+                reason_code: None,
+                session_key: None,
+            };
+            let worker_allows = crate::services::discord::outbound::send_gate::is_allowed_send_source_for(
+                source,
+                crate::services::discord::outbound::source_registry::SendCallerClass::LoopbackInternal,
+            );
+            let enqueue_result = enqueue_outbox_pg_returning_id_with_ttl(&pool, message, 0).await;
+            assert_eq!(
+                enqueue_result.is_ok(),
+                worker_allows,
+                "enqueue/send source decision drifted for `{source}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_lifecycle_enqueue_uses_registered_source_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_message_outbox_lifecycle_source",
+            "message_outbox lifecycle source tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        assert!(
+            enqueue_lifecycle_notification_pg(
+                &pool,
+                "channel:4424",
+                Some("issue-4424-lifecycle"),
+                "issue_4424_test",
+                "registered lifecycle source",
+            )
+            .await
+            .expect("enqueue fixed lifecycle source")
+        );
+        assert_eq!(row_count(&pool).await, 1);
+    }
 }
 
 #[cfg(test)]

@@ -415,6 +415,11 @@
       "path": "migrations/postgres/0080_intake_outbox_provider.sql",
       "sha256": "051f5ddd45e12577f7fe0e7c77ee049687b3a7722ca6bef8666662faa46c7f2f",
       "version": 80
+    },
+    {
+      "path": "migrations/postgres/0081_message_outbox_redrive_audit.sql",
+      "sha256": "bf1646bb40425551447429adca8f119bfa6074a76725a7ebd739cb897da1e6ad",
+      "version": 81
     }
   ],
   "version": 1
