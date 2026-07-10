@@ -681,7 +681,7 @@
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 81 | 81 | 0 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 749 | 678 | 71 |  |
 | `services::discord::sidecar_interaction` | `src/services/discord/sidecar_interaction.rs` | 390 | 390 | 0 |  |
-| `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2830 | 861 | 1969 |  |
+| `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2927 | 861 | 2066 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 113 | 113 | 0 |  |
 | `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1637 | 904 | 733 |  |
 | `services::discord::startup_reclaim` | `src/services/discord/startup_reclaim.rs` | 541 | 324 | 217 |  |

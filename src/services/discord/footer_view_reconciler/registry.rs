@@ -526,7 +526,7 @@ fn completion_footer_record_edit_result_with_block(
         }
     }
 
-    if remove_after_edit {
+    if remove_after_edit && edited {
         guard.remove(&channel_id.get());
         return true;
     }
