@@ -140,14 +140,16 @@ mod tests {
 
     #[test]
     fn relay_recovery_manual_apply_succeeds_after_probe_budget_is_exhausted() {
-        let root = tempfile::tempdir().expect("isolated AgentDesk root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime");
+        // Match the established suite-wide lock order: auto-heal budget first,
+        // shared environment second. The inverse order deadlocks parallel tests.
+        let _guard = runtime.block_on(auto_heal_test_lock().lock());
+        let root = tempfile::tempdir().expect("isolated AgentDesk root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
         runtime.block_on(async {
-            let _guard = auto_heal_test_lock().lock().await;
             clear_auto_heal_attempts_for_tests();
             let provider = ProviderKind::Codex;
             let registry = HealthRegistry::new();
