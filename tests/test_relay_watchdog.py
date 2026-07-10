@@ -23,8 +23,13 @@ from unittest import mock
 
 import scripts.relay_watchdog as relay_watchdog
 from scripts.relay_watchdog import (
+    COVERAGE_CONFIRM_TICKS,
+    COVERAGE_COVERED,
+    COVERAGE_UNCOVERED,
+    COVERAGE_UNKNOWN,
     PG_OK,
     PG_STATE_KEY,
+    PG_TOPOLOGY_DIRECT,
     PG_TUNNEL_DOWN,
     PG_UNCLASSIFIED_DOWN,
     PG_UNKNOWN,
@@ -36,11 +41,15 @@ from scripts.relay_watchdog import (
     Config,
     ConfigError,
     Runtime,
+    TranscriptCandidate,
+    WatcherStateProbe,
     assistant_blocks_from_lines,
     channel_project_dirs,
     delivered,
     evaluate,
+    evaluate_coverage,
     evaluate_pg_health,
+    expected_tmux_session_name,
     load_state,
     main_channel_project_re,
     newest_transcript,
@@ -49,6 +58,7 @@ from scripts.relay_watchdog import (
     parse_transcript_ts,
     project_slug,
     save_state,
+    select_watch_transcript,
     tick_channel,
     tick_pg_tunnel,
 )
@@ -143,6 +153,30 @@ class ProjectDirMatchingTests(unittest.TestCase):
 
 
 class TranscriptResolutionTests(unittest.TestCase):
+    def test_growth_beats_newer_mtime(self):
+        growing = TranscriptCandidate(Path("/tmp/growing.jsonl"), 101, 100.0)
+        newer_stagnant = TranscriptCandidate(
+            Path("/tmp/newer-stagnant.jsonl"), 200, 200.0
+        )
+        selected = select_watch_transcript(
+            [growing, newer_stagnant],
+            {str(growing.path): 100, str(newer_stagnant.path): 200},
+        )
+        self.assertEqual(selected, growing.path)
+
+    def test_no_growth_falls_back_to_newest_mtime(self):
+        older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
+        newer = TranscriptCandidate(Path("/tmp/newer.jsonl"), 200, 200.0)
+        selected = select_watch_transcript(
+            [older, newer], {str(older.path): 100, str(newer.path): 200}
+        )
+        self.assertEqual(selected, newer.path)
+
+    def test_first_observation_uses_mtime_fallback(self):
+        older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
+        newer = TranscriptCandidate(Path("/tmp/newer.jsonl"), 1, 200.0)
+        self.assertEqual(select_watch_transcript([older, newer], {}), newer.path)
+
     def test_newest_transcript_ignores_thread_dirs_and_picks_latest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -305,6 +339,56 @@ class EvaluateBoundaryTests(unittest.TestCase):
         self.assertEqual(v.state, STATE_OK)
 
 
+class CoverageEvaluationTests(unittest.TestCase):
+    def test_live_expected_session_with_healthy_watcher_is_covered(self):
+        verdict = evaluate_coverage(True, 200, True, False, 1)
+        self.assertEqual(verdict.state, COVERAGE_COVERED)
+        self.assertEqual(verdict.consecutive_uncovered, 0)
+        self.assertFalse(verdict.confirmed)
+
+    def test_authoritative_404_confirms_on_exactly_second_tick(self):
+        first = evaluate_coverage(True, 404, None, None, 0)
+        self.assertEqual(first.state, COVERAGE_UNCOVERED)
+        self.assertEqual(first.consecutive_uncovered, 1)
+        self.assertFalse(first.confirmed)
+
+        second = evaluate_coverage(
+            True, 404, None, None, first.consecutive_uncovered
+        )
+        self.assertEqual(second.consecutive_uncovered, COVERAGE_CONFIRM_TICKS)
+        self.assertTrue(second.confirmed)
+
+    def test_dcserver_unreachable_is_unknown_and_resets_confirmation(self):
+        verdict = evaluate_coverage(True, None, None, None, 1)
+        self.assertEqual(verdict.state, COVERAGE_UNKNOWN)
+        self.assertEqual(verdict.reason, "dcserver_unreachable")
+        self.assertEqual(verdict.consecutive_uncovered, 0)
+        self.assertFalse(verdict.confirmed)
+
+    def test_single_detached_tick_never_confirms(self):
+        verdict = evaluate_coverage(True, 200, False, False, 0)
+        self.assertEqual(verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(verdict.consecutive_uncovered, 1)
+        self.assertFalse(verdict.confirmed)
+
+    def test_attached_but_desynced_is_phantom_coverage(self):
+        verdict = evaluate_coverage(True, 200, True, True, 1)
+        self.assertEqual(verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(verdict.reason, "attached_but_desynced")
+        self.assertTrue(verdict.confirmed)
+
+    def test_dead_expected_session_is_left_to_stall_watchdog(self):
+        verdict = evaluate_coverage(False, 200, False, True, 1)
+        self.assertEqual(verdict.state, COVERAGE_COVERED)
+        self.assertEqual(verdict.reason, "tmux_not_expected")
+        self.assertFalse(verdict.confirmed)
+
+    def test_malformed_200_is_unknown_not_uncovered(self):
+        verdict = evaluate_coverage(True, 200, None, None, 1)
+        self.assertEqual(verdict.state, COVERAGE_UNKNOWN)
+        self.assertEqual(verdict.consecutive_uncovered, 0)
+
+
 class PgHealthEvaluationTests(unittest.TestCase):
     def test_db_true_is_authoritative_even_without_listener_probe(self):
         self.assertEqual(evaluate_pg_health(True, None).state, PG_OK)
@@ -429,6 +513,29 @@ class ConfigTests(unittest.TestCase):
             )
             with self.assertRaises(ConfigError):
                 relay_watchdog.load_config(p)
+
+
+class PgTopologyConfigTests(unittest.TestCase):
+    BASE = {
+        "channels": [
+            {
+                "channel_id": "123",
+                "sendmessage_key": "k",
+                "worktree_root": WORKTREE_ROOT,
+            }
+        ]
+    }
+
+    def test_topology_defaults_to_tunnel_for_existing_configs(self):
+        self.assertEqual(parse_config(self.BASE).pg_topology, "tunnel")
+
+    def test_direct_topology_is_accepted(self):
+        cfg = parse_config({**self.BASE, "pg_topology": "direct"})
+        self.assertEqual(cfg.pg_topology, PG_TOPOLOGY_DIRECT)
+
+    def test_unknown_topology_is_config_error(self):
+        with self.assertRaises(ConfigError):
+            parse_config({**self.BASE, "pg_topology": "auto"})
 
 
 class DiscordHaystackShapeTests(unittest.TestCase):
@@ -606,6 +713,112 @@ class RuntimePgProbeTests(unittest.TestCase):
             self.assertFalse(rt.recent_dcserver_pg_alert(1001))
 
 
+class RuntimeCoverageProbeTests(unittest.TestCase):
+    def make_rt(self) -> Runtime:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        return Runtime(Config(channels=(TICK_CHANNEL,)), Path(self._tmp.name))
+
+    def test_tmux_enumeration_includes_only_sessions_with_live_panes(self):
+        stdout = (
+            "AgentDesk-claude-adk-cc\t0\n"
+            "AgentDesk-codex-adk-cdx\t1\n"
+            "AgentDesk-mixed\t1\n"
+            "AgentDesk-mixed\t0\n"
+        )
+        completed = subprocess.CompletedProcess(
+            ["tmux"], 0, stdout=stdout, stderr=""
+        )
+        with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
+            sessions = self.make_rt().live_tmux_sessions()
+        self.assertEqual(
+            sessions, {"AgentDesk-claude-adk-cc", "AgentDesk-mixed"}
+        )
+
+    def test_tmux_probe_failure_is_unknown(self):
+        completed = subprocess.CompletedProcess(
+            ["tmux"], 2, stdout="", stderr="permission denied"
+        )
+        with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
+            self.assertIsNone(self.make_rt().live_tmux_sessions())
+
+    def test_no_tmux_server_is_authoritative_empty_set(self):
+        completed = subprocess.CompletedProcess(
+            ["tmux"], 1, stdout="", stderr="no server running on /tmp/tmux"
+        )
+        with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
+            self.assertEqual(self.make_rt().live_tmux_sessions(), set())
+
+    def test_watcher_state_404_is_preserved_as_uncovered_evidence(self):
+        completed = subprocess.CompletedProcess(
+            ["curl"],
+            0,
+            stdout='{"error":"missing"}\n404',
+            stderr="",
+        )
+        with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
+            probe = self.make_rt().watcher_state("999")
+        self.assertEqual(probe, WatcherStateProbe(404))
+
+    def test_watcher_state_unreachable_is_unknown(self):
+        completed = subprocess.CompletedProcess(
+            ["curl"], 7, stdout="\n000", stderr="connect failed"
+        )
+        with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
+            probe = self.make_rt().watcher_state("999")
+        self.assertEqual(probe, WatcherStateProbe(None))
+
+    def test_watcher_state_parses_exact_boolean_contract(self):
+        completed = subprocess.CompletedProcess(
+            ["curl"],
+            0,
+            stdout='{"attached":true,"desynced":false}\n200',
+            stderr="",
+        )
+        with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
+            probe = self.make_rt().watcher_state("999")
+        self.assertEqual(probe, WatcherStateProbe(200, True, False))
+
+    def test_watcher_state_malformed_200_keeps_status_but_not_claims(self):
+        completed = subprocess.CompletedProcess(
+            ["curl"], 0, stdout='{"attached":"true"}\n200', stderr=""
+        )
+        with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
+            probe = self.make_rt().watcher_state("999")
+        self.assertEqual(probe, WatcherStateProbe(200, None, None))
+
+    def test_direct_node_snapshot_does_not_report_tunnel_closed(self):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if argv[0] == "curl":
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout='{"db":false,"degraded":true}',
+                    stderr="",
+                )
+            if argv[0] == "/bin/ps":
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            raise AssertionError(f"unexpected direct-node probe: {argv}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(
+                Config(
+                    channels=(TICK_CHANNEL,), pg_topology=PG_TOPOLOGY_DIRECT
+                ),
+                Path(tmp),
+            )
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                snapshot = rt.dcserver_snapshot()
+        self.assertIn("pg-topology DIRECT", snapshot)
+        self.assertNotIn("pg-tunnel CLOSED", snapshot)
+        self.assertFalse(any(call[0] == "nc" for call in calls))
+
+
 TICK_CHANNEL = ChannelConfig(
     channel_id="999",
     sendmessage_key="k",
@@ -623,12 +836,22 @@ class FakeRuntime(Runtime):
         self.log_lines: list[str] = []
         self.haystack: str | None = ""
         self.issue_calls = 0
+        self.live_sessions: set[str] | None = set()
+        self.watcher_probe = WatcherStateProbe(None)
+        self.watcher_calls = 0
 
     def log(self, msg: str) -> None:
         self.log_lines.append(msg)
 
     def discord_haystack(self, channel_id: str) -> str | None:
         return self.haystack
+
+    def live_tmux_sessions(self) -> set[str] | None:
+        return self.live_sessions
+
+    def watcher_state(self, channel_id: str) -> WatcherStateProbe:
+        self.watcher_calls += 1
+        return self.watcher_probe
 
     def dcserver_snapshot(self) -> str:
         return "stub-snapshot"
@@ -642,12 +865,20 @@ class FakeRuntime(Runtime):
 
 
 class FakePgRuntime(Runtime):
-    def __init__(self, verdict, *, after: int = 300, cooldown: int = 900) -> None:
+    def __init__(
+        self,
+        verdict,
+        *,
+        after: int = 300,
+        cooldown: int = 900,
+        topology: str = "tunnel",
+    ) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         cfg = Config(
             channels=(TICK_CHANNEL,),
             pg_alert_after_secs=after,
             pg_realert_secs=cooldown,
+            pg_topology=topology,
         )
         super().__init__(cfg, Path(self._tmp.name))
         self.verdict = verdict
@@ -700,6 +931,24 @@ class TickPgTunnelTests(unittest.TestCase):
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("OPEN", rt.alerts[0][0])
         self.assertIn("half-dead", rt.alerts[0][0])
+
+    def test_direct_node_closed_wording_does_not_blame_ssh_supervisor(self):
+        rt = self.make_rt(
+            evaluate_pg_health(False, False), topology=PG_TOPOLOGY_DIRECT
+        )
+        state = {PG_STATE_KEY: {"unhealthy_since": self.NOW - 300}}
+        tick_pg_tunnel(rt, state, self.NOW)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("CLOSED", rt.alerts[0][0])
+        self.assertIn("direct-node topology", rt.alerts[0][0])
+        self.assertNotIn("SSH -L supervisor 재기동 루프 실패", rt.alerts[0][0])
+        self.assertEqual(state[PG_STATE_KEY]["cause"], "direct_postgres_down")
+        self.assertTrue(any("cause=direct_postgres_down" in l for l in rt.log_lines))
+
+        rt.verdict = evaluate_pg_health(True, None)
+        tick_pg_tunnel(rt, state, self.NOW + 1)
+        self.assertIn("direct_postgres_down", rt.alerts[1][0])
+        self.assertNotIn("tunnel_down", rt.alerts[1][0])
 
     def test_realert_cooldown_boundary_is_exact(self):
         verdict = evaluate_pg_health(False, False)
@@ -812,6 +1061,173 @@ class TickChannelTests(unittest.TestCase):
         rt = self.make_rt(**cfg_overrides)
         rt.haystack = ""
         return rt
+
+    def arm_coverage(
+        self, rt: FakeRuntime, probe: WatcherStateProbe
+    ) -> None:
+        rt.live_sessions = {expected_tmux_session_name(TICK_CHANNEL)}
+        rt.watcher_probe = probe
+
+    def test_growth_aware_selector_is_wired_into_tick(self):
+        growing = self.proj_dir / "growing.jsonl"
+        stagnant_dir = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260710-140500"
+        )
+        stagnant_dir.mkdir()
+        stagnant = stagnant_dir / "stagnant.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        growing.write_text(
+            record(self.now - 2000, "missing from older growing transcript") + "\n",
+            encoding="utf-8",
+        )
+        stagnant.write_text(
+            record(self.now - 2000, "newer stagnant block landed") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(growing, (self.now - 100, self.now - 100))
+        os.utime(stagnant, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("newer stagnant block landed")
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [], "first tick must use mtime fallback")
+
+        with growing.open("a", encoding="utf-8") as f:
+            f.write("\n")
+        # Keep the growing file's mtime older than the stagnant candidate: only
+        # size growth can make it win on the second tick.
+        os.utime(growing, (self.now - 50, self.now - 50))
+        os.utime(stagnant, (self.now, self.now))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+
+    def test_coverage_404_alerts_only_after_two_consecutive_ticks(self):
+        rt = self.make_rt()
+        self.arm_coverage(rt, WatcherStateProbe(404))
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"]["coverage_uncovered_ticks"], 1)
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + rt.cfg.poll_secs)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("커버리지 불변식 위반", rt.alerts[0][0])
+        self.assertIn("watcher_state_404", rt.alerts[0][0])
+        self.assertIn("read-only", rt.alerts[0][0])
+        self.assertFalse(
+            rt.alerts[0][1], "read-only coverage alerts must not trigger a turn"
+        )
+
+    def test_coverage_alert_is_suppressed_during_deploy_window(self):
+        rt = self.make_rt()
+        self.arm_coverage(rt, WatcherStateProbe(404))
+        rt.deploy_marker.touch()
+        state = {"999": {"coverage_uncovered_ticks": 1}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state["999"])
+        self.assertTrue(any("deploy window" in l for l in rt.log_lines))
+
+    def test_coverage_recovery_keeps_antiflap_cooldown(self):
+        rt = self.make_rt()
+        self.arm_coverage(rt, WatcherStateProbe(404))
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        first_alert_at = self.now + rt.cfg.poll_secs
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at)
+        self.assertEqual(len(rt.alerts), 1)
+
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at + rt.cfg.poll_secs)
+        self.assertEqual(state["999"]["last_coverage_alert"], first_alert_at)
+
+        rt.watcher_probe = WatcherStateProbe(404)
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at + 2 * rt.cfg.poll_secs)
+        tick_channel(rt, TICK_CHANNEL, state, first_alert_at + 3 * rt.cfg.poll_secs)
+        self.assertEqual(
+            len(rt.alerts), 1, "flapping must not bypass the 900s cooldown"
+        )
+
+    def test_tmux_death_ends_expectation_without_claiming_recovery(self):
+        rt = self.make_rt()
+        state = {
+            "999": {
+                "coverage_alerting": True,
+                "last_coverage_alert": self.now - 60,
+                "coverage_uncovered_ticks": 2,
+            }
+        }
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertTrue(any("expectation ended" in l for l in rt.log_lines))
+        self.assertFalse(any("coverage restored" in l for l in rt.log_lines))
+        self.assertEqual(state["999"]["last_coverage_alert"], self.now - 60)
+
+    def test_dcserver_unreachable_never_advances_coverage_alert(self):
+        rt = self.make_rt()
+        self.arm_coverage(rt, WatcherStateProbe(None))
+        state = {"999": {"coverage_uncovered_ticks": 1}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + rt.cfg.poll_secs)
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("coverage_uncovered_ticks", state["999"])
+        self.assertTrue(any("dcserver_unreachable" in l for l in rt.log_lines))
+
+    def test_covered_tick_breaks_uncovered_continuity(self):
+        rt = self.make_rt()
+        self.arm_coverage(rt, WatcherStateProbe(404))
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        rt.watcher_probe = WatcherStateProbe(404)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"]["coverage_uncovered_ticks"], 1)
+
+    def test_coverage_alert_cannot_suppress_gap_alert_in_same_tick(self):
+        rt = self.gap_rt()
+        self.arm_coverage(rt, WatcherStateProbe(404))
+        state = {"999": {"coverage_uncovered_ticks": 1}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(len(rt.alerts), 2)
+        bodies = [body for body, _ in rt.alerts]
+        self.assertTrue(any("커버리지 불변식 위반" in body for body in bodies))
+        self.assertTrue(any("릴레이 갭 감지" in body for body in bodies))
+        self.assertIn("last_coverage_alert", state["999"])
+        self.assertIn("last_alert", state["999"])
+
+    def test_coverage_probe_exception_cannot_suppress_gap_alert(self):
+        rt = self.gap_rt()
+        with mock.patch.object(
+            rt, "live_tmux_sessions", side_effect=RuntimeError("probe broke")
+        ):
+            tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertTrue(any("coverage tick error" in l for l in rt.log_lines))
+
+    def test_corrupt_growth_state_fails_open_to_mtime_fallback(self):
+        self.write_transcript([(self.now - 60, "fresh block")])
+        rt = self.make_rt()
+        rt.haystack = norm("fresh block")
+        transcript = self.proj_dir / "s.jsonl"
+        state = {"999": {"transcript_sizes": {str(transcript): "not-an-int"}}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        self.assertIsInstance(state["999"]["transcript_sizes"][str(transcript)], int)
 
     # (a) deploy-window suppression — REAL in_deploy_window runs against a real
     # marker file, so replacing it with `return False` fails this test.
