@@ -12,8 +12,12 @@ use crate::services::discord::relay_recovery::{
 };
 use crate::services::provider::ProviderKind;
 
+// Delay after each admitted attempt. The sixth (960s) is the terminal capped
+// horizon from the issue contract; no seventh action is admitted. Consequently
+// the six actual action times are cumulative +0/+30/+90/+210/+450/+930.
 const REDRIVE_BACKOFF_SECS: [i64; 6] = [30, 60, 120, 240, 480, 960];
 const REDRIVE_MAX_NO_PROGRESS_ATTEMPTS: u8 = 6;
+const _: () = assert!(REDRIVE_BACKOFF_SECS.len() == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS as usize);
 
 type RedriveKey = (String, String, u64);
 
@@ -27,7 +31,7 @@ struct RedriveEpisode {
 impl RedriveEpisode {
     fn resets(&self, previous: &Self) -> bool {
         self.frontier > previous.frontier
-            || self.identity != previous.identity
+            || (self.identity.is_some() && self.identity != previous.identity)
             || self.reconnect_count != previous.reconnect_count
     }
 }
@@ -38,7 +42,6 @@ struct RedriveAttemptState {
     attempts: u8,
     last_attempt_unix: i64,
     capped_alarm_emitted: bool,
-    shield_started_unix: Option<i64>,
 }
 
 impl RedriveAttemptState {
@@ -48,7 +51,6 @@ impl RedriveAttemptState {
             attempts: 0,
             last_attempt_unix: now_unix,
             capped_alarm_emitted: false,
-            shield_started_unix: None,
         }
     }
 }
@@ -60,6 +62,8 @@ struct RedriveAttemptDecision {
 }
 
 static REDRIVE_ATTEMPTS: LazyLock<dashmap::DashMap<RedriveKey, RedriveAttemptState>> =
+    LazyLock::new(dashmap::DashMap::new);
+static REDRIVE_PLACEHOLDER_SHIELDS: LazyLock<dashmap::DashMap<RedriveKey, (RedriveEpisode, i64)>> =
     LazyLock::new(dashmap::DashMap::new);
 
 impl SharedData {
@@ -95,6 +99,7 @@ impl SharedData {
             *state = RedriveAttemptState::new(episode, now_unix);
         }
         if state.attempts >= REDRIVE_MAX_NO_PROGRESS_ATTEMPTS {
+            debug_assert_eq!(REDRIVE_BACKOFF_SECS[usize::from(state.attempts - 1)], 960);
             let emit_capped_alarm = !state.capped_alarm_emitted;
             state.capped_alarm_emitted = true;
             return RedriveAttemptDecision {
@@ -111,26 +116,52 @@ impl SharedData {
                 };
             }
         }
-        state.attempts += 1;
-        state.last_attempt_unix = now_unix;
-        let emit_capped_alarm = state.attempts == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS;
-        state.capped_alarm_emitted |= emit_capped_alarm;
         RedriveAttemptDecision {
-            attempt: Some(state.attempts),
-            emit_capped_alarm,
+            attempt: Some(state.attempts + 1),
+            emit_capped_alarm: false,
         }
     }
 
-    fn record_redrive_placeholder_shield(
+    fn commit_redrive_success(
         &self,
         provider: &ProviderKind,
         channel_id: ChannelId,
         now_unix: i64,
-    ) {
+        reattached: bool,
+    ) -> RedriveAttemptDecision {
         let key = self.redrive_key(provider, channel_id);
-        if let Some(mut state) = REDRIVE_ATTEMPTS.get_mut(&key) {
-            state.shield_started_unix.get_or_insert(now_unix);
+        let mut state = REDRIVE_ATTEMPTS
+            .get_mut(&key)
+            .expect("redrive success must follow an admitted attempt");
+        state.attempts += 1;
+        state.last_attempt_unix = now_unix;
+        if reattached {
+            let current = self
+                .tmux_relay_coord(channel_id)
+                .reconnect_count
+                .load(Ordering::Acquire);
+            if current == state.episode.reconnect_count.saturating_add(1) {
+                state.episode.reconnect_count = current;
+            }
         }
+        let emit_capped_alarm =
+            state.attempts == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS && !state.capped_alarm_emitted;
+        state.capped_alarm_emitted |= emit_capped_alarm;
+        let decision = RedriveAttemptDecision {
+            attempt: Some(state.attempts),
+            emit_capped_alarm,
+        };
+        let episode = state.episode.clone();
+        drop(state);
+
+        let now_millis = chrono::Utc::now().timestamp_millis();
+        let mut shield = REDRIVE_PLACEHOLDER_SHIELDS
+            .entry(key)
+            .or_insert_with(|| (episode.clone(), now_millis));
+        if episode.resets(&shield.0) {
+            *shield = (episode, now_millis);
+        }
+        decision
     }
 
     pub(in crate::services::discord) fn redrive_placeholder_shield_context(
@@ -138,13 +169,9 @@ impl SharedData {
         provider: &ProviderKind,
         channel_id: ChannelId,
     ) -> Option<(i64, u64)> {
-        REDRIVE_ATTEMPTS
+        REDRIVE_PLACEHOLDER_SHIELDS
             .get(&self.redrive_key(provider, channel_id))
-            .and_then(|state| {
-                state
-                    .shield_started_unix
-                    .map(|started| (started, state.episode.frontier))
-            })
+            .map(|shield| (shield.1, shield.0.frontier))
     }
 }
 
@@ -277,14 +304,14 @@ impl HealthRegistry {
             return Ok(false);
         }
 
-        let applied = if nudge_existing_watcher_for_backlog(
+        let (applied, reattached) = if nudge_existing_watcher_for_backlog(
             &shared,
             provider,
             &snapshot,
             channel_id,
             now_unix_secs,
         ) {
-            true
+            (true, false)
         } else {
             if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
                 return Ok(false);
@@ -299,9 +326,13 @@ impl HealthRegistry {
             )
             .await?
             .applied
+            .then_some((true, true))
+            .unwrap_or((false, true))
         };
         if applied {
-            shared.record_redrive_placeholder_shield(provider, channel_id, now_unix_secs);
+            let committed =
+                shared.commit_redrive_success(provider, channel_id, now_unix_secs, reattached);
+            trace_redrive_cap_if_needed(provider, channel_id, &snapshot, committed);
         }
         Ok(applied)
     }
@@ -862,6 +893,7 @@ mod tests {
     ) {
         let key = shared.redrive_key(provider, channel_id);
         REDRIVE_ATTEMPTS.remove(&key);
+        REDRIVE_PLACEHOLDER_SHIELDS.remove(&key);
         stall_liveness::clear_stall_watchdog_liveness_state(
             provider,
             channel_id,
@@ -881,15 +913,18 @@ mod tests {
         }
         let decision = shared.redrive_attempt_decision(provider, channel_id, snapshot, now);
         trace_redrive_cap_if_needed(provider, channel_id, snapshot, decision);
-        let Some(attempt) = decision.attempt else {
+        let Some(reserved_attempt) = decision.attempt else {
             return (false, None);
         };
         let nudged =
             nudge_existing_watcher_for_backlog(shared, provider, snapshot, channel_id, now);
         if nudged {
-            shared.record_redrive_placeholder_shield(provider, channel_id, now);
+            let committed = shared.commit_redrive_success(provider, channel_id, now, false);
+            trace_redrive_cap_if_needed(provider, channel_id, snapshot, committed);
+            assert_eq!(committed.attempt, Some(reserved_attempt));
+            return (true, committed.attempt);
         }
-        (nudged, Some(attempt))
+        (false, None)
     }
 
     #[test]
@@ -983,8 +1018,16 @@ mod tests {
         base: i64,
     ) {
         for (expected, elapsed) in [0, 30, 90, 210, 450, 930].into_iter().enumerate() {
+            let reserved =
+                shared.redrive_attempt_decision(provider, channel_id, snapshot, base + elapsed);
             assert_eq!(
-                shared.redrive_attempt_decision(provider, channel_id, snapshot, base + elapsed),
+                reserved.attempt,
+                Some(expected as u8 + 1),
+                "the next ordinal must be reserved without consuming it"
+            );
+            assert!(!reserved.emit_capped_alarm);
+            assert_eq!(
+                shared.commit_redrive_success(provider, channel_id, base + elapsed, false),
                 RedriveAttemptDecision {
                     attempt: Some(expected as u8 + 1),
                     emit_capped_alarm: expected == 5,
@@ -1016,6 +1059,20 @@ mod tests {
 
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
         let base = 1_810_000_000;
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base - 20_000,)
+                .attempt,
+            Some(1)
+        );
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base - 10_000,)
+                .attempt,
+            Some(1),
+            "a TOCTOU-suppressed action must not consume its reservation"
+        );
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
         drive_attempt_state_to_cap(&shared, &provider, channel_id, &snapshot, base);
         stall_liveness::gc_stall_watchdog_liveness_state(
             base + stall_liveness::STALL_LIVENESS_STATE_TTL_SECS as i64 + 1,
@@ -1027,6 +1084,20 @@ mod tests {
                 emit_capped_alarm: false
             },
             "elapsed time and liveness-state GC must not re-arm capped redrive"
+        );
+        let mut missing_identity = snapshot.clone();
+        missing_identity.inflight_identity = None;
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(
+                    &provider,
+                    channel_id,
+                    &missing_identity,
+                    base + 11 * 86_400,
+                )
+                .attempt,
+            None,
+            "identity disappearance is not a replacement and must not re-arm"
         );
 
         let mut progressed = snapshot.clone();
@@ -1064,6 +1135,42 @@ mod tests {
                 emit_capped_alarm: false,
             },
             "replacing the live watcher instance must re-arm the episode"
+        );
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+
+        let first =
+            shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 4_000_000);
+        assert_eq!(first.attempt, Some(1));
+        shared
+            .tmux_relay_coord(channel_id)
+            .reconnect_count
+            .store(1, Ordering::Release);
+        assert_eq!(
+            shared.commit_redrive_success(&provider, channel_id, base + 4_000_000, true,),
+            RedriveAttemptDecision {
+                attempt: Some(1),
+                emit_capped_alarm: false,
+            }
+        );
+        let mut self_reattached = snapshot.clone();
+        self_reattached.reconnect_count = 1;
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(
+                    &provider,
+                    channel_id,
+                    &self_reattached,
+                    base + 4_000_030,
+                )
+                .attempt,
+            Some(2),
+            "redrive's own reattach must advance the same capped episode"
+        );
+        assert!(
+            shared
+                .redrive_placeholder_shield_context(&provider, channel_id)
+                .is_some(),
+            "self-reattach re-baselining must not erase the reclaim shield"
         );
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
     }

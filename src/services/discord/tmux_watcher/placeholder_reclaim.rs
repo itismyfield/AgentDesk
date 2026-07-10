@@ -27,8 +27,9 @@ pub(super) fn drop_placeholder_orphan_record(
 /// the local id for an in-turn retry + enqueues a durable record; committed /
 /// permanent failure drops the handles and compare-and-clears the persisted
 /// `current_msg_id` (#3077 pattern) so a later segment cannot edit the stale id.
-/// The return value is NOT wired into finalize decisions (panel defer semantics
-/// #3003 r5/r12 unchanged).
+/// `false` preserves the local handle for retry. The fresh-idle no-result caller
+/// also treats it as a bounded finalize deferral; a redrive shield deliberately
+/// uses that non-destructive path for at most 900s.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn reclaim_orphan_external_input_placeholder(
     http: &Arc<serenity::Http>,
@@ -43,13 +44,13 @@ pub(super) async fn reclaim_orphan_external_input_placeholder(
     let Some(msg_id) = *placeholder_msg_id else {
         return true;
     };
-    if let Some((nudged_at_unix, frontier_at_nudge)) =
+    if let Some((nudged_at_millis, frontier_at_nudge)) =
         shared.redrive_placeholder_shield_context(provider, channel_id)
         && super::panel_decisions::redrive_shielded_placeholder(
-            nudged_at_unix,
-            msg_id.created_at().unix_timestamp(),
+            nudged_at_millis,
+            msg_id.created_at().timestamp_millis(),
             shared.committed_relay_offset(channel_id) <= frontier_at_nudge,
-            chrono::Utc::now().timestamp(),
+            chrono::Utc::now().timestamp_millis(),
         )
     {
         tracing::debug!(

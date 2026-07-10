@@ -11,7 +11,8 @@ use super::*;
 /// the session during cleanup: pause/epoch change yields `AbortFollowupTookOver`,
 /// while a pinned newer turn yields `SkipStale`. Thus response emptiness never
 /// contradicts a proven terminator, and a current fresh-idle turn's non-zero
-/// pinned identity cannot be mistaken for a stale follow-up.
+/// pinned identity cannot be mistaken for a stale follow-up: `FreshIdle` requires
+/// output growth, so `turn_start_offset < current_offset` for the current turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FreshIdleFinalizeDecision {
     /// `PausedLive` (no terminator) — defer; preserve inflight, keep waiting.
@@ -485,17 +486,17 @@ pub(super) fn watcher_should_reclaim_orphan_turn_placeholder(
         )
 }
 
-const REDRIVE_PLACEHOLDER_SHIELD_SECS: i64 = 900;
+const REDRIVE_PLACEHOLDER_SHIELD_MILLIS: i64 = 900_000;
 
 pub(super) fn redrive_shielded_placeholder(
-    nudged_at_unix: i64,
-    message_created_at_unix: i64,
+    nudged_at_millis: i64,
+    message_created_at_millis: i64,
     frontier_not_advanced: bool,
-    now_unix: i64,
+    now_millis: i64,
 ) -> bool {
-    message_created_at_unix >= nudged_at_unix
+    message_created_at_millis >= nudged_at_millis
         && frontier_not_advanced
-        && now_unix.saturating_sub(nudged_at_unix).max(0) < REDRIVE_PLACEHOLDER_SHIELD_SECS
+        && now_millis.saturating_sub(nudged_at_millis).max(0) < REDRIVE_PLACEHOLDER_SHIELD_MILLIS
 }
 
 /// #3107 (CHANGE 3): pure decision for the `load_inflight_state == None` arm of
@@ -575,9 +576,9 @@ mod redrive_placeholder_shield_tests {
 
     #[test]
     fn redrive_placeholder_shield_truth_table_4299() {
-        let nudged_at = 1_800_000_000;
+        let nudged_at = 1_800_000_000_000;
         assert!(
-            redrive_shielded_placeholder(nudged_at, nudged_at + 1, true, nudged_at + 899),
+            redrive_shielded_placeholder(nudged_at, nudged_at + 1, true, nudged_at + 899_999),
             "post-nudge placeholder at a frozen frontier must be preserved inside 900s"
         );
         assert!(
@@ -585,7 +586,7 @@ mod redrive_placeholder_shield_tests {
             "a pre-nudge orphan must retain the existing reclaim semantics"
         );
         assert!(
-            !redrive_shielded_placeholder(nudged_at, nudged_at + 1, true, nudged_at + 900),
+            !redrive_shielded_placeholder(nudged_at, nudged_at + 1, true, nudged_at + 900_000),
             "the shield must expire at its hard 900s bound"
         );
         assert!(
