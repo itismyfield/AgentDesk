@@ -14,7 +14,7 @@
 | `src/db/automation_candidates.rs` | 1003 | automation-pipeline | 2026-08-31 | #3405 |
 | `src/server/maintenance.rs` | 1119 | server-runtime | 2026-10-31 | #3909 |
 | `src/server/worker_registry.rs` | 1278 | server-runtime | 2026-08-31 | #3739 |
-| `src/services/codex_tui/rollout_tail.rs` | 1276 | discord-relay | 2026-10-31 | #3843 |
+| `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/catch_up.rs` | 1691 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2750 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1374 | discord-relay | 2026-08-31 | #3405 |
@@ -85,9 +85,9 @@
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
 | `src/services/claude.rs` | 2960 |
 | `src/services/claude_tui/input.rs` | 1932 |
-| `src/services/codex.rs` | 3049 |
+| `src/services/codex.rs` | 3112 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
-| `src/services/codex_tui/input.rs` | 1366 |
+| `src/services/codex_tui/input.rs` | 1546 |
 | `src/services/discord/commands/text_commands.rs` | 1476 |
 | `src/services/discord/formatting.rs` | 2862 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
@@ -102,7 +102,7 @@
 | `src/services/onboarding/mod.rs` | 2937 |
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1381 |
-| `src/services/provider.rs` | 1656 |
+| `src/services/provider.rs` | 1647 |
 | `src/services/qwen.rs` | 2198 |
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1589 |
