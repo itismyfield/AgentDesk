@@ -906,6 +906,8 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptSubmitConfirmation {
+    /// Continue by tailing the pinned rollout. This also covers historical
+    /// prompt text with no active-composer draft; it never authorizes replay.
     Submitted,
     RetrySafeDraft,
     Unconfirmed,
@@ -1025,8 +1027,10 @@ fn clear_cancelled_partial_prompt_draft(
     }
 }
 
-fn snapshot_confirms_prompt_left_editor(snapshot: &PromptReadinessSnapshot) -> bool {
-    snapshot.tmux_pane_alive && snapshot.capture_available && !snapshot.prompt_draft_detected
+fn snapshot_allows_tail_only_no_replay(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive
+        && snapshot.capture_available
+        && !snapshot_has_retry_safe_prompt_draft(snapshot)
 }
 
 fn classify_prompt_submit_confirmation(
@@ -1035,8 +1039,8 @@ fn classify_prompt_submit_confirmation(
 ) -> PromptSubmitConfirmation {
     if snapshot_has_retry_safe_prompt_draft(first) && snapshot_has_retry_safe_prompt_draft(second) {
         PromptSubmitConfirmation::RetrySafeDraft
-    } else if snapshot_confirms_prompt_left_editor(first)
-        || snapshot_confirms_prompt_left_editor(second)
+    } else if snapshot_allows_tail_only_no_replay(first)
+        || snapshot_allows_tail_only_no_replay(second)
     {
         PromptSubmitConfirmation::Submitted
     } else {
@@ -1932,8 +1936,16 @@ mod tests {
     #[test]
     fn submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots() {
         let draft = active_box_draft_snapshot("Discord follow-up");
-        let submitted = submit_snapshot(true, true, false, false);
-        let ambiguous_draft = submit_snapshot(true, true, true, true);
+        let mut submitted = submit_snapshot(true, true, false, true);
+        submitted.pane_tail = "working\n› Discord follow-up".to_string();
+        let mut historical_over_blank_composer = submit_snapshot(true, true, true, true);
+        historical_over_blank_composer.pane_tail = "\
+› Discord follow-up\n\
+╭────────────────────────────────────────╮\n\
+│ ▌                                      │\n\
+╰────────────────────────────────────────╯\n\
+  Esc to interrupt   Ctrl+J newline   ⏎ send"
+            .to_string();
         let capture_missing = submit_snapshot(true, false, false, false);
         let pane_dead = submit_snapshot(false, false, false, false);
 
@@ -1950,9 +1962,12 @@ mod tests {
             PromptSubmitConfirmation::Unconfirmed
         );
         assert_eq!(
-            classify_prompt_submit_confirmation(&ambiguous_draft, &ambiguous_draft),
-            PromptSubmitConfirmation::Unconfirmed,
-            "a draft flag without active-composer evidence is never submitted or retry-safe"
+            classify_prompt_submit_confirmation(
+                &historical_over_blank_composer,
+                &historical_over_blank_composer,
+            ),
+            PromptSubmitConfirmation::Submitted,
+            "historical prompt text without an active draft is tail-only and never replay-safe"
         );
     }
 
