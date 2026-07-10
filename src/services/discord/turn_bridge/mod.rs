@@ -641,8 +641,8 @@ mod headless_completion_footer_tests {
     /// suffix but is prefixed by `if outcome {`, not `.await;`, so a bare-suffix
     /// assertion would still pass off the sibling even if this write were deleted
     /// or moved to the `Err` arm (the false-negative this anchor closes). The
-    /// literal is `\`-continued so its own compacted source (`true; \ terminal_`)
-    /// keeps the backslash and does not self-match the `include_str!` include.
+    /// searched source is only the included terminal-delivery module, so this
+    /// test's own expected literal cannot self-match.
     #[test]
     fn headless_enqueue_success_registers_completion_footer_text() {
         let source = compact_ws(include_str!("terminal_outcome_delivery.rs"));
