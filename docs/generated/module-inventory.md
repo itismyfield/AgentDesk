@@ -787,7 +787,7 @@
 | `services::discord::turn_bridge::task_notification_lifecycle` | `src/services/discord/turn_bridge/task_notification_lifecycle.rs` | 221 | 104 | 117 |  |
 | `services::discord::turn_bridge::terminal_controller_cutover` | `src/services/discord/turn_bridge/terminal_controller_cutover.rs` | 1838 | 960 | 878 |  |
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 2002 | 738 | 1264 |  |
-| `services::discord::turn_bridge::terminal_outcome_delivery` | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 882 | 882 | 0 |  |
+| `services::discord::turn_bridge::terminal_outcome_delivery` | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 881 | 881 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::cancel_prompt_replace` | `src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs` | 447 | 447 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue` | `src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` | 430 | 430 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery.rs` | 419 | 419 | 0 |  |

@@ -306,7 +306,6 @@ pub(super) async fn run_terminal_outcome_delivery(
         match outcome {
             CancelPromptReplaceOutcome::Continue => {}
         }
-    } else if recovery_retry {
     } else if let Some(owner) = bridge_output_owner {
         let ts = chrono::Local::now().format("%H:%M:%S");
         match owner {
