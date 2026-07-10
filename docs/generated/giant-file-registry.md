@@ -87,7 +87,7 @@
 | `src/services/claude_tui/input.rs` | 1932 |
 | `src/services/codex.rs` | 3131 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
-| `src/services/codex_tui/input.rs` | 1657 |
+| `src/services/codex_tui/input.rs` | 1659 |
 | `src/services/discord/commands/text_commands.rs` | 1476 |
 | `src/services/discord/formatting.rs` | 2862 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
