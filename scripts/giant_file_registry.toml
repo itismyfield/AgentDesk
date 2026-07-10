@@ -482,6 +482,7 @@ decompose_issue = "#3405"
 # RETIRED 2026-07-10 (#4230 S11): turn_bridge/mod.rs dropped from 1231 to
 # 997 production LoC after the remaining free-function helper zones and all
 # 460 inline test LoC moved to capped/natural child modules. The #3038-tagged
+# Of the production decrease, -7 is blank-line compaction (imports 3 + spawn_turn_bridge body 4); the remainder is helper-move contribution.
 # registry entry is retired; the root is below the 1000-prod-LoC giant threshold.
 
 # RETIRED 2026-07-10 (#4230 S10): terminal_outcome_delivery.rs dropped from
