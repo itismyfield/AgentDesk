@@ -2355,6 +2355,10 @@ mod watcher_stream_progress_tests {
 
 #[cfg(test)]
 mod restored_turn_injected_anchor_tests {
+    mod task_notification_kind_restart_invariant_tests {
+        include!("tmux/task_notification_kind_restart_roundtrip_tests.rs");
+    }
+
     use super::restored_watcher_turn_from_inflight;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;

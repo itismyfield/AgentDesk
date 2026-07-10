@@ -154,7 +154,9 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1624 lines; +11 from #4380 broadening the
+  - `src/services/discord/tmux.rs` (1624 lines; test-only #4253 wires the
+    deterministic task-notification-kind disk-save/reload/restart roundtrip
+    module, with no production-LoC or runtime behavior change; +11 from #4380 broadening the
     watcher-yield escape hatch (`watcher_should_yield_to_inflight_state`) to honour
     the `readopted_from_inflight` crash re-adopt marker via
     `crash_resume_guard::crash_readopt_live_relay_resume_required`, so a
