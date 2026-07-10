@@ -470,7 +470,7 @@
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
-| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1269 | 564 | 705 |  |
+| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1428 | 610 | 818 |  |
 | `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 268 | 101 | 167 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 226 | 226 | 0 |  |
