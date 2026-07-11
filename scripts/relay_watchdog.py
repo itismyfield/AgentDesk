@@ -1660,23 +1660,45 @@ def evaluate_active_foreground_coverage(
         return CoverageActivityVerdict(
             COVERAGE_UNCOVERED, "active_foreground_clock_unknown"
         )
-    timestamps = [
-        timestamp
-        for timestamp in (
-            activity.last_outbound_activity_ms,
-            activity.last_relay_ts_ms,
+    now_value = float(now_ms)
+    freshness_ms = float(freshness_secs) * 1000
+    if not math.isfinite(freshness_ms):
+        return CoverageActivityVerdict(
+            COVERAGE_UNCOVERED, "active_foreground_clock_unknown"
         )
-        if isinstance(timestamp, int)
-        and not isinstance(timestamp, bool)
-        and timestamp > 0
-    ]
+    timestamps: list[float] = []
+    for raw_timestamp in (
+        activity.last_outbound_activity_ms,
+        activity.last_relay_ts_ms,
+    ):
+        if not (
+            isinstance(raw_timestamp, int)
+            and not isinstance(raw_timestamp, bool)
+            and raw_timestamp > 0
+        ):
+            continue
+        try:
+            timestamp = float(raw_timestamp)
+        except (OverflowError, ValueError):
+            return CoverageActivityVerdict(
+                COVERAGE_UNCOVERED, "active_foreground_activity_invalid"
+            )
+        if not math.isfinite(timestamp):
+            return CoverageActivityVerdict(
+                COVERAGE_UNCOVERED, "active_foreground_activity_invalid"
+            )
+        timestamps.append(timestamp)
     if not timestamps:
         return CoverageActivityVerdict(
             COVERAGE_UNCOVERED, "active_foreground_activity_absent"
         )
     freshest = max(timestamps)
-    age_ms = float(now_ms) - freshest
-    if age_ms <= 0 or age_ms < float(freshness_secs) * 1000:
+    age_ms = now_value - freshest
+    if age_ms < 0:
+        return CoverageActivityVerdict(
+            COVERAGE_UNCOVERED, "active_foreground_activity_future"
+        )
+    if age_ms < freshness_ms:
         return CoverageActivityVerdict(
             COVERAGE_COVERED, "active_foreground_recent_activity"
         )
@@ -1872,12 +1894,13 @@ def evaluate(
 
 
 def _is_finite_nonnegative_number(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-        and float(value) >= 0.0
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        return False
+    return math.isfinite(numeric) and numeric >= 0.0
 
 
 def _bounded_delivered_watermarks(

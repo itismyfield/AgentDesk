@@ -1041,8 +1041,68 @@ class CoverageEvaluationTests(unittest.TestCase):
         self.assertEqual(boundary.state, COVERAGE_UNCOVERED)
         self.assertEqual(boundary.reason, "active_foreground_activity_stale")
 
+    def test_future_activity_timestamp_cannot_suppress_desync(self):
+        activity = self.active_foreground(
+            last_outbound_activity_ms=self.NOW_MS + 1,
+            last_relay_ts_ms=None,
+        )
+        activity_verdict = evaluate_active_foreground_coverage(
+            activity,
+            self.NOW_MS,
+        )
+        self.assertEqual(activity_verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(
+            activity_verdict.reason,
+            "active_foreground_activity_future",
+        )
+
+        coverage_verdict = evaluate_coverage(
+            True,
+            200,
+            True,
+            True,
+            1,
+            activity,
+            self.NOW_MS,
+        )
+        self.assertEqual(coverage_verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(coverage_verdict.reason, "attached_but_desynced")
+        self.assertTrue(coverage_verdict.confirmed)
+
+    def test_oversized_activity_timestamp_fails_closed_without_throwing(self):
+        activity = self.active_foreground(
+            last_outbound_activity_ms=10**400,
+            last_relay_ts_ms=None,
+        )
+        activity_verdict = evaluate_active_foreground_coverage(
+            activity,
+            self.NOW_MS,
+        )
+        self.assertEqual(activity_verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(
+            activity_verdict.reason,
+            "active_foreground_activity_invalid",
+        )
+
+        coverage_verdict = evaluate_coverage(
+            True,
+            200,
+            True,
+            True,
+            1,
+            activity,
+            self.NOW_MS,
+        )
+        self.assertEqual(coverage_verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(coverage_verdict.reason, "attached_but_desynced")
+        self.assertTrue(coverage_verdict.confirmed)
+
     def test_invalid_freshness_clock_cannot_suppress_desync(self):
-        for now_ms, freshness_secs in ((None, 60), (self.NOW_MS, 0)):
+        for now_ms, freshness_secs in (
+            (None, 60),
+            (self.NOW_MS, 0),
+            (10**400, 60),
+        ):
             with self.subTest(now_ms=now_ms, freshness_secs=freshness_secs):
                 verdict = evaluate_coverage(
                     True,
@@ -2006,6 +2066,63 @@ class RuntimeCoverageProbeTests(unittest.TestCase):
             probe.relay_activity,
             CoverageEvaluationTests.active_foreground(),
         )
+
+    def test_production_activity_clock_anomalies_fail_closed(self):
+        cases = (
+            (
+                "future",
+                CoverageEvaluationTests.NOW_MS + 1,
+                "active_foreground_activity_future",
+            ),
+            (
+                "oversized",
+                10**400,
+                "active_foreground_activity_invalid",
+            ),
+        )
+        for name, timestamp, reason in cases:
+            with self.subTest(name=name):
+                completed = subprocess.CompletedProcess(
+                    ["curl"],
+                    0,
+                    stdout=(
+                        json.dumps(
+                            WatcherStateParserTests.payload(
+                                last_outbound_activity_ms=timestamp,
+                                last_relay_ts_ms=None,
+                            )
+                        )
+                        + "\n200"
+                    ),
+                    stderr="",
+                )
+                with mock.patch.object(
+                    relay_watchdog.subprocess,
+                    "run",
+                    return_value=completed,
+                ):
+                    probe = self.make_rt().watcher_state("999")
+                activity_verdict = evaluate_active_foreground_coverage(
+                    probe.relay_activity,
+                    CoverageEvaluationTests.NOW_MS,
+                )
+                self.assertEqual(activity_verdict.state, COVERAGE_UNCOVERED)
+                self.assertEqual(activity_verdict.reason, reason)
+                coverage_verdict = evaluate_coverage(
+                    True,
+                    probe.status,
+                    probe.attached,
+                    probe.desynced,
+                    1,
+                    probe.relay_activity,
+                    CoverageEvaluationTests.NOW_MS,
+                )
+                self.assertEqual(coverage_verdict.state, COVERAGE_UNCOVERED)
+                self.assertEqual(
+                    coverage_verdict.reason,
+                    "attached_but_desynced",
+                )
+                self.assertTrue(coverage_verdict.confirmed)
 
     def test_watcher_state_malformed_200_keeps_status_but_not_claims(self):
         completed = subprocess.CompletedProcess(
