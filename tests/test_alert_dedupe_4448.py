@@ -14,12 +14,16 @@ class AlertDedupeWiringTests(unittest.TestCase):
         planning = (REPO_ROOT / "src/services/auto_queue/planning.rs").read_text(
             encoding="utf-8"
         )
+        dispatch_failure = (
+            REPO_ROOT / "src/db/auto_queue/entries/dispatch_failure.rs"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("FAILED_ENTRY_ALERT_REASON_CODE", planning)
         self.assertIn("failed_entry_alert_session_key", planning)
         self.assertIn("failure-transition", planning)
         self.assertIn("failure_transition_id", planning)
-        self.assertIn("enqueue_outbox_pg_with_ttl", planning)
+        self.assertIn("record_entry_dispatch_failure_with_alert_on_pg", planning)
+        self.assertIn("enqueue_outbox_pg_on_tx_with_ttl", dispatch_failure)
         self.assertIn("FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS", planning)
 
     def test_auto_queue_monitor_has_restart_safe_once_reconciliation(self) -> None:
@@ -36,7 +40,16 @@ class AlertDedupeWiringTests(unittest.TestCase):
         self.assertIn("turn_active", monitor)
         self.assertIn("awaiting_bg", monitor)
         self.assertIn("awaiting_user", monitor)
-        self.assertIn('source:"auto-queue-monitor"', monitor)
+        self.assertIn("/api/message-outbox/monitor-alerts", monitor)
+        self.assertIn("action_id", monitor)
+        state_helper = (
+            REPO_ROOT / "scripts/auto_queue_monitor_state.py"
+        ).read_text(encoding="utf-8")
+        route = (
+            REPO_ROOT / "src/server/routes/message_outbox.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"pending_action"', state_helper)
+        self.assertIn('source: "auto-queue-monitor"', route)
 
     def test_quality_regression_has_one_runtime_alert_authority(self) -> None:
         legacy = REPO_ROOT / "src/services/observability/quality_alert.rs"

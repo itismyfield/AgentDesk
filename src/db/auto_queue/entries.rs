@@ -7,6 +7,12 @@ use super::runs::{
     maybe_finalize_run_if_ready_pg,
 };
 
+mod dispatch_failure;
+pub use dispatch_failure::{
+    EntryDispatchFailureAlert, record_entry_dispatch_failure_on_pg,
+    record_entry_dispatch_failure_with_alert_on_pg,
+};
+
 pub const ENTRY_STATUS_PENDING: &str = "pending";
 pub const ENTRY_STATUS_DISPATCHED: &str = "dispatched";
 pub const ENTRY_STATUS_DONE: &str = "done";
@@ -195,112 +201,6 @@ pub async fn reactivate_done_entry_on_pg(
     })
 }
 
-pub async fn record_entry_dispatch_failure_on_pg(
-    pool: &PgPool,
-    entry_id: &str,
-    max_retries: i64,
-    trigger_source: &str,
-) -> Result<EntryDispatchFailureResult, String> {
-    let retry_limit = max_retries.max(1);
-    loop {
-        let current = load_entry_status_row_pg(pool, entry_id).await?;
-        if current.status != ENTRY_STATUS_DISPATCHED {
-            return Ok(EntryDispatchFailureResult {
-                run_id: current.run_id,
-                from_status: current.status.clone(),
-                to_status: current.status,
-                retry_count: current.retry_count,
-                retry_limit,
-                failure_transition_id: None,
-                changed: false,
-            });
-        }
-
-        let retry_count = current.retry_count.saturating_add(1);
-        let target_status = if retry_count >= retry_limit {
-            ENTRY_STATUS_FAILED
-        } else {
-            ENTRY_STATUS_PENDING
-        };
-
-        let mut tx = pool.begin().await.map_err(|error| {
-            format!("begin postgres auto-queue dispatch failure transaction: {error}")
-        })?;
-        let rows_affected = sqlx::query(
-            "UPDATE auto_queue_entries
-             SET status = CASE
-                     WHEN retry_count + 1 >= $1 THEN 'failed'
-                     ELSE 'pending'
-                 END,
-                 dispatch_id = NULL,
-                 slot_index = NULL,
-                 dispatched_at = NULL,
-                 completed_at = CASE
-                     WHEN retry_count + 1 >= $1 THEN NOW()
-                     ELSE NULL
-                 END,
-                 retry_count = retry_count + 1
-             WHERE id = $2
-               AND status = 'dispatched'
-               AND retry_count = $3",
-        )
-        .bind(retry_limit)
-        .bind(entry_id)
-        .bind(current.retry_count)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| {
-            format!("update postgres auto-queue dispatch failure {entry_id}: {error}")
-        })?
-        .rows_affected();
-
-        if rows_affected == 0 {
-            tx.rollback().await.map_err(|error| {
-                format!("rollback stale postgres auto-queue dispatch failure {entry_id}: {error}")
-            })?;
-
-            let latest = load_entry_status_row_pg(pool, entry_id).await?;
-            if latest.status != ENTRY_STATUS_DISPATCHED {
-                return Ok(EntryDispatchFailureResult {
-                    run_id: latest.run_id,
-                    from_status: latest.status.clone(),
-                    to_status: latest.status,
-                    retry_count: latest.retry_count,
-                    retry_limit,
-                    failure_transition_id: None,
-                    changed: false,
-                });
-            }
-            continue;
-        }
-        let failure_transition_id = record_entry_transition_on_pg(
-            &mut tx,
-            entry_id,
-            ENTRY_STATUS_DISPATCHED,
-            target_status,
-            trigger_source,
-        )
-        .await?;
-
-        if target_status == ENTRY_STATUS_FAILED {
-            maybe_finalize_run_after_terminal_entry_pg(&mut tx, &current.run_id, target_status)
-                .await?;
-        }
-
-        tx.commit().await.map_err(|error| {
-            format!("commit postgres auto-queue dispatch failure {entry_id}: {error}")
-        })?;
-        return Ok(EntryDispatchFailureResult {
-            run_id: current.run_id,
-            from_status: ENTRY_STATUS_DISPATCHED.to_string(),
-            to_status: target_status.to_string(),
-            retry_count,
-            retry_limit,
-            failure_transition_id: Some(failure_transition_id),
-            changed: true,
-        });
-    }
-}
 fn dispatch_json_field(document: Option<&str>, field: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(document?).ok()?;
     value

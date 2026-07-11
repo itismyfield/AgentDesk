@@ -77,12 +77,18 @@ case "$url" in
     fi
     printf '%s\n' '{"dispatch":{"status":"dispatched"}}'
     ;;
-  */api/discord/send)
+  */api/message-outbox/monitor-alerts)
     if [ "${FAKE_FAIL_POST:-0}" = "1" ]; then
       exit 22
     fi
     if [ -n "${FAKE_NOTIFY_DELAY:-}" ]; then
       sleep "$FAKE_NOTIFY_DELAY"
+    fi
+    action_id=$(printf '%s' "$body" | jq -r '.action_id')
+    if [ -f "$FAKE_NOTIFY_LOG" ] \
+      && jq -e --arg action_id "$action_id" \
+        'select(.action_id == $action_id)' "$FAKE_NOTIFY_LOG" >/dev/null; then
+      exit 0
     fi
     printf '%s\n' "$body" >> "$FAKE_NOTIFY_LOG"
     ;;
@@ -102,6 +108,7 @@ run_once() {
   AQ_STUCK_THRESHOLD_MIN=1 \
   AQ_REVIEW_THRESHOLD_MIN=1 \
   AQ_MONITOR_STATE_FILE="$STATE_FILE" \
+  PYTHON="${PYTHON:-python3}" \
   bash "$ROOT/scripts/auto-queue-monitor.sh" >/dev/null
 }
 
@@ -126,10 +133,10 @@ assert_notify_count() {
 echo active > "$FAKE_MODE_FILE"
 FAKE_FAIL_POST=1 run_once
 assert_notify_count 0
-if [ -f "$STATE_FILE" ]; then
-  echo "failed notification must not advance persistent state" >&2
+jq -e '.pending_action.action_id | test("^[0-9a-f]{32}$")' "$STATE_FILE" >/dev/null || {
+  echo "failed enqueue must preserve a durable pending action ID" >&2
   exit 1
-fi
+}
 
 run_once
 assert_notify_count 3
@@ -164,7 +171,9 @@ run_once
 assert_notify_count 6
 
 jq -s -e '
-  all(.[]; .source == "auto-queue-monitor") and
+  all(.[];
+    (.action_id | test("^[0-9a-f]{32}$"))
+    and (.action == "alert" or .action == "recovery")) and
   any(.[]; .content | contains("ANOMALY")) and
   any(.[]; .content | contains("STUCK")) and
   any(.[]; .content | contains("REVIEW_LONG")) and
@@ -188,6 +197,35 @@ assert_notify_count 6
 echo review-missing-only > "$FAKE_MODE_FILE"
 run_once
 assert_notify_count 6
+
+# A crash/failure after the durable endpoint accepts an action but before the
+# state commit retries the same action ID. The endpoint's action-ID dedupe
+# leaves one notification obligation, then the retry commits local state.
+cat > "$TMP_ROOT/bin/python-commit-fail-once" <<'FAKE_PYTHON'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${2:-}" = "commit" ] && [ ! -f "$FAKE_COMMIT_MARKER" ]; then
+  : > "$FAKE_COMMIT_MARKER"
+  exit 3
+fi
+exec python3 "$@"
+FAKE_PYTHON
+chmod +x "$TMP_ROOT/bin/python-commit-fail-once"
+rm -f "$STATE_FILE" "$STATE_FILE.lock" "$FAKE_NOTIFY_LOG"
+export FAKE_COMMIT_MARKER="$TMP_ROOT/commit-failed-once"
+rm -f "$FAKE_COMMIT_MARKER"
+echo stuck-only > "$FAKE_MODE_FILE"
+PYTHON="$TMP_ROOT/bin/python-commit-fail-once" run_once
+assert_notify_count 1
+first_action_id=$(jq -r '.action_id' "$FAKE_NOTIFY_LOG")
+jq -e --arg action_id "$first_action_id" \
+  '.pending_action.action_id == $action_id' "$STATE_FILE" >/dev/null
+run_once
+assert_notify_count 1
+jq -e --arg action_id "$first_action_id" '
+  .pending_action == null
+  and .conditions["STUCK|run-1|entry-stuck|dispatch-2"].last_alert_at == 1000
+' "$STATE_FILE" >/dev/null
 
 # The state lock spans detection, delivery, and commit. Two processes racing
 # from an empty state still deliver one alert per condition, not two.

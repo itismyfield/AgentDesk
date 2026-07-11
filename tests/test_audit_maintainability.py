@@ -786,6 +786,9 @@ class LegacySqliteCheck(unittest.TestCase):
         monitor = (REPO_ROOT / "scripts" / "auto-queue-monitor.sh").read_text(
             encoding="utf-8"
         )
+        outbox_route = (
+            REPO_ROOT / "src" / "server" / "routes" / "message_outbox.rs"
+        ).read_text(encoding="utf-8")
         source_registry = (
             REPO_ROOT
             / "src"
@@ -795,7 +798,8 @@ class LegacySqliteCheck(unittest.TestCase):
             / "source_registry.rs"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('source:"auto-queue-monitor"', monitor)
+        self.assertIn("/api/message-outbox/monitor-alerts", monitor)
+        self.assertIn('source: "auto-queue-monitor"', outbox_route)
         self.assertIn('"auto-queue-monitor"', source_registry)
 
 

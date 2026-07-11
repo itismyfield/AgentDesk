@@ -1723,8 +1723,9 @@
   - `src/db/auto_queue/tests.rs` is the migrated auto-queue test harness; it is a
     dedicated `*_tests.rs` file (excluded from the production giant-file count),
     so add coverage freely but keep it split-friendly.
-  - `src/db/auto_queue/entries.rs` (1508 lines; awaiting follow-up split per
-    auto-queue decompose epic #1782).
+  - `src/db/auto_queue/entries.rs` (1408 lines after #4448 extracted terminal
+    dispatch-failure/outbox atomicity into `entries/dispatch_failure.rs`;
+    awaiting follow-up split per auto-queue decompose epic #1782).
   - `src/db/auto_queue/phase_gates.rs` (1639 lines after #1980 durable
     reconciliation, production LoC; PG-backed tests for `current_batch_phase_pg`
     + `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` live in a

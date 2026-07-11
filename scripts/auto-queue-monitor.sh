@@ -30,12 +30,16 @@ api_post_json() {
 
 notify_anomaly() {
   local msg="$1"
+  local action_id="$2"
+  local action="$3"
   local body
   body=$(jq -n -c \
     --arg target "channel:$NOTIFY_CHANNEL" \
     --arg content "$msg" \
-    '{target:$target, content:$content, source:"auto-queue-monitor", bot:"notify"}')
-  api_post_json "/api/discord/send" "$body"
+    --arg action_id "$action_id" \
+    --arg action "$action" \
+    '{target:$target, content:$content, action_id:$action_id, action:$action}')
+  api_post_json "/api/message-outbox/monitor-alerts" "$body"
 }
 
 entry_age_min() {
@@ -181,7 +185,7 @@ collect_active_conditions() {
 
 monitor_once_unlocked() {
   local status_json run_status run_id sessions_json sessions_available now_epoch now_ms
-  local temp_dir active_file unknown_file actions_file action_file action kind message
+  local temp_dir active_file unknown_file actions_file action_file action action_id kind message
 
   if ! status_json=$(api_get "/api/queue/status" 2>/dev/null); then
     echo "auto-queue monitor: status API unavailable; preserving incident state" >&2
@@ -231,36 +235,38 @@ monitor_once_unlocked() {
   jq -s '.' "$CONDITIONS_JSONL" > "$active_file"
   jq -s 'unique' "$UNKNOWN_JSONL" > "$unknown_file"
 
-  if ! "$PYTHON" "$STATE_HELPER" plan \
-    --state-file "$STATE_FILE" \
-    --active-file "$active_file" \
-    --unknown-file "$unknown_file" \
-    --now "$now_epoch" \
-    --cooldown-secs "$COOLDOWN_SECS" > "$actions_file"; then
-    echo "auto-queue monitor: state reconciliation failed; preserving state" >&2
-    rm -rf "$temp_dir"
-    return 0
-  fi
-
-  while IFS= read -r action; do
-    [ -n "$action" ] || continue
+  while true; do
+    if ! "$PYTHON" "$STATE_HELPER" plan \
+      --state-file "$STATE_FILE" \
+      --active-file "$active_file" \
+      --unknown-file "$unknown_file" \
+      --now "$now_epoch" \
+      --cooldown-secs "$COOLDOWN_SECS" > "$actions_file"; then
+      echo "auto-queue monitor: state reconciliation failed; preserving state" >&2
+      break
+    fi
+    action=$(head -n 1 "$actions_file")
+    [ -n "$action" ] || break
     printf '%s\n' "$action" > "$action_file"
     kind=$(printf '%s' "$action" | jq -r '.action')
+    action_id=$(printf '%s' "$action" | jq -r '.action_id')
     if [ "$kind" = "recovery" ]; then
       message=$(printf '%s' "$action" | jq -r '.condition.recovery')
     else
       message=$(printf '%s' "$action" | jq -r '.condition.alert')
     fi
     echo "$message"
-    if notify_anomaly "$message"; then
+    if notify_anomaly "$message" "$action_id" "$kind"; then
       if ! "$PYTHON" "$STATE_HELPER" commit \
         --state-file "$STATE_FILE" --action-file "$action_file"; then
-        echo "auto-queue monitor: notification sent but state commit lost CAS; will reconcile" >&2
+        echo "auto-queue monitor: durable notification queued but state commit lost CAS; will retry the same action ID" >&2
+        break
       fi
     else
-      echo "auto-queue monitor: notification failed; state not advanced" >&2
+      echo "auto-queue monitor: durable notification enqueue failed; pending action preserved" >&2
+      break
     fi
-  done < "$actions_file"
+  done
 
   rm -rf "$temp_dir"
 }

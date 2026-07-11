@@ -10,6 +10,13 @@
 > `auto-queue-monitor` label now matches its live script producer. No delivery
 > verb or v3 callsite changed.)
 
+> Last refreshed: 2026-07-11 (#4448 review follow-up — quality regression
+> cooldowns and terminal auto-queue entry failures now commit their
+> `message_outbox` obligation in the same PostgreSQL transaction as the owning
+> state change. The shell monitor persists an action ID before submission and
+> uses the protected `/api/message-outbox/monitor-alerts` durable enqueue route,
+> so a crash before its local commit retries the same obligation.)
+
 > Last refreshed: 2026-07-11 (#4247 S0 review follow-up — removing the sole
 > destructive reaction-removal intake route also retires the unreachable
 > `AlreadyStopping` reaction-control reply reason. The live

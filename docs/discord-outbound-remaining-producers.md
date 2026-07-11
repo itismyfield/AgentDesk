@@ -25,6 +25,10 @@ Discord summaries to direct v3 envelopes.
   a `ManualOutboundDeliveryId`, so the shared send contract sees the source,
   reason/session correlation, and row semantic event instead of anonymous
   manual delivery.
+- `auto-queue-monitor`: shell-detected alerts and recoveries persist a stable
+  action ID before calling `/api/message-outbox/monitor-alerts`. The protected
+  route durably deduplicates that ID in `message_outbox`; a retry after a local
+  state-commit crash cannot create a second notification obligation.
 - `/api/discord/send-dm`: DM content delivery now uses the same manual outbound
   delivery path as `/api/discord/send` after DM-channel resolution. Callers can pass
   `correlation_id` plus `semantic_event_id`, or `idempotency_key`, to opt into

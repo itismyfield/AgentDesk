@@ -435,16 +435,6 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
     validate_outbox_source(message.source)?;
     let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
-    let dedupe_key = (dedupe_ttl_secs > 0)
-        .then(|| {
-            dedupe_key_for_message(
-                message.target,
-                message.content,
-                reason_code,
-                session_key.as_deref(),
-            )
-        })
-        .flatten();
 
     let duplicate_id = if dedupe_ttl_secs > 0 {
         find_duplicate_outbox_message_pg(
@@ -485,8 +475,44 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
     }
 
     let mut tx = pool.begin().await?;
-    release_expired_outbox_dedupe_key_pg(&mut tx, dedupe_key.as_deref()).await?;
-    let outbox_id = sqlx::query_scalar::<_, i64>(
+    let outbox_id = enqueue_outbox_pg_on_tx_with_ttl(&mut tx, message, dedupe_ttl_secs).await?;
+    tx.commit().await?;
+
+    if outbox_id.is_none() {
+        tracing::info!(
+            target = message.target,
+            reason_code,
+            session_key = session_key.as_deref(),
+            dedupe_ttl_secs,
+            "suppressed duplicate outbox message by database dedupe key"
+        );
+    }
+
+    Ok(outbox_id)
+}
+
+/// Validated deduplicating insert for callers that must atomically commit an
+/// outbox obligation with another PostgreSQL state transition.
+pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+) -> Result<Option<i64>, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
+    let reason_code = normalized_reason_code(message.reason_code);
+    let session_key = normalized_session_key(message.target, message.session_key);
+    let dedupe_key = (dedupe_ttl_secs > 0)
+        .then(|| {
+            dedupe_key_for_message(
+                message.target,
+                message.content,
+                reason_code,
+                session_key.as_deref(),
+            )
+        })
+        .flatten();
+    release_expired_outbox_dedupe_key_pg(tx, dedupe_key.as_deref()).await?;
+    Ok(sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7,
@@ -507,21 +533,21 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
     .bind(session_key.as_deref())
     .bind(dedupe_key.as_deref())
     .bind(dedupe_ttl_secs)
-    .fetch_optional(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    .fetch_optional(&mut **tx)
+    .await?)
+}
 
-    if outbox_id.is_none() {
-        tracing::info!(
-            target = message.target,
-            reason_code,
-            session_key = session_key.as_deref(),
-            dedupe_ttl_secs,
-            "suppressed duplicate outbox message by database dedupe key"
-        );
-    }
-
-    Ok(outbox_id)
+#[cfg(test)]
+pub(crate) async fn monitor_alert_rows_for_test(
+    pool: &PgPool,
+) -> Result<Vec<(String, String, String, String, String, String, bool)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT source, bot, reason_code, session_key, target, content,
+                dedupe_expires_at >= created_at + INTERVAL '30 days'
+           FROM message_outbox",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// Variant of [`enqueue_outbox_pg`] that lets the caller pick the dedupe TTL.

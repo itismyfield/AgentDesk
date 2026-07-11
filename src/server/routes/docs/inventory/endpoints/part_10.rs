@@ -5,6 +5,28 @@ use super::super::{EndpointDoc, body_param, ep, query_param};
 pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
         ep(
+            "POST",
+            "/api/message-outbox/monitor-alerts",
+            "health",
+            "Durably enqueue one auto-queue monitor alert or recovery by its persisted action ID; replaying the ID is idempotent.",
+        )
+        .with_params([
+            ("target", body_param("string", true, "Discord channel target in channel:<positive id> form.")),
+            ("content", body_param("string", true, "Non-empty notification text, at most 2000 bytes.")),
+            ("action_id", body_param("string", true, "Persisted 32-character lowercase hexadecimal monitor action ID.")),
+            ("action", body_param("string", true, "Either alert or recovery.")),
+        ])
+        .with_example(
+            json!({"body": {"target": "channel:1479671298497183835", "content": "[auto-queue monitor] STUCK: #4448", "action_id": "0123456789abcdef0123456789abcdef", "action": "alert"}}),
+            json!({"ok": true, "enqueued": true, "action_id": "0123456789abcdef0123456789abcdef"}),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"target": "channel:123", "content": "alert", "action_id": "bad", "action": "alert"}}),
+            json!({"ok": false, "error": "action_id must be 32 lowercase hexadecimal characters"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/message-outbox/monitor-alerts -H 'Content-Type: application/json' -d '{\"target\":\"channel:1479671298497183835\",\"content\":\"[auto-queue monitor] STUCK: #4448\",\"action_id\":\"0123456789abcdef0123456789abcdef\",\"action\":\"alert\"}'"),
+        ep(
             "GET",
             "/api/message-outbox/failed",
             "health",

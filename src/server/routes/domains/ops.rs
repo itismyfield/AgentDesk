@@ -27,6 +27,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/message-outbox/failed", get(message_outbox::list_failed))
             .route(
+                "/message-outbox/monitor-alerts",
+                post(message_outbox::enqueue_monitor_alert),
+            )
+            .route(
                 "/message-outbox/failed/redrive",
                 post(message_outbox::redrive_failed),
             )

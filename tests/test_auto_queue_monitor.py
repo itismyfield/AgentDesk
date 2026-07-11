@@ -34,20 +34,33 @@ class AutoQueueMonitorStateTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def test_state_advances_only_after_success_commit(self) -> None:
+    def test_pending_action_id_is_persisted_before_enqueue_and_reused(self) -> None:
         active = [condition()]
         first = state_helper.plan_actions(self.state_path, active, 1_000, 1_800)
         self.assertEqual([action["action"] for action in first], ["alert"])
-        self.assertFalse(self.state_path.exists())
+        action_id = first[0]["action_id"]
+        self.assertEqual(len(action_id), 32)
+        persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["pending_action"]["action_id"], action_id)
 
-        # A failed HTTP send means no commit. The next process/run must retry.
-        retry = state_helper.plan_actions(self.state_path, active, 1_001, 1_800)
+        # A failed HTTP enqueue or a crash before commit retries the exact ID.
+        retry = state_helper.plan_actions(self.state_path, active, 3_001, 1_800)
         self.assertEqual([action["action"] for action in retry], ["alert"])
+        self.assertEqual(retry[0]["action_id"], action_id)
+        self.assertEqual(retry[0]["condition"], first[0]["condition"])
+        self.assertEqual(retry[0]["expected_last_alert_at"], None)
+        self.assertEqual(retry[0]["now"], 3_001)
 
         self.assertTrue(state_helper.commit_action(self.state_path, retry[0]))
         persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
         entry = persisted["conditions"][active[0]["key"]]
-        self.assertEqual(entry["last_alert_at"], 1_001)
+        self.assertEqual(entry["last_alert_at"], 3_001)
+        self.assertIsNone(persisted["pending_action"])
+        self.assertEqual(
+            state_helper.plan_actions(self.state_path, active, 3_002, 1_800),
+            [],
+            "a long enqueue outage must not immediately consume the cooldown after commit",
+        )
 
     def test_cooldown_is_at_least_thirty_minutes_and_per_instance(self) -> None:
         first_condition = condition(suffix="one")
@@ -66,11 +79,12 @@ class AutoQueueMonitorStateTests(unittest.TestCase):
             self.state_path, [first_condition], 11_800, 1
         )
         self.assertEqual([action["action"] for action in boundary], ["alert"])
+        self.assertTrue(state_helper.commit_action(self.state_path, boundary[0]))
 
         # A distinct condition instance is not suppressed by the first key.
         second_condition = condition(suffix="two")
         mixed = state_helper.plan_actions(
-            self.state_path, [first_condition, second_condition], 10_100, 1
+            self.state_path, [first_condition, second_condition], 11_801, 1
         )
         self.assertEqual(
             [action["condition"]["key"] for action in mixed],
@@ -84,17 +98,11 @@ class AutoQueueMonitorStateTests(unittest.TestCase):
 
         recovery = state_helper.plan_actions(self.state_path, [], 2_010, 1_800)
         self.assertEqual([action["action"] for action in recovery], ["recovery"])
-        # Failed recovery send is retried because the state was not committed.
-        self.assertEqual(
-            [
-                action["action"]
-                for action in state_helper.plan_actions(
-                    self.state_path, [], 2_011, 1_800
-                )
-            ],
-            ["recovery"],
-        )
-        self.assertTrue(state_helper.commit_action(self.state_path, recovery[0]))
+        # Failed recovery enqueue is retried with the same durable action ID.
+        retry = state_helper.plan_actions(self.state_path, [], 2_011, 1_800)
+        self.assertEqual(retry[0]["action_id"], recovery[0]["action_id"])
+        self.assertEqual(retry[0]["now"], 2_011)
+        self.assertTrue(state_helper.commit_action(self.state_path, retry[0]))
         self.assertEqual(state_helper.plan_actions(self.state_path, [], 2_012, 1_800), [])
 
     def test_malformed_state_realerts_without_consuming_incident(self) -> None:
@@ -105,21 +113,18 @@ class AutoQueueMonitorStateTests(unittest.TestCase):
         self.assertEqual([action["action"] for action in actions], ["alert"])
         quarantined = list(self.state_path.parent.glob("monitor-state.json.corrupt.*"))
         self.assertEqual(len(quarantined), 1)
-        self.assertFalse(self.state_path.exists())
+        persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["pending_action"]["action_id"], actions[0]["action_id"])
 
-        # A failed HTTP delivery leaves no state and retries immediately.
+        # A failed enqueue retains the action identity and retries it.
         self.assertEqual(
-            [
-                action["action"]
-                for action in state_helper.plan_actions(
-                    self.state_path, active, 3_001, 1_800
-                )
-            ],
-            ["alert"],
+            state_helper.plan_actions(self.state_path, active, 3_001, 1_800)[0]["action_id"],
+            actions[0]["action_id"],
         )
 
         # Only a successful delivery commit creates cooldown/recovery state.
-        self.assertTrue(state_helper.commit_action(self.state_path, actions[0]))
+        retry = state_helper.plan_actions(self.state_path, active, 3_001, 1_800)
+        self.assertTrue(state_helper.commit_action(self.state_path, retry[0]))
         recovery = state_helper.plan_actions(self.state_path, [], 3_100, 1_800)
         self.assertEqual([action["action"] for action in recovery], ["recovery"])
 

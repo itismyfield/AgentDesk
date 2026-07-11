@@ -55,7 +55,7 @@
 | `src/cli/migrate/source.rs` | 1612 |
 | `src/cli/provider_cli/mod.rs` | 1039 |
 | `src/config.rs` | 2723 |
-| `src/db/auto_queue/entries.rs` | 1508 |
+| `src/db/auto_queue/entries.rs` | 1408 |
 | `src/db/auto_queue/phase_gates.rs` | 1639 |
 | `src/db/dispatched_sessions.rs` | 1734 |
 | `src/db/dispatches/mod.rs` | 1028 |

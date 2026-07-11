@@ -14,6 +14,7 @@ use crate::services::message_outbox_recovery::{
 };
 
 const MAX_EXACT_IDS: usize = 50;
+const MONITOR_ALERT_DEDUPE_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 
 #[derive(Deserialize)]
 pub struct FailedQuery {
@@ -28,6 +29,15 @@ pub struct RedriveRequest {
     reason: String,
     #[serde(default = "default_dry_run")]
     dry_run: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitorAlertRequest {
+    target: String,
+    content: String,
+    action_id: String,
+    action: String,
 }
 
 fn default_dry_run() -> bool {
@@ -72,6 +82,99 @@ fn control_allowed(state: &AppState, peer: SocketAddr) -> Result<(), Response> {
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
         )
             .into_response())
+    }
+}
+
+fn normalized_monitor_alert(
+    request: MonitorAlertRequest,
+) -> Result<(String, String, String, &'static str), &'static str> {
+    let target = request.target.trim();
+    let channel_id = target
+        .strip_prefix("channel:")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0);
+    if channel_id.is_none() {
+        return Err("target must be channel:<positive Discord channel id>");
+    }
+    let content = request.content.trim();
+    if content.is_empty() || content.len() > 2_000 {
+        return Err("content is required and must be at most 2000 bytes");
+    }
+    let action_id = request.action_id.trim();
+    if action_id.len() != 32
+        || !action_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("action_id must be 32 lowercase hexadecimal characters");
+    }
+    let reason_code = match request.action.trim() {
+        "alert" => "auto_queue.monitor_alert",
+        "recovery" => "auto_queue.monitor_recovery",
+        _ => return Err("action must be alert or recovery"),
+    };
+    Ok((
+        target.to_string(),
+        content.to_string(),
+        action_id.to_string(),
+        reason_code,
+    ))
+}
+
+pub async fn enqueue_monitor_alert(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(request): Json<MonitorAlertRequest>,
+) -> Response {
+    if let Err(response) = control_allowed(&state, peer) {
+        return response;
+    }
+    let (target, content, action_id, reason_code) = match normalized_monitor_alert(request) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"ok": false, "error": error})),
+            )
+                .into_response();
+        }
+    };
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "pg pool unavailable"})),
+        )
+            .into_response();
+    };
+    let session_key = format!("auto_queue_monitor:{action_id}");
+    match crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target: &target,
+            content: &content,
+            bot: "notify",
+            source: "auto-queue-monitor",
+            reason_code: Some(reason_code),
+            session_key: Some(&session_key),
+        },
+        MONITOR_ALERT_DEDUPE_TTL_SECS,
+    )
+    .await
+    {
+        Ok(enqueued) => Json(serde_json::json!({
+            "ok": true,
+            "enqueued": enqueued,
+            "action_id": action_id
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::error!(%error, %action_id, "monitor alert outbox enqueue failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"ok": false, "error": "monitor alert enqueue failed"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -213,12 +316,19 @@ mod tests {
         request
     }
 
-    fn app(mut config: crate::config::Config) -> axum::Router {
+    fn app_with_pg(
+        mut config: crate::config::Config,
+        pg_pool: Option<sqlx::PgPool>,
+    ) -> axum::Router {
         config.policies.hot_reload = false;
         let engine = crate::engine::PolicyEngine::new(&config).unwrap();
         let tx = crate::server::ws::new_broadcast();
         let buffer = crate::server::ws::spawn_batch_flusher(tx.clone());
-        crate::server::routes::api_router_with_pg(engine, config, tx, buffer, None, None)
+        crate::server::routes::api_router_with_pg(engine, config, tx, buffer, None, pg_pool)
+    }
+
+    fn app(config: crate::config::Config) -> axum::Router {
+        app_with_pg(config, None)
     }
 
     #[tokio::test]
@@ -245,5 +355,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(post_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let monitor_response = app(crate::config::Config::default())
+            .oneshot(request(
+                "POST",
+                "/message-outbox/monitor-alerts",
+                r#"{"target":"channel:123","content":"alert","action_id":"0123456789abcdef0123456789abcdef","action":"alert"}"#,
+                "127.0.0.1:8791",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(monitor_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn monitor_alert_action_id_is_durable_and_idempotent_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let router = app_with_pg(crate::config::Config::default(), Some(pool.clone()));
+        let body = r#"{"target":"channel:123","content":"monitor alert","action_id":"0123456789abcdef0123456789abcdef","action":"alert"}"#;
+
+        for _ in 0..2 {
+            let response = router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/message-outbox/monitor-alerts",
+                    body,
+                    "127.0.0.1:8791",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let invalid = router
+            .oneshot(request(
+                "POST",
+                "/message-outbox/monitor-alerts",
+                r#"{"target":"channel:123","content":"monitor alert","action_id":"bad","action":"alert"}"#,
+                "127.0.0.1:8791",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let rows = crate::services::message_outbox::monitor_alert_rows_for_test(&pool)
+            .await
+            .expect("load monitor outbox rows");
+        assert_eq!(
+            rows,
+            vec![(
+                "auto-queue-monitor".to_string(),
+                "notify".to_string(),
+                "auto_queue.monitor_alert".to_string(),
+                "auto_queue_monitor:0123456789abcdef0123456789abcdef".to_string(),
+                "channel:123".to_string(),
+                "monitor alert".to_string(),
+                true,
+            )]
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

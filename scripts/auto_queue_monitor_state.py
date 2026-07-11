@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Restart-safe incident state for ``auto-queue-monitor.sh``.
 
-The shell monitor owns condition detection and delivery.  This helper owns the
-small durable state machine so an alert is recorded only after the HTTP send
-succeeds, persistent conditions respect a cooldown, and a resolved condition
-emits one recovery notification.
+The shell monitor owns condition detection and durable outbox submission.  This
+helper persists a stable action ID before submission, so a crash between a
+successful HTTP response and the local state commit retries the same outbox
+obligation instead of creating a second notification.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -80,8 +81,35 @@ def _normalize_entry(key: str, raw: Any) -> dict[str, Any]:
     }
 
 
+def normalize_action(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise StateError("action must be an object")
+    action = raw.get("action")
+    if action not in {"alert", "recovery"}:
+        raise StateError(f"unsupported action: {action!r}")
+    action_id = _nonempty_string(raw.get("action_id"), "action.action_id")
+    if len(action_id) != 32 or any(ch not in "0123456789abcdef" for ch in action_id):
+        raise StateError("action.action_id must be 32 lowercase hexadecimal characters")
+    condition = normalize_condition(raw.get("condition"))
+    now = raw.get("now")
+    expected = raw.get("expected_last_alert_at")
+    if not isinstance(now, int) or isinstance(now, bool) or now < 0:
+        raise StateError("action.now must be a non-negative integer")
+    if expected is not None and (
+        not isinstance(expected, int) or isinstance(expected, bool) or expected < 0
+    ):
+        raise StateError("action.expected_last_alert_at is invalid")
+    return {
+        "action_id": action_id,
+        "action": action,
+        "condition": condition,
+        "now": now,
+        "expected_last_alert_at": expected,
+    }
+
+
 def _empty_state() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "conditions": {}}
+    return {"version": STATE_VERSION, "conditions": {}, "pending_action": None}
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -99,7 +127,13 @@ def load_state(path: Path) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     for key, entry in conditions.items():
         normalized[_nonempty_string(key, "state condition key")] = _normalize_entry(key, entry)
-    return {"version": STATE_VERSION, "conditions": normalized}
+    pending_raw = raw.get("pending_action")
+    pending_action = None if pending_raw is None else normalize_action(pending_raw)
+    return {
+        "version": STATE_VERSION,
+        "conditions": normalized,
+        "pending_action": pending_action,
+    }
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
@@ -171,6 +205,14 @@ def plan_actions(
         # a brand-new incident behind a fabricated cooldown.
         state = _empty_state()
 
+    pending_action = state["pending_action"]
+    if pending_action is not None:
+        if pending_action["now"] != now:
+            pending_action = {**pending_action, "now": now}
+            state["pending_action"] = pending_action
+            save_state(state_path, state)
+        return [pending_action]
+
     stored: dict[str, dict[str, Any]] = state["conditions"]
     actions: list[dict[str, Any]] = []
     changed = False
@@ -237,32 +279,34 @@ def plan_actions(
                 }
             )
 
+    if actions:
+        pending_action = {
+            **actions[0],
+            "action_id": uuid.uuid4().hex,
+        }
+        state["pending_action"] = pending_action
+        save_state(state_path, state)
+        return [pending_action]
     if changed:
         save_state(state_path, state)
-    return actions
+    return []
 
 
 def commit_action(state_path: Path, raw_action: Any) -> bool:
-    if not isinstance(raw_action, dict):
-        raise StateError("action must be an object")
-    action = raw_action.get("action")
-    if action not in {"alert", "recovery"}:
-        raise StateError(f"unsupported action: {action!r}")
-    condition = normalize_condition(raw_action.get("condition"))
-    now = raw_action.get("now")
-    expected = raw_action.get("expected_last_alert_at")
-    if not isinstance(now, int) or isinstance(now, bool) or now < 0:
-        raise StateError("action.now must be a non-negative integer")
-    if expected is not None and (
-        not isinstance(expected, int) or isinstance(expected, bool) or expected < 0
-    ):
-        raise StateError("action.expected_last_alert_at is invalid")
+    requested = normalize_action(raw_action)
+    action = requested["action"]
+    condition = requested["condition"]
+    now = requested["now"]
+    expected = requested["expected_last_alert_at"]
 
     try:
         state = load_state(state_path)
     except StateError:
         _quarantine_corrupt_state(state_path, now)
         state = _empty_state()
+    pending_action = state["pending_action"]
+    if pending_action is None or pending_action != requested:
+        return False
     stored: dict[str, dict[str, Any]] = state["conditions"]
     current = stored.get(condition["key"])
     current_last = current["last_alert_at"] if current is not None else None
@@ -279,6 +323,7 @@ def commit_action(state_path: Path, raw_action: Any) -> bool:
         if current is None:
             return False
         del stored[condition["key"]]
+    state["pending_action"] = None
     save_state(state_path, state)
     return True
 
