@@ -78,6 +78,8 @@ async fn prepare_watcher_task_response(
     kind: TaskNotificationKind,
     context: Option<&task_delivery::TaskNotificationContext>,
     response_turn_key: &str,
+    turn_started_at: Option<&str>,
+    turn_start_offset: u64,
 ) -> Result<PreparedWatcherTaskResponse, PrepareWatcherTaskResponseError> {
     let mut event = context.map_or_else(
         || {
@@ -151,13 +153,16 @@ async fn prepare_watcher_task_response(
         .ui
         .placeholder_live_events
         .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
-    let claim = task_delivery::claim_task_response_delivery(
+    let claim = task_delivery::claim_task_response_delivery_with_recovery_key_and_started_at(
         shared.pg_pool.as_ref(),
         channel_id.get(),
         provider.as_str(),
         tmux_session_name,
         event.event_key(),
         response_turn_key,
+        Some(response_turn_key),
+        turn_started_at,
+        Some(turn_start_offset),
         card.message_id,
         task_delivery::ResponseDeliveryOwner::Watcher,
     )
@@ -227,6 +232,8 @@ pub(super) async fn apply_watcher_task_response(
     kind: TaskNotificationKind,
     context: Option<&task_delivery::TaskNotificationContext>,
     response_turn_key: &str,
+    turn_started_at: Option<&str>,
+    turn_start_offset: u64,
     relay_text: &str,
     external_input_lease_before_relay: bool,
     locals: WatcherTaskResponseLocals<'_>,
@@ -252,6 +259,8 @@ pub(super) async fn apply_watcher_task_response(
         kind,
         context,
         response_turn_key,
+        turn_started_at,
+        turn_start_offset,
     )
     .await
     {

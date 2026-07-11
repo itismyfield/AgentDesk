@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
     -- while a restarted watcher only knows terminal offset/body identity.
     recovery_turn_key VARCHAR(64)
         CHECK (recovery_turn_key IS NULL OR char_length(recovery_turn_key) = 64),
+    -- The monotonic transcript boundary identifies one logical provider turn
+    -- even when sink/watcher response bytes produce divergent fallback keys.
+    turn_start_offset BIGINT CHECK (turn_start_offset IS NULL OR turn_start_offset >= 0),
     referenced_card_message_id BIGINT NOT NULL
         CHECK (referenced_card_message_id > 0),
     response_generation INTEGER NOT NULL DEFAULT 1

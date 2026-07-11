@@ -1253,13 +1253,16 @@ async fn watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg(
     assert_ne!(frame_key, fallback_key);
     assert_ne!(sink_fallback_key, fallback_key);
 
-    let watcher = claim_task_response_delivery(
+    let watcher = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &fallback_key,
+        Some(&fallback_key),
+        Some("2026-07-11 19:38:00"),
+        Some(44_461),
         card.message_id,
         ResponseDeliveryOwner::Watcher,
     )
@@ -1267,7 +1270,7 @@ async fn watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg(
     .expect("watcher persists fallback-primary response");
     assert!(matches!(watcher, ResponseDeliveryClaimOutcome::Owned(_)));
 
-    let sink = claim_task_response_delivery_with_recovery_key(
+    let sink = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
@@ -1275,6 +1278,8 @@ async fn watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg(
         event.event_key(),
         &frame_key,
         Some(&sink_fallback_key),
+        Some("2026-07-11 19:38:00"),
+        Some(44_461),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -1371,6 +1376,7 @@ async fn recently_delivered_watcher_blocks_a_divergent_late_sink_alias_pg() {
             "sink body diverged from watcher",
         )),
         Some("2000-01-01T00:00:00Z"),
+        None,
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -2999,6 +3005,228 @@ async fn delivered_semantic_event_accepts_a_second_response_turn_pg() {
         rows, 2,
         "one semantic card must retain one row per response turn"
     );
+}
+
+#[tokio::test]
+async fn active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_active_sequential_4446",
+        "active first turn does not consume a later turn",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("active-sequential-response-cycle");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm card");
+    let first_key = response_turn_key(4_446, "2026-07-12 04:20:00", Some(70_000));
+    let second_key = response_turn_key(4_447, "2026-07-12 04:20:00", Some(70_100));
+    let first = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &first_key,
+        Some(&first_key),
+        Some("2026-07-12 04:20:00"),
+        Some(70_000),
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("production local timestamp is accepted");
+    let ResponseDeliveryClaimOutcome::Owned(first) = first else {
+        panic!("first turn owns its response fence")
+    };
+    mark_task_response_sent(Some(&pool), &first)
+        .await
+        .expect("record first response POST");
+
+    let second_while_first_active = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &second_key,
+        Some(&second_key),
+        Some("2026-07-12 04:20:00"),
+        Some(70_100),
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("later turn observes the active event fence");
+    assert!(
+        matches!(
+            second_while_first_active,
+            ResponseDeliveryClaimOutcome::Wait
+        ),
+        "a distinct offset must wait, not inherit the first turn's sent state"
+    );
+
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE response_turn_key = $1",
+    )
+    .bind(&first_key)
+    .execute(&pool)
+    .await
+    .expect("expire first sent lease");
+    let second_finalizes_expired_first =
+        claim_task_response_delivery_with_recovery_key_and_started_at(
+            Some(&pool),
+            event.scope.channel_id,
+            &event.scope.provider,
+            &event.scope.session_key,
+            event.event_key(),
+            &second_key,
+            Some(&second_key),
+            Some("2026-07-12 04:20:00"),
+            Some(70_100),
+            card.message_id,
+            ResponseDeliveryOwner::Sink,
+        )
+        .await
+        .expect("later turn safely finalizes the expired sent predecessor");
+    assert!(matches!(
+        second_finalizes_expired_first,
+        ResponseDeliveryClaimOutcome::Wait
+    ));
+
+    let second = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &second_key,
+        Some(&second_key),
+        Some("2026-07-12 04:20:00"),
+        Some(70_100),
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim distinct second response after first finalizes");
+    assert!(matches!(second, ResponseDeliveryClaimOutcome::Owned(_)));
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE event_key = $1",
+    )
+    .bind(event.event_key())
+    .fetch_one(&pool)
+    .await
+    .expect("count sequential response rows");
+    assert_eq!(
+        rows, 2,
+        "both logical turns retain separate durable authority"
+    );
+}
+
+#[tokio::test]
+async fn legacy_second_turn_starting_before_first_delivery_is_not_suppressed_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_legacy_sequential_4446",
+        "legacy turn start is compared with row creation, not delivery",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("legacy-overlapping-response-cycle");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm card");
+    let first_key = fallback_response_turn_key(
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        80_000,
+        "first legacy response",
+    );
+    let first = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &first_key,
+        card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim first legacy response");
+    let ResponseDeliveryClaimOutcome::Owned(first) = first else {
+        panic!("first legacy response owns its fence")
+    };
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET created_at = NOW() - INTERVAL '10 seconds'
+         WHERE response_turn_key = $1",
+    )
+    .bind(&first_key)
+    .execute(&pool)
+    .await
+    .expect("place first row creation before the second turn start");
+    mark_task_response_delivered(Some(&pool), &first)
+        .await
+        .expect("deliver first response after the second turn began");
+
+    let second_started_at = (chrono::Local::now() - chrono::Duration::seconds(5))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let second_key = fallback_response_turn_key(
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        80_100,
+        "second legacy response",
+    );
+    let second = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &second_key,
+        Some(&second_key),
+        Some(&second_started_at),
+        None,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim second legacy response");
+    assert!(
+        matches!(second, ResponseDeliveryClaimOutcome::Owned(_)),
+        "first-turn delivery latency must not suppress a later logical turn"
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE event_key = $1",
+    )
+    .bind(event.event_key())
+    .fetch_one(&pool)
+    .await
+    .expect("count overlapping legacy response rows");
+    assert_eq!(rows, 2);
 }
 
 #[tokio::test]

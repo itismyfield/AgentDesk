@@ -653,7 +653,8 @@ src/
 │   │   │   ├── store/
 │   │   │   │   ├── missing_card_replacement.rs
 │   │   │   │   ├── response_chunks.rs
-│   │   │   │   └── response_fence.rs
+│   │   │   │   ├── response_fence.rs
+│   │   │   │   └── response_identity.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs

@@ -147,6 +147,8 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                 kind,
                 task_notification_context,
                 &response_turn_key,
+                (!started_at.is_empty()).then_some(started_at),
+                turn_data_start_offset,
                 &relay_text,
                 external_input_lease_before_relay,
                 super::task_response_authority::WatcherTaskResponseLocals {

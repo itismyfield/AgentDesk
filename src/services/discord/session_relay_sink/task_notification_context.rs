@@ -224,6 +224,7 @@ pub(super) async fn ensure_card_and_route(
                 &turn_key,
                 Some(&recovery_turn_key),
                 Some(&delivery.frame_turn_started_at),
+                delivery.frame_turn_start_offset,
                 message_id.get(),
                 ResponseDeliveryOwner::Sink,
             )

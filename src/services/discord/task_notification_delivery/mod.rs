@@ -477,6 +477,7 @@ pub(in crate::services::discord) async fn claim_task_response_delivery_with_reco
         response_turn_key,
         recovery_turn_key,
         None,
+        None,
         card_message_id,
         owner,
     )
@@ -493,22 +494,18 @@ pub(in crate::services::discord) async fn claim_task_response_delivery_with_reco
     response_turn_key: &str,
     recovery_turn_key: Option<&str>,
     turn_started_at: Option<&str>,
+    turn_start_offset: Option<u64>,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
     let scope = TaskCardScope::new(channel_id, provider, session_key, event_key);
-    let turn_started_at = turn_started_at
-        .filter(|value| !value.trim().is_empty())
-        .map(chrono::DateTime::parse_from_rfc3339)
-        .transpose()
-        .map_err(|error| format!("parse task response turn start timestamp: {error}"))?
-        .map(|value| value.with_timezone(&chrono::Utc));
     store::claim_response_delivery(
         pool,
         &scope,
         response_turn_key,
         recovery_turn_key,
         turn_started_at,
+        turn_start_offset,
         card_message_id,
         owner,
     )

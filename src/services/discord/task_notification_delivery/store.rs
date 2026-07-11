@@ -3,6 +3,7 @@
 mod missing_card_replacement;
 mod response_chunks;
 mod response_fence;
+mod response_identity;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
