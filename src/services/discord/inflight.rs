@@ -8,6 +8,8 @@
 pub(in crate::services::discord) mod anchor_repost;
 pub(in crate::services::discord) mod budget;
 mod finalizer_identity;
+#[cfg(test)]
+mod invariant_test_capture;
 mod model;
 
 // #3479: the pure domain model moved to `model.rs`; re-export every public
@@ -372,6 +374,14 @@ fn record_inflight_invariant_with_severity(
     details: serde_json::Value,
     severity: ObsSeverity,
 ) -> bool {
+    // #4422: the old test scraped formatted tracing text through a scoped
+    // subscriber while tracing callsite/subscriber state changed in parallel.
+    // Expose the already-selected typed severity to a thread-local TEST-ONLY
+    // witness instead; production logging/event behavior remains byte-identical.
+    #[cfg(test)]
+    if !condition {
+        invariant_test_capture::record(invariant, severity);
+    }
     let turn_id = turn_id_for_state(state);
     crate::services::observability::record_invariant_check_with_severity(
         condition,
@@ -625,6 +635,7 @@ mod stall_recovery_tests {
     // these fixtures (`build_synth_3358`, `monotonic_3358_test_mutex`, the
     // `_in_root` helpers, …) via `use super::*`.
     mod flake_isolation_4361;
+    mod flake_isolation_4422;
 
     /// `inflight_state_is_stale` must flip to true once `updated_at` is
     /// older than the configured threshold and stay false for fresh state.
@@ -1669,160 +1680,6 @@ mod stall_recovery_tests {
             "the enforce-skipped stale write must not clobber the committed answer"
         );
         assert_eq!(persisted.response_sent_offset, committed_body.len());
-    }
-
-    /// #3933 (severity WARN downgrade): a legitimate full reset (same turn
-    /// identity, cleared body, `response_sent_offset` back to 0) PERSISTS its
-    /// backward write — the enforce guard PERMITS the re-stream rewind, so
-    /// `enforce_skips_backward_write` is false — yet that rewind is intended, not a
-    /// data-loss regression. The offset-monotonic violation must therefore be
-    /// recorded at WARN (not ERROR), killing the per-retry operator ERROR noise the
-    /// release (authority-ON) emits on every Gemini/Qwen `RetryBoundary`. The
-    /// control at the end proves a GENUINE non-reset backward write still records at
-    /// ERROR, so the capture actually differentiates WARN vs ERROR (non-vacuous).
-    #[test]
-    fn legit_reset_records_monotonic_violation_at_warn_3933() {
-        use crate::services::discord::outbound::delivery_record as dr;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
-
-        // A legit reset is a same-turn backward move, so the debug tripwire fires
-        // (it relaxes ONLY for an enforce-SKIP; a PERMITTED reset is not skipped) —
-        // share the panic-hook serialization the sibling tripwire tests use.
-        let _serialized = monotonic_3358_test_mutex()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-
-        #[derive(Clone)]
-        struct CapturingWriter {
-            buffer: Arc<Mutex<Vec<u8>>>,
-        }
-        impl std::io::Write for CapturingWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.buffer.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for CapturingWriter {
-            type Writer = CapturingWriter;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        // Capture WARN+ERROR (max-level WARN admits the more-severe ERROR too), so a
-        // downgrade-to-WARN and any stray ERROR both land in the buffer — making
-        // "WARN, not ERROR" directly observable. The debug tripwire's panic goes to
-        // the process panic hook (stderr), NOT this subscriber, so it never pollutes
-        // the buffer; the invariant records are emitted BEFORE the panic anyway.
-        fn capture<F: FnOnce()>(f: F) -> String {
-            let buffer = Arc::new(Mutex::new(Vec::new()));
-            let subscriber = tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::WARN)
-                .with_ansi(false)
-                .without_time()
-                .with_writer(CapturingWriter {
-                    buffer: buffer.clone(),
-                })
-                .finish();
-            let guard = tracing::subscriber::set_default(subscriber);
-            f();
-            drop(guard);
-            String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned()
-        }
-
-        // The WARN branch appends this suffix to the invariant message; the ERROR
-        // branch does not — so its presence is an unambiguous WARN witness.
-        const WARN_SUFFIX: &str = "(handled by downstream guard — downgraded to WARN)";
-
-        // ---- legit reset → WARN, under BOTH authority states -----------------
-        // The flag is forced EXPLICITLY (not env) so the assertion is independent
-        // of the release shell's AGENTDESK_DELIVERY_RECORD_AUTHORITY. A legit reset
-        // is safely-handled regardless of the flag, so both must downgrade to WARN.
-        for authority_on in [false, true] {
-            let temp = TempDir::new().unwrap();
-            let channel_id = 39_330_200 + authority_on as u64;
-            // On-disk row: an advanced streamed frontier (non-empty body, rso > 0).
-            let mut reset = seed_watcher_stream_state(
-                temp.path(),
-                channel_id,
-                "AgentDesk-claude-3933warn",
-                "streamed answer body",
-                120,
-            );
-            // Same-turn RetryBoundary reset: cleared body + rso 0 (last_offset left
-            // forward so ONLY response_sent_offset_monotonic violates → one record).
-            reset.full_response = String::new();
-            reset.response_sent_offset = 0;
-            let path = inflight_state_path(temp.path(), &ProviderKind::Claude, channel_id);
-
-            let logs = capture(|| {
-                let _authority = dr::authority_test_seam::force(authority_on);
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    validate_inflight_state_for_save(
-                        temp.path(),
-                        &path,
-                        &reset,
-                        "src/services/discord/inflight.rs:test",
-                    );
-                }));
-            });
-
-            assert!(
-                logs.contains("response_sent_offset_monotonic"),
-                "legit reset must record the response_sent_offset_monotonic violation (authority_on={authority_on}): {logs}"
-            );
-            assert!(
-                logs.contains(WARN_SUFFIX),
-                "legit reset offset-monotonic violation must be downgraded to WARN (authority_on={authority_on}): {logs}"
-            );
-            assert!(
-                !logs.contains("ERROR"),
-                "legit reset must not emit an ERROR-level invariant log (authority_on={authority_on}): {logs}"
-            );
-        }
-
-        // ---- control: a GENUINE non-reset backward write stays ERROR ----------
-        // authority OFF (forced) → the backward write persists, so it is a real
-        // breach, not a safely-handled rewind. This proves the capture genuinely
-        // differentiates WARN vs ERROR, so the WARN assertions above are not vacuous.
-        let temp = TempDir::new().unwrap();
-        let channel_id = 39_330_299;
-        let mut regression = seed_watcher_stream_state(
-            temp.path(),
-            channel_id,
-            "AgentDesk-claude-3933err",
-            "the full committed answer",
-            200,
-        );
-        // NON-empty (shorter) body moving the frontier back for the SAME turn — NOT
-        // the reset signature, so `is_legitimate_full_reset` is false → ERROR.
-        regression.full_response = "stale".to_string();
-        regression.response_sent_offset = 3;
-        let path = inflight_state_path(temp.path(), &ProviderKind::Claude, channel_id);
-
-        let logs = capture(|| {
-            let _authority = dr::authority_test_seam::force(false);
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                validate_inflight_state_for_save(
-                    temp.path(),
-                    &path,
-                    &regression,
-                    "src/services/discord/inflight.rs:test",
-                );
-            }));
-        });
-        assert!(
-            logs.contains("response_sent_offset_monotonic") && !logs.contains(WARN_SUFFIX),
-            "a genuine non-reset backward write must stay ERROR (no WARN downgrade): {logs}"
-        );
-        assert!(
-            logs.contains("ERROR"),
-            "a genuine non-reset backward write must record at ERROR: {logs}"
-        );
     }
 
     // ---- #3077: typed status-panel ownership write tests ----
