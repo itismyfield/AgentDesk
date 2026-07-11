@@ -40,7 +40,9 @@ pub(super) struct StallSignalSnapshot {
     pub(super) frontier_advanced_recently: bool,
     pub(super) desynced: bool,
     pub(super) mailbox_cancel_token_present: bool,
-    pub(super) phantom_attached: bool,
+    pub(super) active_turn: RelayActiveTurn,
+    pub(super) watcher_attached: bool,
+    pub(super) watcher_owns_live_relay: Option<bool>,
     pub(super) producer_known_dead: bool,
     pub(super) delivery_committed: bool,
     pub(super) idle: bool,
@@ -57,6 +59,7 @@ pub(super) enum StallVerdictReason {
     Desynced,
     MailboxCancelTokenPresent,
     PhantomAttached,
+    WatcherLiveRelayOwnershipUnknown,
     ProducerKnownDead,
     NoPositiveLiveness,
 }
@@ -72,6 +75,7 @@ impl StallVerdictReason {
             Self::Desynced => "desynced",
             Self::MailboxCancelTokenPresent => "mailbox_cancel_token_present",
             Self::PhantomAttached => "phantom_attached",
+            Self::WatcherLiveRelayOwnershipUnknown => "watcher_live_relay_ownership_unknown",
             Self::ProducerKnownDead => "producer_known_dead",
             Self::NoPositiveLiveness => "no_positive_liveness",
         }
@@ -98,9 +102,10 @@ impl StallVerdictAssessment {
     }
 }
 
-/// Pure W0 classifier. Ordering is intentional: completed idle work and
-/// positive producer evidence outrank every desync symptom; control-plane
-/// contamination outranks a dead-producer fallback.
+/// Pure W0 classifier. Ordering is intentional: completed idle work and the
+/// deployment restart grace are safe terminal/mitigation cases. Outside that
+/// grace, control-plane contradictions outrank producer activity because a
+/// live producer does not prove that its relay path is healthy.
 pub(super) fn classify_stall(signals: StallSignalSnapshot) -> StallVerdictAssessment {
     if signals.delivery_committed && signals.idle {
         return StallVerdictAssessment::new(
@@ -112,6 +117,44 @@ pub(super) fn classify_stall(signals: StallSignalSnapshot) -> StallVerdictAssess
         );
     }
 
+    if signals.restart_grace_active {
+        return StallVerdictAssessment::new(
+            StallVerdict::ProducerLive,
+            vec![StallVerdictReason::RestartGraceActive],
+        );
+    }
+
+    let phantom_attached =
+        signals.watcher_attached && matches!(signals.watcher_owns_live_relay, Some(false));
+    let ownership_unknown = signals.watcher_attached && signals.watcher_owns_live_relay.is_none();
+    let pretripped_token = signals.mailbox_cancel_token_present
+        && matches!(signals.active_turn, RelayActiveTurn::None);
+    let mut control_plane_reasons = Vec::new();
+    if signals.desynced {
+        control_plane_reasons.push(StallVerdictReason::Desynced);
+    }
+    if phantom_attached {
+        control_plane_reasons.push(StallVerdictReason::PhantomAttached);
+    }
+    if pretripped_token {
+        control_plane_reasons.push(StallVerdictReason::MailboxCancelTokenPresent);
+    }
+    if !control_plane_reasons.is_empty() {
+        if signals.producer_activity_recent {
+            control_plane_reasons.push(StallVerdictReason::ProducerActivityRecent);
+        }
+        if signals.frontier_advanced_recently {
+            control_plane_reasons.push(StallVerdictReason::FrontierAdvancedRecently);
+        }
+        if ownership_unknown {
+            control_plane_reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
+        }
+        return StallVerdictAssessment::new(
+            StallVerdict::ControlPlaneDesync,
+            control_plane_reasons,
+        );
+    }
+
     let mut live_reasons = Vec::new();
     if signals.producer_activity_recent {
         live_reasons.push(StallVerdictReason::ProducerActivityRecent);
@@ -119,42 +162,26 @@ pub(super) fn classify_stall(signals: StallSignalSnapshot) -> StallVerdictAssess
     if signals.frontier_advanced_recently {
         live_reasons.push(StallVerdictReason::FrontierAdvancedRecently);
     }
-    if signals.restart_grace_active {
-        live_reasons.push(StallVerdictReason::RestartGraceActive);
+    if ownership_unknown {
+        live_reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
     }
-    if !live_reasons.is_empty() {
+    if signals.producer_activity_recent || signals.frontier_advanced_recently {
         return StallVerdictAssessment::new(StallVerdict::ProducerLive, live_reasons);
     }
 
-    if signals.desynced && (signals.mailbox_cancel_token_present || signals.phantom_attached) {
-        let mut reasons = vec![StallVerdictReason::Desynced];
-        if signals.mailbox_cancel_token_present {
-            reasons.push(StallVerdictReason::MailboxCancelTokenPresent);
-        }
-        if signals.phantom_attached {
-            reasons.push(StallVerdictReason::PhantomAttached);
-        }
-        return StallVerdictAssessment::new(StallVerdict::ControlPlaneDesync, reasons);
-    }
-
     if signals.producer_known_dead {
-        return StallVerdictAssessment::new(
-            StallVerdict::ProducerDead,
-            vec![StallVerdictReason::ProducerKnownDead],
-        );
+        let mut reasons = vec![StallVerdictReason::ProducerKnownDead];
+        if ownership_unknown {
+            reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
+        }
+        return StallVerdictAssessment::new(StallVerdict::ProducerDead, reasons);
     }
 
-    if signals.desynced {
-        return StallVerdictAssessment::new(
-            StallVerdict::ControlPlaneDesync,
-            vec![StallVerdictReason::Desynced],
-        );
+    let mut reasons = vec![StallVerdictReason::NoPositiveLiveness];
+    if ownership_unknown {
+        reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
     }
-
-    StallVerdictAssessment::new(
-        StallVerdict::ProducerDead,
-        vec![StallVerdictReason::NoPositiveLiveness],
-    )
+    StallVerdictAssessment::new(StallVerdict::ProducerDead, reasons)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,21 +219,33 @@ fn recent_unix_millis(timestamp_ms: Option<i64>, now_unix_secs: i64, freshness_s
 /// Adapter for the existing watchdog judgment logs. Producer progress comes
 /// only from the evidence already computed for the existing decision; watcher
 /// polling is consumer liveness and is deliberately excluded.
-fn classify_existing_judgment(
+fn classify_existing_judgment_lossy(
     snapshot: &WatcherStateSnapshot,
     decision: Option<&super::stall_liveness::StallWatchdogLivenessDecision>,
     freshness_secs: u64,
+    restart_grace_active: bool,
 ) -> Option<StallVerdictAssessment> {
-    classify_runtime_signals(
+    classify_runtime_signals_lossy(
         &snapshot.relay_health,
         snapshot.attached,
         snapshot.inflight_state_present,
         snapshot.inflight_terminal_delivery_committed,
         decision.is_some_and(|decision| decision.evidence.has_positive_liveness(freshness_secs)),
         false,
-        false,
+        restart_grace_active,
         snapshot.desynced,
     )
+}
+
+pub(super) fn restart_grace_active(
+    inflight_state_present: bool,
+    now_unix_secs: i64,
+    boot_unix_secs: i64,
+) -> bool {
+    inflight_state_present
+        && now_unix_secs >= boot_unix_secs
+        && now_unix_secs.saturating_sub(boot_unix_secs) as u64
+            <= super::recovery::STALL_WATCHDOG_THRESHOLD_SECS
 }
 
 pub(super) fn classify_health_snapshot_lossy(
@@ -273,11 +312,12 @@ fn classify_health_snapshot_at_lossy(
         now_unix_secs,
         super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
     );
-    let restart_grace_active = session.inflight_state_present
-        && now_unix_secs >= boot_unix_secs
-        && now_unix_secs.saturating_sub(boot_unix_secs) as u64
-            <= super::recovery::STALL_WATCHDOG_THRESHOLD_SECS;
-    classify_runtime_signals(
+    let restart_grace_active = restart_grace_active(
+        session.inflight_state_present,
+        now_unix_secs,
+        boot_unix_secs,
+    );
+    classify_runtime_signals_lossy(
         relay,
         session.attached,
         session.inflight_state_present,
@@ -301,10 +341,11 @@ fn classification_is_applicable(
         || desynced
         || relay.mailbox_has_cancel_token
         || channel_session_attached
+        || relay.watcher_attached
 }
 
 #[allow(clippy::too_many_arguments)]
-fn classify_runtime_signals(
+fn classify_runtime_signals_lossy(
     relay: &RelayHealthSnapshot,
     channel_session_attached: bool,
     inflight_state_present: bool,
@@ -324,8 +365,6 @@ fn classify_runtime_signals(
         return None;
     }
 
-    let phantom_attached = channel_session_attached
-        && (relay.watcher_attached_stale || relay.tmux_alive == Some(false));
     let idle =
         !relay.mailbox_has_cancel_token && matches!(relay.active_turn, RelayActiveTurn::None);
 
@@ -334,7 +373,9 @@ fn classify_runtime_signals(
         frontier_advanced_recently,
         desynced,
         mailbox_cancel_token_present: relay.mailbox_has_cancel_token,
-        phantom_attached,
+        active_turn: relay.active_turn,
+        watcher_attached: relay.watcher_attached,
+        watcher_owns_live_relay: Some(relay.watcher_owns_live_relay),
         producer_known_dead: relay.tmux_alive == Some(false),
         delivery_committed,
         idle,
@@ -358,8 +399,10 @@ pub(super) fn judgment_log_fields(
     snapshot: &WatcherStateSnapshot,
     decision: Option<&super::stall_liveness::StallWatchdogLivenessDecision>,
     freshness_secs: u64,
+    restart_grace_active: bool,
 ) -> (&'static str, String) {
-    let assessment = classify_existing_judgment(snapshot, decision, freshness_secs);
+    let assessment =
+        classify_existing_judgment_lossy(snapshot, decision, freshness_secs, restart_grace_active);
     classification_log_fields(assessment.as_ref())
 }
 
@@ -381,7 +424,9 @@ mod tests {
             frontier_advanced_recently: false,
             desynced: false,
             mailbox_cancel_token_present: false,
-            phantom_attached: false,
+            active_turn: RelayActiveTurn::None,
+            watcher_attached: false,
+            watcher_owns_live_relay: None,
             producer_known_dead: false,
             delivery_committed: false,
             idle: false,
@@ -515,20 +560,54 @@ mod tests {
     }
 
     #[test]
-    fn incident_4423_phantom_attached_with_pretripped_token_is_control_plane_desync() {
+    fn incident_4423_runtime_signals_are_control_plane_desync() {
+        let mut relay = relay_fixture();
+        relay.desynced = false;
+        relay.watcher_attached = true;
+        relay.watcher_attached_stale = false;
+        relay.watcher_owns_live_relay = false;
+        relay.mailbox_has_cancel_token = true;
+        relay.tmux_alive = Some(true);
+        relay.last_relay_ts_ms = None;
+
+        let assessment =
+            classify_runtime_signals_lossy(&relay, true, true, false, false, false, false, false)
+                .expect("applicable #4423 runtime signals");
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
+        assert_eq!(
+            assessment.reasons,
+            vec![StallVerdictReason::PhantomAttached]
+        );
+    }
+
+    #[test]
+    fn pretripped_token_without_active_turn_is_control_plane_desync() {
         let assessment = classify_stall(StallSignalSnapshot {
-            desynced: true,
             mailbox_cancel_token_present: true,
-            phantom_attached: true,
+            active_turn: RelayActiveTurn::None,
             ..quiet_signals()
         });
         assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             assessment.reasons,
+            vec![StallVerdictReason::MailboxCancelTokenPresent]
+        );
+    }
+
+    #[test]
+    fn unknown_watcher_ownership_skips_phantom_rule_and_records_reason() {
+        let assessment = classify_stall(StallSignalSnapshot {
+            producer_activity_recent: true,
+            watcher_attached: true,
+            watcher_owns_live_relay: None,
+            ..quiet_signals()
+        });
+        assert_eq!(assessment.verdict, StallVerdict::ProducerLive);
+        assert_eq!(
+            assessment.reasons,
             vec![
-                StallVerdictReason::Desynced,
-                StallVerdictReason::MailboxCancelTokenPresent,
-                StallVerdictReason::PhantomAttached,
+                StallVerdictReason::ProducerActivityRecent,
+                StallVerdictReason::WatcherLiveRelayOwnershipUnknown,
             ]
         );
     }
@@ -549,16 +628,19 @@ mod tests {
     }
 
     #[test]
-    fn producer_activity_advancing_while_desynced_is_producer_live() {
+    fn producer_activity_advancing_while_desynced_is_control_plane_desync() {
         let assessment = classify_stall(StallSignalSnapshot {
             producer_activity_recent: true,
             desynced: true,
             ..quiet_signals()
         });
-        assert_eq!(assessment.verdict, StallVerdict::ProducerLive);
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             assessment.reasons,
-            vec![StallVerdictReason::ProducerActivityRecent]
+            vec![
+                StallVerdictReason::Desynced,
+                StallVerdictReason::ProducerActivityRecent,
+            ]
         );
     }
 
@@ -589,7 +671,7 @@ mod tests {
                     desynced: true,
                     ..quiet_signals()
                 },
-                StallVerdict::ProducerLive,
+                StallVerdict::ControlPlaneDesync,
             ),
             (
                 StallSignalSnapshot {
@@ -628,10 +710,11 @@ mod tests {
             &snapshot,
             Some(&decision),
             super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            false,
         );
 
         assert_eq!(verdict, "control_plane_desync");
-        assert_eq!(reasons, "desynced,mailbox_cancel_token_present");
+        assert_eq!(reasons, "desynced");
     }
 
     #[test]
@@ -681,25 +764,52 @@ mod tests {
                 &snapshot,
                 Some(&decision),
                 super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                false,
             );
-            assert_eq!(verdict, "producer_live");
-            assert_eq!(reasons, "producer_activity_recent");
+            assert_eq!(verdict, "control_plane_desync");
+            assert_eq!(reasons, "desynced,producer_activity_recent");
         }
     }
 
     #[test]
-    fn raw_incident_4423_phantom_and_pretripped_token_is_control_plane_desync() {
+    fn judgment_log_fields_honors_restart_grace_before_desync() {
+        let snapshot = watcher_fixture();
+        let decision = liveness_decision(
+            StallWatchdogLivenessAction::Defer { deferral_count: 0 },
+            StallWatchdogLivenessEvidence {
+                runtime_activity_age_secs: Some(1),
+                ..Default::default()
+            },
+        );
+
+        let (verdict, reasons) = judgment_log_fields(
+            &snapshot,
+            Some(&decision),
+            super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            true,
+        );
+
+        assert_eq!(verdict, "producer_live");
+        assert_eq!(reasons, "restart_grace_active");
+    }
+
+    #[test]
+    fn raw_health_incident_4423_signals_are_control_plane_desync() {
         let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
         let now = fixture_updated_at_unix() + freshness as i64 + 10;
         let mut session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
-        // `attached` can come from the inflight tmux owner even when this
-        // channel has no strict watcher binding. Verdict adapters intentionally
-        // use this same channel/session fact as watchdog snapshots.
-        session.watcher_attached = false;
-        session.capture_lagged = true;
+        if let Some(inflight) = session.inflight.as_mut() {
+            inflight.watcher_owns_live_relay = false;
+        }
+        session.capture_lagged = false;
         let mut relay = relay_fixture();
-        relay.watcher_attached = false;
-        relay.tmux_alive = Some(false);
+        relay.desynced = false;
+        relay.watcher_attached = true;
+        relay.watcher_attached_stale = false;
+        relay.watcher_owns_live_relay = false;
+        relay.mailbox_has_cancel_token = true;
+        relay.tmux_alive = Some(true);
+        relay.last_relay_ts_ms = None;
 
         let assessment = classify_health_snapshot_at_lossy(
             Some(&ProviderKind::Codex),
@@ -714,16 +824,12 @@ mod tests {
         assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             assessment.reasons,
-            vec![
-                StallVerdictReason::Desynced,
-                StallVerdictReason::MailboxCancelTokenPresent,
-                StallVerdictReason::PhantomAttached,
-            ]
+            vec![StallVerdictReason::PhantomAttached]
         );
     }
 
     #[test]
-    fn raw_health_fresh_inflight_or_relay_frontier_is_producer_live() {
+    fn raw_health_fresh_inflight_or_relay_frontier_without_contradiction_is_producer_live() {
         let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
         let timestamp = fixture_updated_at_unix();
         let fresh_now = timestamp + 1;
@@ -760,6 +866,34 @@ mod tests {
         assert_eq!(
             fresh_frontier.reasons,
             vec![StallVerdictReason::FrontierAdvancedRecently]
+        );
+    }
+
+    #[test]
+    fn raw_health_fresh_producer_activity_while_desynced_is_control_plane_desync() {
+        let timestamp = fixture_updated_at_unix();
+        let now = timestamp + 1;
+        let mut session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
+        session.capture_lagged = true;
+        let relay = relay_fixture();
+
+        let assessment = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now - super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1,
+        )
+        .expect("applicable desynced producer activity");
+
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
+        assert_eq!(
+            assessment.reasons,
+            vec![
+                StallVerdictReason::Desynced,
+                StallVerdictReason::ProducerActivityRecent,
+            ]
         );
     }
 
