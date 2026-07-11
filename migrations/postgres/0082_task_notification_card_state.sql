@@ -52,9 +52,10 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
     -- while a restarted watcher only knows terminal offset/body identity.
     recovery_turn_key VARCHAR(64)
         CHECK (recovery_turn_key IS NULL OR char_length(recovery_turn_key) = 64),
-    -- The monotonic transcript boundary identifies one logical provider turn
-    -- even when sink/watcher response bytes produce divergent fallback keys.
+    -- Monotonic transcript boundaries identify one logical provider turn even
+    -- when sink/watcher response bytes produce divergent fallback keys.
     turn_start_offset BIGINT CHECK (turn_start_offset IS NULL OR turn_start_offset >= 0),
+    turn_end_offset BIGINT CHECK (turn_end_offset IS NULL OR turn_end_offset >= 0),
     referenced_card_message_id BIGINT NOT NULL
         CHECK (referenced_card_message_id > 0),
     response_generation INTEGER NOT NULL DEFAULT 1
@@ -69,6 +70,8 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (channel_id, provider, session_key, response_turn_key),
+    CHECK (turn_start_offset IS NULL OR turn_end_offset IS NULL
+        OR turn_end_offset >= turn_start_offset),
     CHECK (
         (delivery_state = 'claimed'
             AND owner_kind IS NOT NULL
@@ -106,7 +109,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_task_notification_response_recovery_key
 -- response is active. Sequential delivered responses remain permitted.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_notification_response_active_event
     ON task_notification_response_delivery
-        (channel_id, provider, session_key, event_key, referenced_card_message_id)
+        (channel_id, provider, session_key, event_key)
     WHERE delivery_state IN ('claimed', 'sent');
 
 CREATE INDEX IF NOT EXISTS idx_task_notification_response_retention

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use sqlx::{PgPool, Row};
 
 use super::super::TaskCardScope;
-use super::response_identity::parse_turn_started_at;
+use super::response_identity::{ResponseTurnCoordinates, TurnRelation, parse_turn_started_at};
 use super::{db_id, memory_fallback_unavailable, message_id};
 
 const RESPONSE_LEASE_SECONDS: i64 = 120;
@@ -78,6 +78,7 @@ pub(in super::super) async fn claim_response_delivery(
     recovery_turn_key: Option<&str>,
     turn_started_at: Option<&str>,
     turn_start_offset: Option<u64>,
+    turn_end_offset: Option<u64>,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
@@ -85,10 +86,8 @@ pub(in super::super) async fn claim_response_delivery(
     if let Some(recovery_turn_key) = recovery_turn_key {
         validate_turn_key(recovery_turn_key)?;
     }
-    let turn_started_at = parse_turn_started_at(turn_started_at)?;
-    let turn_start_offset = turn_start_offset
-        .map(|offset| i64::try_from(offset).map_err(|_| "turn_start_offset exceeds BIGINT"))
-        .transpose()?;
+    parse_turn_started_at(turn_started_at)?;
+    let coordinates = ResponseTurnCoordinates::try_new(turn_start_offset, turn_end_offset)?;
     match pool {
         Some(pool) => {
             claim_response_delivery_pg(
@@ -96,8 +95,7 @@ pub(in super::super) async fn claim_response_delivery(
                 scope,
                 response_turn_key,
                 recovery_turn_key,
-                turn_started_at,
-                turn_start_offset,
+                coordinates,
                 card_message_id,
                 owner,
             )
@@ -107,8 +105,7 @@ pub(in super::super) async fn claim_response_delivery(
             scope,
             response_turn_key,
             recovery_turn_key,
-            turn_started_at,
-            turn_start_offset,
+            coordinates,
             card_message_id,
             owner,
         ),
@@ -193,8 +190,7 @@ async fn claim_response_delivery_pg(
     scope: &TaskCardScope,
     response_turn_key: &str,
     recovery_turn_key: Option<&str>,
-    turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
-    turn_start_offset: Option<i64>,
+    coordinates: ResponseTurnCoordinates,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
@@ -204,11 +200,11 @@ async fn claim_response_delivery_pg(
     let inserted: Option<i64> = sqlx::query_scalar(
         "INSERT INTO task_notification_response_delivery
              (channel_id, provider, session_key, event_key, response_turn_key, recovery_turn_key,
-              turn_start_offset,
+              turn_start_offset, turn_end_offset,
               referenced_card_message_id, delivery_state, owner_kind, owner_token,
               lease_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'claimed', $9, $10,
-                 NOW() + make_interval(secs => $11))
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'claimed', $10, $11,
+                 NOW() + make_interval(secs => $12))
          ON CONFLICT DO NOTHING
          RETURNING id",
     )
@@ -218,7 +214,8 @@ async fn claim_response_delivery_pg(
     .bind(&scope.event_key)
     .bind(response_turn_key)
     .bind(recovery_turn_key)
-    .bind(turn_start_offset)
+    .bind(coordinates.start_offset)
+    .bind(coordinates.end_offset)
     .bind(card_message_id_db)
     .bind(owner.as_str())
     .bind(&owner_token)
@@ -227,33 +224,32 @@ async fn claim_response_delivery_pg(
     .await
     .map_err(|error| format!("claim task response delivery: {error}"))?;
     if let Some(inserted_id) = inserted {
-        let prior_card: Option<i64> = match (turn_started_at, turn_start_offset) {
-            (None, None) => None,
-            (turn_started_at, turn_start_offset) => sqlx::query_scalar(
-                "SELECT referenced_card_message_id
+        let prior_rows = sqlx::query(
+            "SELECT turn_start_offset, turn_end_offset
              FROM task_notification_response_delivery
              WHERE channel_id = $1 AND provider = $2 AND session_key = $3
-               AND event_key = $4 AND referenced_card_message_id = $5
-               AND id <> $6 AND delivery_state = 'delivered'
-               AND (($8::bigint IS NOT NULL AND turn_start_offset = $8)
-                    OR (turn_start_offset IS NULL AND $7::timestamptz IS NOT NULL
-                        AND created_at >= $7))
-             ORDER BY delivered_at DESC
-             LIMIT 1",
-            )
-            .bind(channel_id)
-            .bind(&scope.provider)
-            .bind(&scope.session_key)
-            .bind(&scope.event_key)
-            .bind(card_message_id_db)
-            .bind(inserted_id)
-            .bind(turn_started_at)
-            .bind(turn_start_offset)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("check delayed task response frame: {error}"))?,
-        };
-        if prior_card.is_some() {
+               AND event_key = $4 AND id <> $5 AND delivery_state = 'delivered'
+             ORDER BY delivered_at DESC",
+        )
+        .bind(channel_id)
+        .bind(&scope.provider)
+        .bind(&scope.session_key)
+        .bind(&scope.event_key)
+        .bind(inserted_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("check prior task response turns: {error}"))?;
+        let mut relation = TurnRelation::Distinct;
+        for row in prior_rows {
+            let persisted = ResponseTurnCoordinates {
+                start_offset: row.get("turn_start_offset"),
+                end_offset: row.get("turn_end_offset"),
+            };
+            if relation.absorb(coordinates.relation(persisted)) {
+                break;
+            }
+        }
+        if relation != TurnRelation::Distinct {
             let deleted = sqlx::query(
                 "DELETE FROM task_notification_response_delivery
                  WHERE id = $1 AND owner_token = $2 AND delivery_state = 'claimed'",
@@ -267,7 +263,11 @@ async fn claim_response_delivery_pg(
             if deleted != 1 {
                 return Err("delayed task response frame lost its provisional claim".to_string());
             }
-            return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+            return Ok(if relation == TurnRelation::Same {
+                ResponseDeliveryClaimOutcome::Delivered { card_message_id }
+            } else {
+                ResponseDeliveryClaimOutcome::Wait
+            });
         }
         return Ok(ResponseDeliveryClaimOutcome::Owned(ResponseDeliveryClaim {
             scope: scope.clone(),
@@ -279,8 +279,8 @@ async fn claim_response_delivery_pg(
     }
 
     let mut rows = sqlx::query(
-        "SELECT event_key, response_turn_key, recovery_turn_key, turn_start_offset,
-                response_generation, created_at,
+        "SELECT event_key, response_turn_key, recovery_turn_key,
+                turn_start_offset, turn_end_offset, response_generation,
                 referenced_card_message_id, delivery_state,
                 lease_expires_at > NOW() AS lease_active
          FROM task_notification_response_delivery
@@ -299,23 +299,22 @@ async fn claim_response_delivery_pg(
     let matched_by_event = rows.is_empty();
     if matched_by_event {
         rows = sqlx::query(
-            "SELECT event_key, response_turn_key, recovery_turn_key, turn_start_offset,
-                    response_generation, created_at,
+            "SELECT event_key, response_turn_key, recovery_turn_key,
+                    turn_start_offset, turn_end_offset, response_generation,
                     referenced_card_message_id, delivery_state,
                     lease_expires_at > NOW() AS lease_active
              FROM task_notification_response_delivery
              WHERE channel_id = $1 AND provider = $2 AND session_key = $3
-               AND event_key = $4 AND referenced_card_message_id = $5
+               AND event_key = $4
                AND delivery_state IN ('claimed', 'sent')",
         )
         .bind(channel_id)
         .bind(&scope.provider)
         .bind(&scope.session_key)
         .bind(&scope.event_key)
-        .bind(card_message_id_db)
         .fetch_all(pool)
         .await
-        .map_err(|error| format!("load active task response by event/card: {error}"))?;
+        .map_err(|error| format!("load active task response by event: {error}"))?;
     }
     if rows.len() != 1 {
         return Err(format!(
@@ -327,11 +326,14 @@ async fn claim_response_delivery_pg(
     let current_event: String = current.get("event_key");
     let canonical_turn_key: String = current.get("response_turn_key");
     let current_recovery_key: Option<String> = current.get("recovery_turn_key");
-    let current_turn_start_offset: Option<i64> = current.get("turn_start_offset");
-    let current_created_at: chrono::DateTime<chrono::Utc> = current.get("created_at");
+    let current_coordinates = ResponseTurnCoordinates {
+        start_offset: current.get("turn_start_offset"),
+        end_offset: current.get("turn_end_offset"),
+    };
     let current_card: i64 = current.get("referenced_card_message_id");
     let response_generation: i32 = current.get("response_generation");
-    if current_event != scope.event_key || current_card != card_message_id_db {
+    if current_event != scope.event_key || (!matched_by_event && current_card != card_message_id_db)
+    {
         return Err("task response turn identity conflicts with another event/card".to_string());
     }
     if !matched_by_event
@@ -342,12 +344,9 @@ async fn claim_response_delivery_pg(
             "task response recovery identity conflicts with the persisted alias".to_string(),
         );
     }
-    let divergent_active_turn = if matched_by_event {
-        let same_turn = match (turn_start_offset, current_turn_start_offset) {
-            (Some(incoming), Some(current)) => incoming == current,
-            _ => turn_started_at.is_none_or(|started_at| started_at <= current_created_at),
-        };
-        !same_turn
+    let blocked_active_turn = if matched_by_event {
+        coordinates.relation(current_coordinates) != TurnRelation::Same
+            || current_card != card_message_id_db
     } else {
         false
     };
@@ -358,7 +357,7 @@ async fn claim_response_delivery_pg(
     let lease_active: bool = current.get("lease_active");
     if state == "sent" {
         if lease_active {
-            return Ok(if divergent_active_turn {
+            return Ok(if blocked_active_turn {
                 ResponseDeliveryClaimOutcome::Wait
             } else {
                 ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id }
@@ -378,26 +377,26 @@ async fn claim_response_delivery_pg(
         .bind(&scope.session_key)
         .bind(&scope.event_key)
         .bind(&canonical_turn_key)
-        .bind(card_message_id_db)
+        .bind(current_card)
         .execute(pool)
         .await
         .map_err(|error| format!("finalize expired sent task response: {error}"))?
         .rows_affected();
         if finalized == 1 {
             super::cleanup_old_rows_pg(pool).await;
-            return Ok(if divergent_active_turn {
+            return Ok(if blocked_active_turn {
                 ResponseDeliveryClaimOutcome::Wait
             } else {
                 ResponseDeliveryClaimOutcome::Delivered { card_message_id }
             });
         }
-        return Ok(if divergent_active_turn {
+        return Ok(if blocked_active_turn {
             ResponseDeliveryClaimOutcome::Wait
         } else {
             ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id }
         });
     }
-    if divergent_active_turn {
+    if blocked_active_turn {
         return Ok(ResponseDeliveryClaimOutcome::Wait);
     }
     if lease_active {
@@ -492,8 +491,10 @@ async fn claim_existing_response_delivery_pg(
         &scope,
         &canonical_turn_key,
         recovery_turn_key.as_deref(),
-        None,
-        None,
+        ResponseTurnCoordinates {
+            start_offset: None,
+            end_offset: None,
+        },
         card_message_id,
         owner,
     )
@@ -633,8 +634,7 @@ struct MemoryResponseRow {
     state: MemoryResponseState,
     owner_token: Option<String>,
     lease_expires_at: Option<Instant>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    turn_start_offset: Option<i64>,
+    coordinates: ResponseTurnCoordinates,
     delivered_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -671,8 +671,7 @@ fn claim_response_delivery_memory(
     scope: &TaskCardScope,
     response_turn_key: &str,
     recovery_turn_key: Option<&str>,
-    turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
-    turn_start_offset: Option<i64>,
+    coordinates: ResponseTurnCoordinates,
     card_message_id: u64,
     _owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
@@ -702,7 +701,6 @@ fn claim_response_delivery_memory(
                     && provider == &scope.provider
                     && session_key == &scope.session_key
                     && row.event_key == scope.event_key
-                    && row.card_message_id == card_message_id
                     && row.state != MemoryResponseState::Delivered
             })
             .map(|(key, _)| key.clone())
@@ -720,30 +718,32 @@ fn claim_response_delivery_memory(
     let canonical_turn_key = key.3.clone();
     let owner_token = uuid::Uuid::new_v4().to_string();
     let now = Instant::now();
-    if !rows.contains_key(&key) && (turn_start_offset.is_some() || turn_started_at.is_some()) && {
-        rows.values().any(|row| {
-            row.event_key == scope.event_key
-                && row.card_message_id == card_message_id
+    if !rows.contains_key(&key) {
+        let mut relation = TurnRelation::Distinct;
+        for (_, row) in rows.iter().filter(|(key, row)| {
+            key.0 == scope.channel_id
+                && key.1 == scope.provider
+                && key.2 == scope.session_key
+                && row.event_key == scope.event_key
                 && row.state == MemoryResponseState::Delivered
-                && match (turn_start_offset, row.turn_start_offset) {
-                    (Some(incoming), Some(current)) => incoming == current,
-                    (_, None) => {
-                        turn_started_at.is_some_and(|started_at| row.created_at >= started_at)
-                    }
-                    _ => false,
-                }
-        })
-    } {
-        return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+        }) {
+            if relation.absorb(coordinates.relation(row.coordinates)) {
+                break;
+            }
+        }
+        if relation == TurnRelation::Same {
+            return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+        }
+        if relation == TurnRelation::Unknown {
+            return Ok(ResponseDeliveryClaimOutcome::Wait);
+        }
     }
-    let divergent_active_turn = matched_by_event
-        && rows
-            .get(&key)
-            .is_some_and(|row| match (turn_start_offset, row.turn_start_offset) {
-                (Some(incoming), Some(current)) => incoming != current,
-                _ => turn_started_at.is_some_and(|started_at| started_at > row.created_at),
-            });
-    if divergent_active_turn {
+    let blocked_active_turn = matched_by_event
+        && rows.get(&key).is_some_and(|row| {
+            coordinates.relation(row.coordinates) != TurnRelation::Same
+                || row.card_message_id != card_message_id
+        });
+    if blocked_active_turn {
         if let Some(row) = rows.get_mut(&key)
             && row.state == MemoryResponseState::Sent
             && row.lease_expires_at.is_some_and(|expiry| expiry <= now)
@@ -769,13 +769,15 @@ fn claim_response_delivery_memory(
                     lease_expires_at: Some(
                         now + Duration::from_secs(RESPONSE_LEASE_SECONDS as u64),
                     ),
-                    created_at: chrono::Utc::now(),
-                    turn_start_offset,
+                    coordinates,
                     delivered_at: None,
                 },
             );
         }
-        Some(row) if row.event_key != scope.event_key || row.card_message_id != card_message_id => {
+        Some(row)
+            if row.event_key != scope.event_key
+                || (!matched_by_event && row.card_message_id != card_message_id) =>
+        {
             return Err(
                 "task response turn identity conflicts with another event/card".to_string(),
             );
@@ -869,8 +871,10 @@ fn claim_existing_response_delivery_memory(
         &scope,
         &canonical_turn_key,
         recovery_turn_key.as_deref(),
-        None,
-        None,
+        ResponseTurnCoordinates {
+            start_offset: None,
+            end_offset: None,
+        },
         card_message_id,
         owner,
     )?;

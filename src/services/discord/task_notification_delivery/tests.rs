@@ -1263,6 +1263,7 @@ async fn watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg(
         Some(&fallback_key),
         Some("2026-07-11 19:38:00"),
         Some(44_461),
+        Some(55_501),
         card.message_id,
         ResponseDeliveryOwner::Watcher,
     )
@@ -1280,6 +1281,7 @@ async fn watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg(
         Some(&sink_fallback_key),
         Some("2026-07-11 19:38:00"),
         Some(44_461),
+        Some(55_501),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -1342,13 +1344,17 @@ async fn recently_delivered_watcher_blocks_a_divergent_late_sink_alias_pg() {
         61_001,
         "watcher terminal body",
     );
-    let watcher = claim_task_response_delivery(
+    let watcher = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &watcher_key,
+        Some(&watcher_key),
+        None,
+        None,
+        Some(61_001),
         card.message_id,
         ResponseDeliveryOwner::Watcher,
     )
@@ -1377,6 +1383,7 @@ async fn recently_delivered_watcher_blocks_a_divergent_late_sink_alias_pg() {
         )),
         Some("2000-01-01T00:00:00Z"),
         None,
+        Some(61_001),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -1920,13 +1927,17 @@ async fn repeated_replacement_deletion_reaches_generation_three_with_bounded_rep
     .await
     .expect("response card");
     let turn_key = response_turn_key(44_471, "2026-07-11T11:11:00Z", Some(11));
-    let claim = claim_task_response_delivery(
+    let claim = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &turn_key,
+        Some(&turn_key),
+        Some("2026-07-11T11:11:00Z"),
+        Some(11),
+        Some(11_100),
         card.message_id,
         ResponseDeliveryOwner::Watcher,
     )
@@ -1971,13 +1982,17 @@ async fn repeated_replacement_deletion_reaches_generation_three_with_bounded_rep
         .await
         .expect("finish first repaired response");
     let capped_turn_key = response_turn_key(44_472, "2026-07-11T11:12:00Z", Some(12));
-    let capped_claim = claim_task_response_delivery(
+    let capped_claim = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &capped_turn_key,
+        Some(&capped_turn_key),
+        Some("2026-07-11T11:12:00Z"),
+        Some(12),
+        Some(12_100),
         rebound.card_message_id(),
         ResponseDeliveryOwner::Watcher,
     )
@@ -2373,13 +2388,17 @@ async fn response_chunk_journal_is_cascade_pruned_with_bounded_response_retentio
     .await
     .expect("response card");
     let turn_key = response_turn_key(44_466, "2026-07-11T11:06:00Z", Some(6));
-    let claim = claim_task_response_delivery(
+    let claim = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &turn_key,
+        Some(&turn_key),
+        Some("2026-07-11T11:06:00Z"),
+        Some(6),
+        Some(6_100),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -2403,13 +2422,17 @@ async fn response_chunk_journal_is_cascade_pruned_with_bounded_response_retentio
         .await
         .expect("mark delivered");
     let incomplete_turn_key = response_turn_key(44_470, "2026-07-11T11:10:00Z", Some(10));
-    let incomplete = claim_task_response_delivery(
+    let incomplete = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &incomplete_turn_key,
+        Some(&incomplete_turn_key),
+        Some("2026-07-11T11:10:00Z"),
+        Some(10),
+        Some(10_100),
         card.message_id,
         ResponseDeliveryOwner::Watcher,
     )
@@ -2666,6 +2689,75 @@ async fn response_card_rebind_requires_exact_owner_token_and_old_card_pg() {
             card_message_id: 90_059
         }
     ));
+}
+
+#[tokio::test]
+async fn replacement_card_cannot_partition_active_response_authority_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_replacement_partition_4446",
+        "replacement card shares the active event fence",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("replacement-card-active-response");
+    let first_key = response_turn_key(4_446, "2026-07-12 04:30:00", Some(90_000));
+    let first = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &first_key,
+        Some(&first_key),
+        Some("2026-07-12 04:30:00"),
+        Some(90_000),
+        Some(90_050),
+        90_058,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim response on original card");
+    let ResponseDeliveryClaimOutcome::Owned(first) = first else {
+        panic!("first response owns original-card authority")
+    };
+
+    let second_key = response_turn_key(4_447, "2026-07-12 04:30:01", Some(90_100));
+    let second = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &second_key,
+        Some(&second_key),
+        Some("2026-07-12 04:30:01"),
+        Some(90_100),
+        Some(90_150),
+        90_059,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("replacement-card claimant observes the event fence");
+    assert!(matches!(second, ResponseDeliveryClaimOutcome::Wait));
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE event_key = $1",
+    )
+    .bind(event.event_key())
+    .fetch_one(&pool)
+    .await
+    .expect("count active response authorities");
+    assert_eq!(
+        rows, 1,
+        "card replacement must not open a second active row"
+    );
+
+    let rebound = rebind_task_response_card(Some(&pool), &first, 90_059)
+        .await
+        .expect("original exact owner still rebinds to replacement card");
+    assert_eq!(rebound.card_message_id, 90_059);
 }
 
 #[tokio::test]
@@ -2959,13 +3051,17 @@ async fn delivered_semantic_event_accepts_a_second_response_turn_pg() {
     let first = response_turn_key(4055, "2026-07-11T02:37:00Z", Some(10));
     let second = response_turn_key(4056, "2026-07-11T02:38:00Z", Some(20));
 
-    let first_claim = claim_task_response_delivery(
+    let first_claim = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &first,
+        Some(&first),
+        Some("2026-07-11T02:37:00Z"),
+        Some(10),
+        Some(10_100),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -2978,13 +3074,17 @@ async fn delivered_semantic_event_accepts_a_second_response_turn_pg() {
         .await
         .expect("deliver first response turn");
 
-    let second_claim = claim_task_response_delivery(
+    let second_claim = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &second,
+        Some(&second),
+        Some("2026-07-11T02:38:00Z"),
+        Some(20),
+        Some(20_100),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -3040,6 +3140,7 @@ async fn active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg() {
         Some(&first_key),
         Some("2026-07-12 04:20:00"),
         Some(70_000),
+        Some(70_050),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -3062,6 +3163,7 @@ async fn active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg() {
         Some(&second_key),
         Some("2026-07-12 04:20:00"),
         Some(70_100),
+        Some(70_150),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -3095,6 +3197,7 @@ async fn active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg() {
             Some(&second_key),
             Some("2026-07-12 04:20:00"),
             Some(70_100),
+            Some(70_150),
             card.message_id,
             ResponseDeliveryOwner::Sink,
         )
@@ -3115,6 +3218,7 @@ async fn active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg() {
         Some(&second_key),
         Some("2026-07-12 04:20:00"),
         Some(70_100),
+        Some(70_150),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -3135,10 +3239,10 @@ async fn active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg() {
 }
 
 #[tokio::test]
-async fn legacy_second_turn_starting_before_first_delivery_is_not_suppressed_pg() {
+async fn offset_null_turns_use_exact_consumed_end_instead_of_delivery_time_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_task_response_legacy_sequential_4446",
-        "legacy turn start is compared with row creation, not delivery",
+        "offset-null turns use the consumed end coordinate",
     )
     .await
     else {
@@ -3162,13 +3266,17 @@ async fn legacy_second_turn_starting_before_first_delivery_is_not_suppressed_pg(
         80_000,
         "first legacy response",
     );
-    let first = claim_task_response_delivery(
+    let first = claim_task_response_delivery_with_recovery_key_and_started_at(
         Some(&pool),
         event.scope.channel_id,
         &event.scope.provider,
         &event.scope.session_key,
         event.event_key(),
         &first_key,
+        Some(&first_key),
+        Some("2026-07-12 04:20:00"),
+        None,
+        Some(80_000),
         card.message_id,
         ResponseDeliveryOwner::Watcher,
     )
@@ -3177,22 +3285,9 @@ async fn legacy_second_turn_starting_before_first_delivery_is_not_suppressed_pg(
     let ResponseDeliveryClaimOutcome::Owned(first) = first else {
         panic!("first legacy response owns its fence")
     };
-    sqlx::query(
-        "UPDATE task_notification_response_delivery
-         SET created_at = NOW() - INTERVAL '10 seconds'
-         WHERE response_turn_key = $1",
-    )
-    .bind(&first_key)
-    .execute(&pool)
-    .await
-    .expect("place first row creation before the second turn start");
     mark_task_response_delivered(Some(&pool), &first)
         .await
-        .expect("deliver first response after the second turn began");
-
-    let second_started_at = (chrono::Local::now() - chrono::Duration::seconds(5))
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+        .expect("deliver first response");
     let second_key = fallback_response_turn_key(
         event.scope.channel_id,
         &event.scope.provider,
@@ -3208,8 +3303,9 @@ async fn legacy_second_turn_starting_before_first_delivery_is_not_suppressed_pg(
         event.event_key(),
         &second_key,
         Some(&second_key),
-        Some(&second_started_at),
+        Some("2026-07-12 04:20:00"),
         None,
+        Some(80_100),
         card.message_id,
         ResponseDeliveryOwner::Sink,
     )
@@ -3217,7 +3313,7 @@ async fn legacy_second_turn_starting_before_first_delivery_is_not_suppressed_pg(
     .expect("claim second legacy response");
     assert!(
         matches!(second, ResponseDeliveryClaimOutcome::Owned(_)),
-        "first-turn delivery latency must not suppress a later logical turn"
+        "distinct consumed ends must preserve same-second sequential turns"
     );
     let rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM task_notification_response_delivery WHERE event_key = $1",
@@ -3227,6 +3323,137 @@ async fn legacy_second_turn_starting_before_first_delivery_is_not_suppressed_pg(
     .await
     .expect("count overlapping legacy response rows");
     assert_eq!(rows, 2);
+}
+
+#[tokio::test]
+async fn divergent_turn_without_monotonic_coordinates_quarantines_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_unknown_coordinates_4446",
+        "unknown divergent turn coordinates fail closed",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("unknown-coordinate-response-cycle");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm card");
+    let first_key = fallback_response_turn_key(
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        0,
+        "first unknown-coordinate response",
+    );
+    let first = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &first_key,
+        card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim first response");
+    let ResponseDeliveryClaimOutcome::Owned(first) = first else {
+        panic!("first response owns its fence")
+    };
+    mark_task_response_delivered(Some(&pool), &first)
+        .await
+        .expect("deliver first response");
+
+    let second_key = fallback_response_turn_key(
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        1,
+        "divergent unknown-coordinate response",
+    );
+    let second = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &second_key,
+        Some(&second_key),
+        None,
+        None,
+        None,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("unknown coordinates fail closed");
+    assert!(matches!(second, ResponseDeliveryClaimOutcome::Wait));
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE event_key = $1",
+    )
+    .bind(event.event_key())
+    .fetch_one(&pool)
+    .await
+    .expect("count quarantined rows");
+    assert_eq!(rows, 1, "quarantine must delete the provisional authority");
+}
+
+#[tokio::test]
+async fn memory_delivered_reconciliation_respects_channel_provider_and_session() {
+    let event_key = "shared-memory-event-key";
+    let first_key = response_turn_key(44_460, "2026-07-12T04:40:00Z", None);
+    let first = claim_task_response_delivery_with_recovery_key_and_started_at(
+        None,
+        44_460,
+        "claude",
+        "AgentDesk-claude-memory-scope-a",
+        event_key,
+        &first_key,
+        Some(&first_key),
+        Some("2026-07-12T04:40:00Z"),
+        None,
+        Some(100),
+        99_001,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim first memory-scoped response");
+    let ResponseDeliveryClaimOutcome::Owned(first) = first else {
+        panic!("first memory scope owns its response")
+    };
+    mark_task_response_delivered(None, &first)
+        .await
+        .expect("deliver first memory-scoped response");
+
+    let second_key = response_turn_key(44_461, "2026-07-12T04:40:00Z", None);
+    let second = claim_task_response_delivery_with_recovery_key_and_started_at(
+        None,
+        44_460,
+        "claude",
+        "AgentDesk-claude-memory-scope-b",
+        event_key,
+        &second_key,
+        Some(&second_key),
+        Some("2026-07-12T04:40:00Z"),
+        None,
+        Some(100),
+        99_001,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim unrelated memory-scoped response");
+    assert!(
+        matches!(second, ResponseDeliveryClaimOutcome::Owned(_)),
+        "matching event/card/coordinates in another scope cannot look delivered"
+    );
 }
 
 #[tokio::test]

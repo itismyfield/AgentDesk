@@ -478,6 +478,7 @@ pub(in crate::services::discord) async fn claim_task_response_delivery_with_reco
         recovery_turn_key,
         None,
         None,
+        None,
         card_message_id,
         owner,
     )
@@ -495,6 +496,7 @@ pub(in crate::services::discord) async fn claim_task_response_delivery_with_reco
     recovery_turn_key: Option<&str>,
     turn_started_at: Option<&str>,
     turn_start_offset: Option<u64>,
+    turn_end_offset: Option<u64>,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
@@ -506,6 +508,7 @@ pub(in crate::services::discord) async fn claim_task_response_delivery_with_reco
         recovery_turn_key,
         turn_started_at,
         turn_start_offset,
+        turn_end_offset,
         card_message_id,
         owner,
     )

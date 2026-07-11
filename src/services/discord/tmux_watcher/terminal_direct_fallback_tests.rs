@@ -55,6 +55,17 @@ fn watcher_task_response_wiring_prepares_reference_before_send_and_marks_after_f
         fallback.contains("task_response_authority::apply_watcher_task_response("),
         "the production fallback must delegate task responses to the durable authority"
     );
+    let response_call = fallback
+        .split_once("task_response_authority::apply_watcher_task_response(")
+        .and_then(|(_, tail)| tail.split_once("external_input_lease_before_relay"))
+        .map(|(call, _)| call)
+        .expect("task response authority call body");
+    assert!(
+        response_call.contains("turn_start_offset")
+            && response_call.contains("watcher_lease_end")
+            && !response_call.contains("turn_data_start_offset"),
+        "dedup identity must use pinned start and consumed end, never a per-pass read offset"
+    );
 
     let parent = include_str!("../tmux_watcher.rs");
     let apply = parent

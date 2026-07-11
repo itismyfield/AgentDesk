@@ -79,7 +79,8 @@ async fn prepare_watcher_task_response(
     context: Option<&task_delivery::TaskNotificationContext>,
     response_turn_key: &str,
     turn_started_at: Option<&str>,
-    turn_start_offset: u64,
+    turn_start_offset: Option<u64>,
+    turn_end_offset: u64,
 ) -> Result<PreparedWatcherTaskResponse, PrepareWatcherTaskResponseError> {
     let mut event = context.map_or_else(
         || {
@@ -162,7 +163,8 @@ async fn prepare_watcher_task_response(
         response_turn_key,
         Some(response_turn_key),
         turn_started_at,
-        Some(turn_start_offset),
+        turn_start_offset,
+        Some(turn_end_offset),
         card.message_id,
         task_delivery::ResponseDeliveryOwner::Watcher,
     )
@@ -233,7 +235,8 @@ pub(super) async fn apply_watcher_task_response(
     context: Option<&task_delivery::TaskNotificationContext>,
     response_turn_key: &str,
     turn_started_at: Option<&str>,
-    turn_start_offset: u64,
+    turn_start_offset: Option<u64>,
+    turn_end_offset: u64,
     relay_text: &str,
     external_input_lease_before_relay: bool,
     locals: WatcherTaskResponseLocals<'_>,
@@ -261,6 +264,7 @@ pub(super) async fn apply_watcher_task_response(
         response_turn_key,
         turn_started_at,
         turn_start_offset,
+        turn_end_offset,
     )
     .await
     {
