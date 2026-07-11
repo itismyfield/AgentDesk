@@ -1610,7 +1610,7 @@ def evaluate_active_foreground_coverage(
         )
     if activity.desynced is False:
         return CoverageActivityVerdict(
-            COVERAGE_UNKNOWN, "watcher_state_desync_inconsistent"
+            COVERAGE_UNCOVERED, "watcher_state_desync_inconsistent"
         )
 
     active_hint = (
@@ -1632,7 +1632,7 @@ def evaluate_active_foreground_coverage(
     )
     if activity.malformed or required_evidence_missing:
         return CoverageActivityVerdict(
-            COVERAGE_UNKNOWN, "active_foreground_evidence_incomplete"
+            COVERAGE_UNCOVERED, "active_foreground_evidence_incomplete"
         )
     if not active_hint:
         return CoverageActivityVerdict(
@@ -1658,7 +1658,7 @@ def evaluate_active_foreground_coverage(
         and float(freshness_secs) > 0
     ):
         return CoverageActivityVerdict(
-            COVERAGE_UNKNOWN, "active_foreground_clock_unknown"
+            COVERAGE_UNCOVERED, "active_foreground_clock_unknown"
         )
     timestamps = [
         timestamp
@@ -1700,9 +1700,11 @@ def evaluate_coverage(
     E is independently enumerated tmux liveness. A is normally
     ``attached and not desynced`` from watcher-state; #4458 also accepts an
     exact, fresh active-foreground relay proof while the snapshot is transiently
-    desynced. Only E && !A advances confirmation. Transport/schema uncertainty
-    is unknown (never an alert), while an authoritative watcher-state 404 is
-    uncovered. Two consecutive uncovered ticks are required.
+    desynced. Only E && !A advances confirmation. Core watcher-state transport/
+    schema uncertainty is unknown, but optional activity evidence can only prove
+    the exception; incomplete or malformed activity never weakens an otherwise
+    authoritative attached+desynced failure. An authoritative watcher-state 404
+    is uncovered. Two consecutive uncovered ticks are required.
     """
 
     def uncovered(reason: str) -> CoverageVerdict:
@@ -1742,10 +1744,8 @@ def evaluate_coverage(
             return CoverageVerdict(
                 COVERAGE_COVERED, activity_verdict.reason, 0, False
             )
-        if activity_verdict.state == COVERAGE_UNKNOWN:
-            return CoverageVerdict(
-                COVERAGE_UNKNOWN, activity_verdict.reason, 0, False
-            )
+        # Supplemental activity is a one-way exception proof. Any outcome
+        # other than exact COVERED retains the original desync invariant.
         return uncovered("attached_but_desynced")
     return CoverageVerdict(COVERAGE_UNKNOWN, "watcher_state_malformed", 0, False)
 

@@ -1041,6 +1041,23 @@ class CoverageEvaluationTests(unittest.TestCase):
         self.assertEqual(boundary.state, COVERAGE_UNCOVERED)
         self.assertEqual(boundary.reason, "active_foreground_activity_stale")
 
+    def test_invalid_freshness_clock_cannot_suppress_desync(self):
+        for now_ms, freshness_secs in ((None, 60), (self.NOW_MS, 0)):
+            with self.subTest(now_ms=now_ms, freshness_secs=freshness_secs):
+                verdict = evaluate_coverage(
+                    True,
+                    200,
+                    True,
+                    True,
+                    1,
+                    self.active_foreground(),
+                    now_ms,
+                    freshness_secs,
+                )
+                self.assertEqual(verdict.state, COVERAGE_UNCOVERED)
+                self.assertEqual(verdict.reason, "attached_but_desynced")
+                self.assertTrue(verdict.confirmed)
+
     def test_explicit_stall_evidence_never_uses_foreground_bypass(self):
         cases = {
             "queue": {"queue_depth": 1},
@@ -1077,7 +1094,7 @@ class CoverageEvaluationTests(unittest.TestCase):
                 self.assertEqual(verdict.reason, "attached_but_desynced")
                 self.assertTrue(verdict.confirmed)
 
-    def test_partial_or_malformed_active_schema_is_unknown(self):
+    def test_partial_or_malformed_active_schema_cannot_suppress_desync(self):
         partial = CoverageActivityProbe(
             relay_stall_state="active_foreground_stream",
             active_turn="foreground",
@@ -1094,10 +1111,14 @@ class CoverageEvaluationTests(unittest.TestCase):
                     activity,
                     self.NOW_MS,
                 )
-                self.assertEqual(verdict.state, COVERAGE_UNKNOWN)
-                self.assertEqual(verdict.consecutive_uncovered, 0)
+                self.assertEqual(verdict.state, COVERAGE_UNCOVERED)
+                self.assertEqual(verdict.reason, "attached_but_desynced")
+                self.assertEqual(
+                    verdict.consecutive_uncovered, COVERAGE_CONFIRM_TICKS
+                )
+                self.assertTrue(verdict.confirmed)
 
-    def test_nested_desync_disagreement_is_unknown(self):
+    def test_nested_desync_disagreement_cannot_suppress_top_level_desync(self):
         verdict = evaluate_coverage(
             True,
             200,
@@ -1107,8 +1128,9 @@ class CoverageEvaluationTests(unittest.TestCase):
             self.active_foreground(desynced=False),
             self.NOW_MS,
         )
-        self.assertEqual(verdict.state, COVERAGE_UNKNOWN)
-        self.assertEqual(verdict.reason, "watcher_state_desync_inconsistent")
+        self.assertEqual(verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(verdict.reason, "attached_but_desynced")
+        self.assertTrue(verdict.confirmed)
 
     def test_active_evidence_cannot_override_detached_or_404(self):
         activity = self.active_foreground()
@@ -1216,7 +1238,7 @@ class WatcherStateParserTests(unittest.TestCase):
         self.assertIsNone(probe.relay_activity.watcher_attached_stale)
         self.assertIsNone(probe.relay_activity.last_outbound_activity_ms)
 
-    def test_partial_active_schema_is_preserved_as_unknown_evidence(self):
+    def test_partial_active_schema_preserves_legacy_desync_detection(self):
         probe = parse_watcher_state_probe(
             200,
             {
@@ -1235,8 +1257,9 @@ class WatcherStateParserTests(unittest.TestCase):
             probe.relay_activity,
             self.NOW_MS,
         )
-        self.assertEqual(verdict.state, COVERAGE_UNKNOWN)
-        self.assertEqual(verdict.consecutive_uncovered, 0)
+        self.assertEqual(verdict.state, COVERAGE_UNCOVERED)
+        self.assertEqual(verdict.reason, "attached_but_desynced")
+        self.assertTrue(verdict.confirmed)
 
     def test_legacy_schema_retains_original_desync_detection(self):
         probe = parse_watcher_state_probe(
@@ -2561,6 +2584,25 @@ class TickChannelTests(unittest.TestCase):
         self.assertNotIn("coverage_uncovered_ticks", state["999"])
         self.assertNotIn("last_coverage_alert", state["999"])
 
+    def test_back_to_back_foreground_churn_never_accumulates_confirmation(self):
+        rt = self.make_rt()
+        state = {"999": {"coverage_uncovered_ticks": 1}}
+
+        for tick_index in range(10):
+            tick_at = self.now + tick_index * rt.cfg.poll_secs
+            self.arm_coverage(
+                rt,
+                self.active_foreground_probe(
+                    last_outbound_activity_ms=int(tick_at * 1000) - 1,
+                    last_relay_ts_ms=int(tick_at * 1000) - 2,
+                ),
+            )
+            tick_channel(rt, TICK_CHANNEL, state, tick_at)
+            self.assertNotIn("coverage_uncovered_ticks", state["999"])
+
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state["999"])
+
     def test_stale_foreground_desync_still_confirms_coverage_alert(self):
         rt = self.make_rt()
         stale_ms = int(self.now * 1000) - COVERAGE_ACTIVITY_FRESH_SECS * 1000
@@ -2579,7 +2621,7 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn("커버리지 불변식 위반", rt.alerts[0][0])
         self.assertIn("attached_but_desynced", rt.alerts[0][0])
 
-    def test_partial_foreground_schema_resets_confirmation_as_unknown(self):
+    def test_partial_foreground_schema_cannot_suppress_coverage_alert(self):
         rt = self.make_rt()
         self.arm_coverage(
             rt,
@@ -2597,14 +2639,32 @@ class TickChannelTests(unittest.TestCase):
 
         tick_channel(rt, TICK_CHANNEL, state, self.now)
 
-        self.assertEqual(rt.alerts, [])
-        self.assertNotIn("coverage_uncovered_ticks", state["999"])
-        self.assertTrue(
-            any(
-                "active_foreground_evidence_incomplete" in line
-                for line in rt.log_lines
-            )
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("커버리지 불변식 위반", rt.alerts[0][0])
+        self.assertIn("attached_but_desynced", rt.alerts[0][0])
+        self.assertEqual(
+            state["999"]["coverage_uncovered_ticks"], COVERAGE_CONFIRM_TICKS
         )
+
+    def test_active_foreground_evidence_cannot_suppress_detached_alert(self):
+        rt = self.make_rt()
+        probe = self.active_foreground_probe()
+        self.arm_coverage(
+            rt,
+            WatcherStateProbe(
+                status=200,
+                attached=False,
+                desynced=True,
+                relay_activity=probe.relay_activity,
+            ),
+        )
+        state = {"999": {"coverage_uncovered_ticks": 1}}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("커버리지 불변식 위반", rt.alerts[0][0])
+        self.assertIn("detached", rt.alerts[0][0])
 
     def test_active_foreground_coverage_cannot_suppress_transcript_gap(self):
         rt = self.gap_rt()
