@@ -349,7 +349,7 @@
 | `services::auto_queue::command` | `src/services/auto_queue/command.rs` | 426 | 426 | 0 |  |
 | `services::auto_queue::control_routes` | `src/services/auto_queue/control_routes.rs` | 906 | 854 | 52 |  |
 | `services::auto_queue::dispatch_assignment_command` | `src/services/auto_queue/dispatch_assignment_command.rs` | 101 | 101 | 0 |  |
-| `services::auto_queue::dispatch_command` | `src/services/auto_queue/dispatch_command.rs` | 908 | 908 | 0 |  |
+| `services::auto_queue::dispatch_command` | `src/services/auto_queue/dispatch_command.rs` | 906 | 906 | 0 |  |
 | `services::auto_queue::dispatch_query` | `src/services/auto_queue/dispatch_query.rs` | 93 | 93 | 0 |  |
 | `services::auto_queue::fsm` | `src/services/auto_queue/fsm.rs` | 713 | 693 | 20 |  |
 | `services::auto_queue::order_routes` | `src/services/auto_queue/order_routes.rs` | 295 | 295 | 0 |  |

@@ -642,13 +642,12 @@ pub(super) fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
         components.entry(root).or_default().push(idx);
     }
 
-    let mut component_roots: Vec<usize> = components.keys().copied().collect();
-    component_roots
-        .sort_by_key(|root| components[root].iter().copied().min().unwrap_or(usize::MAX));
+    let mut component_members: Vec<Vec<usize>> = components.into_values().collect();
+    component_members.sort_by_key(|members| members.iter().copied().min().unwrap_or(usize::MAX));
+    let thread_group_count = component_members.len() as i64;
 
     let mut planned_entries = Vec::with_capacity(n);
-    for (group_num, root) in component_roots.iter().enumerate() {
-        let mut members = components[root].clone();
+    for (group_num, mut members) in component_members.into_iter().enumerate() {
         members.sort_by_key(|idx| planning_sort_key(&cards[*idx], *idx));
         let member_set: HashSet<usize> = members.iter().copied().collect();
 
@@ -815,7 +814,6 @@ pub(super) fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
         planned.batch_phase = batch_phase_by_idx[planned.card_idx];
     }
 
-    let thread_group_count = component_roots.len() as i64;
     let recommended_parallel_threads = if thread_group_count <= 1 {
         1
     } else {
