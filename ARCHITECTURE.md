@@ -649,6 +649,8 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── task_notification_delivery/
+│   │   │   ├── store/
+│   │   │   │   └── response_fence.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── store.rs
@@ -691,6 +693,7 @@ src/
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_direct_fallback.rs
+│   │   │   ├── terminal_direct_fallback_tests.rs
 │   │   │   ├── terminal_long_chunks.rs
 │   │   │   ├── terminal_readiness.rs
 │   │   │   ├── terminal_readiness_tests.rs

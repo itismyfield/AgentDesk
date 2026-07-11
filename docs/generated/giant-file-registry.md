@@ -28,7 +28,7 @@
 | `src/services/discord/session_relay_sink.rs` | 1689 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1624 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 3559 | discord-relay | 2026-10-31 | #3832 |
-| `src/services/discord/tmux_watcher/turn_stream_collector.rs` | 1161 | discord-relay | 2026-10-31 | #4229 |
+| `src/services/discord/tmux_watcher/turn_stream_collector.rs` | 1159 | discord-relay | 2026-10-31 | #4229 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1495 | discord-relay | 2026-08-31 | #3540 |
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1051 | discord-relay | 2026-10-31 | #4019 |
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
