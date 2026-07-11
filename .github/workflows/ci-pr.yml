@@ -115,6 +115,10 @@ jobs:
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/**'
               - 'src/services/dispatches/**'
+              # #4460: recovery owns production-shaped PostgreSQL/outbox
+              # tests; changes to the owner or its sidecars must run them.
+              - 'src/services/discord/health/recovery.rs'
+              - 'src/services/discord/health/recovery/**'
               - 'src/services/message_outbox.rs'
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
