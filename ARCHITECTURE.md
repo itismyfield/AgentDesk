@@ -463,6 +463,7 @@ src/
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
+│   │   │   │   ├── stall_alert.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── mailbox.rs
