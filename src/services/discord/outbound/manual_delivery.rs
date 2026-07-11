@@ -494,7 +494,9 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
             message_id: String::new(),
             delivery: Some("skipped"),
         },
-        DeliveryResult::PermanentFailure { reason } => {
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => {
             ManualDeliveryOutcome::Failed { detail: reason }
         }
     }

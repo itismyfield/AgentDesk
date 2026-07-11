@@ -1,10 +1,10 @@
 use poise::serenity_prelude as serenity;
 use regex::Regex;
 use serenity::{ChannelId, CreateAttachment, MessageId};
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashSet;
+#[cfg(test)]
+use std::sync::Mutex;
+use std::sync::{Arc, LazyLock};
 
 use super::{
     DISCORD_MSG_LIMIT, SharedData,
@@ -35,31 +35,39 @@ pub(super) use super::reaction_lifecycle::is_real_discord_message_id;
 #[cfg(test)]
 pub(super) use super::reaction_lifecycle::reaction_target_channel_for_shared;
 
-// This mutex serializes both the process-local rollback map and every sidecar
-// mutation for the same protocol: atomic writes, clears, empty-marker writes,
-// and claim-side empty-marker GC. Keeping the fs operation under the same lock
-// prevents a claimer from deleting a freshly-written durable debt.
-static REPLACE_CONTINUATION_ROLLBACKS: LazyLock<
-    Mutex<HashMap<(u64, u64), ReplaceContinuationRollback>>,
-> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[cfg(test)]
-static REPLACE_CONTINUATION_ROLLBACK_FORCED_REMOVE_FAILURES: LazyLock<Mutex<HashSet<(u64, u64)>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
 #[path = "formatting/long_send_rollback.rs"]
-mod long_send_rollback;
+pub(in crate::services::discord) mod long_send_rollback;
+#[path = "formatting/rollback_journal.rs"]
+mod rollback_journal;
 
 use self::long_send_rollback::delete_rollback_channel_message;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
+#[cfg(test)]
+use self::rollback_journal::{
+    REPLACE_CONTINUATION_ROLLBACKS, force_next_replace_continuation_rollback_remove_failure,
+    replace_continuation_rollback_path,
+};
+use self::rollback_journal::{
+    ReplaceContinuationRollbackClaim, claim_replace_continuation_rollback,
+    clear_replace_continuation_rollback, clear_replace_continuation_rollback_memory_only,
+    record_replace_continuation_rollback, record_replace_continuation_rollback_memory_only,
+    replace_continuation_rollback_key, task_response_continuation_rollback_key,
+    unclaim_replace_continuation_rollback,
+};
 
 #[cfg(test)]
 pub(in crate::services::discord) mod rollback_transport_test_hook {
     use super::*;
 
     type SendHook = Box<
-        dyn Fn(ChannelId, &str, Option<(ChannelId, MessageId)>) -> Option<Result<MessageId, String>>
+        dyn Fn(
+                ChannelId,
+                &str,
+                Option<(ChannelId, MessageId)>,
+                Option<&str>,
+                bool,
+            ) -> Option<Result<MessageId, String>>
             + Send
             + Sync,
     >;
@@ -91,13 +99,16 @@ pub(in crate::services::discord) mod rollback_transport_test_hook {
         channel_id: ChannelId,
         content: &str,
         reference: Option<(ChannelId, MessageId)>,
+        nonce: Option<&str>,
+        enforce_nonce: bool,
     ) -> Option<Result<MessageId, Error>> {
         SEND_HOOK
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .as_ref()
             .and_then(|hook| {
-                hook(channel_id, content, reference).map(|result| result.map_err(Into::into))
+                hook(channel_id, content, reference, nonce, enforce_nonce)
+                    .map(|result| result.map_err(Into::into))
             })
     }
 
@@ -111,56 +122,6 @@ pub(in crate::services::discord) mod rollback_transport_test_hook {
             .as_ref()
             .and_then(|hook| hook(channel_id, message_id).map(|result| result.map_err(Into::into)))
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ReplaceContinuationRollback {
-    message_ids: Vec<u64>,
-    claimed: bool,
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct PersistedReplaceContinuationRollback {
-    message_ids: Vec<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PersistReplaceContinuationRollbackOutcome {
-    Recorded,
-    Removed,
-    ClearedMarkerWritten,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ReplaceContinuationRollbackClaim {
-    None,
-    Owner(Vec<u64>),
-    InProgress(Vec<u64>),
-}
-
-fn remove_replace_continuation_rollback_file(
-    key: (u64, u64),
-    path: &PathBuf,
-) -> std::io::Result<()> {
-    #[cfg(test)]
-    {
-        if REPLACE_CONTINUATION_ROLLBACK_FORCED_REMOVE_FAILURES
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&key)
-        {
-            return Err(std::io::Error::other("forced rollback remove failure"));
-        }
-    }
-    fs::remove_file(path)
-}
-
-#[cfg(test)]
-fn force_next_replace_continuation_rollback_remove_failure(key: (u64, u64)) {
-    REPLACE_CONTINUATION_ROLLBACK_FORCED_REMOVE_FAILURES
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(key);
 }
 
 pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
@@ -2340,7 +2301,7 @@ pub(super) async fn replace_long_message_raw_with_outcome(
         return Ok(ReplaceLongMessageOutcome::EditedOriginal);
     };
     let rollback_key = replace_continuation_rollback_key(channel_id, message_id);
-    match claim_replace_continuation_rollback(rollback_key) {
+    match claim_replace_continuation_rollback(&rollback_key) {
         ReplaceContinuationRollbackClaim::None => {}
         ReplaceContinuationRollbackClaim::InProgress(pending_ids) => {
             return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
@@ -2360,8 +2321,8 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                 cleanup_replace_continuations_after_failure(http, channel_id, &pending_ids, shared)
                     .await;
             if cleanup.failed_message_ids.is_empty() {
-                if let Err(error) = clear_replace_continuation_rollback(rollback_key) {
-                    unclaim_replace_continuation_rollback(rollback_key);
+                if let Err(error) = clear_replace_continuation_rollback(&rollback_key) {
+                    unclaim_replace_continuation_rollback(&rollback_key);
                     let mut cleanup_errors = cleanup.errors;
                     cleanup_errors.push(error.clone());
                     return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
@@ -2381,11 +2342,11 @@ pub(super) async fn replace_long_message_raw_with_outcome(
             } else {
                 let mut cleanup_errors = cleanup.errors;
                 if let Err(error) = record_replace_continuation_rollback(
-                    rollback_key,
+                    &rollback_key,
                     cleanup.failed_message_ids.clone(),
                 ) {
                     record_replace_continuation_rollback_memory_only(
-                        rollback_key,
+                        &rollback_key,
                         cleanup.failed_message_ids.clone(),
                     );
                     cleanup_errors.push(error.clone());
@@ -2510,7 +2471,7 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                 shared.answer_flush_barrier.note_progress(channel_id);
                 sent_continuation_message_ids.push(message.id.get());
                 if let Err(error) = record_replace_continuation_rollback(
-                    rollback_key,
+                    &rollback_key,
                     sent_continuation_message_ids.clone(),
                 ) {
                     tracing::warn!(
@@ -2532,16 +2493,16 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                     let mut errors = cleanup_errors.errors;
                     errors.push(error.clone());
                     if cleanup_errors.failed_message_ids.is_empty() {
-                        if let Err(clear_error) = clear_replace_continuation_rollback(rollback_key)
+                        if let Err(clear_error) = clear_replace_continuation_rollback(&rollback_key)
                         {
                             errors.push(clear_error);
                         }
                     } else if let Err(record_error) = record_replace_continuation_rollback(
-                        rollback_key,
+                        &rollback_key,
                         cleanup_errors.failed_message_ids.clone(),
                     ) {
                         record_replace_continuation_rollback_memory_only(
-                            rollback_key,
+                            &rollback_key,
                             cleanup_errors.failed_message_ids.clone(),
                         );
                         errors.push(record_error);
@@ -2596,8 +2557,8 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                 )
                 .await;
                 if cleanup_errors.failed_message_ids.is_empty() {
-                    if let Err(error) = clear_replace_continuation_rollback(rollback_key) {
-                        unclaim_replace_continuation_rollback(rollback_key);
+                    if let Err(error) = clear_replace_continuation_rollback(&rollback_key) {
+                        unclaim_replace_continuation_rollback(&rollback_key);
                         let mut errors = cleanup_errors.errors;
                         errors.push(error.clone());
                         return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
@@ -2612,11 +2573,11 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                 } else {
                     let mut errors = cleanup_errors.errors;
                     if let Err(record_error) = record_replace_continuation_rollback(
-                        rollback_key,
+                        &rollback_key,
                         cleanup_errors.failed_message_ids.clone(),
                     ) {
                         record_replace_continuation_rollback_memory_only(
-                            rollback_key,
+                            &rollback_key,
                             cleanup_errors.failed_message_ids.clone(),
                         );
                         errors.push(record_error);
@@ -2647,9 +2608,9 @@ pub(super) async fn replace_long_message_raw_with_outcome(
     }
 
     if !sent_continuation_message_ids.is_empty()
-        && let Err(error) = clear_replace_continuation_rollback(rollback_key)
+        && let Err(error) = clear_replace_continuation_rollback(&rollback_key)
     {
-        clear_replace_continuation_rollback_memory_only(rollback_key);
+        clear_replace_continuation_rollback_memory_only(&rollback_key);
         tracing::warn!(
             target: "discord::chunker",
             path = "replace_long_message_raw",
@@ -2713,254 +2674,6 @@ async fn cleanup_replace_continuations_after_failure(
     result
 }
 
-fn replace_continuation_rollback_key(channel_id: ChannelId, message_id: MessageId) -> (u64, u64) {
-    (channel_id.get(), message_id.get())
-}
-
-fn replace_continuation_rollback_root() -> Option<PathBuf> {
-    crate::config::runtime_root().map(|root| {
-        root.join("runtime")
-            .join("discord_replace_continuation_rollbacks")
-    })
-}
-
-fn replace_continuation_rollback_path(key: (u64, u64)) -> Option<PathBuf> {
-    let (channel_id, message_id) = key;
-    replace_continuation_rollback_root().map(|root| {
-        root.join(channel_id.to_string())
-            .join(format!("{message_id}.json"))
-    })
-}
-
-fn load_persisted_replace_continuation_rollback(key: (u64, u64)) -> Option<Vec<u64>> {
-    let path = replace_continuation_rollback_path(key)?;
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-            // Non-UTF8 means the sidecar content is corrupt, just like a JSON
-            // parse failure below. Remove it so a bad-content file cannot warn
-            // forever on every future claim attempt.
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to decode continuation rollback sidecar; removing corrupt sidecar and treating as no debt"
-            );
-            let _ = fs::remove_file(&path);
-            return None;
-        }
-        Err(error) => {
-            // Fail open WITHOUT removing the file: a read error (EIO, fd
-            // exhaustion, EACCES) is transient-environment evidence, not
-            // corruption evidence — removing here would permanently destroy
-            // valid debt that a later claim could still read. Only the parse
-            // arm below (unparseable content = a genuinely bad file) removes.
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to read continuation rollback sidecar; leaving file in place and treating as no debt for this claim"
-            );
-            return None;
-        }
-    };
-    let persisted: PersistedReplaceContinuationRollback = match serde_json::from_str(&content) {
-        Ok(persisted) => persisted,
-        Err(error) => {
-            // Fail open for corrupt sidecars: runtime_store::atomic_write uses a
-            // temp file, fsync, and same-dir rename, so torn files cannot be
-            // self-produced. Treating corrupt data as debt would reintroduce the
-            // r4 permanent send-block without a bounded probe.
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to parse continuation rollback sidecar; removing corrupt sidecar and treating as no debt"
-            );
-            let _ = fs::remove_file(&path);
-            return None;
-        }
-    };
-    if persisted.message_ids.is_empty() {
-        let _ = fs::remove_file(&path);
-        return None;
-    }
-    (!persisted.message_ids.is_empty()).then_some(persisted.message_ids)
-}
-
-fn replace_continuation_rollback_cleared_marker() -> Result<String, String> {
-    serde_json::to_string_pretty(&PersistedReplaceContinuationRollback {
-        message_ids: Vec::new(),
-    })
-    .map_err(|error| format!("serialize cleared continuation rollback marker: {error}"))
-}
-
-fn persist_replace_continuation_rollback(
-    key: (u64, u64),
-    message_ids: &[u64],
-) -> Result<PersistReplaceContinuationRollbackOutcome, String> {
-    let Some(path) = replace_continuation_rollback_path(key) else {
-        return Err("runtime root unavailable for continuation rollback".to_string());
-    };
-    if message_ids.is_empty() {
-        match remove_replace_continuation_rollback_file(key, &path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                let cleared_marker = replace_continuation_rollback_cleared_marker()?;
-                super::runtime_store::atomic_write(&path, &cleared_marker).map_err(
-                    |write_error| {
-                        format!(
-                            "remove continuation rollback {}: {error}; write cleared marker failed: {write_error}",
-                            path.display()
-                        )
-                    },
-                )?;
-                return Ok(PersistReplaceContinuationRollbackOutcome::ClearedMarkerWritten);
-            }
-        }
-        return Ok(PersistReplaceContinuationRollbackOutcome::Removed);
-    }
-    let persisted = PersistedReplaceContinuationRollback {
-        message_ids: message_ids.to_vec(),
-    };
-    let json = serde_json::to_string_pretty(&persisted)
-        .map_err(|error| format!("serialize continuation rollback: {error}"))?;
-    super::runtime_store::atomic_write(&path, &json)?;
-    Ok(PersistReplaceContinuationRollbackOutcome::Recorded)
-}
-
-fn claim_replace_continuation_rollback(key: (u64, u64)) -> ReplaceContinuationRollbackClaim {
-    let mut rollbacks = REPLACE_CONTINUATION_ROLLBACKS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let rollback = match rollbacks.get_mut(&key) {
-        Some(rollback) if rollback.message_ids.is_empty() => {
-            return ReplaceContinuationRollbackClaim::None;
-        }
-        Some(rollback) => rollback,
-        None => {
-            let Some(message_ids) = load_persisted_replace_continuation_rollback(key) else {
-                return ReplaceContinuationRollbackClaim::None;
-            };
-            rollbacks.insert(
-                key,
-                ReplaceContinuationRollback {
-                    message_ids,
-                    claimed: true,
-                },
-            );
-            return ReplaceContinuationRollbackClaim::Owner(
-                rollbacks
-                    .get(&key)
-                    .map(|entry| entry.message_ids.clone())
-                    .unwrap_or_default(),
-            );
-        }
-    };
-    if rollback.claimed {
-        ReplaceContinuationRollbackClaim::InProgress(rollback.message_ids.clone())
-    } else {
-        rollback.claimed = true;
-        ReplaceContinuationRollbackClaim::Owner(rollback.message_ids.clone())
-    }
-}
-
-fn record_replace_continuation_rollback(
-    key: (u64, u64),
-    message_ids: Vec<u64>,
-) -> Result<(), String> {
-    let mut rollbacks = REPLACE_CONTINUATION_ROLLBACKS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let outcome = persist_replace_continuation_rollback(key, &message_ids)?;
-    if message_ids.is_empty() {
-        match outcome {
-            PersistReplaceContinuationRollbackOutcome::ClearedMarkerWritten => {
-                rollbacks.insert(
-                    key,
-                    ReplaceContinuationRollback {
-                        message_ids: Vec::new(),
-                        claimed: false,
-                    },
-                );
-            }
-            PersistReplaceContinuationRollbackOutcome::Removed
-            | PersistReplaceContinuationRollbackOutcome::Recorded => {
-                rollbacks.remove(&key);
-            }
-        }
-    } else {
-        rollbacks.insert(
-            key,
-            ReplaceContinuationRollback {
-                message_ids: message_ids.clone(),
-                claimed: false,
-            },
-        );
-    }
-    Ok(())
-}
-
-fn record_replace_continuation_rollback_memory_only(key: (u64, u64), message_ids: Vec<u64>) {
-    if message_ids.is_empty() {
-        return;
-    }
-    REPLACE_CONTINUATION_ROLLBACKS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(
-            key,
-            ReplaceContinuationRollback {
-                message_ids,
-                claimed: false,
-            },
-        );
-}
-
-fn clear_replace_continuation_rollback_memory_only(key: (u64, u64)) {
-    REPLACE_CONTINUATION_ROLLBACKS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(
-            key,
-            ReplaceContinuationRollback {
-                message_ids: Vec::new(),
-                claimed: false,
-            },
-        );
-}
-
-fn clear_replace_continuation_rollback(key: (u64, u64)) -> Result<(), String> {
-    let mut rollbacks = REPLACE_CONTINUATION_ROLLBACKS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    match persist_replace_continuation_rollback(key, &[])? {
-        PersistReplaceContinuationRollbackOutcome::ClearedMarkerWritten => {
-            rollbacks.insert(
-                key,
-                ReplaceContinuationRollback {
-                    message_ids: Vec::new(),
-                    claimed: false,
-                },
-            );
-        }
-        PersistReplaceContinuationRollbackOutcome::Removed
-        | PersistReplaceContinuationRollbackOutcome::Recorded => {
-            rollbacks.remove(&key);
-        }
-    }
-    Ok(())
-}
-
-fn unclaim_replace_continuation_rollback(key: (u64, u64)) {
-    if let Some(rollback) = REPLACE_CONTINUATION_ROLLBACKS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .get_mut(&key)
-    {
-        rollback.claimed = false;
-    }
-}
-
 #[cfg(test)]
 mod replace_long_message_tests {
     use poise::serenity_prelude::{ChannelId, MessageId};
@@ -2985,6 +2698,57 @@ mod replace_long_message_tests {
                 None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
             }
         }
+    }
+
+    #[test]
+    fn required_reference_failure_never_retries_as_plain_message() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = RuntimeRootEnvGuard::new(tempdir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let channel = ChannelId::new(4_055_771);
+            let card = MessageId::new(4_055_772);
+            let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = attempts.clone();
+            let _hook = super::rollback_transport_test_hook::install(
+                Box::new(
+                    move |seen_channel, _content, reference, _nonce, _enforce_nonce| {
+                        if seen_channel != channel {
+                            return None;
+                        }
+                        seen.lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .push(reference);
+                        Some(Err("referenced send rejected".to_string()))
+                    },
+                ),
+                Box::new(|_, _| Some(Ok(()))),
+            );
+            let http = poise::serenity_prelude::Http::new("test-token");
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            super::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
+                &http,
+                channel,
+                card,
+                "task answer",
+                &shared,
+                (channel, card),
+                &"a".repeat(64),
+            )
+            .await
+            .expect_err("a rejected required reference must fail delivery");
+            assert_eq!(
+                *attempts.lock().unwrap_or_else(|error| error.into_inner()),
+                vec![Some((channel, card))],
+                "the sender must not make a second unreferenced POST"
+            );
+        });
     }
 
     // #3805 P1: a multi-chunk answer must re-anchor the completion footer onto the
@@ -3059,25 +2823,25 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(7), MessageId::new(11));
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
 
-        super::record_replace_continuation_rollback(key, vec![101, 202]).expect("record rollback");
+        super::record_replace_continuation_rollback(&key, vec![101, 202]).expect("record rollback");
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::Owner(vec![101, 202])
         );
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::InProgress(vec![101, 202])
         );
 
-        super::record_replace_continuation_rollback(key, Vec::new()).expect("clear by record");
+        super::record_replace_continuation_rollback(&key, Vec::new()).expect("clear by record");
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
     }
@@ -3091,21 +2855,21 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(13), MessageId::new(29));
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
-        super::record_replace_continuation_rollback(key, vec![401]).expect("record rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
+        super::record_replace_continuation_rollback(&key, vec![401]).expect("record rollback");
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::Owner(vec![401])
         );
 
-        super::record_replace_continuation_rollback(key, vec![401, 402])
+        super::record_replace_continuation_rollback(&key, vec![401, 402])
             .expect("record rollback progress");
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::Owner(vec![401, 402])
         );
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
     }
 
     #[test]
@@ -3117,14 +2881,14 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(31), MessageId::new(37));
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
-        super::record_replace_continuation_rollback_memory_only(key, vec![701, 702]);
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
+        super::record_replace_continuation_rollback_memory_only(&key, vec![701, 702]);
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::Owner(vec![701, 702])
         );
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
     }
 
     #[test]
@@ -3136,14 +2900,14 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(33), MessageId::new(39));
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
-        super::record_replace_continuation_rollback(key, vec![711, 712]).expect("record rollback");
-        let rollback_path = super::replace_continuation_rollback_path(key).expect("rollback path");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
+        super::record_replace_continuation_rollback(&key, vec![711, 712]).expect("record rollback");
+        let rollback_path = super::replace_continuation_rollback_path(&key).expect("rollback path");
         assert!(rollback_path.exists(), "rollback sidecar must be persisted");
 
-        super::clear_replace_continuation_rollback_memory_only(key);
+        super::clear_replace_continuation_rollback_memory_only(&key);
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
         assert!(
@@ -3151,7 +2915,7 @@ mod replace_long_message_tests {
             "memory tombstone should not require disk cleanup to succeed"
         );
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
     }
 
     #[test]
@@ -3163,13 +2927,13 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(35), MessageId::new(41));
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
-        super::record_replace_continuation_rollback(key, vec![721, 722]).expect("record rollback");
-        let rollback_path = super::replace_continuation_rollback_path(key).expect("rollback path");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
+        super::record_replace_continuation_rollback(&key, vec![721, 722]).expect("record rollback");
+        let rollback_path = super::replace_continuation_rollback_path(&key).expect("rollback path");
         assert!(rollback_path.exists(), "rollback sidecar must be persisted");
 
-        super::force_next_replace_continuation_rollback_remove_failure(key);
-        super::clear_replace_continuation_rollback(key)
+        super::force_next_replace_continuation_rollback_remove_failure(&key);
+        super::clear_replace_continuation_rollback(&key)
             .expect("clear should write a cleared marker after remove failure");
         let marker = std::fs::read_to_string(&rollback_path).expect("cleared marker");
         assert!(
@@ -3182,7 +2946,7 @@ mod replace_long_message_tests {
             .unwrap_or_else(|error| error.into_inner())
             .remove(&key);
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
         assert!(
@@ -3200,8 +2964,8 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(37), MessageId::new(41));
 
-        super::record_replace_continuation_rollback(key, vec![731, 732]).expect("record rollback");
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
+        super::record_replace_continuation_rollback(&key, vec![731, 732]).expect("record rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
 
         assert!(
             !super::REPLACE_CONTINUATION_ROLLBACKS
@@ -3211,7 +2975,7 @@ mod replace_long_message_tests {
             "successful clear should leave absence, not a permanent tombstone"
         );
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
     }
@@ -3224,13 +2988,13 @@ mod replace_long_message_tests {
         let tempdir = tempfile::tempdir().expect("temp runtime root");
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(39), MessageId::new(45));
-        let rollback_path = super::replace_continuation_rollback_path(key).expect("rollback path");
+        let rollback_path = super::replace_continuation_rollback_path(&key).expect("rollback path");
         std::fs::create_dir_all(rollback_path.parent().expect("rollback parent"))
             .expect("create rollback parent");
         std::fs::write(&rollback_path, "{not-json").expect("write corrupt sidecar");
 
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
         assert!(
@@ -3247,13 +3011,13 @@ mod replace_long_message_tests {
         let tempdir = tempfile::tempdir().expect("temp runtime root");
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(40), MessageId::new(46));
-        let rollback_path = super::replace_continuation_rollback_path(key).expect("rollback path");
+        let rollback_path = super::replace_continuation_rollback_path(&key).expect("rollback path");
         std::fs::create_dir_all(rollback_path.parent().expect("rollback parent"))
             .expect("create rollback parent");
         std::fs::write(&rollback_path, [0xff, 0xfe, 0xfd]).expect("write non-UTF8 sidecar");
 
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
         assert!(
@@ -3271,23 +3035,23 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(41), MessageId::new(43));
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
-        super::record_replace_continuation_rollback(key, vec![801]).expect("record rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
+        super::record_replace_continuation_rollback(&key, vec![801]).expect("record rollback");
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::Owner(vec![801])
         );
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::InProgress(vec![801])
         );
-        super::unclaim_replace_continuation_rollback(key);
+        super::unclaim_replace_continuation_rollback(&key);
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::Owner(vec![801])
         );
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
     }
 
     #[test]
@@ -3299,9 +3063,9 @@ mod replace_long_message_tests {
         let _env = RuntimeRootEnvGuard::new(tempdir.path());
         let key = super::replace_continuation_rollback_key(ChannelId::new(17), MessageId::new(23));
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
-        super::record_replace_continuation_rollback(key, vec![301, 302]).expect("record rollback");
-        let rollback_path = super::replace_continuation_rollback_path(key).expect("rollback path");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
+        super::record_replace_continuation_rollback(&key, vec![301, 302]).expect("record rollback");
+        let rollback_path = super::replace_continuation_rollback_path(&key).expect("rollback path");
         assert!(rollback_path.exists(), "rollback sidecar must be persisted");
 
         super::REPLACE_CONTINUATION_ROLLBACKS
@@ -3309,27 +3073,61 @@ mod replace_long_message_tests {
             .unwrap_or_else(|error| error.into_inner())
             .remove(&key);
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::Owner(vec![301, 302])
         );
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::InProgress(vec![301, 302])
         );
 
-        super::clear_replace_continuation_rollback(key).expect("clear rollback");
+        super::clear_replace_continuation_rollback(&key).expect("clear rollback");
         super::REPLACE_CONTINUATION_ROLLBACKS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&key);
         assert_eq!(
-            super::claim_replace_continuation_rollback(key),
+            super::claim_replace_continuation_rollback(&key),
             super::ReplaceContinuationRollbackClaim::None
         );
         assert!(
             !rollback_path.exists(),
             "clearing rollback must remove persisted sidecar"
         );
+    }
+
+    #[test]
+    fn task_response_rollback_journal_is_turn_scoped_across_restart() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = RuntimeRootEnvGuard::new(tempdir.path());
+        let channel = ChannelId::new(47);
+        let card = MessageId::new(53);
+        let turn_one = "1".repeat(64);
+        let turn_two = "2".repeat(64);
+        let key_one = super::task_response_continuation_rollback_key(channel, card, &turn_one);
+        let key_two = super::task_response_continuation_rollback_key(channel, card, &turn_two);
+
+        super::record_replace_continuation_rollback(&key_one, vec![901, 902])
+            .expect("persist turn-one rollback debt");
+        super::REPLACE_CONTINUATION_ROLLBACKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+
+        assert_eq!(
+            super::claim_replace_continuation_rollback(&key_two),
+            super::ReplaceContinuationRollbackClaim::None,
+            "a new response turn on the same card must not claim stale turn-one debt"
+        );
+        assert_eq!(
+            super::claim_replace_continuation_rollback(&key_one),
+            super::ReplaceContinuationRollbackClaim::Owner(vec![901, 902]),
+            "the original turn must retain its own restart-recoverable rollback debt"
+        );
+        super::clear_replace_continuation_rollback(&key_one).expect("clear turn-one debt");
     }
 }
 

@@ -69,6 +69,21 @@ impl DispatchMessagePostError {
     pub(crate) fn is_length_error(&self) -> bool {
         self.kind == DispatchMessagePostErrorKind::MessageTooLong
     }
+
+    /// Preserve retry authority across the canonical outbound-v3 boundary.
+    /// Discord 5xx/429/408 responses and failures without an authoritative
+    /// HTTP response are transient; deterministic payload/policy failures and
+    /// all other 4xx responses are terminal.
+    pub(crate) fn is_transient(&self) -> bool {
+        if self.is_length_error() {
+            return false;
+        }
+        self.http_status.is_none_or(|status| {
+            status.is_server_error()
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        })
+    }
 }
 
 impl std::fmt::Display for DispatchMessagePostError {
@@ -519,7 +534,9 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
             DispatchMessagePostErrorKind::Other,
             format!("unexpected skip for channel {channel_id}"),
         )),
-        DeliveryResult::PermanentFailure { reason } => {
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => {
             let kind = if reason.to_ascii_lowercase().contains("base_type_max_length")
                 || reason.contains("length")
             {

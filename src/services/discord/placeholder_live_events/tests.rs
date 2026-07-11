@@ -6092,6 +6092,72 @@ fn task_completion_card_suppression_quiets_background_xml_lifecycle() {
 }
 
 #[test]
+fn confirmed_task_notification_card_evicts_only_exact_terminal_footer_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_055_001);
+    for (tool_use_id, description) in [
+        ("toolu_4055_target", "Target task"),
+        ("toolu_4055_decoy", "Decoy task"),
+    ] {
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use_with_id_for_footer_mode(
+                "Bash",
+                &json!({
+                    "command": "true",
+                    "description": description,
+                    "run_in_background": true
+                })
+                .to_string(),
+                Some(tool_use_id),
+                true,
+            ),
+        );
+        events.push_status_events(
+            channel_id,
+            status_events_from_task_notification_with_tool_use_id(
+                "background",
+                "completed",
+                &format!("Background command \"{description}\" completed (exit code 0)"),
+                Some(tool_use_id),
+            ),
+        );
+    }
+
+    assert!(
+        !events.claim_terminal_slot_for_card(channel_id, "background", Some("toolu_4055_wrong"),),
+        "a non-matching card identity must not guess a footer slot"
+    );
+    assert!(
+        !events.claim_terminal_slot_for_card(channel_id, "subagent", Some("toolu_4055_target"),),
+        "the same tool id in a different terminal-slot kind must not evict"
+    );
+    let before = events
+        .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+        .block
+        .expect("both terminal footer slots remain after wrong-id claim");
+    assert!(before.contains("Target task") && before.contains("Decoy task"));
+
+    assert!(events.claim_terminal_slot_for_card(
+        channel_id,
+        "background",
+        Some("toolu_4055_target"),
+    ));
+    let after = events
+        .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+        .block
+        .expect("decoy footer slot remains");
+    assert!(
+        !after.contains("Target task"),
+        "exact target must be evicted: {after}"
+    );
+    assert!(
+        after.contains("Decoy task"),
+        "wrong slot must be preserved: {after}"
+    );
+}
+
+#[test]
 fn task_completion_card_suppression_requires_idful_matching_subagent_slot() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_654_002);

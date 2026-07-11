@@ -28,6 +28,8 @@
 > `AGENTDESK_ROOT_DIR` inside a scoped temp root. Production delivery-record
 > authority, rollout defaults, writers, and outbound callsite coverage are unchanged.)
 
+> Last refreshed: 2026-07-11 (manual: #4055 adds durable task-notification card create/edit delivery. `DiscordOutboundMessage` now carries an optional create nonce + enforcement bit, nonce-bearing payloads are single-message only, Serenity nonce POST lives in `outbound/transport.rs`, and only structured edit `404/10008` becomes `DeliveryResult::ConfirmedMissing`; every transient/ambiguous edit remains non-reposting.)
+
 > #3664 outbound bot-selection note: the outbox drain (`src/server/mod.rs`)
 > now resolves the delivery bot via `message_outbox::delivery_bot_for_target_session`.
 > For a private (DM) session — tmux name `AgentDesk-<provider>-dm-<digits>` with a
@@ -102,15 +104,15 @@ HTTP path.
 
 | Symbol | Path | Status | When to use |
 |---|---|---|---|
-| `DiscordOutboundMessage` (v3) | `outbound/message.rs:312` | active — multiple production callers | All future sends/edits. Carries `OutboundDeliveryId` (mandatory `correlation_id` + `semantic_event_id`), `OutboundTarget`, `OutboundOperation`, `DiscordOutboundPolicy`. |
+| `DiscordOutboundMessage` (v3) | `outbound/message.rs` | active — multiple production callers | All future sends/edits. Carries `OutboundDeliveryId` (mandatory `correlation_id` + `semantic_event_id`), `OutboundTarget`, `OutboundOperation`, `DiscordOutboundPolicy`, and an optional single-message Discord create nonce with explicit enforcement. |
 | `OutboundTarget::{Channel, Thread, DmUser}` | `outbound/message.rs:82` | active for channel, thread, and DM delivery | Replaces legacy `(channel_id, Option<thread_id>)` pair with sum type. `DmUser` lets v3 resolve/create the DM channel through `DiscordOutboundClient::resolve_dm_channel`. |
 | `OutboundOperation::{Send, Edit{message_id}}` | `outbound/message.rs:125` | active through v3 and legacy adapter | Encodes send-vs-edit at the type level (legacy used `Option<edit_message_id>`). |
 | `OutboundDedupKey` | `outbound/message.rs:68` | active | Structured key that prevents `("a::b","c")` vs `("a","b::c")` collisions in the legacy delimiter-joined form. |
 | `decide_policy(...) -> DiscordOutboundPolicyDecision` | `outbound/decision.rs:133` | active pure planner | Pure function that turns a v3 message + policy into a delivery plan (split / fallback / dedup). Does not perform I/O. |
 | `DiscordOutboundPolicy` (v3 in `policy.rs`) | `outbound/policy.rs:57` | active | New policy with named presets, including `dispatch_outbox()`, `review_notification()`, and `preserve_inline_content()`. |
-| `DeliveryResult` | `outbound/result.rs:126` | active | Single outbound result source; carries ordered `DeliveredMessage` metadata for success, fallback, and duplicate replay. |
+| `DeliveryResult` | `outbound/result.rs` | active | Single outbound result source; carries ordered `DeliveredMessage` metadata for success, fallback, and duplicate replay. `ConfirmedMissing` is emitted only for an edit with structured Discord HTTP 404 + code 10008, allowing a durable owner to replace a proven-missing message without treating transient errors as absence. |
 | **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. Success paths record the reservation; terminal skip/permanent-failure paths explicitly release it before returning. |
-| `DiscordOutboundClient`, `HttpOutboundClient`, `OutboundDeduper` | `outbound/transport.rs` | active | Transport trait, HTTP client, fingerprint helper, and in-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`. |
+| `DiscordOutboundClient`, `HttpOutboundClient`, `OutboundDeduper` | `outbound/transport.rs` | active | Transport trait, HTTP client, nonce-aware Serenity create helper, fingerprint helper, and in-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`. |
 | `shared_outbound_deduper()` | `outbound/mod.rs` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
 | `validate_send_source_for(...)` / `SendCallerClass` | `outbound/source_registry.rs` | active — shared by enqueue and send gates | Exact, case-sensitive source authorization with one typed static policy table plus the unchanged known-agent fallback. New internal producers must be registered here and remain caller-class scoped; `message_outbox` validates as `LoopbackInternal` before DB work. |
 | **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | **all six owners structurally routed; rollout flags retired in #3998 S1-f2; rollback is git revert** | The single delivery entry point routes the turn-output surfaces through the controller (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay) whenever each owner’s structural conditions are satisfied. A4/A5 route anchored short-replace and anchored long-chunk-with-delete terminal delivery through the controller; anchored long chunks use `SendNewChunks { delete_anchor: true }` (chunks first, best-effort anchor delete after full success, delete failure records cleanup but stays Delivered). The watcher no-placeholder new-message direct fallback remains legacy because anchor-less fresh-send is not yet a controller verb. The retained exclusions are empty body, `NoRange` deliver-without-advance, headless enqueue, watcher no-placeholder new-message fresh-send, and the TUI completion gate (see §8.1.1). A2b (`session_relay_sink` short-replace) owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The held lease is RAII-released on future cancel/panic via the internal `ControllerLeaseGuard` (review-fix H1 r2), matching legacy `SinkDeliveryLeaseGuard::Drop`; the guard now keys acquire/renew/commit/release on `DeliveryLeaseKey` instead of `TurnKey`, preserving non-zero turn identity while disambiguating id-0 rows with inflight `started_at` + `turn_start_offset` when both are present and otherwise using the explicit degenerate legacy fallback. If no `lease_key` is supplied, the controller uses the existing markerless path and never commits/releases a lease. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. |
@@ -185,8 +187,10 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/services/discord/discord_io.rs:478` (`deliver_channel_message`) | CLI text/DM helper | **migrated_v3**. Used by `--discord-sendmessage` / `--discord-senddm` *after* the DM channel has been resolved. Static `discord_io_deduper`; no caller-supplied delivery id means `without_idempotency()`. |
 | `src/services/discord/outbound/manual_delivery.rs` (`deliver_manual_notification`) | manual `/api/discord/send` | **migrated_v3 for sub-2k text**. Over-limit content remains a compatibility shim to `post_text_attachment` (announce) or `deliver_chunked_manual_notification` (notify). Moved from `health/` to `outbound/` in #3038 S1 with `health::` compatibility re-exports preserved. |
 | `src/services/discord/outbound/manual_delivery.rs` (`deliver_manual_dm_notification`) | `dm_reply` / `/api/discord/send-dm` | **migrated_v3 for sub-2k text** using `OutboundTarget::DmUser(UserId)`. The v3 transport resolves the DM channel and duplicate delivery returns before a second resolve. Over-limit content keeps the compatibility attachment/chunk path. Moved from `health/` to `outbound/` in #3038 S1. |
-| `src/services/discord/gateway.rs:359` (`send_intake_placeholder`) | `placeholder_sends` (intake) | **migrated_v3**. Posts the `"..."` placeholder before a turn via direct v3. Uses `preserve_inline_content().without_idempotency()` to preserve streaming behavior. |
-| `src/services/discord/gateway.rs:377` (`edit_outbound_message`) | `placeholder_sends` (edit) | **migrated_v3**. Encodes edit through `OutboundOperation::Edit`. |
+| `src/services/discord/gateway/outbound_messages.rs` (`send_intake_placeholder`) | `placeholder_sends` (intake) | **migrated_v3**. Posts the `"..."` placeholder before a turn via direct v3. Uses `preserve_inline_content().without_idempotency()` to preserve streaming behavior. |
+| `src/services/discord/gateway/outbound_messages.rs` (`edit_outbound_message`) | `placeholder_sends` (edit) | **migrated_v3**. Encodes edit through `OutboundOperation::Edit`. |
+| `src/services/discord/task_notification_delivery/gateway.rs` via `gateway/outbound_messages.rs` | durable task-notification cards | **migrated_v3**. Create uses the row's stable nonce with enforcement; edit returns a classified confirmed-missing result only for structured Discord `404/10008`. The PG card authority, not the process deduper, decides create/edit/replacement ownership. |
+| `src/services/discord/formatting/long_send_rollback.rs` via `http.rs` | durable task-response replies | **nonce-hardened required-reference compatibility path**. Sink and watcher share the exact `response_turn_key`; each physical reply chunk derives a distinct stable nonce and sets `enforce_nonce=true`. A retry after Discord POST success but response `sent`-CAS failure reconciles the returned message id instead of duplicating the reply. |
 | `src/services/discord/gateway.rs:400` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
 | `src/services/discord/router/intake_gate.rs` (`send_reaction_control_reply`) | reaction-control lifecycle replies | **migrated_v3**. Short fixed replies for queued-card POST fallback and duplicate stop now use referenced v3 lifecycle notices. Correlation = `intake-reaction-control:<channel_id>:<message_id>`, semantic = `intake-reaction-control:<channel_id>:<message_id>:<reason_key>`. |
 | `src/services/discord/monitoring_status.rs:115` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
@@ -195,12 +199,12 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/integration_tests/discord_flow/scenarios.rs` (removed in #3035 Phase 1) | integration test harness | Mock-Discord roundtrip for §1.2 validation; legacy-sqlite-only harness deleted. |
 | `src/integration_tests/agents_setup_e2e.rs` (removed in #3035 Phase 1) | integration test | Wizard-ready E2E; legacy-sqlite-only harness deleted. |
 
-Total **direct migrated_v3 production families: 12** (`dispatch_outbox`,
+Total **direct migrated_v3 production families: 13** (`dispatch_outbox`,
 `review_notifications`, final dispatch completion summaries, issue
 announcements, monitoring status, meeting notifications, routine Discord
 summaries, CLI text/DM helper, short manual notifications, short manual DM
 notifications, intake reaction-control replies, and gateway/turn-bridge
-placeholder sends/edits).
+placeholder sends/edits, plus durable task-notification cards).
 
 No production caller uses the removed legacy facade. Verify with
 `git grep -n 'deliver_outbound' -- src/services src/bin tests`.
@@ -371,6 +375,18 @@ button hits the manual outbound API, which is covered under §3.A
 - `src/services/discord/outbound/delivery.rs`:
   `v3_referenced_send_preserves_reference_and_dedupes` verifies referenced v3
   sends preserve the reply target and duplicate replay avoids a second post.
+- `src/services/discord/gateway.rs` and
+  `src/services/discord/outbound/delivery.rs`:
+  `task_notification_card_outbound_message_enforces_nonce_reconciliation` and
+  `task_notification_edit_replacement_requires_structured_discord_unknown_message`
+  pin nonce enforcement and the exact edit `404/10008` replacement boundary.
+- `src/services/discord/task_notification_delivery/tests.rs` and
+  `src/services/discord/http.rs`:
+  `response_chunk_nonce_is_stable_bounded_and_distinct`,
+  `required_reference_nonce_builder_enforces_discord_reconciliation`, and
+  `response_reply_nonce_reconciles_after_sent_cas_failure_and_lease_takeover_pg`
+  pin per-chunk reply nonces, required references, and the POST-success / failed
+  `sent`-CAS / expired-lease takeover boundary without a second physical reply.
 - `src/services/discord/outbound/reaction_control.rs`:
   `reaction_control_reply_ids_are_stable_per_message_and_reason` verifies the
   reaction-control lifecycle replies keep stable correlation and semantic ids.

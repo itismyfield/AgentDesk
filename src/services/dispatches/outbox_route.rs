@@ -3,8 +3,7 @@
 //! Owns the completed-dispatch followup orchestration and dispatch message
 //! rendering helpers that used to live in
 //! `src/server/routes/dispatches/outbox.rs`. The route module now re-exports
-//! this service surface so existing callers keep their paths while route-level
-//! code stays declarative.
+//! this service surface so existing callers keep their paths while route code stays declarative.
 //!
 //! - `crate::services::dispatches::outbox_queue` — `OutboxNotifier`,
 //!   `RealOutboxNotifier`, `process_outbox_batch_*`, `dispatch_outbox_loop`.
@@ -502,7 +501,9 @@ async fn post_dispatch_completion_summary(
         | DeliveryResult::Fallback { .. }
         | DeliveryResult::Duplicate { .. }
         | DeliveryResult::Skip { .. } => Ok(()),
-        DeliveryResult::PermanentFailure { reason } => Err(format!(
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => Err(format!(
             "failed to post dispatch summary for {dispatch_id}: {reason}"
         )),
     }

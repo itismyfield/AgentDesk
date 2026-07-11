@@ -1,6 +1,7 @@
 //! Shared renderer/sanitizer for Codex `<subagent_notification>` envelopes.
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use super::super::tui_task_card::{
     strip_terminal_controls, truncate_chars_ascii as truncate_chars,
@@ -20,6 +21,10 @@ const FRESH_FORK_PROLOGUE: &str = "The prior authoritative Discord, role, and to
 
 #[derive(Debug, Deserialize)]
 struct Envelope {
+    #[serde(default, alias = "task-id", alias = "taskId")]
+    task_id: Option<String>,
+    #[serde(default, alias = "tool-use-id", alias = "toolUseId")]
+    tool_use_id: Option<String>,
     status: Option<Status>,
 }
 
@@ -33,6 +38,67 @@ enum Render {
     Completed(String),
     Failed(String),
     Unknown,
+}
+
+pub(in crate::services::discord) struct SubagentNotificationSemantic {
+    pub(in crate::services::discord) task_id: Option<String>,
+    pub(in crate::services::discord) tool_use_id: Option<String>,
+    pub(in crate::services::discord) payload_fingerprint: String,
+}
+
+pub(in crate::services::discord) fn semantic_event(
+    prompt: &str,
+) -> Option<SubagentNotificationSemantic> {
+    let payload = extract_payload(prompt).ok()?;
+    let envelope: Envelope = serde_json::from_str(&payload).ok()?;
+    let status = envelope.status?;
+    let (status_name, report) = if let Some(report) = status
+        .completed
+        .as_deref()
+        .map(str::trim)
+        .filter(|report| !report.is_empty())
+    {
+        ("completed", report)
+    } else if let Some(report) = status
+        .failed
+        .as_deref()
+        .map(str::trim)
+        .filter(|report| !report.is_empty())
+    {
+        ("failed", report)
+    } else {
+        ("unknown", "")
+    };
+    let task_id = clean_semantic_id(envelope.task_id);
+    let tool_use_id = clean_semantic_id(envelope.tool_use_id);
+    Some(SubagentNotificationSemantic {
+        payload_fingerprint: fingerprint(&[
+            task_id.as_deref().unwrap_or(""),
+            tool_use_id.as_deref().unwrap_or(""),
+            status_name,
+            &strip_terminal_controls(report),
+        ]),
+        task_id,
+        tool_use_id,
+    })
+}
+
+fn clean_semantic_id(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| strip_terminal_controls(&value).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn fingerprint(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+        .chars()
+        .take(16)
+        .collect()
 }
 
 pub(in crate::services::discord) fn is_start_anchored_subagent_notification(prompt: &str) -> bool {

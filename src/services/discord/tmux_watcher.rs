@@ -77,6 +77,9 @@ mod terminal_long_chunks;
 #[path = "tmux_watcher/terminal_direct_fallback.rs"]
 mod terminal_direct_fallback;
 
+#[path = "tmux_watcher/task_response_authority.rs"]
+mod task_response_authority;
+
 // #3479 item-2: the watcher-direct orphan status-panel cleanup/completion/refresh
 // cluster extracted to a sibling submodule (pure move, zero logic change). Items
 // are `pub(super)` there and re-imported below so the watcher loop's call sites —
@@ -559,6 +562,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             provider_overload_message,
             stale_resume_detected,
             task_notification_kind,
+            task_notification_context,
             assistant_text_seen,
             fresh_assistant_text_seen,
             was_paused,
@@ -1495,10 +1499,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `slot_guard.release()` explicitly to preserve their timing.
         let mut slot_guard = RelaySlotGuard::new(relay_coord.relay_slot.clone());
 
-        // Send the terminal response to Discord, or delegate it to the
-        // supervisor-owned StreamRelay sink when the matched session's
-        // inflight metadata says session-bound delivery owns this terminal
-        // envelope.
+        // Send the terminal response to Discord, or delegate it when matched
+        // session-bound inflight metadata assigns delivery to the StreamRelay sink.
         let relay_decision = terminal_relay_decision(
             has_assistant_response,
             task_notification_kind,
@@ -1863,39 +1865,31 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
         let watcher_lease_start = data_start_offset;
         let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
-        // #3610 PR-1d: the legacy long-chunk fallback arm's terminal anchor (last
-        // sent chunk msg id), captured at the send arm but RECORDED only at the
-        // post-advance M4 site below (Some here ⇒ this turn took the long-chunk arm
-        // AND fully committed). Declared at lease scope so it survives the
-        // `let relay_ok = if … { … }` block that holds the send arm.
+        // #3610 PR-1d: capture the legacy long-chunk anchor here; record it only
+        // after the post-advance M4 commit below.
         let mut watcher_long_chunk_anchor_msg_id: Option<MessageId> = None;
         let mut watcher_long_chunk_delivered_body: Option<String> = None;
+        let mut watcher_task_response_claim = None;
         let watcher_lease_cell = shared.delivery_lease(channel_id);
-        // Only the watcher-direct fallback path direct-sends; acquire exactly when it
-        // runs with a real body so the lease identity matches the delivered bytes (a
-        // zero/inverted range never delivers, so do not lease it).
+        // Lease only a watcher-direct real body; zero/inverted ranges never deliver.
         let watcher_will_direct_send = watcher_direct_fallback_after_session_bound_ack
             && has_direct_terminal_response
             && !direct_terminal_response_refused_duplicate;
-        // #3089 A4/#3998 S1-f2: cut structurally eligible watcher terminal
-        // delivery onto the unified controller. The CONTROLLER owns the single
-        // lease, so the watcher's own acquire/heartbeat/b2-skip/commit/advance/
-        // release are skipped (no double-acquire). Empty bodies / TUI-gated turns
-        // stay legacy; anchored long chunks route via the controller's
-        // anchor-delete plan.
-        // No-placeholder new-message fresh-send remains legacy: anchor-less
-        // fresh-send is not yet a controller verb (#3998 legacy-retirement follow-up).
-        let cutover_short_replace = terminal_send::watcher_short_replace_cutover_decision(
-            shared.ui.status_panel_v2_enabled,
-            relay_decision.should_tag_monitor_origin,
-            &watcher_provider,
-            &direct_terminal_response,
-            watcher_will_direct_send,
-            watcher_lease_end > watcher_lease_start,
-            placeholder_msg_id.is_some(),
-            session_bound_fallback_uses_full_body,
-            watcher_terminal_kind_requires_tui_completion_gate(terminal_kind),
-        );
+        // #3089/#3998: the unified controller owns one lease for eligible non-task
+        // terminals. Task responses keep the watcher lease around card+reference send;
+        // empty/TUI-gated and placeholderless fresh sends remain legacy.
+        let cutover_short_replace = task_notification_kind.is_none()
+            && terminal_send::watcher_short_replace_cutover_decision(
+                shared.ui.status_panel_v2_enabled,
+                relay_decision.should_tag_monitor_origin,
+                &watcher_provider,
+                &direct_terminal_response,
+                watcher_will_direct_send,
+                watcher_lease_end > watcher_lease_start,
+                placeholder_msg_id.is_some(),
+                session_bound_fallback_uses_full_body,
+                watcher_terminal_kind_requires_tui_completion_gate(terminal_kind),
+            );
         // Pure no-double-acquire gate: `None` when cut over (the controller owns the
         // lease), so the watcher's own acquire below is skipped.
         let watcher_terminal_lease_range = terminal_send::watcher_terminal_lease_range(
@@ -1904,12 +1898,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             cutover_short_replace,
         );
         let watcher_lease_acquired = watcher_terminal_lease_range.is_some()
-            // #3041 P1-1 (B3, Issue 1): SELF-HEALING acquire — reclaim an ELAPSED
-            // `Leased` lease (dead holder that died before commit/release) against the
-            // SAME monotonic `lease_now_ms()` clock, so a LIVE holder mid-send (deadline
-            // pushed forward by the heartbeat) is NOT reclaimed and still correctly
-            // B2-skips (§5.2). PRIMARY black-hole guarantee, bounded to the deadline,
-            // no finalizer `SharedData` dependency; reconcile-tick reclaim is secondary.
+            // #3041 B3: reclaim elapsed leases on the shared monotonic clock; a live
+            // heartbeat remains protected and other watchers B2-skip.
             && try_acquire_watcher_delivery_lease(
                 &watcher_lease_cell,
                 watcher_lease_holder,
@@ -1917,13 +1907,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_start,
                 watcher_lease_end,
             );
-        // B2 skip flag: intended to direct-send but a different holder owns the range →
-        // skip arm (no duplicate send). #3089 A4: EXCLUDE the cut-over turn
-        // (`!cutover_short_replace`) — its lost-acquire B2-skip is handled INSIDE the
-        // controller (`AcquireFailureMode::Transient`) so the chain reaches arm 5. (P1-3
-        // residual: the 10s ACK-timeout blind re-send stays; a same-holder re-send
-        // re-acquires/re-commits the SAME range but the offset advance is a monotonic CAS
-        // — cannot double-advance, bounded, idempotent.)
+        // B2: another holder means no duplicate send. Controller cutover handles its
+        // own acquire failure; same-holder retries remain bounded by monotonic advance.
         let watcher_lease_b2_skip = watcher_will_direct_send
             && watcher_lease_end > watcher_lease_start
             && !watcher_lease_acquired
@@ -2122,6 +2107,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 turn_data_start_offset,
                 response_sent_offset,
                 task_notification_kind,
+                task_notification_context.as_ref(),
                 terminal_kind,
                 has_direct_terminal_response,
                 session_bound_fallback_uses_full_body,
@@ -2157,6 +2143,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &mut watcher_direct_terminal_idle_committed,
                     last_relayed_offset: &mut last_relayed_offset,
                     last_observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
+                    task_response_claim: &mut watcher_task_response_claim,
                 },
             )
             .await
@@ -2724,6 +2711,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if let Some(hb) = watcher_lease_heartbeat {
             hb.stop();
         }
+        let mut watcher_response_frontier_committed = false;
         if watcher_lease_acquired {
             // #3041 P1-1 (§5.2): commit the 3-way outcome and, on `Delivered`, advance
             // `confirmed_end_offset` — both INLINE at the pre-P1-1 timing. (#3089 A4: the
@@ -2771,6 +2759,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     watcher_lease_end,
                     "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
                 );
+                watcher_response_frontier_committed = true;
                 // #3610 PR-1d: record the durable terminal anchor for the legacy
                 // long-chunk fallback arm ONLY here — gated on the SAME successful
                 // commit+advance (M4) AND `Some` anchor (⇒ the long-chunk arm ran and
@@ -2809,7 +2798,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 terminal_committed_offset,
                 "src/services/discord/tmux.rs:tmux_output_watcher_confirmed_end",
             );
+            watcher_response_frontier_committed = true;
         }
+        task_response_authority::commit_watcher_task_response_fence(
+            &shared,
+            &watcher_provider,
+            channel_id,
+            &tmux_session_name,
+            watcher_response_frontier_committed,
+            watcher_task_response_claim.as_ref(),
+        )
+        .await;
         // #3104: terminal/idle reconciliation. A turn can commit (the channel is
         // about to return to idle) without ever relaying a body onto the live
         // streaming placeholder — e.g. a session-bound/subagent-only turn whose

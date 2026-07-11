@@ -34,7 +34,7 @@ pub(crate) use policy::DiscordOutboundPolicy;
 pub(crate) use result::DeliveryResult;
 pub(crate) use transport::{
     DiscordOutboundClient, HttpOutboundClient, OutboundDedupClaim, OutboundDedupReservation,
-    OutboundDedupWait, OutboundDeduper, outbound_fingerprint,
+    OutboundDedupWait, OutboundDeduper, outbound_fingerprint, post_serenity_message_with_nonce,
 };
 
 /// Process-wide in-memory outbound deduper shared by every Discord producer.

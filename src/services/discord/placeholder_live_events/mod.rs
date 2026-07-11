@@ -69,6 +69,12 @@ pub(in crate::services::discord) use status_events::{
 pub(in crate::services::discord) use recent_events::events_from_json;
 pub(in crate::services::discord) use status_events::status_events_from_json;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum TaskCompletionDisplayPolicy {
+    FooterOnly,
+    CardRequired,
+}
+
 #[derive(Debug, Default)]
 pub(in crate::services::discord) struct PlaceholderLiveEvents {
     by_channel: dashmap::DashMap<ChannelId, Mutex<VecDeque<RecentPlaceholderEvent>>>,
@@ -259,22 +265,22 @@ impl PlaceholderLiveEvents {
         self.push_status_events(channel_id, events);
     }
 
-    pub(in crate::services::discord) fn task_notification_completion_visible_in_footer_for_mode(
+    pub(in crate::services::discord) fn task_notification_display_policy_for_mode(
         &self,
         channel_id: ChannelId,
         raw: &str,
         footer_mode_enabled: bool,
-    ) -> bool {
+    ) -> TaskCompletionDisplayPolicy {
         if status_events::is_background_task_notification_xml_status_transition(raw) {
-            return true;
+            return TaskCompletionDisplayPolicy::FooterOnly;
         }
         if !footer_mode_enabled {
-            return false;
+            return TaskCompletionDisplayPolicy::CardRequired;
         }
         let events =
             status_events::status_events_from_task_notification_xml_for_footer_mode(raw, true);
         if events.is_empty() {
-            return false;
+            return TaskCompletionDisplayPolicy::CardRequired;
         }
         let snapshot = self
             .status_by_channel
@@ -286,7 +292,24 @@ impl PlaceholderLiveEvents {
                     .clone()
             })
             .unwrap_or_default();
-        task_notification_success_completion_visible_in_snapshot(&snapshot, &events)
+        if task_notification_success_completion_visible_in_snapshot(&snapshot, &events) {
+            TaskCompletionDisplayPolicy::FooterOnly
+        } else {
+            TaskCompletionDisplayPolicy::CardRequired
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn task_notification_completion_visible_in_footer_for_mode(
+        &self,
+        channel_id: ChannelId,
+        raw: &str,
+        footer_mode_enabled: bool,
+    ) -> bool {
+        matches!(
+            self.task_notification_display_policy_for_mode(channel_id, raw, footer_mode_enabled,),
+            TaskCompletionDisplayPolicy::FooterOnly
+        )
     }
 
     pub(in crate::services::discord) fn set_session_panel_lifecycle_event(

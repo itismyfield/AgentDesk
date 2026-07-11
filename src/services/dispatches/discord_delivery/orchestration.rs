@@ -1499,13 +1499,13 @@ async fn send_review_result_message_via_http(
     )
     .await
     {
-        DeliveryResult::Sent { .. } | DeliveryResult::Fallback { .. } => Ok(()),
-        DeliveryResult::Duplicate { .. } => {
-            // Duplicate suppression is a success for the caller.
-            Ok(())
-        }
-        DeliveryResult::Skip { .. } => Ok(()),
-        DeliveryResult::PermanentFailure { reason } => match kind {
+        DeliveryResult::Sent { .. }
+        | DeliveryResult::Fallback { .. }
+        | DeliveryResult::Duplicate { .. }
+        | DeliveryResult::Skip { .. } => Ok(()),
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => match kind {
             ReviewFollowupKind::Pass => Err(format!(
                 "discord request failed for pass notification: {reason}"
             )),

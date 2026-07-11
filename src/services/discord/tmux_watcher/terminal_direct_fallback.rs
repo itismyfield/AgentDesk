@@ -12,6 +12,7 @@ use super::*;
 
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
+use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
@@ -32,6 +33,8 @@ pub(in crate::services::discord) struct WatcherDirectFallbackLocals<'a> {
     pub(in crate::services::discord) watcher_direct_terminal_idle_committed: &'a mut bool,
     pub(in crate::services::discord) last_relayed_offset: &'a mut Option<u64>,
     pub(in crate::services::discord) last_observed_generation_mtime_ns: &'a mut Option<i64>,
+    pub(in crate::services::discord) task_response_claim:
+        &'a mut Option<task_delivery::ResponseDeliveryClaim>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -48,6 +51,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     turn_data_start_offset: u64,
     response_sent_offset: usize,
     task_notification_kind: Option<TaskNotificationKind>,
+    task_notification_context: Option<&task_delivery::TaskNotificationContext>,
     terminal_kind: Option<WatcherTerminalKind>,
     has_direct_terminal_response: bool,
     session_bound_fallback_uses_full_body: bool,
@@ -81,7 +85,27 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         watcher_direct_terminal_idle_committed,
         last_relayed_offset,
         last_observed_generation_mtime_ns,
+        task_response_claim,
     } = locals;
+    let (user_msg_id, started_at, turn_start_offset) = inflight_identity_before_relay
+        .as_ref()
+        .map_or((0, "", None), |identity| {
+            (
+                identity.user_msg_id,
+                identity.started_at.as_str(),
+                identity.turn_start_offset,
+            )
+        });
+    let response_turn_key = task_delivery::durable_response_turn_key(
+        channel_id.get(),
+        watcher_provider.as_str(),
+        tmux_session_name,
+        user_msg_id,
+        started_at,
+        turn_start_offset,
+        watcher_lease_end,
+        direct_terminal_response,
+    );
     let formatted = if shared.ui.status_panel_v2_enabled {
         crate::services::discord::formatting::format_for_discord_with_status_panel(
             direct_terminal_response,
@@ -110,8 +134,42 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     let mut relay_ok = true;
     let mut direct_send_delivered = false;
     let mut external_input_lease_consumed_by_relay = false;
-    match *placeholder_msg_id {
-        Some(msg_id) => {
+    let task_response_path = has_direct_terminal_response && task_notification_kind.is_some();
+    match (task_response_path, *placeholder_msg_id) {
+        (true, _) => {
+            let kind = task_notification_kind.expect("task response path requires a kind");
+            let outcome = super::task_response_authority::apply_watcher_task_response(
+                http,
+                shared,
+                watcher_provider,
+                channel_id,
+                tmux_session_name,
+                kind,
+                task_notification_context,
+                &response_turn_key,
+                (!started_at.is_empty()).then_some(started_at),
+                turn_start_offset,
+                watcher_lease_end,
+                &relay_text,
+                external_input_lease_before_relay,
+                super::task_response_authority::WatcherTaskResponseLocals {
+                    placeholder_msg_id: &mut *placeholder_msg_id,
+                    placeholder_from_restored_inflight: &mut *placeholder_from_restored_inflight,
+                    last_edit_text: &mut *last_edit_text,
+                    retry_terminal_delivery_from_offset: &mut *retry_terminal_delivery_from_offset,
+                    tui_direct_anchor_terminal_body_visible:
+                        &mut *tui_direct_anchor_terminal_body_visible,
+                    tui_direct_anchor_or_lease_present_for_lifecycle:
+                        &mut *tui_direct_anchor_or_lease_present_for_lifecycle,
+                    task_response_claim: &mut *task_response_claim,
+                },
+            )
+            .await;
+            relay_ok = outcome.relay_ok;
+            direct_send_delivered = outcome.direct_send_delivered;
+            external_input_lease_consumed_by_relay = outcome.external_input_lease_consumed_by_relay;
+        }
+        (false, Some(msg_id)) => {
             if has_direct_terminal_response {
                 if watcher_should_send_ordered_new_chunks_for_terminal_fallback(
                     session_bound_fallback_uses_full_body,
@@ -461,7 +519,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                 }
             }
         }
-        None => {
+        (false, None) => {
             if has_direct_terminal_response {
                 let prompt_anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                     watcher_provider.as_str(),
@@ -611,4 +669,9 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         clear_provider_overload_retry_state(channel_id);
     }
     relay_ok
+}
+
+#[cfg(test)]
+mod tests {
+    include!("terminal_direct_fallback_tests.rs");
 }

@@ -27,12 +27,16 @@ use tracing::Instrument;
 mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
-    format_ssh_direct_prompt_notification, format_subagent_notification_card,
-    format_system_continuation_note, is_slash_command_control_prompt,
-    is_start_anchored_task_notification, should_suppress_local_only_kind_note_after_continuation,
+    format_ssh_direct_prompt_notification, format_system_continuation_note,
+    is_slash_command_control_prompt, should_suppress_local_only_kind_note_after_continuation,
     slash_command_control_kind, slash_command_control_prompt_is_caveat_only,
     slash_command_control_prompt_is_local_command_stdout,
 };
+#[cfg(test)]
+use self::injected_prompt_policy::{
+    format_subagent_notification_card, is_start_anchored_task_notification,
+};
+mod task_notification_prompt;
 
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
@@ -344,6 +348,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
     let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     let injected_class = relay_prompt_decision.injected_class;
+    let task_notification =
+        task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
     // #3305/#4033/#4082: one pure decision drives dedupe and the lifecycle
     // skips, so stdout halves and compact continuation records use the same
     // classifier for note rendering, external-owner selection, and synthetic start.
@@ -378,35 +384,20 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         channel_id,
         lease.generation,
     );
-    let Some(registry) = shared.health_registry() else {
-        tracing::warn!(
-            provider = %prompt.provider,
-            channel_id = channel_id.get(),
-            turn_id = lease.turn_id.as_deref().unwrap_or(""),
-            session_key = lease.session_key.as_deref().unwrap_or(""),
-            relay_owner = lease.relay_owner.as_str(),
-            runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-            "skipping SSH-direct TUI prompt notify; health registry unavailable"
-        );
+    let Some(task_gate) = task_notification_prompt::resolve_gate(
+        shared,
+        &prompt,
+        channel_id,
+        injected_class,
+        &lease,
+        task_notification,
+    )
+    .await
+    else {
         return;
     };
-    let notify_http = match super::health::resolve_bot_http(registry.as_ref(), "notify").await {
-        Ok(http) => http,
-        Err((status, body)) => {
-            tracing::warn!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                session_key = lease.session_key.as_deref().unwrap_or(""),
-                relay_owner = lease.relay_owner.as_str(),
-                runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                status = %status,
-                body = %body,
-                "skipping SSH-direct TUI prompt notify; notify bot unavailable"
-            );
-            return;
-        }
-    };
+    let notify_http = task_gate.notify_http;
+    let task_card_anchor = task_gate.card_anchor;
     // A TUI-direct prompt has now been observed for this channel. Bump idle
     // recap generation before the pre-claim clear so an in-flight recap POST job
     // cannot persist a stale card after a deferred/local-only/aborted synthetic
@@ -515,19 +506,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         }
         return;
     }
-    if injected_class.is_subagent_notification_event() {
-        let note = format_subagent_notification_card(&prompt.tmux_session_name, &prompt.prompt);
-        if let Err(error) = channel_id.say(&*notify_http, note).await {
-            tracing::warn!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                tmux_session_name = %prompt.tmux_session_name,
-                error = %error,
-                "failed to send subagent_notification machine-event card"
-            );
-        }
-        return;
-    }
     if suppresses_user_turn_lifecycle {
         // #3178 (codex fix): only SystemContinuation reaches here now —
         // SlashCommandControl was removed from `suppresses_user_turn_lifecycle`
@@ -560,9 +538,9 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // ⏳ + synthetic inflight like HumanTuiDirect). Its anchor content carries the
         // /loop directive body but never the <command-*> wrapper or Compacted stdout;
         // the #3153 duplicate half was already dropped before the lease record above.
-        // #3075: a `<task-notification>` auto-turn is a MACHINE event — render a
-        // compact structured card and dedupe repeats by task-id (a repeat edits its
-        // live card or no-ops; the first sighting posts as the #3099 anchor).
+        // #4055: a `<task-notification>` auto-turn's card was already confirmed
+        // through the durable authority above. This block only attaches the
+        // existing card id to the normal synthetic-turn lifecycle.
         // HumanTuiDirect keeps the raw render; SystemContinuation handled above (#3100).
         let content = if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
             let kind = relay_prompt_decision
@@ -571,50 +549,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 .expect("slash command control decisions carry a kind");
             format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt)
         } else if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
-            // #3393: background-task / subagent completions arrive ONLY as this
-            // `user`-record `<task-notification>` XML — never the stream-json
-            // `system` record the footer panel's `system_status_events` parses. So
-            // before the card render (which has its OWN store), bridge the SAME
-            // payload into the live-panel terminal StatusEvents so footer Tasks /
-            // Subagents flip ✓ and the #3391 delivered-ack eviction can fire. Runs
-            // for BOTH Post and Repeat outcomes (a repeat re-asserts terminal,
-            // which is idempotent at the slot). Footer-mode gated inside the
-            // bridge; an unknown/id-less notification is a slot no-op.
-            //
-            // #3393 finding 2: gate the BRIDGE (not the card) on a START-ANCHORED
-            // check — a human prompt QUOTING a notification mid-message still gets
-            // its card but pushes NO terminal events, so a quoted live tool-use-id
-            // cannot false-close a running slot. Layered with finding 1 (the XML
-            // bridge requires a tool_use_id for any terminal End).
-            let start_anchored_task_notification =
-                is_start_anchored_task_notification(&prompt.prompt);
-            if start_anchored_task_notification {
-                shared
-                    .ui
-                    .placeholder_live_events
-                    .bridge_task_notification_xml(channel_id, &prompt.prompt);
-            }
-            match super::tui_task_card::resolve_task_card_content(
-                &notify_http,
-                shared,
-                channel_id,
-                &prompt.prompt,
-                start_anchored_task_notification,
-            )
-            .await
-            {
-                super::tui_task_card::TaskCardOutcome::Post { content } => content,
-                super::tui_task_card::TaskCardOutcome::Repeat
-                | super::tui_task_card::TaskCardOutcome::SuppressedByFooter => {
-                    // #3075 codex P1 #2: a repeat early-returns before the bridge-tail
-                    // lease-guard cleanup, but the lease recorded above would dangle and
-                    // make `session_bound_external_lease_blocks_delivery` skip legitimate
-                    // delivery. Clear exactly the lease THIS observation recorded
-                    // (exact-match preserves a newer turn's lease).
-                    clear_observed_external_turn_lease_if_current(&prompt, channel_id, &lease);
-                    return;
-                }
-            }
+            String::new()
         } else {
             format_ssh_direct_prompt_notification(
                 &prompt.provider,
@@ -622,54 +557,34 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 &prompt.prompt,
             )
         };
-        let anchor_message = match channel_id.say(&*notify_http, content).await {
-            Ok(message) => message,
-            Err(error) => {
-                // #3075 codex P2: the `Post` outcome reserved a placeholder card slot
-                // (message_id == 0) before this post; on post failure release the
-                // reservation we own so the next same-task notification reserves fresh
-                // (a lingering placeholder would force later ones to `Pending` no-ops
-                // until the 1h stale purge; the NEXT reservation alone is affected).
-                if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
-                    let task_id =
-                        super::tui_task_card::parse_task_notification(&prompt.prompt).task_id;
-                    super::tui_task_card::forget_reserved_card(
-                        channel_id.get(),
-                        task_id.as_deref(),
+        let anchor_message_id = if let Some(message_id) = task_card_anchor {
+            message_id
+        } else {
+            match channel_id.say(&*notify_http, content).await {
+                Ok(message) => message.id,
+                Err(error) => {
+                    tracing::warn!(
+                        provider = %prompt.provider,
+                        channel_id = channel_id.get(),
+                        turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                        session_key = lease.session_key.as_deref().unwrap_or(""),
+                        relay_owner = lease.relay_owner.as_str(),
+                        runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+                        error = %error,
+                        "failed to send SSH-direct TUI prompt notify"
                     );
+                    return;
                 }
-                tracing::warn!(
-                    provider = %prompt.provider,
-                    channel_id = channel_id.get(),
-                    turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                    session_key = lease.session_key.as_deref().unwrap_or(""),
-                    relay_owner = lease.relay_owner.as_str(),
-                    runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                    error = %error,
-                    "failed to send SSH-direct TUI prompt notify"
-                );
-                return;
             }
         };
         // #3176: pin this turn's anchor id — it becomes the synthetic inflight's
         // `user_msg_id` below, so the idle-tail drain-wait can recognise our own row.
-        current_turn_anchor_id = Some(anchor_message.id.get());
-        // #3075: remember this card so a repeat completion edits it. #3164 codex R3
-        // issue-2: keep this IMMEDIATELY after the successful post (before the awaited
-        // `⏳` add) — deferring it behind the reaction await widens the task-card
-        // `Pending` no-op window and can drop the only repeat/update.
-        if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
-            super::tui_task_card::record_posted_card(
-                channel_id.get(),
-                &prompt.prompt,
-                anchor_message.id.get(),
-            );
-        }
+        current_turn_anchor_id = Some(anchor_message_id.get());
         // Add before the anchor becomes findable so fast completion cannot re-leave ⏳.
         started(
             shared,
             channel_id,
-            anchor_message.id,
+            anchor_message_id,
             lease.generation,
             "tui_anchor_start",
         )
@@ -678,7 +593,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             &prompt.provider,
             &prompt.tmux_session_name,
             channel_id.get(),
-            anchor_message.id.get(),
+            anchor_message_id.get(),
         );
         // #3174: turn-identity guard on the ⏳ lifecycle. A lease-gated completion
         // firing inside the sub-second notify+⏳-add window left a deferred marker;
@@ -744,7 +659,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             &prompt.provider,
             channel_id,
             &prompt,
-            anchor_message.id,
+            anchor_message_id,
             &relay_prompt_decision,
             &mut lease,
         )
@@ -757,7 +672,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             session_key = lease.session_key.as_deref().unwrap_or(""),
             relay_owner = lease.relay_owner.as_str(),
             runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-            anchor_message_id = anchor_message.id.get(),
+            anchor_message_id = anchor_message_id.get(),
             synthetic_inflight = tui_direct_synthetic_inflight_active_for_prompt(&prompt.provider, channel_id, &prompt.tmux_session_name),
             "SSH-direct TUI prompt notified; runtime relay attached synthetic ownership when possible"
         );

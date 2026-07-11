@@ -3,6 +3,7 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::InflightTurnState;
+use crate::services::discord::task_notification_delivery::merge_context;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -134,6 +135,8 @@ pub(super) struct CollectedTurnStream {
     pub(super) provider_overload_message: Option<String>,
     pub(super) stale_resume_detected: bool,
     pub(super) task_notification_kind: Option<TaskNotificationKind>,
+    pub(super) task_notification_context:
+        Option<crate::services::discord::task_notification_delivery::TaskNotificationContext>,
     pub(super) assistant_text_seen: bool,
     pub(super) fresh_assistant_text_seen: bool,
     pub(super) was_paused: bool,
@@ -209,17 +212,10 @@ pub(super) async fn collect_turn_stream_until_terminal(
         }};
     }
 
-    // Collect the full turn: keep reading until we see a "result" event.
-    // #1216: append to the outer-scope `all_data` so any leftover from a
-    // previous iteration (multi-turn buffer split at the first `result`)
-    // is processed before the new disk read.
+    // #1216: process any prior multi-turn leftover before the new disk read.
     let decoded_data = utf8_decoder.decode(&data, data_start_offset);
-    // #3041 P1-3 (Part a, B1): the forward of this outer-read chunk is
-    // DEFERRED until AFTER `process_watcher_lines` below so the result-bearing
-    // chunk can ride a TERMINAL frame carrying the commit fence. Set only the
-    // buffer START offset here (independent of the forward); the mirror flags +
-    // ack target are set from the deferred forward result (see the
-    // `data_mirrored_to_session_relay` binding after the initial parse).
+    // #3041 P1-3 B1: defer forwarding until after parsing so a result-bearing
+    // chunk carries its terminal commit fence; only seed the buffer start here.
     let initial_buffer_was_empty = all_data.is_empty();
     if initial_buffer_was_empty {
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
@@ -274,13 +270,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
     let stream_seed = seed_disposition.stream_seed;
     let restored_response_seed = stream_seed.full_response.clone();
     let restored_assistant_text_seen = !restored_response_seed.trim().is_empty();
-    // #3041 P1-3 (Part a, B1): the `restored_assistant_text_seen` →
-    // "not fully mirrored" reset is now applied where
-    // `session_bound_relay_turn_fully_mirrored` is DECLARED (after the deferred
-    // initial forward below). A restored response prefix came from watcher
-    // state, not from chunks mirrored into the session-bound StreamRelay
-    // parser, so the legacy watcher delivery owner keeps this terminal envelope
-    // (we do not delegate a partial response).
+    // #3041 P1-3 B1: restored assistant text was not mirrored into StreamRelay,
+    // so reset it after the deferred initial forward and keep watcher ownership.
     let mut full_response = stream_seed.full_response;
     let mut tool_state = WatcherToolState::new();
 
@@ -499,6 +490,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     let mut stale_resume_detected = initial_outcome.stale_resume_detected;
     let mut auto_compaction_lifecycle_attempted = false;
     let mut task_notification_kind = stream_seed.task_notification_kind;
+    let mut task_notification_context = initial_outcome.task_notification_context;
     let mut assistant_text_seen =
         restored_assistant_text_seen || initial_outcome.assistant_text_seen;
     let mut fresh_assistant_text_seen = initial_outcome.assistant_text_seen;
@@ -801,6 +793,10 @@ pub(super) async fn collect_turn_stream_until_terminal(
                     if let Some(kind) = outcome.task_notification_kind {
                         task_notification_kind =
                             merge_task_notification_kind(task_notification_kind, kind);
+                    }
+                    if let Some(context) = outcome.task_notification_context {
+                        task_notification_context =
+                            merge_context(task_notification_context.take(), context);
                     }
                     assistant_text_seen |= outcome.assistant_text_seen;
                     fresh_assistant_text_seen |= outcome.assistant_text_seen;
@@ -1153,6 +1149,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         provider_overload_message,
         stale_resume_detected,
         task_notification_kind,
+        task_notification_context,
         assistant_text_seen,
         fresh_assistant_text_seen,
         was_paused,

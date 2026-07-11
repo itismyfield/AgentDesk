@@ -609,7 +609,9 @@ impl RoutineDiscordLogger {
                         "routine run Discord summary edit skipped: {reason}"
                     ));
                 }
-                DeliveryResult::PermanentFailure { reason } => {
+                DeliveryResult::TransientFailure { reason } => return Err(reason),
+                DeliveryResult::PermanentFailure { reason }
+                | DeliveryResult::ConfirmedMissing { reason } => {
                     tracing::warn!(
                         target = %target.target,
                         message_id = %message_id,
@@ -641,7 +643,9 @@ impl RoutineDiscordLogger {
             DeliveryResult::Skip { reason } => Err(format!(
                 "routine run Discord summary send skipped: {reason}"
             )),
-            DeliveryResult::PermanentFailure { reason } => Err(reason),
+            DeliveryResult::TransientFailure { reason }
+            | DeliveryResult::PermanentFailure { reason }
+            | DeliveryResult::ConfirmedMissing { reason } => Err(reason),
         }
     }
 

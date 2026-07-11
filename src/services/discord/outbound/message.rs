@@ -326,6 +326,14 @@ pub(crate) struct DiscordOutboundMessage {
     pub(crate) content: String,
     pub(crate) target: OutboundTarget,
     pub(crate) operation: OutboundOperation,
+    /// Optional Discord create-message nonce. When `enforce_nonce` is true,
+    /// Discord can return the already-created message for a same-author replay
+    /// within its bounded nonce-replay window. This is used only by
+    /// single-message durable authorities (#4055).
+    #[serde(default)]
+    pub(crate) create_nonce: Option<String>,
+    #[serde(default)]
+    pub(crate) enforce_nonce: bool,
     pub(crate) producer: Option<OutboundProducer>,
     pub(crate) bot: OutboundBotSelector,
     pub(crate) reference: Option<OutboundReferenceContext>,
@@ -349,6 +357,8 @@ impl DiscordOutboundMessage {
             content: content.into(),
             target,
             operation: OutboundOperation::Send,
+            create_nonce: None,
+            enforce_nonce: false,
             producer: None,
             bot: OutboundBotSelector::Default,
             reference: None,
@@ -360,6 +370,16 @@ impl DiscordOutboundMessage {
 
     pub(crate) fn with_operation(mut self, operation: OutboundOperation) -> Self {
         self.operation = operation;
+        self
+    }
+
+    pub(crate) fn with_create_nonce(
+        mut self,
+        nonce: impl Into<String>,
+        enforce_nonce: bool,
+    ) -> Self {
+        self.create_nonce = Some(nonce.into());
+        self.enforce_nonce = enforce_nonce;
         self
     }
 
@@ -422,5 +442,30 @@ impl DiscordOutboundMessage {
     /// Structured dedup key derived from idempotency + target + operation.
     pub(crate) fn dedup_key(&self) -> OutboundDedupKey {
         self.idempotency.key_for(self.target, self.operation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_outbound_envelope_defaults_create_nonce_fields() {
+        let message = DiscordOutboundMessage::new(
+            "legacy",
+            "legacy:event",
+            "body",
+            OutboundTarget::Channel(ChannelId::new(4055)),
+            DiscordOutboundPolicy::default(),
+        );
+        let mut value = serde_json::to_value(message).expect("serialize outbound envelope");
+        let object = value.as_object_mut().expect("outbound envelope object");
+        object.remove("create_nonce");
+        object.remove("enforce_nonce");
+
+        let restored: DiscordOutboundMessage =
+            serde_json::from_value(value).expect("deserialize legacy outbound envelope");
+        assert_eq!(restored.create_nonce, None);
+        assert!(!restored.enforce_nonce);
     }
 }

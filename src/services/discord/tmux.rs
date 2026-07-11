@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
@@ -47,7 +48,6 @@ use super::tmux_restart_handoff::{
 use super::{
     SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, lock_tmux_watcher_registry, rate_limit_wait,
 };
-// Extracted lifecycle code stays a tmux child module until its callers split out.
 #[path = "tmux_placeholder_suppression/mod.rs"]
 mod placeholder_suppression;
 #[path = "tmux_reattach_offsets.rs"]
@@ -76,14 +76,12 @@ pub(in crate::services::discord) use self::watcher_lifecycle::{
     restore_tmux_watchers, session_belongs_to_current_runtime, store_recovery_handled_channels,
 };
 use super::watcher_lifecycle_decision::*;
-const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-const SOFT_TERMINAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
-pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(30);
+const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const SOFT_TERMINAL_DEBOUNCE: Duration = Duration::from_millis(1500);
+pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
 const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
-const BACKGROUND_AGENT_PENDING_SNIFF_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(2);
+const BACKGROUND_AGENT_PENDING_SNIFF_TIMEOUT: Duration = Duration::from_secs(2);
 #[path = "tmux_kill_policy.rs"]
 mod tmux_kill_policy;
 #[allow(unused_imports)]
@@ -132,6 +130,8 @@ pub(super) struct WatcherLineOutcome {
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
     pub task_notification_kind: Option<TaskNotificationKind>,
+    pub task_notification_context:
+        Option<super::task_notification_delivery::TaskNotificationContext>,
     pub assistant_text_seen: bool,
 }
 

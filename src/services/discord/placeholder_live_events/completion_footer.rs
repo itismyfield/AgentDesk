@@ -54,6 +54,36 @@ pub(in crate::services::discord) struct CompletionFooterRender {
 // #3391: delivery-ack surface colocated with the render below — eviction drops
 // exactly the slot identities `render_completion_footer` reported as delivered.
 impl super::PlaceholderLiveEvents {
+    /// Once a task card is confirmed, remove only the exact terminal footer
+    /// slot carrying its `tool_use_id`. Missing/id-less/ambiguous identities are
+    /// a no-op; this never guesses by order or rendered text (#4055).
+    pub(in crate::services::discord) fn claim_terminal_slot_for_card(
+        &self,
+        channel_id: ChannelId,
+        kind: &str,
+        tool_use_id: Option<&str>,
+    ) -> bool {
+        let Some(tool_use_id) = tool_use_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return false;
+        };
+        let identity = match kind {
+            "background" => TerminalSlotId::Task(SlotKey::ToolUseId(tool_use_id.to_string())),
+            "subagent" => TerminalSlotId::Subagent(SlotKey::ToolUseId(tool_use_id.to_string())),
+            _ => return false,
+        };
+        let evicted = self.evict_delivered_terminal_slots(channel_id, &[identity]);
+        if evicted.evicted_any() {
+            tracing::info!(
+                target: "agentdesk::discord::live_panel",
+                channel_id = channel_id.get(),
+                kind,
+                tool_use_id,
+                "#4055: task card claimed its exact terminal footer slot"
+            );
+        }
+        evicted.evicted_any()
+    }
+
     /// Drops task/subagent slots whose terminal mark (✓/✗) was confirmed
     /// delivered in a completion-footer render, addressing them by SLOT
     /// IDENTITY rather than the rendered line. Call only after the Discord

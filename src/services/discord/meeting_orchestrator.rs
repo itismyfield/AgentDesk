@@ -30,8 +30,6 @@ use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 
-// ─── Data Structures ─────────────────────────────────────────────────────────
-
 #[derive(Clone, Debug)]
 pub(super) struct MeetingParticipant {
     pub role_id: String,
@@ -829,7 +827,9 @@ fn meeting_delivery_result(result: DeliveryResult) -> Result<Option<serenity::Me
             tracing::info!(?reason, "[meeting] outbound delivery skipped");
             Ok(None)
         }
-        DeliveryResult::PermanentFailure { reason } => Err(reason),
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => Err(reason),
     }
 }
 

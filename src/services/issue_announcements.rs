@@ -410,7 +410,9 @@ async fn send_issue_announcement_message(
         DeliveryResult::Skip { .. } => Err(IssueAnnouncementDeliveryError::new(
             "issue announcement delivery skipped",
         )),
-        DeliveryResult::PermanentFailure { reason } => {
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => {
             Err(IssueAnnouncementDeliveryError::new(reason))
         }
     }

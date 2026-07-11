@@ -13,7 +13,9 @@ use super::outbound::message::{
 };
 use super::outbound::policy::DiscordOutboundPolicy;
 use super::outbound::result::DeliveryResult;
-use super::outbound::{DiscordOutboundClient, shared_outbound_deduper};
+use super::outbound::{
+    DiscordOutboundClient, post_serenity_message_with_nonce, shared_outbound_deduper,
+};
 use super::router;
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
@@ -22,6 +24,15 @@ use super::{
 };
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
+
+mod outbound_messages;
+#[cfg(test)]
+use self::outbound_messages::await_answer_flush_if_queued_notice;
+pub(super) use self::outbound_messages::{
+    ClassifiedOutboundEditError, ClassifiedOutboundPostError, edit_outbound_message,
+    edit_outbound_message_classified, send_intake_placeholder, send_outbound_message,
+    send_outbound_message_with_nonce_classified,
+};
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -264,7 +275,9 @@ fn outbound_delivery_error(result: DeliveryResult) -> Result<Option<MessageId>, 
             );
             Ok(None)
         }
-        DeliveryResult::PermanentFailure { reason } => Err(reason),
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason }
+        | DeliveryResult::PermanentFailure { reason } => Err(reason),
     }
 }
 
@@ -290,6 +303,14 @@ fn gateway_outbound_message(
         OutboundTarget::Channel(channel_id),
         outbound_policy(),
     )
+}
+
+fn task_card_outbound_message(
+    channel_id: ChannelId,
+    content: &str,
+    nonce: &str,
+) -> DiscordOutboundMessage {
+    gateway_outbound_message(channel_id, content).with_create_nonce(nonce, true)
 }
 
 impl DiscordOutboundClient for SerenityTurnOutboundClient {
@@ -357,6 +378,59 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
             .map_err(dispatch_post_error)
     }
 
+    async fn post_message_with_nonce(
+        &self,
+        target_channel: &str,
+        content: &str,
+        nonce: &str,
+        enforce_nonce: bool,
+    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
+    {
+        let channel_id = parse_channel_id(target_channel)?;
+        post_serenity_message_with_nonce(
+            &self.http,
+            &self.shared,
+            channel_id,
+            content,
+            None,
+            nonce,
+            enforce_nonce,
+        )
+        .await
+        .map_err(dispatch_post_error)
+    }
+
+    async fn post_message_with_reference_and_nonce(
+        &self,
+        target_channel: &str,
+        content: &str,
+        reference_channel: &str,
+        reference_message: &str,
+        nonce: &str,
+        enforce_nonce: bool,
+    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
+    {
+        let channel_id = parse_channel_id(target_channel)?;
+        let reference_channel_id = parse_channel_id(reference_channel)?;
+        let reference_message_id = parse_message_id(reference_message).map_err(|error| {
+            crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
+                crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
+                error,
+            )
+        })?;
+        post_serenity_message_with_nonce(
+            &self.http,
+            &self.shared,
+            channel_id,
+            content,
+            Some((reference_channel_id, reference_message_id)),
+            nonce,
+            enforce_nonce,
+        )
+        .await
+        .map_err(dispatch_post_error)
+    }
+
     async fn edit_message(
         &self,
         target_channel: &str,
@@ -410,6 +484,16 @@ fn dispatch_post_error(
     } else {
         crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other
     };
+    if let serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response)) = &error
+        && let Ok(status) = reqwest::StatusCode::from_u16(response.status_code.as_u16())
+    {
+        return crate::services::dispatches::discord_delivery::DispatchMessagePostError::http(
+            kind,
+            status,
+            i64::try_from(response.error.code).ok(),
+            detail,
+        );
+    }
     crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(kind, detail)
 }
 
@@ -468,99 +552,6 @@ pub(super) async fn drain_merged_queued_placeholders(
         );
     }
     to_delete
-}
-
-/// #3082 part B (codex P2-3): the answer-flush wait gate for intake
-/// placeholders, factored out so the queued-only gating is unit-testable
-/// without a live Discord HTTP client.
-///
-/// Only the queued-turn "📬" notice path waits behind an in-flight multi-chunk
-/// answer flush — so the notice lands as a single TRAILING card after the last
-/// chunk, never interleaved between answer chunks. Active-turn placeholders (a
-/// turn starting NOW, or a TUI idle-response card) pass `is_queued_notice =
-/// false` and return immediately, never delayed behind a flush.
-///
-/// The wait is bounded (progress-aware inactivity grace + absolute hard
-/// ceiling) and the barrier guard is RAII-cleared, so a stuck/errored flush can
-/// never permanently suppress the queued card — we proceed regardless once it
-/// elapses (logged, no deadlock).
-async fn await_answer_flush_if_queued_notice(
-    barrier: &Arc<super::answer_flush_barrier::AnswerFlushBarrier>,
-    channel_id: ChannelId,
-    is_queued_notice: bool,
-) {
-    if !is_queued_notice {
-        return;
-    }
-    if !barrier
-        .wait_for_flush(
-            channel_id,
-            super::answer_flush_barrier::ANSWER_FLUSH_WAIT_TIMEOUT,
-            super::answer_flush_barrier::ANSWER_FLUSH_WAIT_HARD_CEILING,
-        )
-        .await
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⏱ INTAKE: answer-flush barrier timed out for channel {}; posting queued card anyway (no deadlock)",
-            channel_id
-        );
-    }
-}
-
-pub(super) async fn send_intake_placeholder(
-    http: Arc<serenity::Http>,
-    shared: Arc<SharedData>,
-    channel_id: ChannelId,
-    reference: Option<(ChannelId, MessageId)>,
-    // #3082 part B (codex P2-3): only the queued-turn notice path must wait on
-    // the answer-flush barrier. Active-turn placeholders (a turn starting NOW,
-    // or a TUI idle-response card) are NOT a trailing "📬 queued" notice and
-    // must NOT be delayed behind a multi-chunk answer flush — set this `false`
-    // for those callers.
-    is_queued_notice: bool,
-) -> Result<MessageId, String> {
-    // codex P2-3: gate the answer-flush wait to the queued-notice path only;
-    // unrelated active-turn placeholders skip the barrier entirely.
-    await_answer_flush_if_queued_notice(&shared.answer_flush_barrier, channel_id, is_queued_notice)
-        .await;
-
-    let client = SerenityTurnOutboundClient { http, shared };
-    let mut msg = gateway_outbound_message(channel_id, "...");
-    if let Some((reference_channel, reference_message)) = reference {
-        msg = msg.with_reference(OutboundReferenceContext::reply_to(
-            reference_channel,
-            reference_message,
-        ));
-    }
-    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)?
-        .ok_or_else(|| "intake placeholder delivery was skipped".to_string())
-}
-
-pub(super) async fn send_outbound_message(
-    http: Arc<serenity::Http>,
-    shared: Arc<SharedData>,
-    channel_id: ChannelId,
-    content: &str,
-) -> Result<MessageId, String> {
-    let client = SerenityTurnOutboundClient { http, shared };
-    let msg = gateway_outbound_message(channel_id, content);
-    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)?
-        .ok_or_else(|| "message delivery was skipped".to_string())
-}
-
-pub(super) async fn edit_outbound_message(
-    http: Arc<serenity::Http>,
-    shared: Arc<SharedData>,
-    channel_id: ChannelId,
-    message_id: MessageId,
-    content: &str,
-) -> Result<(), String> {
-    let client = SerenityTurnOutboundClient { http, shared };
-    let msg = gateway_outbound_message(channel_id, content)
-        .with_operation(OutboundOperation::Edit { message_id });
-    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)
-        .map(|_| ())
 }
 
 fn live_bot_owner_provider(live_turn: Option<&LiveDiscordTurnContext>) -> Option<ProviderKind> {
@@ -949,6 +940,16 @@ mod tests {
     use super::*;
     use crate::services::discord::DISCORD_MSG_LIMIT;
     use std::sync::Mutex;
+
+    #[test]
+    fn task_notification_card_outbound_message_enforces_nonce_reconciliation() {
+        let message = task_card_outbound_message(ChannelId::new(4_055), "card", "adktn123");
+        assert_eq!(message.create_nonce.as_deref(), Some("adktn123"));
+        assert!(
+            message.enforce_nonce,
+            "ambiguous task-card retries must ask Discord to return the same message"
+        );
+    }
 
     #[derive(Default)]
     struct DefaultLongGateway {

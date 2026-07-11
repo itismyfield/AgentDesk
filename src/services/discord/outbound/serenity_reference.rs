@@ -60,7 +60,9 @@ fn delivery_message_id(result: DeliveryResult) -> Result<Option<MessageId>, Stri
             .map(parse_message_id)
             .transpose(),
         DeliveryResult::Skip { .. } => Ok(None),
-        DeliveryResult::PermanentFailure { reason } => Err(reason),
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => Err(reason),
     }
 }
 

@@ -16,6 +16,8 @@
 //!   can replay split/chunk identity.
 //! - `PermanentFailure` — delivery failed and must not be retried. The
 //!   `reason` string is intended for logs / dead-letter queues.
+//! - `TransientFailure` — no authoritative rejection was observed; the
+//!   durable caller retains retry authority.
 //!
 //! [`super::delivery`] constructs these variants for all outbound callsites.
 
@@ -146,6 +148,14 @@ pub(crate) enum DeliveryResult {
         dedup_key: OutboundDedupKey,
         existing_messages: Vec<DeliveredMessage>,
     },
+    /// Discord authoritatively reported that an edit target does not exist
+    /// (`404` + code `10008`). This is the only outcome that permits a durable
+    /// authority to replace the message with a new nonce/revision.
+    ConfirmedMissing { reason: String },
+    /// Retryable transport/Discord failure (for example no HTTP response,
+    /// 408/429, or 5xx). Durable callers must not collapse this into a
+    /// terminal rejection.
+    TransientFailure { reason: String },
     /// Terminal failure; the caller should not retry.
     PermanentFailure { reason: String },
 }

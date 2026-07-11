@@ -1,19 +1,49 @@
 //! Shared Discord outbound transport and in-process dedup primitives.
 //!
 //! The v3 envelope/policy/result modules own outbound delivery semantics.
-//! This module keeps the transport trait, HTTP implementation, and temporary
-//! in-memory deduper used by production callers and tests.
+//! This module keeps the transport trait, HTTP/Serenity implementations, and
+//! temporary in-memory deduper used by production callers and tests.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use poise::serenity_prelude as serenity;
+use serenity::{ChannelId, MessageId};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
+use crate::services::discord::SharedData;
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
+
+pub(crate) async fn post_serenity_message_with_nonce(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    content: &str,
+    reference: Option<(ChannelId, MessageId)>,
+    nonce: &str,
+    enforce_nonce: bool,
+) -> Result<String, serenity::Error> {
+    let mut message = serenity::CreateMessage::new()
+        .content(content)
+        .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
+        .enforce_nonce(enforce_nonce)
+        .allowed_mentions(crate::services::discord::http::relay_allowed_mentions());
+    if let Some((reference_channel, reference_message)) = reference {
+        message = message.reference_message(
+            serenity::MessageReference::from((reference_channel, reference_message))
+                .fail_if_not_exists(false),
+        );
+    }
+    crate::services::discord::rate_limit_wait(shared, channel_id).await;
+    channel_id
+        .send_message(http, message)
+        .await
+        .map(|message| message.id.get().to_string())
+}
 
 /// Short stable fingerprint for outbound idempotency keys. Parts are separated
 /// before hashing so concatenated inputs cannot collide by boundary changes.
@@ -49,6 +79,40 @@ pub(crate) trait DiscordOutboundClient: Send + Sync {
         _reference_message: &str,
     ) -> Result<String, DispatchMessagePostError> {
         self.post_message(target_channel, content).await
+    }
+
+    /// Post with Discord's create-message nonce contract. Clients that do not
+    /// support nonces preserve legacy behavior; production Serenity clients
+    /// override this method.
+    async fn post_message_with_nonce(
+        &self,
+        target_channel: &str,
+        content: &str,
+        _nonce: &str,
+        _enforce_nonce: bool,
+    ) -> Result<String, DispatchMessagePostError> {
+        self.post_message(target_channel, content).await
+    }
+
+    /// Reference-bearing nonce variant used when a durable send is also a
+    /// reply. The default retains the reference even when the client cannot
+    /// express a nonce.
+    async fn post_message_with_reference_and_nonce(
+        &self,
+        target_channel: &str,
+        content: &str,
+        reference_channel: &str,
+        reference_message: &str,
+        _nonce: &str,
+        _enforce_nonce: bool,
+    ) -> Result<String, DispatchMessagePostError> {
+        self.post_message_with_reference(
+            target_channel,
+            content,
+            reference_channel,
+            reference_message,
+        )
+        .await
     }
 
     /// Edit an existing message. Returns the edited message id on success.

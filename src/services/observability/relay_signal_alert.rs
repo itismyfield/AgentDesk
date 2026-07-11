@@ -335,9 +335,9 @@ mod tests {
     }
 
     /// The canonical signal table must cover every relay-loss vector #3561
-    /// scopes: the three relay root-cause counters plus the two offset
-    /// invariant violations. A missing entry silently drops a signal from the
-    /// operator monitor, so guard the membership explicitly.
+    /// scopes: the three relay root-cause counters, offset invariant
+    /// violations, and fail-closed ambiguous task responses. A missing entry
+    /// silently drops a signal from the operator monitor, so guard membership.
     #[test]
     fn signal_table_covers_documented_relay_loss_vectors() {
         let keys: Vec<&str> = RELAY_SIGNAL_DEFINITIONS.iter().map(|s| s.key).collect();
@@ -346,6 +346,8 @@ mod tests {
             "relay_uncommitted_inflight_cleared",
             "relay_owner_unknown",
             "offset_invariant_violation",
+            "task_response_chunk_ambiguous",
+            "task_card_post_ambiguous",
         ] {
             assert!(
                 keys.contains(&expected),
@@ -402,6 +404,7 @@ mod tests {
             "relay_terminal_ack_timeout",
             "relay_uncommitted_inflight_cleared",
             "response_sent_offset_monotonic",
+            "task_response_chunk_delivery_ambiguous",
         ] {
             assert!(
                 statuses.contains(&expected),

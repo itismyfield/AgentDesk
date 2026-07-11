@@ -456,7 +456,10 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
 │   │   ├── formatting/
-│   │   │   └── long_send_rollback.rs
+│   │   │   ├── long_send_rollback.rs
+│   │   │   └── rollback_journal.rs
+│   │   ├── gateway/
+│   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -634,7 +637,8 @@ src/
 │   │   ├── session_relay_sink/
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── orphan_reclaim.rs
-│   │   │   └── relay_format.rs
+│   │   │   ├── relay_format.rs
+│   │   │   └── task_notification_context.rs
 │   │   ├── session_runtime/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
@@ -645,6 +649,18 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── task_notification_delivery/
+│   │   │   ├── store/
+│   │   │   │   ├── missing_card_replacement.rs
+│   │   │   │   ├── response_chunks.rs
+│   │   │   │   ├── response_fence.rs
+│   │   │   │   └── response_identity.rs
+│   │   │   ├── card_post.rs
+│   │   │   ├── gateway.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── response_chunks.rs
+│   │   │   ├── store.rs
+│   │   │   └── tests.rs
 │   │   ├── tmux/
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
@@ -680,9 +696,11 @@ src/
 │   │   │   ├── streaming_status_tick.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
+│   │   │   ├── task_response_authority.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_direct_fallback.rs
+│   │   │   ├── terminal_direct_fallback_tests.rs
 │   │   │   ├── terminal_long_chunks.rs
 │   │   │   ├── terminal_readiness.rs
 │   │   │   ├── terminal_readiness_tests.rs
@@ -720,6 +738,7 @@ src/
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs
+│   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard/

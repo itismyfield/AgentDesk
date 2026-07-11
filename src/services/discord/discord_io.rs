@@ -502,6 +502,8 @@ async fn deliver_channel_message(
             message_id: None,
             fallback_kind: None,
         }),
-        DeliveryResult::PermanentFailure { reason } => Err(reason),
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => Err(reason),
     }
 }

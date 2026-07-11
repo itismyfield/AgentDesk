@@ -81,8 +81,10 @@ pub(super) const QUALITY_SAMPLE_GUARD: i64 = 5;
 //   * `relay_owner_unknown` (relay started with unknown owner) is rarer and
 //     more suspicious, so a lower bar.
 //   * `relay_uncommitted_inflight_cleared` (LEAKED ANSWER — a non-empty reply
-//     was dropped) and `offset_invariant_violation` (persisted bad offset
-//     state) are severe enough that a single occurrence warrants an alert.
+//     was dropped), `offset_invariant_violation` (persisted bad offset state),
+//     and `task_response_chunk_ambiguous` (a response may have crossed Discord's
+//     network boundary but cannot be safely replayed) are severe enough that a
+//     single occurrence warrants an alert.
 // All are overridable per-deploy via `kanban.relay_alert_threshold`
 // (mirrored to kv_meta `kanban_relay_alert_threshold` by `services::settings`).
 pub(super) const RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS: i64 = 60 * 60;
@@ -141,6 +143,20 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
         statuses: &["last_offset_monotonic", "response_sent_offset_monotonic"],
         default_threshold: 1,
         label: "오프셋 단조성 불변식 위반",
+    },
+    RelaySignal {
+        key: "task_response_chunk_ambiguous",
+        event_type: "invariant_violation",
+        statuses: &["task_response_chunk_delivery_ambiguous"],
+        default_threshold: 1,
+        label: "태스크 응답 청크 전송 결과 불명(중복 위험 격리)",
+    },
+    RelaySignal {
+        key: "task_card_post_ambiguous",
+        event_type: "invariant_violation",
+        statuses: &["task_card_post_delivery_ambiguous"],
+        default_threshold: 1,
+        label: "태스크 카드 전송 결과 불명(중복 위험 격리)",
     },
 ];
 pub(super) const AGENT_QUALITY_EVENT_TYPES: &[&str] = &[
