@@ -2909,6 +2909,56 @@ class TickChannelTests(unittest.TestCase):
             )
         )
 
+    def test_invariant_4435_torn_debut_miss_reentry_still_escalates(self):
+        current = self.proj_dir / "current.jsonl"
+        torn = self.proj_dir / "torn-unreadable.jsonl"
+        anchor = float(int(self.now - 30))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "current delivered") + "\n", encoding="utf-8"
+        )
+        rt = self.make_rt(read_fail_alert_after=3)
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        torn.write_text('{"type":"assistant"', encoding="utf-8")
+        os.utime(torn, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(
+            state["999"]["pending_transcript_failures"][str(torn)], 1
+        )
+
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[]
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertIn(str(torn), state["999"]["pending_transcripts"])
+        self.assertEqual(
+            state["999"]["pending_transcript_failures"][str(torn)], 1
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 5)
+
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 불능 에스컬레이션" in body]),
+            1,
+        )
+        self.assertIn(str(torn), state["999"]["retired_transcripts"])
+        self.assertNotIn(str(torn), state["999"]["pending_transcripts"])
+
     def test_invariant_4435_corrupt_pending_escalates_once_then_unwedges(self):
         current = self.proj_dir / "current.jsonl"
         malformed = self.proj_dir / "permanently-malformed.jsonl"
