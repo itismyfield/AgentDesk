@@ -365,6 +365,38 @@ def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
     return candidates
 
 
+def recheck_selected_transcript(
+    value: object,
+    project_root: Path,
+    pattern: re.Pattern[str],
+    tracked_paths: set[str],
+) -> TranscriptCandidate | None:
+    """Recover a tracked selection omitted by a partial directory listing.
+
+    Only an exact, absolute provider-project path already present in persisted
+    size/watermark state is eligible.  This keeps malformed state from gaining
+    sticky authority while a direct stat closes the transient discovery gap.
+    """
+    if not isinstance(value, str) or not value or value not in tracked_paths:
+        return None
+    path = _lexical_absolute_path(value)
+    root = _lexical_absolute_path(project_root)
+    if (
+        path is None
+        or root is None
+        or str(path) != value
+        or path.suffix != ".jsonl"
+        or path.parent.parent != root
+        or pattern.fullmatch(path.parent.name) is None
+    ):
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return TranscriptCandidate(path, stat.st_size, stat.st_mtime)
+
+
 def select_watch_transcript(
     candidates: list[TranscriptCandidate],
     previous_sizes: Mapping[str, int],
@@ -413,6 +445,19 @@ def select_watch_transcript_with_reason(
             None,
         )
         if retained is not None:
+            unseen_newer = [
+                candidate
+                for candidate in candidates
+                if candidate.path != retained.path
+                and str(candidate.path) not in previous_sizes
+                and candidate.mtime > retained.mtime
+            ]
+            if unseen_newer:
+                selected = max(
+                    unseen_newer,
+                    key=lambda candidate: (candidate.mtime, str(candidate.path)),
+                )
+                return selected.path, "unseen_newer"
             return retained.path, "sticky"
     selected = max(
         candidates, key=lambda candidate: (candidate.mtime, str(candidate.path))
@@ -1575,7 +1620,8 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         rt.log(f"[{cid}] coverage tick error: {type(e).__name__}: {e}")
 
     pattern = main_channel_project_re(ch.worktree_root, ch.worktree_prefix)
-    dirs = channel_project_dirs(projects_root(), pattern)
+    project_root = projects_root()
+    dirs = channel_project_dirs(project_root, pattern)
     candidates = transcript_candidates(dirs)
     raw_previous_sizes = chs.get("transcript_sizes", {})
     previous_sizes = {
@@ -1588,21 +1634,35 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         if isinstance(size, int) and not isinstance(size, bool) and size >= 0
     }
     previous_selected = chs.get(SELECTED_TRANSCRIPT_KEY)
+    watermarks = delivered_watermarks(chs)
     bootstrapped_from_watermark = False
     candidate_paths = {str(candidate.path) for candidate in candidates}
+    if (
+        not isinstance(previous_selected, str)
+        or previous_selected not in candidate_paths
+    ):
+        rechecked = recheck_selected_transcript(
+            previous_selected,
+            project_root,
+            pattern,
+            set(previous_sizes) | set(watermarks),
+        )
+        if rechecked is not None:
+            candidates.append(rechecked)
+            candidate_paths.add(str(rechecked.path))
+            rt.log(f"[{cid}] transcript-recheck recovered path={rechecked.path}")
     if (
         not isinstance(previous_selected, str)
         or not previous_selected
         or (candidate_paths and previous_selected not in candidate_paths)
     ):
         previous_selected = None
-        watermarks = delivered_watermarks(chs)
         watermarked_candidates = [
             (watermarks[str(candidate.path)][1], str(candidate.path))
             for candidate in candidates
             if str(candidate.path) in watermarks
         ]
-        if watermarked_candidates:
+        if watermarked_candidates and len(watermarked_candidates) == len(candidates):
             previous_selected = max(watermarked_candidates)[1]
             bootstrapped_from_watermark = True
     tr, selection_reason = select_watch_transcript_with_reason(
@@ -1613,9 +1673,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     if tr is not None:
         chs[SELECTED_TRANSCRIPT_KEY] = str(tr)
     rt.log(f"[{cid}] transcript-select reason={selection_reason} path={tr}")
-    chs["transcript_sizes"] = {
-        str(candidate.path): candidate.size for candidate in candidates
-    }
+    chs["transcript_sizes"] = (
+        {str(candidate.path): candidate.size for candidate in candidates}
+        if candidates
+        else previous_sizes
+    )
     selected = next((candidate for candidate in candidates if candidate.path == tr), None)
     # I1 selector sync (#4408 phase 2): compare the dcserver's asserted relay
     # bind (B) against F. Parallel to gap/coverage — its own cooldown key, wrapped

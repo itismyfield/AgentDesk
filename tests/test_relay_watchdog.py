@@ -1649,6 +1649,9 @@ class TickChannelTests(unittest.TestCase):
 
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(previous))
+        self.assertEqual(
+            state["999"]["transcript_sizes"], {str(previous): 100}
+        )
         self.assertTrue(
             any("transcript-select reason=no_candidates" in line for line in rt.log_lines)
         )
@@ -1740,7 +1743,7 @@ class TickChannelTests(unittest.TestCase):
             any("transcript-select reason=sticky" in line for line in restarted.log_lines)
         )
 
-    def test_invariant_4435_existing_watermark_bootstraps_sticky_selection(self):
+    def test_invariant_4435_newest_updated_watermark_bootstraps_selection(self):
         current = self.proj_dir / "current.jsonl"
         touched_old = self.proj_dir / "old.jsonl"
         anchor = float(int(self.now - 2000))
@@ -1773,6 +1776,9 @@ class TickChannelTests(unittest.TestCase):
                 }
             }
         }
+        advance_delivered_watermark(
+            state["999"], touched_old, anchor - 100, self.now - 2
+        )
         advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
 
         rt = self.make_rt()
@@ -1787,7 +1793,65 @@ class TickChannelTests(unittest.TestCase):
             )
         )
 
-    def test_invariant_4435_invalid_persisted_selection_allows_watermark_bootstrap(
+    def test_invariant_4435_partial_discovery_rechecks_tracked_selection(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "confirmed current") + "\n", encoding="utf-8"
+        )
+        touched_old.write_text(
+            record(anchor - 1000, "historic old") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(current),
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(touched_old): touched_old.stat().st_size,
+                },
+            }
+        }
+        advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
+        rt = self.make_rt()
+        rt.haystack = norm("confirmed current historic old")
+        partial = TranscriptCandidate(
+            touched_old, touched_old.stat().st_size, touched_old.stat().st_mtime
+        )
+
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[partial]
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any("transcript-recheck recovered" in line for line in rt.log_lines)
+        )
+
+        current.unlink()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(touched_old))
+        self.assertTrue(
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_invalid_persisted_selection_is_ignored_before_fallback(
         self,
     ):
         current = self.proj_dir / "current.jsonl"
@@ -1828,15 +1892,65 @@ class TickChannelTests(unittest.TestCase):
         advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
 
         rt = self.make_rt()
+        rt.haystack = norm("confirmed current historic missing output")
         tick_channel(rt, TICK_CHANNEL, state, self.now)
 
         self.assertEqual(rt.alerts, [])
-        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(touched_old))
         self.assertTrue(
             any(
-                "transcript-select reason=watermark_bootstrap" in line
+                "transcript-select reason=bootstrap" in line
                 for line in rt.log_lines
             )
+        )
+
+    def test_invariant_4435_partial_watermark_coverage_cannot_hide_newer_gap(self):
+        delivered_old = self.proj_dir / "delivered-old.jsonl"
+        missed_newer = self.proj_dir / "missed-newer.jsonl"
+        old_anchor = float(int(self.now - 3000))
+        missed_ts = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        delivered_old.write_text(
+            record(old_anchor, "delivered old") + "\n", encoding="utf-8"
+        )
+        missed_newer.write_text(
+            record(missed_ts, "stale missed final block") + "\n", encoding="utf-8"
+        )
+        os.utime(delivered_old, (self.now - 100, self.now - 100))
+        os.utime(missed_newer, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: "relative/corrupt-selection.jsonl",
+                "transcript_sizes": {
+                    str(delivered_old): delivered_old.stat().st_size,
+                    str(missed_newer): missed_newer.stat().st_size,
+                },
+            }
+        }
+        advance_delivered_watermark(
+            state["999"], delivered_old, old_anchor, self.now - 1
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("delivered old")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(missed_newer))
+        self.assertTrue(
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
         )
 
     def test_invariant_4435_older_haystack_cannot_regress_persisted_anchor(self):
@@ -1862,7 +1976,7 @@ class TickChannelTests(unittest.TestCase):
             delivered_watermark_for_path(state["999"], transcript), newer
         )
 
-    def test_invariant_4435_new_transcript_does_not_inherit_old_path_anchor(self):
+    def test_invariant_4435_unseen_newer_transcript_wins_without_growth_baseline(self):
         old_anchor = float(int(self.now - 1000))
         self.write_transcript([(old_anchor, "old path delivered")])
         old_transcript = self.proj_dir / "s.jsonl"
@@ -1891,16 +2005,12 @@ class TickChannelTests(unittest.TestCase):
         os.utime(new_transcript, (self.now + 1, self.now + 1))
         rt.haystack = ""
         tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
-        self.assertEqual(rt.alerts, [])
-        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(old_transcript))
-
-        with new_transcript.open("a", encoding="utf-8") as stream:
-            stream.write("\n")
-        os.utime(new_transcript, (self.now + 2, self.now + 2))
-        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
-
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(new_transcript))
+        self.assertTrue(
+            any("transcript-select reason=unseen_newer" in line for line in rt.log_lines)
+        )
         self.assertEqual(
             delivered_watermark_for_path(state["999"], old_transcript), old_anchor
         )
