@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import time
@@ -37,6 +38,7 @@ from scripts.relay_watchdog import (
     PG_UNKNOWN,
     PG_UPSTREAM_DOWN,
     SELECTOR_DIVERGED,
+    SELECTED_TRANSCRIPT_KEY,
     SELECTOR_SYNCED,
     SELECTOR_UNKNOWN,
     STATE_GAP,
@@ -67,8 +69,10 @@ from scripts.relay_watchdog import (
     parse_config,
     parse_transcript_ts,
     project_slug,
+    recheck_selected_transcript,
     save_state,
     select_watch_transcript,
+    select_watch_transcript_with_reason,
     selector_divergence_confirmed,
     tick_channel,
     tick_pg_tunnel,
@@ -172,6 +176,7 @@ class TranscriptResolutionTests(unittest.TestCase):
         selected = select_watch_transcript(
             [growing, newer_stagnant],
             {str(growing.path): 100, str(newer_stagnant.path): 200},
+            semantic_growth_paths={str(growing.path)},
         )
         self.assertEqual(selected, growing.path)
 
@@ -182,6 +187,39 @@ class TranscriptResolutionTests(unittest.TestCase):
             [older, newer], {str(older.path): 100, str(newer.path): 200}
         )
         self.assertEqual(selected, newer.path)
+
+    def test_invariant_4435_no_growth_retains_previous_selection(self):
+        current = TranscriptCandidate(Path("/tmp/current.jsonl"), 100, 100.0)
+        touched_old = TranscriptCandidate(Path("/tmp/old.jsonl"), 200, 200.0)
+        selected, reason = select_watch_transcript_with_reason(
+            [current, touched_old],
+            {str(current.path): 100, str(touched_old.path): 200},
+            str(current.path),
+        )
+        self.assertEqual(selected, current.path)
+        self.assertEqual(reason, "sticky")
+
+    def test_invariant_4435_missing_previous_selection_bootstraps_newest(self):
+        older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
+        newer = TranscriptCandidate(Path("/tmp/newer.jsonl"), 200, 200.0)
+        selected, reason = select_watch_transcript_with_reason(
+            [older, newer],
+            {str(older.path): 100, str(newer.path): 200},
+            "/tmp/disappeared.jsonl",
+        )
+        self.assertEqual(selected, newer.path)
+        self.assertEqual(reason, "prior_missing")
+
+    def test_invariant_4435_corrupt_previous_selection_fails_open(self):
+        older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
+        newer = TranscriptCandidate(Path("/tmp/newer.jsonl"), 200, 200.0)
+        selected, reason = select_watch_transcript_with_reason(
+            [older, newer],
+            {str(older.path): 100, str(newer.path): 200},
+            True,
+        )
+        self.assertEqual(selected, newer.path)
+        self.assertEqual(reason, "bootstrap")
 
     def test_first_observation_uses_mtime_fallback(self):
         older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
@@ -224,6 +262,436 @@ class TranscriptResolutionTests(unittest.TestCase):
 
     def test_no_dirs_yields_none(self):
         self.assertIsNone(newest_transcript([]))
+
+
+class TranscriptRecheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.pattern = make_re()
+        self.project = self.root / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260709-140500"
+        )
+        self.project.mkdir()
+        self.transcript = self.project / "valid.jsonl"
+        self.transcript.write_text("{}\n", encoding="utf-8")
+
+    def test_untracked_valid_shaped_path_is_rejected(self):
+        self.assertIsNone(
+            recheck_selected_transcript(
+                str(self.transcript), self.root, self.pattern, set()
+            )
+        )
+
+    def test_tracked_noncanonical_path_is_rejected(self):
+        value = str(
+            self.root
+            / self.project.name
+            / ".."
+            / self.project.name
+            / self.transcript.name
+        )
+        self.assertIsNone(
+            recheck_selected_transcript(value, self.root, self.pattern, {value})
+        )
+
+    def test_tracked_path_outside_root_or_deeper_nested_is_rejected(self):
+        other_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(other_tmp.cleanup)
+        other_root = Path(other_tmp.name)
+        outside_project = other_root / self.project.name
+        outside_project.mkdir()
+        outside = outside_project / "outside.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+
+        nested_project = self.root / "extra" / self.project.name
+        nested_project.mkdir(parents=True)
+        nested = nested_project / "nested.jsonl"
+        nested.write_text("{}\n", encoding="utf-8")
+
+        for value in (str(outside), str(nested)):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    recheck_selected_transcript(
+                        value, self.root, self.pattern, {value}
+                    )
+                )
+
+    def test_tracked_wrong_suffix_is_rejected(self):
+        wrong = self.project / "wrong.txt"
+        wrong.write_text("{}\n", encoding="utf-8")
+        self.assertIsNone(
+            recheck_selected_transcript(
+                str(wrong), self.root, self.pattern, {str(wrong)}
+            )
+        )
+
+    def test_tracked_pattern_mismatch_is_rejected(self):
+        wrong_project = self.root / "not-a-channel-project"
+        wrong_project.mkdir()
+        wrong = wrong_project / "wrong.jsonl"
+        wrong.write_text("{}\n", encoding="utf-8")
+        self.assertIsNone(
+            recheck_selected_transcript(
+                str(wrong), self.root, self.pattern, {str(wrong)}
+            )
+        )
+
+    def test_valid_tracked_existing_path_is_recovered(self):
+        candidate = recheck_selected_transcript(
+            str(self.transcript),
+            self.root,
+            self.pattern,
+            {str(self.transcript)},
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.path, self.transcript)
+        self.assertEqual(candidate.size, self.transcript.stat().st_size)
+
+    def test_malformed_tracked_path_stat_errors_are_rejected(self):
+        for name in ("bad\0.jsonl", "bad\ud800.jsonl"):
+            value = str(self.project / name)
+            with self.subTest(name=repr(name)):
+                try:
+                    candidate = recheck_selected_transcript(
+                        value, self.root, self.pattern, {value}
+                    )
+                except (OSError, ValueError, UnicodeError) as exc:
+                    self.fail(f"malformed persisted path escaped recheck: {exc!r}")
+                self.assertIsNone(candidate)
+
+    def test_directory_fstat_errors_fail_closed_as_unsafe_paths(self):
+        real_fstat = relay_watchdog.os.fstat
+        for failing_directory_index in (1, 2):
+            with self.subTest(failing_directory_index=failing_directory_index):
+                directory_calls = 0
+
+                def fail_selected_directory_fstat(descriptor):
+                    nonlocal directory_calls
+                    opened = real_fstat(descriptor)
+                    if stat.S_ISDIR(opened.st_mode):
+                        directory_calls += 1
+                        if directory_calls == failing_directory_index:
+                            raise OSError("injected directory fstat failure")
+                    return opened
+
+                with mock.patch.object(
+                    relay_watchdog.os,
+                    "fstat",
+                    side_effect=fail_selected_directory_fstat,
+                ):
+                    result = relay_watchdog.assistant_blocks(self.transcript)
+
+                self.assertEqual(directory_calls, failing_directory_index)
+                self.assertEqual(result.blocks, [])
+                self.assertEqual(result.error, "UnsafePath")
+
+    def test_symlink_escape_is_rejected_across_recheck_discovery_and_read(self):
+        other_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(other_tmp.cleanup)
+        outside = Path(other_tmp.name) / "outside.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        linked = self.project / "linked.jsonl"
+        try:
+            linked.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+
+        self.assertIsNone(
+            recheck_selected_transcript(
+                str(linked), self.root, self.pattern, {str(linked)}
+            )
+        )
+        self.assertNotIn(
+            linked,
+            [
+                candidate.path
+                for candidate in relay_watchdog.transcript_candidates([self.project])
+            ],
+        )
+        self.assertIsNotNone(relay_watchdog.assistant_blocks(linked).error)
+        with mock.patch.object(
+            relay_watchdog,
+            "_regular_file_stat_without_symlink",
+            return_value=outside.stat(),
+        ):
+            self.assertIsNotNone(
+                relay_watchdog.assistant_blocks(linked).error,
+                "descriptor open must reject a symlink swapped in after precheck",
+            )
+
+        discovery_root = self.root / "discovery"
+        discovery_root.mkdir()
+        linked_project = discovery_root / self.project.name
+        linked_project.symlink_to(self.project, target_is_directory=True)
+        self.assertEqual(
+            channel_project_dirs(discovery_root, self.pattern),
+            [],
+        )
+
+    def test_parent_symlink_swap_before_open_cannot_escape_dirfd(self):
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside_project = Path(outside_tmp.name) / self.project.name
+        outside_project.mkdir()
+        outside = outside_project / self.transcript.name
+        outside.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-11T07:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "escaped-parent-read"}
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        moved_project = self.root / "original-project-after-swap"
+        real_open = relay_watchdog.os.open
+        swapped = False
+
+        def swap_parent_then_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and os.fspath(path) == self.project.name:
+                swapped = True
+                self.project.rename(moved_project)
+                self.project.symlink_to(outside_project, target_is_directory=True)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(
+            relay_watchdog.os, "open", side_effect=swap_parent_then_open
+        ):
+            result = relay_watchdog.assistant_blocks(self.transcript)
+
+        self.assertTrue(swapped, "test must swap after nofollow prechecks")
+        self.assertEqual(result.error, "UnsafePath")
+        self.assertEqual(
+            result.blocks,
+            [],
+            "a path-string reopen must never read through the swapped parent",
+        )
+
+    def test_projects_root_symlink_swap_after_discovery_cannot_escape(self):
+        """Pin every ancestor below the trusted root, not just file.parent."""
+        trusted_home = self.root / "trusted-home"
+        projects_root = trusted_home / "projects"
+        project = projects_root / self.project.name
+        project.mkdir(parents=True)
+        transcript = project / "ancestor-swap.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        candidates = relay_watchdog.transcript_candidates([project])
+        self.assertEqual([candidate.path for candidate in candidates], [transcript])
+
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside_projects = Path(outside_tmp.name) / "projects"
+        outside_project = outside_projects / project.name
+        outside_project.mkdir(parents=True)
+        outside = outside_project / transcript.name
+        outside.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-11T07:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "escaped-ancestor-read"}
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        moved_projects = trusted_home / "projects-after-discovery"
+        projects_root.rename(moved_projects)
+        projects_root.symlink_to(outside_projects, target_is_directory=True)
+
+        # Independent semantic mutation oracle: the old immediate-parent-only
+        # implementation follows the swapped projects ancestor and reads the
+        # outside same-shaped transcript.  Keep this proof local to the test;
+        # the production helper below must reject the exact same filesystem.
+        def narrow_parent_only_open(path, flags, _trusted_root):
+            expected_parent = path.parent.stat(follow_symlinks=False)
+            expected_file = path.stat(follow_symlinks=False)
+            parent_fd = os.open(
+                path.parent,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+            descriptor = -1
+            try:
+                opened_parent = os.fstat(parent_fd)
+                if not relay_watchdog._same_file_identity(
+                    expected_parent, opened_parent
+                ):
+                    return None
+                descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+                opened_file = os.fstat(descriptor)
+                if not stat.S_ISREG(opened_file.st_mode) or not (
+                    relay_watchdog._same_file_identity(expected_file, opened_file)
+                ):
+                    return None
+                opened = descriptor
+                descriptor = -1
+                return opened
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(parent_fd)
+
+        with mock.patch.object(
+            relay_watchdog,
+            "_open_regular_file_beneath_parent",
+            side_effect=narrow_parent_only_open,
+        ):
+            legacy_result = relay_watchdog.assistant_blocks(
+                transcript, trusted_root=projects_root
+            )
+        self.assertEqual(
+            [text for _, text in legacy_result.blocks], ["escaped-ancestor-read"]
+        )
+
+        result = relay_watchdog.assistant_blocks(
+            transcript, trusted_root=projects_root
+        )
+        self.assertEqual(result.error, "UnsafePath")
+        self.assertEqual(result.blocks, [])
+
+    def test_trusted_root_boundary_allows_symlink_only_above_it(self):
+        """The explicit root may live below a legitimate platform symlink."""
+        real_home = self.root / "real-home"
+        real_projects = real_home / "projects"
+        real_project = real_projects / self.project.name
+        real_project.mkdir(parents=True)
+        transcript_name = "trusted-boundary.jsonl"
+        (real_project / transcript_name).write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-11T07:00:00Z",
+                    "message": {
+                        "content": [{"type": "text", "text": "trusted-read"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        alias_home = self.root / "home-alias"
+        alias_home.symlink_to(real_home, target_is_directory=True)
+        alias_projects = alias_home / "projects"
+        alias_transcript = alias_projects / real_project.name / transcript_name
+
+        result = relay_watchdog.assistant_blocks(
+            alias_transcript, trusted_root=alias_projects
+        )
+
+        self.assertIsNone(result.error)
+        self.assertEqual([text for _, text in result.blocks], ["trusted-read"])
+
+    def test_component_open_requires_absolute_path_beneath_trusted_root(self):
+        relative = relay_watchdog.assistant_blocks(
+            Path("relative.jsonl"), trusted_root=self.root
+        )
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside = Path(outside_tmp.name) / "outside.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        escaped = relay_watchdog.assistant_blocks(
+            outside, trusted_root=self.root
+        )
+
+        self.assertEqual(relative.error, "UnsafePath")
+        self.assertEqual(escaped.error, "UnsafePath")
+
+    def test_component_open_not_implemented_fails_closed(self):
+        real_open = relay_watchdog.os.open
+
+        def unsupported_openat(path, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") is not None:
+                raise NotImplementedError("dir_fd is unavailable")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(
+            relay_watchdog.os, "open", side_effect=unsupported_openat
+        ):
+            result = relay_watchdog.assistant_blocks(
+                self.transcript, trusted_root=self.root
+            )
+
+        self.assertEqual(result.error, "UnsafePath")
+        self.assertEqual(result.blocks, [])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO unavailable on this platform")
+    def test_fifo_swap_before_open_is_rejected_without_blocking(self):
+        """A non-regular swap must not block before the descriptor fstat."""
+        fifo = self.project / "swapped.jsonl"
+        os.mkfifo(fifo)
+        probe = (
+            "from pathlib import Path\n"
+            "from unittest import mock\n"
+            "import scripts.relay_watchdog as rw\n"
+            f"with mock.patch.object(rw, '_regular_file_stat_without_symlink', "
+            f"return_value=rw.os.stat({str(self.transcript)!r})):\n"
+            f"    result = rw.assistant_blocks(Path({str(fifo)!r}))\n"
+            "raise SystemExit(0 if result.error == 'UnsafePath' else 1)\n"
+        )
+        try:
+            completed = subprocess.run(
+                [os.environ.get("PYTHON", "python3"), "-c", probe],
+                cwd=REPO_ROOT,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("assistant_blocks blocked opening a FIFO swapped after precheck")
+        self.assertEqual(completed.returncode, 0)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO unavailable on this platform")
+    def test_regular_to_fifo_race_between_stat_and_open_is_nonblocking(self):
+        """Swap after the final lstat; O_NONBLOCK must make fstat rejection bounded."""
+        raced = self.project / "raced-after-stat.jsonl"
+        raced.write_text("{}\n", encoding="utf-8")
+        probe = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "from unittest import mock\n"
+            "import scripts.relay_watchdog as rw\n"
+            f"target = Path({str(raced)!r})\n"
+            f"trusted = Path({str(self.root)!r})\n"
+            "real_open = rw.os.open\n"
+            "swapped = False\n"
+            "def swap_then_open(path, flags, *args, **kwargs):\n"
+            "    global swapped\n"
+            "    if (not swapped and kwargs.get('dir_fd') is not None "
+            "and os.fspath(path) == target.name):\n"
+            "        target.unlink()\n"
+            "        os.mkfifo(target)\n"
+            "        swapped = True\n"
+            "    return real_open(path, flags, *args, **kwargs)\n"
+            "with mock.patch.object(rw.os, 'open', side_effect=swap_then_open):\n"
+            "    result = rw.assistant_blocks(target, trusted_root=trusted)\n"
+            "raise SystemExit(0 if swapped and result.error == 'UnsafePath' else 1)\n"
+        )
+        try:
+            completed = subprocess.run(
+                [os.environ.get("PYTHON", "python3"), "-c", probe],
+                cwd=REPO_ROOT,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("regular-to-FIFO race blocked at final open without O_NONBLOCK")
+        self.assertEqual(completed.returncode, 0)
 
 
 class TimestampTests(unittest.TestCase):
@@ -919,6 +1387,186 @@ class StateTests(unittest.TestCase):
         self.assertEqual(delivered_watermark_for_path(state, "/a.jsonl"), 20.0)
         self.assertEqual(delivered_watermark_for_path(state, "/b.jsonl"), 0.0)
 
+    def test_invariant_4435_selected_watermark_is_pinned_under_cap_pressure(self):
+        selected = "/z-selected.jsonl"
+        state: dict = {SELECTED_TRANSCRIPT_KEY: selected}
+        self.assertTrue(advance_delivered_watermark(state, selected, 50.0, 100.0))
+        for index in range(MAX_DELIVERED_WATERMARKS):
+            self.assertTrue(
+                advance_delivered_watermark(
+                    state,
+                    f"/a-{index:02d}.jsonl",
+                    60.0 + index,
+                    100.0,
+                )
+            )
+        self.assertEqual(len(delivered_watermarks(state)), MAX_DELIVERED_WATERMARKS)
+        self.assertEqual(delivered_watermark_for_path(state, selected), 50.0)
+
+    def test_invariant_4435_all_active_pending_watermarks_are_pinned(self):
+        selected = "/selected.jsonl"
+        pending = [
+            f"/pending-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        state: dict = {
+            SELECTED_TRANSCRIPT_KEY: selected,
+            "pending_transcripts": pending,
+        }
+        for index, path in enumerate([selected, *pending]):
+            self.assertTrue(
+                advance_delivered_watermark(state, path, 10.0 + index, 20.0)
+            )
+        for index in range(MAX_DELIVERED_WATERMARKS + 5):
+            advance_delivered_watermark(
+                state,
+                f"/unrelated-{index:02d}.jsonl",
+                100.0 + index,
+                1000.0 + index,
+            )
+
+        retained = delivered_watermarks(state)
+        self.assertEqual(len(retained), MAX_DELIVERED_WATERMARKS)
+        self.assertTrue(set([selected, *pending]) <= set(retained))
+
+    def test_invariant_4435_watermark_cap_fits_full_authority_union(self):
+        selected = "/selected.jsonl"
+        pending = [
+            f"/pending-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        gap_owners = [
+            f"/gap-owner-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1)
+        ]
+        recovered = [
+            f"/recovered-{index:03d}.jsonl"
+            for index in range(relay_watchdog.MAX_RECOVERED_GAP_GUARDS)
+        ]
+        authorities = [selected, *pending, *gap_owners, *recovered]
+        unrelated = "/unrelated-newer.jsonl"
+        state = {
+            SELECTED_TRANSCRIPT_KEY: selected,
+            relay_watchdog.PENDING_TRANSCRIPTS_KEY: pending,
+            relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: gap_owners,
+            relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                path: {
+                    "size": index,
+                    "confirmed_at": 100.0,
+                    "last_seen_at": 100.0,
+                    "absent_since": None,
+                }
+                for index, path in enumerate(recovered)
+            },
+            DELIVERED_WATERMARKS_KEY: {
+                path: {"delivered_ts": 10.0 + index, "updated_at": 100.0}
+                for index, path in enumerate(authorities)
+            }
+            | {
+                unrelated: {
+                    "delivered_ts": 999.0,
+                    "updated_at": 999.0,
+                }
+            },
+        }
+
+        retained = delivered_watermarks(state)
+
+        self.assertEqual(
+            MAX_DELIVERED_WATERMARKS,
+            1
+            + relay_watchdog.MAX_PENDING_TRANSCRIPTS
+            + (relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1)
+            + relay_watchdog.MAX_RECOVERED_GAP_GUARDS,
+        )
+        self.assertEqual(len(retained), MAX_DELIVERED_WATERMARKS)
+        self.assertTrue(set(authorities) <= set(retained))
+        self.assertNotIn(unrelated, retained)
+
+    def test_invariant_4435_gap_owner_validation_stays_deduped_and_bounded(self):
+        valid = [
+            f"/owner-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 5)
+        ]
+        state = {
+            relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [
+                valid[0],
+                "",
+                None,
+                True,
+                valid[0],
+                *valid[1:],
+            ],
+            relay_watchdog.GAP_TRANSCRIPT_KEY: valid[-1],
+        }
+
+        owners = relay_watchdog._validated_gap_owner_transcripts(state)
+
+        self.assertEqual(
+            owners,
+            valid[: relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1],
+        )
+        self.assertEqual(len(owners), len(set(owners)))
+
+    def test_invariant_4435_recovered_guard_validation_is_strict_and_bounded(self):
+        valid = {
+            f"/guard-{index:03d}.jsonl": {
+                "size": index,
+                "confirmed_at": 10.0,
+                "last_seen_at": 11.0,
+                "absent_since": None,
+            }
+            for index in range(relay_watchdog.MAX_RECOVERED_GAP_GUARDS + 5)
+        }
+        state = {
+            relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                "/bad-bool.jsonl": {
+                    "size": True,
+                    "confirmed_at": 10.0,
+                    "last_seen_at": 11.0,
+                    "absent_since": None,
+                },
+                "/bad-clock.jsonl": {
+                    "size": 1,
+                    "confirmed_at": 10.0,
+                    "last_seen_at": 20.0,
+                    "absent_since": 19.0,
+                },
+                **valid,
+            }
+        }
+
+        guards = relay_watchdog._validated_recovered_gap_guards(state)
+
+        self.assertEqual(len(guards), relay_watchdog.MAX_RECOVERED_GAP_GUARDS)
+        self.assertNotIn("/bad-bool.jsonl", guards)
+        self.assertNotIn("/bad-clock.jsonl", guards)
+
+    def test_invariant_4435_recovered_guard_capacity_outlives_one_gap_wave(self):
+        guards: dict = {}
+        for index in range(relay_watchdog.MAX_GAP_OWNER_TRANSCRIPTS + 1):
+            guards, admitted = relay_watchdog._upsert_recovered_gap_guard(
+                guards, f"/guard-{index:03d}.jsonl", index, 100.0 + index
+            )
+            self.assertTrue(admitted)
+        self.assertGreater(
+            len(guards), relay_watchdog.MAX_GAP_OWNER_TRANSCRIPTS
+        )
+
+        for index in range(
+            len(guards), relay_watchdog.MAX_RECOVERED_GAP_GUARDS
+        ):
+            guards, admitted = relay_watchdog._upsert_recovered_gap_guard(
+                guards, f"/guard-{index:03d}.jsonl", index, 100.0 + index
+            )
+            self.assertTrue(admitted)
+        before = dict(guards)
+        guards, admitted = relay_watchdog._upsert_recovered_gap_guard(
+            guards, "/overflow.jsonl", 1, 999.0
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(guards, before)
+
 
 class RuntimePgProbeTests(unittest.TestCase):
     def test_health_detail_db_false_is_classified_by_nc_closed(self):
@@ -1328,13 +1976,13 @@ class TickChannelTests(unittest.TestCase):
         rt.live_sessions = {expected_tmux_session_name(TICK_CHANNEL)}
         rt.watcher_probe = probe
 
-    def test_growth_aware_selector_is_wired_into_tick(self):
-        growing = self.proj_dir / "growing.jsonl"
+    def test_metadata_only_growth_cannot_steal_live_selection(self):
+        stale_compact = self.proj_dir / "stale-compact.jsonl"
         stagnant_dir = self.projects / (
             "-Users-alice--adk-release-worktrees-claude-adk-cc-20260710-140500"
         )
         stagnant_dir.mkdir()
-        stagnant = stagnant_dir / "stagnant.jsonl"
+        current = stagnant_dir / "current.jsonl"
 
         def record(epoch: float, text: str) -> str:
             return json.dumps(
@@ -1347,37 +1995,98 @@ class TickChannelTests(unittest.TestCase):
                 }
             )
 
-        growing.write_text(
-            record(self.now - 2000, "missing from older growing transcript") + "\n",
+        stale_compact.write_text(
+            "".join(
+                record(self.now - 3000 - index, f"old missing block {index}") + "\n"
+                for index in range(490)
+            ),
             encoding="utf-8",
         )
-        stagnant.write_text(
-            record(self.now - 2000, "newer stagnant block landed") + "\n",
+        current.write_text(
+            record(self.now - 30, "current live block landed") + "\n",
             encoding="utf-8",
         )
-        os.utime(growing, (self.now - 100, self.now - 100))
-        os.utime(stagnant, (self.now, self.now))
+        os.utime(stale_compact, (self.now - 100, self.now - 100))
+        os.utime(current, (self.now, self.now))
         rt = self.make_rt()
-        rt.haystack = norm("newer stagnant block landed")
+        rt.haystack = norm("current live block landed")
         state: dict = {}
 
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.alerts, [], "first tick must use mtime fallback")
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
 
-        with growing.open("a", encoding="utf-8") as f:
-            f.write("\n")
-        # Keep the growing file's mtime older than the stagnant candidate: only
-        # size growth can make it win on the second tick.
-        os.utime(growing, (self.now - 50, self.now - 50))
-        os.utime(stagnant, (self.now, self.now))
+        with stale_compact.open("a", encoding="utf-8") as f:
+            f.write("\n" + json.dumps({"type": "queue-operation"}) + "\n")
+        # This is the live #4435 recurrence: compact/dead transcript metadata
+        # grows and gets a fresh mtime, but no deliverable assistant row exists.
+        os.utime(stale_compact, (self.now + 1, self.now + 1))
         tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
-        self.assertEqual(len(rt.alerts), 1)
-        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any(
+                f"transcript-growth-ignored reason=non-semantic path={stale_compact}"
+                in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_timestamped_assistant_growth_can_switch_selection(self):
+        prior = self.proj_dir / "prior.jsonl"
+        current_dir = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260710-140500"
+        )
+        current_dir.mkdir()
+        current = current_dir / "current.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        prior.write_text(record(self.now - 60, "prior delivered") + "\n", encoding="utf-8")
+        current.write_text(record(self.now - 30, "current delivered") + "\n", encoding="utf-8")
+        os.utime(prior, (self.now - 100, self.now - 100))
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("prior delivered current delivered semantic growth delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        with prior.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now + 1, "semantic growth delivered") + "\n")
+        os.utime(prior, (self.now - 50, self.now - 50))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(prior))
+        self.assertTrue(
+            any("transcript-select reason=growth" in line for line in rt.log_lines)
+        )
 
     def _grow_selected_transcript(self) -> None:
         tr = self.proj_dir / "s.jsonl"
         with tr.open("a", encoding="utf-8") as f:
-            f.write("\n")
+            f.write(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now)
+                        ),
+                        "message": {
+                            "content": [{"type": "text", "text": "selector growth"}]
+                        },
+                    }
+                )
+                + "\n"
+            )
         os.utime(tr, (self.now, self.now))
 
     def test_selector_divergence_alerts_only_after_swap_confirm(self):
@@ -1426,6 +2135,39 @@ class TickChannelTests(unittest.TestCase):
             trigger_turn,
             "actionable selector alerts must trigger an agent turn "
             "(send-to-agent handoff), not bot-direct delivery",
+        )
+
+    def test_selector_quiet_tool_tick_preserves_divergence_window(self):
+        self.write_transcript([(self.now - 30, "delivered selector anchor")])
+        rt = self.make_rt(swap_confirm_secs=300)
+        rt.haystack = norm("delivered selector anchor")
+        stale_bind = str(self.projects / "other-provider" / "stale-bind.jsonl")
+        rt.watcher_probe = WatcherStateProbe(200, True, False, stale_bind)
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self._grow_selected_transcript()
+        first_divergence = self.now + 1
+        tick_channel(rt, TICK_CHANNEL, state, first_divergence)
+        self.assertEqual(
+            state["999"].get("selector_diverged_since"), first_divergence
+        )
+
+        # A normal long tool phase has no new assistant text.  It pauses F
+        # evidence but must not erase the already-proven stuck-bind window.
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 200)
+        self.assertEqual(
+            state["999"].get("selector_diverged_since"), first_divergence
+        )
+        self.assertTrue(
+            any("retained divergence window" in line for line in rt.log_lines)
+        )
+
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 301)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "셀렉터 동기화" in body]),
+            1,
         )
 
     def test_invariant_4435_runtime_mirror_never_starts_swap_timer_or_alerts(self):
@@ -1583,10 +2325,47 @@ class TickChannelTests(unittest.TestCase):
         rt = self.make_rt()
         rt.haystack = norm("fresh block")
         transcript = self.proj_dir / "s.jsonl"
-        state = {"999": {"transcript_sizes": {str(transcript): "not-an-int"}}}
+        state = {
+            "999": {
+                "transcript_sizes": {str(transcript): "not-an-int"},
+                SELECTED_TRANSCRIPT_KEY: True,
+            }
+        }
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.alerts, [])
         self.assertIsInstance(state["999"]["transcript_sizes"][str(transcript)], int)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(transcript))
+        self.assertTrue(
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_empty_discovery_tick_retains_previous_selection(self):
+        previous = self.proj_dir / "temporarily-hidden.jsonl"
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(previous),
+                "transcript_sizes": {str(previous): 100},
+            }
+        }
+        rt = self.make_rt()
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(previous))
+        self.assertEqual(
+            state["999"]["transcript_sizes"], {str(previous): 100}
+        )
+        self.assertTrue(
+            any("transcript-select reason=no_candidates" in line for line in rt.log_lines)
+        )
+
+        replacement = self.proj_dir / "replacement.jsonl"
+        replacement.write_text("{}\n", encoding="utf-8")
+        os.utime(replacement, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(replacement))
+        self.assertTrue(
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
+        )
 
     def test_invariant_4435_all_stale_restart_keeps_delivered_anchor(self):
         anchor = float(int(self.now - 2000))
@@ -1614,6 +2393,2525 @@ class TickChannelTests(unittest.TestCase):
         )
         self.assertTrue(any("stale=1 lost=0" in line for line in restarted.log_lines))
 
+    def test_invariant_4435_restart_ignores_old_transcript_mtime_only_touch(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "confirmed current delivery") + "\n", encoding="utf-8"
+        )
+        touched_old.write_text(
+            record(anchor - 1000, "historic missing output") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(touched_old, (self.now - 100, self.now - 100))
+        os.utime(current, (self.now, self.now))
+
+        first = self.make_rt()
+        first.haystack = norm("confirmed current delivery")
+        state: dict = {}
+        tick_channel(first, TICK_CHANNEL, state, self.now)
+        self.assertEqual(first.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], current), anchor
+        )
+
+        state_path = self.root / "sticky-state.json"
+        save_state(state_path, state)
+        restarted_state = load_state(state_path)
+        os.utime(touched_old, (self.now + 1, self.now + 1))
+
+        restarted = self.make_rt()
+        restarted.haystack = ""
+        tick_channel(restarted, TICK_CHANNEL, restarted_state, self.now + 2)
+        self.assertEqual(restarted.alerts, [])
+        self.assertEqual(
+            restarted_state["999"][SELECTED_TRANSCRIPT_KEY], str(current)
+        )
+        self.assertTrue(
+            any("transcript-select reason=sticky" in line for line in restarted.log_lines)
+        )
+
+    def test_invariant_4435_newest_updated_watermark_bootstraps_selection(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+        current.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "confirmed current"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        touched_old.write_text(
+            current.read_text(encoding="utf-8").replace("confirmed current", "old"),
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {
+            "999": {
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(touched_old): touched_old.stat().st_size,
+                }
+            }
+        }
+        advance_delivered_watermark(
+            state["999"], touched_old, anchor - 100, self.now - 2
+        )
+        advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
+
+        rt = self.make_rt()
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any(
+                "transcript-select reason=watermark_bootstrap" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_watermark_only_restart_ignores_mtime_override(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "confirmed current") + "\n", encoding="utf-8"
+        )
+        touched_old.write_text(
+            record(anchor - 100, "old delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {"999": {}}
+        advance_delivered_watermark(
+            state["999"], touched_old, anchor - 100, self.now - 2
+        )
+        advance_delivered_watermark(
+            state["999"], current, anchor, self.now - 1
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("confirmed current old delivered")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(rt.alerts, [])
+        self.assertTrue(
+            any(
+                "transcript-select reason=watermark_bootstrap" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_watermark_bootstrap_yields_to_positive_growth(self):
+        current = self.proj_dir / "current.jsonl"
+        growing = self.proj_dir / "growing.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "current delivered") + "\n", encoding="utf-8"
+        )
+        growing.write_text(
+            record(anchor - 100, "growing delivered") + "\n", encoding="utf-8"
+        )
+        state = {
+            "999": {
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(growing): growing.stat().st_size,
+                }
+            }
+        }
+        with growing.open("a", encoding="utf-8") as stream:
+            stream.write(record(anchor + 1, "positive growth delivered") + "\n")
+        advance_delivered_watermark(
+            state["999"], growing, anchor - 100, self.now - 2
+        )
+        advance_delivered_watermark(
+            state["999"], current, anchor, self.now - 1
+        )
+        rt = self.make_rt()
+        rt.haystack = norm(
+            "current delivered growing delivered positive growth delivered"
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(growing))
+        self.assertTrue(
+            any("transcript-select reason=growth" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_partial_discovery_rechecks_tracked_selection(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "confirmed current") + "\n", encoding="utf-8"
+        )
+        touched_old.write_text(
+            record(anchor - 1000, "historic old") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(current),
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(touched_old): touched_old.stat().st_size,
+                },
+            }
+        }
+        advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
+        rt = self.make_rt()
+        rt.haystack = norm("confirmed current historic old")
+        partial = TranscriptCandidate(
+            touched_old, touched_old.stat().st_size, touched_old.stat().st_mtime
+        )
+
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[partial]
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any("transcript-recheck recovered" in line for line in rt.log_lines)
+        )
+
+        current.unlink()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(touched_old))
+        self.assertTrue(
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_partial_discovery_preserves_nonselected_baseline(self):
+        current = self.proj_dir / "current.jsonl"
+        historical = self.proj_dir / "historical.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "confirmed current") + "\n", encoding="utf-8"
+        )
+        historical.write_text(
+            record(anchor - 1000, "historic missing") + "\n", encoding="utf-8"
+        )
+        os.utime(historical, (self.now - 100, self.now - 100))
+        os.utime(current, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(current),
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(historical): historical.stat().st_size,
+                },
+            }
+        }
+        advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
+        rt = self.make_rt()
+        rt.haystack = norm("confirmed current")
+        current_only = TranscriptCandidate(
+            current, current.stat().st_size, current.stat().st_mtime
+        )
+
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[current_only]
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertIn(str(historical), state["999"]["transcript_sizes"])
+        self.assertEqual(
+            state["999"]["transcript_sizes"][str(historical)],
+            historical.stat().st_size,
+        )
+
+        os.utime(historical, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any("transcript-select reason=sticky" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_transcript_history_is_bounded(self):
+        current = self.proj_dir / "current.jsonl"
+        current.write_text("{}\n", encoding="utf-8")
+        fresh = {
+            f"/missing/fresh-{index}.jsonl": index
+            for index in range(relay_watchdog.MAX_TRANSCRIPT_HISTORY + 10)
+        }
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(current),
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    **fresh,
+                },
+                "transcript_seen_at": {
+                    str(current): self.now,
+                    **{path: self.now - 1 for path in fresh},
+                },
+            }
+        }
+
+        tick_channel(self.make_rt(), TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(
+            len(state["999"]["transcript_sizes"]),
+            relay_watchdog.MAX_TRANSCRIPT_HISTORY,
+        )
+        self.assertIn(str(current), state["999"]["transcript_sizes"])
+        self.assertTrue(set(fresh) & set(state["999"]["transcript_sizes"]))
+
+    def test_invariant_4435_transcript_history_evicts_stale_missing(self):
+        current = self.proj_dir / "current.jsonl"
+        current.write_text("{}\n", encoding="utf-8")
+        stale_at = self.now - relay_watchdog.TRANSCRIPT_HISTORY_TTL_SECS - 1
+        stale = {
+            f"/missing/history-{index}.jsonl": index for index in range(3)
+        }
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(current),
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    **stale,
+                },
+                "transcript_seen_at": {
+                    str(current): self.now,
+                    **{path: stale_at for path in stale},
+                },
+                "pending_transcripts": [next(iter(stale))],
+            }
+        }
+
+        tick_channel(self.make_rt(), TICK_CHANNEL, state, self.now)
+
+        self.assertFalse(set(stale) & set(state["999"]["transcript_sizes"]))
+        self.assertEqual(state["999"]["pending_transcripts"], [])
+
+    def test_invariant_4435_pending_debut_queue_is_bounded_on_read_failure(self):
+        current = self.proj_dir / "current.jsonl"
+        current.write_text("{}\n", encoding="utf-8")
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(current),
+                "transcript_sizes": {str(current): current.stat().st_size},
+            }
+        }
+        for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 5):
+            (self.proj_dir / f"debut-{index:02d}.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 1)
+                        ),
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": f"debut {index}"}
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        rt = self.make_rt()
+        rt.haystack = None
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(
+            len(state["999"]["pending_transcripts"]),
+            relay_watchdog.MAX_PENDING_TRANSCRIPTS,
+        )
+
+    def test_invariant_4435_debut_queue_evaluates_all_while_growth_stays_selected(
+        self,
+    ):
+        current = self.proj_dir / "current.jsonl"
+        missed = self.proj_dir / "missed-final.jsonl"
+        delivered_new = self.proj_dir / "delivered-final.jsonl"
+        current_ts = float(int(self.now - 1000))
+        missed_ts = float(int(self.now - 2000))
+        delivered_ts = float(int(self.now - 1500))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(current_ts + 1, "current growth delivered") + "\n")
+        missed.write_text(
+            record(missed_ts, "missed final block") + "\n", encoding="utf-8"
+        )
+        delivered_new.write_text(
+            record(delivered_ts, "new final delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(missed, (self.now - 2, self.now - 2))
+        os.utime(delivered_new, (self.now - 1, self.now - 1))
+        os.utime(current, (self.now + 1, self.now + 1))
+        rt.haystack = norm(
+            "current delivered current growth delivered new final delivered"
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any("transcript-select reason=growth" in line for line in rt.log_lines)
+        )
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        for path in (missed, delivered_new):
+            self.assertTrue(
+                any(
+                    f"transcript-debut-eval path={path}" in line
+                    for line in rt.log_lines
+                )
+            )
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], delivered_new), delivered_ts
+        )
+        self.assertEqual(delivered_watermark_for_path(state["999"], missed), 0.0)
+        self.assertEqual(state["999"]["pending_transcripts"], [str(missed)])
+
+    def test_invariant_4435_debut_survives_blind_tick_until_first_evaluation(self):
+        current = self.proj_dir / "current.jsonl"
+        missed = self.proj_dir / "missed-after-blind-tick.jsonl"
+        current_ts = float(int(self.now - 1000))
+        missed_ts = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        missed.write_text(
+            record(missed_ts, "missed during blind tick") + "\n", encoding="utf-8"
+        )
+        os.utime(missed, (self.now - 1, self.now - 1))
+        rt.haystack = None
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertIn(str(missed), state["999"]["pending_transcripts"])
+
+        rt.haystack = norm("current delivered")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={missed}" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_fresh_debut_stays_pending_until_mature_verdict(self):
+        current = self.proj_dir / "current.jsonl"
+        final = self.proj_dir / "swap-final.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(self.now - 1000, "current delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        final.write_text(
+            record(self.now + 60, "swap final never relayed") + "\n",
+            encoding="utf-8",
+        )
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now + 61, "current growth delivered") + "\n")
+        os.utime(final, (self.now + 60, self.now + 60))
+        os.utime(current, (self.now + 61, self.now + 61))
+        rt.haystack = norm("current delivered current growth delivered")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 120)
+
+        self.assertIn(str(final), state["999"]["pending_transcripts"])
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 0
+        )
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={final} state=ok" in line
+                and "fresh_undelivered=1" in line
+                for line in rt.log_lines
+            )
+        )
+
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now + 899, "current keepalive delivered") + "\n")
+        os.utime(current, (self.now + 900, self.now + 900))
+        rt.haystack = norm(
+            "current delivered current growth delivered current keepalive delivered"
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 900)
+
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+        self.assertIn(str(final), state["999"]["pending_transcripts"])
+        self.assertEqual(
+            sum(
+                1
+                for line in rt.log_lines
+                if f"transcript-debut-eval path={final}" in line
+            ),
+            2,
+        )
+
+    def test_invariant_4435_touched_known_history_evictee_cannot_redebut(self):
+        current = self.proj_dir / "current.jsonl"
+        historic = self.proj_dir / "historic-old.jsonl"
+        day = 24 * 60 * 60
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        historic.write_text(
+            "\n".join(
+                record(self.now - 3 * day + index, f"historic block {index}")
+                for index in range(490)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(historic, (self.now - 3 * day, self.now - 3 * day))
+        for index in range(relay_watchdog.MAX_TRANSCRIPT_HISTORY):
+            recent = self.proj_dir / f"recent-{index:03d}.jsonl"
+            recent.write_text("{}\n", encoding="utf-8")
+            os.utime(
+                recent,
+                (self.now - 5000 - index, self.now - 5000 - index),
+            )
+        current.write_text(
+            record(self.now - 1000, "current delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertNotIn(str(historic), state["999"]["transcript_sizes"])
+        self.assertIn("transcript_known_at", state["999"])
+        self.assertIn(str(historic), state["999"]["transcript_known_at"])
+
+        os.utime(historic, (self.now + 100, self.now + 100))
+        log_start = len(rt.log_lines)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 120)
+
+        second_tick_logs = rt.log_lines[log_start:]
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 0
+        )
+        self.assertNotIn(str(historic), state["999"]["pending_transcripts"])
+        self.assertFalse(
+            any(
+                f"transcript-debut-eval path={historic}" in line
+                for line in second_tick_logs
+            )
+        )
+        self.assertTrue(
+            any(
+                f"transcript-debut-skip reason=known_stale_content path={historic}"
+                in line
+                for line in second_tick_logs
+            )
+        )
+
+    def test_invariant_4435_history_cap_evictees_do_not_redebut_when_idle(self):
+        current = self.proj_dir / "current.jsonl"
+        current_ts = float(int(self.now - 1000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        idle_at = self.now - rt.cfg.idle_quiet_secs - 60
+        dead_paths: list[Path] = []
+        for index in range(relay_watchdog.MAX_TRANSCRIPT_HISTORY + 8):
+            dead = self.proj_dir / f"dead-{index:03d}.jsonl"
+            dead.write_text(
+                record(self.now - 3000 - index, f"historic missing {index}") + "\n",
+                encoding="utf-8",
+            )
+            os.utime(dead, (idle_at - index, idle_at - index))
+            dead_paths.append(dead)
+
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        retained = set(state["999"]["transcript_sizes"])
+        evicted = [path for path in dead_paths if str(path) not in retained]
+        self.assertGreater(len(evicted), 0)
+
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(current_ts + 1, "current growth delivered") + "\n")
+        live_debut = self.proj_dir / "live-final.jsonl"
+        live_debut.write_text(
+            record(self.now - 2000, "live final missing") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(live_debut, (self.now + 1, self.now + 1))
+        os.utime(current, (self.now + 2, self.now + 2))
+        rt.haystack = norm("current delivered current growth delivered")
+        log_start = len(rt.log_lines)
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        second_tick_logs = rt.log_lines[log_start:]
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={live_debut}" in line
+                for line in second_tick_logs
+            )
+        )
+        for path in evicted:
+            self.assertFalse(
+                any(
+                    f"transcript-debut-eval path={path}" in line
+                    for line in second_tick_logs
+                ),
+                f"idle history evictee regained debut authority: {path}",
+            )
+
+    def test_invariant_4435_malformed_pending_does_not_abort_healthy_selected(self):
+        current = self.proj_dir / "current.jsonl"
+        malformed = self.proj_dir / "malformed.jsonl"
+        current_ts = float(int(self.now - 1000))
+        grown_ts = current_ts + 1
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(grown_ts, "healthy selected growth") + "\n")
+        malformed.write_bytes(b"\xff\n")
+        os.utime(malformed, (self.now + 1, self.now + 1))
+        os.utime(current, (self.now + 2, self.now + 2))
+        state["999"]["alerting"] = True
+        state["999"]["gap_since"] = self.now - 60
+        rt.haystack = norm("current delivered healthy selected growth")
+
+        try:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        except UnicodeError as exc:
+            self.fail(f"malformed pending transcript aborted channel tick: {exc!r}")
+
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], current), grown_ts
+        )
+        self.assertIn(str(malformed), state["999"]["pending_transcripts"])
+        self.assertEqual(rt.alerts, [])
+        self.assertTrue(state["999"]["alerting"])
+        self.assertTrue(
+            any(
+                f"transcript-read-error path={malformed} error=UnicodeDecodeError"
+                in line
+                for line in rt.log_lines
+            )
+        )
+        self.assertFalse(
+            any(
+                f"transcript-debut-eval path={malformed}" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_pending_overflow_keeps_newest_and_alerts(self):
+        current = self.proj_dir / "current.jsonl"
+        current_ts = float(int(self.now - 1000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        debuts: list[Path] = []
+        delivered_texts: list[str] = []
+        for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 5):
+            path = self.proj_dir / f"overflow-{index:02d}.jsonl"
+            text = f"overflow debut {index}"
+            path.write_text(
+                record(self.now - 2000 - index, text) + "\n", encoding="utf-8"
+            )
+            os.utime(
+                path,
+                (self.now + 1 + index / 100, self.now + 1 + index / 100),
+            )
+            debuts.append(path)
+            delivered_texts.append(text)
+        newest = debuts[-1]
+        oldest = debuts[0]
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(current_ts + 1, "current growth delivered") + "\n")
+        os.utime(current, (self.now + 2, self.now + 2))
+        rt.haystack = None
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        pending = state["999"]["pending_transcripts"]
+        self.assertEqual(len(pending), relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        self.assertIn(str(newest), pending)
+        self.assertNotIn(str(oldest), pending)
+        self.assertEqual(
+            state["999"]["pending_transcript_overflow"]["dropped"], 5
+        )
+        self.assertTrue(
+            any(
+                "transcript-debut-overflow kept=32 dropped=5" in line
+                for line in rt.log_lines
+            )
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 큐 포화" in body]), 1
+        )
+
+        rt.haystack = norm(
+            "current delivered current growth delivered "
+            + " ".join(delivered_texts[:-1])
+        )
+        log_start = len(rt.log_lines)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={newest}" in line
+                for line in rt.log_lines[log_start:]
+            )
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+
+    def test_invariant_4435_truncated_debut_stays_pending_until_completed(self):
+        current = self.proj_dir / "current.jsonl"
+        final = self.proj_dir / "torn-final.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        anchor = float(int(self.now - 1000))
+        current.write_text(record(anchor, "current delivered") + "\n", encoding="utf-8")
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        final_record = record(self.now - 2000, "completed final was never relayed")
+        final.write_text(final_record[:-9], encoding="utf-8")
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(anchor + 1, "current growth delivered") + "\n")
+        os.utime(final, (self.now + 1, self.now + 1))
+        os.utime(current, (self.now + 2, self.now + 2))
+        rt.haystack = norm("current delivered current growth delivered")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        self.assertIn(str(final), state["999"]["pending_transcripts"])
+        self.assertNotIn(
+            str(final),
+            state["999"]["transcript_sizes"],
+            "an incomplete debut must not commit a safe growth baseline",
+        )
+        self.assertTrue(
+            any(
+                f"transcript-read-incomplete path={final}" in line
+                for line in rt.log_lines
+            )
+        )
+
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[]
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        self.assertIn(
+            str(final),
+            state["999"]["pending_transcripts"],
+            "a torn debut must retain authority across a discovery miss",
+        )
+        self.assertNotIn(str(final), state["999"]["transcript_sizes"])
+
+        final.write_text(final_record + "\n", encoding="utf-8")
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(anchor + 2, "current second growth delivered") + "\n")
+        os.utime(final, (self.now + 4, self.now + 4))
+        os.utime(current, (self.now + 5, self.now + 5))
+        rt.haystack = norm(
+            "current delivered current growth delivered current second growth delivered"
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 6)
+
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={final} state=gap" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_torn_debut_miss_reentry_still_escalates(self):
+        current = self.proj_dir / "current.jsonl"
+        torn = self.proj_dir / "torn-unreadable.jsonl"
+        anchor = float(int(self.now - 30))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "current delivered") + "\n", encoding="utf-8"
+        )
+        rt = self.make_rt(read_fail_alert_after=3)
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        torn.write_text('{"type":"assistant"', encoding="utf-8")
+        os.utime(torn, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(
+            state["999"]["pending_transcript_failures"][str(torn)], 1
+        )
+
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[]
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertIn(str(torn), state["999"]["pending_transcripts"])
+        self.assertEqual(
+            state["999"]["pending_transcript_failures"][str(torn)], 1
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 5)
+
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 불능 에스컬레이션" in body]),
+            1,
+        )
+        self.assertIn(str(torn), state["999"]["retired_transcripts"])
+        self.assertNotIn(str(torn), state["999"]["pending_transcripts"])
+
+    def test_invariant_4435_corrupt_pending_escalates_once_then_unwedges(self):
+        current = self.proj_dir / "current.jsonl"
+        malformed = self.proj_dir / "permanently-malformed.jsonl"
+        anchor = float(int(self.now - 1000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(record(anchor, "current delivered") + "\n", encoding="utf-8")
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt(read_fail_alert_after=3)
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        malformed.write_bytes(b"\xff\n")
+        os.utime(malformed, (self.now + 1, self.now + 1))
+        state["999"]["alerting"] = True
+        state["999"]["gap_since"] = self.now - 60
+        state["999"][relay_watchdog.GAP_TRANSCRIPT_KEY] = str(malformed)
+
+        for offset in range(2, 5):
+            tick_channel(rt, TICK_CHANNEL, state, self.now + offset)
+
+        escalation_alerts = [
+            body for body, _ in rt.alerts if "평가 불능 에스컬레이션" in body
+        ]
+        self.assertEqual(len(escalation_alerts), 1)
+        self.assertNotIn(str(malformed), state["999"]["pending_transcripts"])
+        self.assertFalse(state["999"].get("alerting", False))
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+        for offset in range(5, 9):
+            with malformed.open("ab") as stream:
+                stream.write(b"\xff")
+            os.utime(malformed, (self.now + offset, self.now + offset))
+            tick_channel(rt, TICK_CHANNEL, state, self.now + offset)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 불능 에스컬레이션" in body]),
+            1,
+        )
+        self.assertIn(
+            str(malformed), state["999"]["retired_transcripts"]
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_selected_read_failure_escalates_and_quarantines(self):
+        selected = self.proj_dir / "selected.jsonl"
+        anchor = float(int(self.now - 30))
+        selected.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "selected delivered"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt(read_fail_alert_after=3)
+        rt.haystack = norm("selected delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        with selected.open("ab") as stream:
+            stream.write(b"\xff\n")
+        for offset in range(1, 4):
+            os.utime(selected, (self.now + offset, self.now + offset))
+            tick_channel(rt, TICK_CHANNEL, state, self.now + offset)
+
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 불능 에스컬레이션" in body]),
+            1,
+        )
+        self.assertIn(str(selected), state["999"]["retired_transcripts"])
+        self.assertNotEqual(
+            state["999"].get(SELECTED_TRANSCRIPT_KEY), str(selected)
+        )
+
+    def test_invariant_4435_full_pending_cap_keeps_selected_failure_authority(self):
+        selected = self.proj_dir / "selected-cap-anchor.jsonl"
+        anchor = float(int(self.now - 30))
+        selected.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "cap anchor landed"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt(read_fail_alert_after=4)
+        rt.haystack = norm("cap anchor landed")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(selected))
+
+        pending: list[str] = []
+        for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS):
+            path = self.proj_dir / f"pending-corrupt-{index:02d}.jsonl"
+            path.write_bytes(b"\xff\n")
+            os.utime(path, (self.now + 1, self.now + 1))
+            pending.append(str(path))
+        with selected.open("ab") as stream:
+            stream.write(b"\xff\n")
+        os.utime(selected, (self.now + 1, self.now + 1))
+        state["999"]["pending_transcripts"] = pending
+        state["999"]["pending_transcript_since"] = {
+            path: self.now + 1 for path in pending
+        }
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        chs = state["999"]
+        self.assertEqual(
+            len(chs["pending_transcripts"]),
+            relay_watchdog.MAX_PENDING_TRANSCRIPTS,
+        )
+        self.assertNotIn(
+            str(selected),
+            chs["pending_transcripts"],
+            "selected owns a separate failure slot, not pending capacity",
+        )
+        self.assertEqual(
+            chs.get("pending_transcript_failures", {}).get(str(selected)), 1
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertEqual(
+            state["999"].get("pending_transcript_failures", {}).get(str(selected)),
+            2,
+            "a full cap must not reset the established selection each tick",
+        )
+
+    def test_invariant_4435_legacy_without_known_at_tracks_torn_debut(self):
+        selected = self.proj_dir / "legacy-selected.jsonl"
+        torn = self.proj_dir / "legacy-new-torn.jsonl"
+        anchor = float(int(self.now - 30))
+        selected.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "legacy landed"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        torn.write_text('{"type":"assistant"', encoding="utf-8")
+        os.utime(selected, (self.now - 1, self.now - 1))
+        os.utime(torn, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                "transcript_sizes": {str(selected): selected.stat().st_size},
+            }
+        }
+        rt = self.make_rt(read_fail_alert_after=3)
+        rt.haystack = norm("legacy landed")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        chs = state["999"]
+        self.assertIn(str(torn), chs["pending_transcripts"])
+        self.assertEqual(chs["pending_transcript_failures"][str(torn)], 1)
+        self.assertIn("transcript_known_at", chs)
+        self.assertFalse(
+            any("unproven_stale_content" in line for line in rt.log_lines)
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(
+            state["999"]["pending_transcript_failures"][str(torn)], 2
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertIn(str(torn), state["999"]["retired_transcripts"])
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 불능" in body]), 1
+        )
+
+    def test_invariant_4435_zero_assistant_debut_keeps_pending_authority(self):
+        current = self.proj_dir / "zero-block-current.jsonl"
+        debut = self.proj_dir / "zero-block-debut.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(self.now - 30, "zero block anchor landed") + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("zero block anchor landed")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        debut.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now + 1)
+                    ),
+                    "message": {"content": "prompt only"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(debut, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertIn(
+            str(debut),
+            state["999"]["pending_transcripts"],
+            "vacuous OK without one assistant block cannot consume debut authority",
+        )
+
+        with debut.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now - 2000, "later semantic block missing") + "\n")
+        os.utime(debut, (self.now + 3, self.now + 3))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+
+    def test_invariant_4435_stale_pending_gap_expires_without_realert_loop(self):
+        current = self.proj_dir / "current.jsonl"
+        missed = self.proj_dir / "missed-final.jsonl"
+        anchor = float(int(self.now - 1000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(record(anchor, "current delivered") + "\n", encoding="utf-8")
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        missed.write_text(
+            record(self.now - 2000, "dead session final missing") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(missed, (self.now + 1, self.now + 1))
+        rt.haystack = norm("current delivered")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(missed))
+
+        expiry = self.now + 3 + rt.cfg.idle_quiet_secs + 1
+        # Metadata-only activity is not content authority and must not extend
+        # the pending lifetime indefinitely.
+        os.utime(missed, (expiry, expiry))
+        tick_channel(rt, TICK_CHANNEL, state, expiry)
+        tick_channel(rt, TICK_CHANNEL, state, expiry + rt.cfg.realert_secs + 1)
+
+        self.assertNotIn(str(missed), state["999"]["pending_transcripts"])
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 권한 만료" in body]), 1
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_retirement_alerts_share_realert_cooldown(self):
+        current = self.proj_dir / "retirement-current.jsonl"
+        current.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 30)
+                    ),
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "retirement anchor landed"}
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("retirement anchor landed")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+
+        def arm_expired(name: str, tick_at: float) -> None:
+            path = self.proj_dir / name
+            path.write_text("{}\n", encoding="utf-8")
+            os.utime(path, (tick_at, tick_at))
+            chs["transcript_sizes"][str(path)] = path.stat().st_size
+            chs["transcript_seen_at"][str(path)] = tick_at
+            chs["transcript_known_at"][str(path)] = tick_at
+            chs["pending_transcripts"] = [str(path)]
+            chs["pending_transcript_since"] = {
+                str(path): tick_at - rt.cfg.idle_quiet_secs - 1
+            }
+
+        first_tick = self.now + 1
+        arm_expired("retire-one.jsonl", first_tick)
+        tick_channel(rt, TICK_CHANNEL, state, first_tick)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 권한 만료" in body]), 1
+        )
+
+        arm_expired("retire-two.jsonl", first_tick + 1)
+        tick_channel(rt, TICK_CHANNEL, state, first_tick + 1)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 권한 만료" in body]),
+            1,
+            "a new crash-loop transcript inside cooldown must not spam",
+        )
+        self.assertTrue(
+            any("retirement-alert suppressed" in line for line in rt.log_lines)
+        )
+
+        boundary = first_tick + rt.cfg.realert_secs
+        arm_expired("retire-three.jsonl", boundary)
+        tick_channel(rt, TICK_CHANNEL, state, boundary)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 권한 만료" in body]), 2
+        )
+
+    def test_invariant_4435_unrelated_pending_retirement_preserves_live_gap(self):
+        rt = self.gap_rt()
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+        selected = chs[SELECTED_TRANSCRIPT_KEY]
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], selected)
+        chs["issue_url"] = "https://example.test/issues/existing"
+        original_gap_since = chs["gap_since"]
+
+        unrelated = self.proj_dir / "unrelated-pending.jsonl"
+        unrelated.write_text("{}\n", encoding="utf-8")
+        os.utime(unrelated, (self.now, self.now))
+        chs["transcript_sizes"][str(unrelated)] = unrelated.stat().st_size
+        chs["transcript_seen_at"][str(unrelated)] = self.now
+        chs["pending_transcripts"] = [str(unrelated)]
+        chs["pending_transcript_since"] = {
+            str(unrelated): self.now - rt.cfg.idle_quiet_secs - 1
+        }
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertEqual(
+            chs["issue_url"], "https://example.test/issues/existing"
+        )
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], selected)
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+        self.assertTrue(
+            any(
+                "unrelated transcript retirement preserved live gap authority"
+                in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_young_debut_cannot_false_recover_prior_gap_owner(self):
+        owner = self.proj_dir / "gap-owner-a.jsonl"
+        debut = self.proj_dir / "young-debut-b.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner.write_text(
+            record(self.now - 2000, "owner A remains missing") + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        rt.haystack = ""
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+        self.assertTrue(chs.get("alerting"))
+        self.assertIn(
+            str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        original_gap_since = chs["gap_since"]
+        chs["issue_url"] = "https://example.test/issues/owner-a"
+
+        debut.write_text(
+            record(self.now + 1, "young B not delivered yet") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(debut, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertEqual(
+            chs["issue_url"], "https://example.test/issues/owner-a"
+        )
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], str(owner))
+        self.assertIn(
+            str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_retiring_one_of_two_gap_owners_keeps_incident_clock(self):
+        owner_a = self.proj_dir / "multi-gap-a.jsonl"
+        owner_b = self.proj_dir / "multi-gap-b.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner_a.write_text(
+            record(self.now - 2000, "multi gap A missing") + "\n",
+            encoding="utf-8",
+        )
+        owner_b.write_text(
+            record(self.now - 3000, "multi gap B missing") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(owner_a, (self.now, self.now))
+        os.utime(owner_b, (self.now + 1, self.now + 1))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(owner_a),
+                "transcript_sizes": {
+                    str(owner_a): owner_a.stat().st_size,
+                    str(owner_b): owner_b.stat().st_size,
+                },
+                "transcript_seen_at": {
+                    str(owner_a): self.now,
+                    str(owner_b): self.now,
+                },
+                "transcript_known_at": {
+                    str(owner_a): self.now,
+                    str(owner_b): self.now,
+                },
+                "pending_transcripts": [str(owner_b)],
+                "pending_transcript_since": {str(owner_b): self.now},
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        chs = state["999"]
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], str(owner_b))
+        self.assertEqual(
+            set(chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]),
+            {str(owner_a), str(owner_b)},
+        )
+        original_gap_since = chs["gap_since"]
+        chs["issue_url"] = "https://example.test/issues/multi-gap"
+        chs["pending_transcript_since"][str(owner_b)] = (
+            self.now - rt.cfg.idle_quiet_secs - 1
+        )
+
+        os.utime(owner_a, (self.now + 3, self.now + 3))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertEqual(
+            chs["issue_url"], "https://example.test/issues/multi-gap"
+        )
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], str(owner_a))
+        self.assertEqual(
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY], [str(owner_a)]
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_deleted_anchor_uses_watermark_over_touched_dead_path(self):
+        deleted_anchor = self.proj_dir / "deleted-current.jsonl"
+        safe = self.proj_dir / "safe-watermarked.jsonl"
+        dead = self.proj_dir / "touched-dead.jsonl"
+        unwatermarked = self.proj_dir / "unwatermarked-stale.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        safe.write_text(record(anchor, "safe delivered anchor") + "\n", encoding="utf-8")
+        dead.write_text(
+            "\n".join(
+                record(anchor - 1000 + index, f"historic missing block {index}")
+                for index in range(490)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        unwatermarked.write_text("{}\n", encoding="utf-8")
+        os.utime(safe, (self.now - 100, self.now - 100))
+        os.utime(unwatermarked, (self.now - 1, self.now - 1))
+        os.utime(dead, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(deleted_anchor),
+                "transcript_sizes": {
+                    str(deleted_anchor): 10,
+                    str(safe): safe.stat().st_size,
+                    str(dead): dead.stat().st_size,
+                },
+                "transcript_seen_at": {
+                    str(deleted_anchor): self.now - 1,
+                    str(safe): self.now - 1,
+                    str(dead): self.now - 1,
+                },
+                "transcript_known_at": {
+                    str(deleted_anchor): self.now - 1,
+                    str(safe): self.now - 1,
+                    str(dead): self.now - 1,
+                },
+            }
+        }
+        advance_delivered_watermark(state["999"], safe, anchor, self.now - 1)
+        rt = self.make_rt()
+        rt.haystack = ""
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(safe))
+        self.assertTrue(
+            any(
+                "transcript-select reason=watermark_anchor_recovery" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_selected_anchor_survives_many_delivered_debuts(self):
+        current = self.proj_dir / "z-current.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(record(anchor, "selected delivered") + "\n", encoding="utf-8")
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("selected delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        delivered_texts = ["selected delivered", "selected growth delivered"]
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(anchor + 1, "selected growth delivered") + "\n")
+        for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS):
+            path = self.proj_dir / f"a-{index:02d}.jsonl"
+            text = f"delivered debut {index}"
+            path.write_text(
+                record(self.now - 1900 + index, text) + "\n", encoding="utf-8"
+            )
+            os.utime(path, (self.now + 1, self.now + 1))
+            delivered_texts.append(text)
+        os.utime(current, (self.now + 2, self.now + 2))
+        rt.haystack = norm(" ".join(delivered_texts))
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], current), anchor + 1
+        )
+        self.assertEqual(
+            len(delivered_watermarks(state["999"])),
+            relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1,
+        )
+
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 0
+        )
+
+    def test_invariant_4435_full_cap_gap_owner_recovery_survives_haystack_rolloff(self):
+        anchor = float(int(self.now - 2000))
+        selected = self.proj_dir / "selected-empty.jsonl"
+        pending = [
+            self.proj_dir / f"pending-empty-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        target = self.proj_dir / "zz-recovered-gap-owner.jsonl"
+        other_owners = [
+            self.proj_dir / f"gap-owner-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        gap_owners = [target, *other_owners]
+
+        def record(text: str, epoch: float = anchor) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        selected.write_text("{}\n", encoding="utf-8")
+        for path in pending:
+            path.write_text("{}\n", encoding="utf-8")
+        owner_texts: dict[str, str] = {}
+        for index, path in enumerate(gap_owners):
+            text = f"delivered full-cap gap owner {index:02d}"
+            owner_texts[str(path)] = text
+            path.write_text(record(text) + "\n", encoding="utf-8")
+        for path in [selected, *pending, *other_owners]:
+            os.utime(path, (self.now, self.now))
+        # Keep the target in bounded transcript history while the 66 authority
+        # paths are present; it is the sole file left for the rolloff tick.
+        os.utime(target, (self.now + 1, self.now + 1))
+
+        paths = [selected, *pending, *gap_owners]
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(path): path.stat().st_size for path in paths
+                },
+                relay_watchdog.TRANSCRIPT_SEEN_AT_KEY: {
+                    str(path): self.now for path in paths
+                },
+                relay_watchdog.TRANSCRIPT_KNOWN_AT_KEY: {
+                    str(path): self.now for path in paths
+                },
+                relay_watchdog.PENDING_TRANSCRIPTS_KEY: [
+                    str(path) for path in pending
+                ],
+                relay_watchdog.PENDING_TRANSCRIPT_SINCE_KEY: {
+                    str(path): self.now for path in pending
+                },
+                relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [
+                    str(path) for path in gap_owners
+                ],
+                relay_watchdog.GAP_TRANSCRIPT_KEY: str(target),
+                DELIVERED_WATERMARKS_KEY: {
+                    str(path): {
+                        "delivered_ts": anchor - 1,
+                        "updated_at": self.now,
+                    }
+                    for path in [selected, *pending]
+                }
+                | {
+                    f"/unrelated-newer-{index:03d}.jsonl": {
+                        "delivered_ts": anchor - 1,
+                        "updated_at": self.now + 100,
+                    }
+                    for index in range(
+                        relay_watchdog.MAX_RECOVERED_GAP_GUARDS
+                    )
+                },
+                "alerting": True,
+                "gap_since": self.now - 2000,
+                "last_alert": self.now - 10_000,
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = norm(" ".join(owner_texts.values()))
+        state_path = self.root / "post-recovery-state.json"
+
+        def restart(current_state: dict) -> dict:
+            save_state(state_path, current_state)
+            return load_state(state_path)
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        state = restart(state)
+        chs = state["999"]
+
+        self.assertFalse(chs.get("alerting", False))
+        self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
+        self.assertEqual(
+            delivered_watermark_for_path(chs, target),
+            anchor,
+            "a recovered GAP owner must retain its delivery authority at full cap",
+        )
+        self.assertEqual(
+            len(delivered_watermarks(chs)), MAX_DELIVERED_WATERMARKS
+        )
+
+        growth_text = "delivered growth after GAP recovery"
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write(record(growth_text, anchor + 1) + "\n")
+        os.utime(target, (self.now + 3, self.now + 3))
+        rt.haystack = norm(growth_text)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        state = restart(state)
+        chs = state["999"]
+        self.assertEqual(delivered_watermark_for_path(chs, target), anchor + 1)
+        self.assertEqual(
+            relay_watchdog._validated_recovered_gap_guards(chs)[str(target)][0],
+            target.stat().st_size,
+        )
+
+        # Recovery clears GAP-owner state. Exercise the actual review finding:
+        # two later full debut waves create enough newer watermarks to evict an
+        # ex-owner unless recovery transferred it to durable replay authority.
+        pressure_paths: list[Path] = []
+        for wave in range(2):
+            wave_texts: list[str] = []
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1):
+                path = self.proj_dir / f"wave-{wave}-{index:02d}.jsonl"
+                text = f"delivered pressure wave {wave} item {index:02d}"
+                path.write_text(record(text) + "\n", encoding="utf-8")
+                os.utime(path, (self.now + 4 + wave, self.now + 4 + wave))
+                pressure_paths.append(path)
+                wave_texts.append(text)
+            rt.haystack = norm(" ".join(wave_texts))
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 4 + wave)
+            state = restart(state)
+            chs = state["999"]
+            self.assertEqual(
+                delivered_watermark_for_path(chs, target),
+                anchor + 1,
+                f"post-recovery pressure wave {wave} evicted replay authority",
+            )
+
+        for path in [selected, *pending, *other_owners, *pressure_paths]:
+            path.unlink()
+        rt.haystack = ""  # bounded Discord history has rolled off the delivery
+        prior_gap_alerts = len(
+            [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 6)
+
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(target))
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]),
+            prior_gap_alerts,
+            "haystack rolloff must not re-alert a delivery already confirmed",
+        )
+        self.assertFalse(chs.get("alerting", False))
+
+    def test_invariant_4435_recovered_guard_absence_ttl_starts_new_lifecycle(self):
+        anchor = float(int(self.now - 2000))
+        target = self.proj_dir / "absent-recovered.jsonl"
+        target.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "old lifecycle"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        path = str(target)
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: path,
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {path: target.stat().st_size},
+                relay_watchdog.TRANSCRIPT_SEEN_AT_KEY: {path: self.now},
+                relay_watchdog.TRANSCRIPT_KNOWN_AT_KEY: {path: self.now},
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    path: {
+                        "size": target.stat().st_size,
+                        "confirmed_at": self.now,
+                        "last_seen_at": self.now,
+                        "absent_since": None,
+                    }
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {"delivered_ts": anchor, "updated_at": self.now}
+                },
+            }
+        }
+        state_path = self.root / "absence-lifecycle.json"
+
+        def restart(current_state: dict) -> dict:
+            save_state(state_path, current_state)
+            return load_state(state_path)
+
+        target.unlink()
+        rt = self.make_rt()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        state = restart(state)
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[path]
+        self.assertEqual(guard[3], self.now + 1)
+
+        before_expiry = (
+            self.now + 1 + relay_watchdog.RECOVERED_GAP_GUARD_TTL_SECS - 1
+        )
+        tick_channel(rt, TICK_CHANNEL, state, before_expiry)
+        state = restart(state)
+        self.assertIn(
+            path, relay_watchdog._validated_recovered_gap_guards(state["999"])
+        )
+        self.assertEqual(delivered_watermark_for_path(state["999"], path), anchor)
+
+        after_expiry = before_expiry + 2
+        tick_channel(rt, TICK_CHANNEL, state, after_expiry)
+        state = restart(state)
+        chs = state["999"]
+        self.assertNotIn(
+            path, relay_watchdog._validated_recovered_gap_guards(chs)
+        )
+        self.assertEqual(delivered_watermark_for_path(chs, path), 0.0)
+        self.assertNotIn(path, chs.get(relay_watchdog.TRANSCRIPT_SIZES_KEY, {}))
+        self.assertTrue(
+            any("recovered-gap-guard-reclaimed" in line for line in rt.log_lines)
+        )
+
+        # Reuse after the proven-absence boundary is a new path lifecycle. The
+        # old delivery floor must not authenticate its stale content.
+        target.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "old lifecycle"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(target, (after_expiry + 1, after_expiry + 1))
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, after_expiry + 1)
+        self.assertTrue(state["999"].get("alerting"))
+        self.assertEqual(state["999"][relay_watchdog.GAP_TRANSCRIPT_KEY], path)
+
+    def test_invariant_4435_present_recovered_guard_does_not_expire(self):
+        anchor = float(int(self.now - 2000))
+        selected = self.proj_dir / "present-selected.jsonl"
+        target = self.proj_dir / "present-recovered.jsonl"
+        selected.write_text("{}\n", encoding="utf-8")
+        target.write_text("{}\n", encoding="utf-8")
+        target_path = str(target)
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(selected): selected.stat().st_size,
+                    target_path: target.stat().st_size,
+                },
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    target_path: {
+                        "size": target.stat().st_size,
+                        "confirmed_at": self.now,
+                        "last_seen_at": self.now,
+                        "absent_since": None,
+                    }
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    target_path: {
+                        "delivered_ts": anchor,
+                        "updated_at": self.now,
+                    }
+                },
+            }
+        }
+        state_path = self.root / "present-lifecycle.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        tick_at = self.now + relay_watchdog.RECOVERED_GAP_GUARD_TTL_SECS + 1
+
+        tick_channel(self.make_rt(), TICK_CHANNEL, state, tick_at)
+
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[
+            target_path
+        ]
+        self.assertEqual(guard[1], self.now)
+        self.assertEqual(guard[2], tick_at)
+        self.assertIsNone(guard[3])
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], target_path), anchor
+        )
+
+    def test_invariant_4435_ancestor_symlink_is_ambiguous_not_absent(self):
+        target = self.proj_dir / "hidden-recovered.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        path = str(target)
+        state = {
+            "999": {
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    path: {
+                        "size": target.stat().st_size,
+                        "confirmed_at": self.now,
+                        "last_seen_at": self.now,
+                        "absent_since": None,
+                    }
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {
+                        "delivered_ts": self.now - 2000,
+                        "updated_at": self.now,
+                    }
+                },
+            }
+        }
+        hidden = self.projects / "hidden-real-project"
+        decoy = self.projects / "decoy-project"
+        self.proj_dir.rename(hidden)
+        decoy.mkdir()
+        self.proj_dir.symlink_to(decoy, target_is_directory=True)
+        state_path = self.root / "symlink-lifecycle.json"
+        rt = self.make_rt()
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        save_state(state_path, state)
+        state = load_state(state_path)
+        tick_channel(
+            rt,
+            TICK_CHANNEL,
+            state,
+            self.now + relay_watchdog.RECOVERED_GAP_GUARD_TTL_SECS + 2,
+        )
+
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[path]
+        self.assertIsNone(guard[3])
+        self.assertGreater(
+            delivered_watermark_for_path(state["999"], path), 0.0
+        )
+        self.assertFalse(
+            any("recovered-gap-guard-reclaimed" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_guard_directory_fstat_errors_keep_floor_and_tick_running(self):
+        selected = self.proj_dir / "fstat-selected.jsonl"
+        selected.write_text("{}\n", encoding="utf-8")
+        hidden_project = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260709-150500"
+        )
+        hidden_project.mkdir()
+        target = hidden_project / "fstat-hidden-recovered.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        path = str(target)
+        real_fstat = relay_watchdog.os.fstat
+
+        for failing_directory_index in (1, 2):
+            with self.subTest(failing_directory_index=failing_directory_index):
+                state = {
+                    "999": {
+                        relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                            path: {
+                                "size": target.stat().st_size,
+                                "confirmed_at": self.now,
+                                "last_seen_at": self.now,
+                                "absent_since": None,
+                            }
+                        },
+                        DELIVERED_WATERMARKS_KEY: {
+                            path: {
+                                "delivered_ts": self.now - 2000,
+                                "updated_at": self.now,
+                            }
+                        },
+                    }
+                }
+                directory_calls = 0
+
+                def fail_selected_directory_fstat(descriptor):
+                    nonlocal directory_calls
+                    opened = real_fstat(descriptor)
+                    if stat.S_ISDIR(opened.st_mode):
+                        directory_calls += 1
+                        if directory_calls == failing_directory_index:
+                            raise OSError("injected recovered-guard directory fstat failure")
+                    return opened
+
+                with (
+                    mock.patch.object(
+                        relay_watchdog,
+                        "channel_project_dirs",
+                        return_value=[self.proj_dir],
+                    ),
+                    mock.patch.object(
+                        relay_watchdog.os,
+                        "fstat",
+                        side_effect=fail_selected_directory_fstat,
+                    ),
+                ):
+                    tick_channel(self.make_rt(), TICK_CHANNEL, state, self.now + 1)
+
+                chs = state["999"]
+                guard = relay_watchdog._validated_recovered_gap_guards(chs)[path]
+                self.assertGreaterEqual(directory_calls, failing_directory_index)
+                self.assertIsNone(guard[3])
+                self.assertGreater(delivered_watermark_for_path(chs, target), 0.0)
+                self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(selected))
+
+    def test_invariant_4435_unchanged_guards_are_not_parsed_and_metadata_settles(self):
+        selected = self.proj_dir / "guard-perf-selected.jsonl"
+        selected.write_text("{}\n", encoding="utf-8")
+        guards: dict[str, dict] = {}
+        sizes = {str(selected): selected.stat().st_size}
+        watermarks: dict[str, dict] = {}
+        paths: list[Path] = []
+        for index in range(relay_watchdog.MAX_RECOVERED_GAP_GUARDS):
+            path = self.proj_dir / f"guard-perf-{index:03d}.jsonl"
+            path.write_text("{}\n", encoding="utf-8")
+            paths.append(path)
+            sizes[str(path)] = path.stat().st_size
+            guards[str(path)] = {
+                "size": path.stat().st_size,
+                "confirmed_at": self.now,
+                "last_seen_at": self.now,
+                "absent_since": None,
+            }
+            watermarks[str(path)] = {
+                "delivered_ts": self.now - 2000,
+                "updated_at": self.now,
+            }
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: sizes,
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: guards,
+                DELIVERED_WATERMARKS_KEY: watermarks,
+            }
+        }
+        rt = self.make_rt()
+
+        with mock.patch.object(
+            relay_watchdog,
+            "assistant_blocks",
+            wraps=relay_watchdog.assistant_blocks,
+        ) as parse:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(
+            [str(call.args[0]) for call in parse.call_args_list], [str(selected)]
+        )
+
+        target = paths[0]
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write('{"type":"progress","message":"metadata only"}\n')
+        os.utime(target, (self.now + 2, self.now + 2))
+        with mock.patch.object(
+            relay_watchdog,
+            "assistant_blocks",
+            wraps=relay_watchdog.assistant_blocks,
+        ) as parse:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        parsed = [str(call.args[0]) for call in parse.call_args_list]
+        self.assertEqual(parsed.count(str(target)), 1)
+        self.assertEqual(parsed.count(str(selected)), 1)
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[
+            str(target)
+        ]
+        self.assertEqual(guard[0], target.stat().st_size)
+        self.assertEqual(guard[1], self.now)
+
+        state_path = self.root / "guard-perf-state.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        with mock.patch.object(
+            relay_watchdog,
+            "assistant_blocks",
+            wraps=relay_watchdog.assistant_blocks,
+        ) as parse:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertEqual(
+            [str(call.args[0]) for call in parse.call_args_list], [str(selected)]
+        )
+
+    def test_invariant_4435_simultaneous_guard_growth_checks_every_growing_path(self):
+        anchor = float(int(self.now - 4000))
+        selected = self.proj_dir / "multi-growth-selected.jsonl"
+        delivered_path = self.proj_dir / "multi-growth-delivered.jsonl"
+        missing_path = self.proj_dir / "multi-growth-missing.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        selected.write_text("{}\n", encoding="utf-8")
+        delivered_path.write_text(
+            record(anchor, "old delivered A") + "\n", encoding="utf-8"
+        )
+        missing_path.write_text(
+            record(anchor, "old delivered B") + "\n", encoding="utf-8"
+        )
+        old_sizes = {
+            str(delivered_path): delivered_path.stat().st_size,
+            str(missing_path): missing_path.stat().st_size,
+        }
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(selected): selected.stat().st_size,
+                    **old_sizes,
+                },
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    path: {
+                        "size": old_sizes[path],
+                        "confirmed_at": self.now - 100,
+                        "last_seen_at": self.now - 100,
+                        "absent_since": None,
+                    }
+                    for path in old_sizes
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {
+                        "delivered_ts": anchor,
+                        "updated_at": self.now - 100,
+                    }
+                    for path in old_sizes
+                },
+            }
+        }
+        delivered_epoch = float(int(self.now - 2000))
+        missing_epoch = float(int(self.now))
+        with delivered_path.open("a", encoding="utf-8") as stream:
+            stream.write(record(delivered_epoch, "new delivered A") + "\n")
+        with missing_path.open("a", encoding="utf-8") as stream:
+            stream.write(record(missing_epoch, "new missing B") + "\n")
+        os.utime(delivered_path, (self.now, self.now))
+        os.utime(missing_path, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("new delivered A")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        state_path = self.root / "multi-growth-state.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        chs = state["999"]
+        guards = relay_watchdog._validated_recovered_gap_guards(chs)
+        self.assertEqual(guards[str(delivered_path)][0], delivered_path.stat().st_size)
+        self.assertEqual(guards[str(missing_path)][0], old_sizes[str(missing_path)])
+        self.assertEqual(
+            delivered_watermark_for_path(chs, delivered_path), delivered_epoch
+        )
+        self.assertEqual(delivered_watermark_for_path(chs, missing_path), anchor)
+        self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
+        self.assertFalse(chs.get("alerting", False))
+
+        stale_tick = self.now + rt.cfg.grace_secs + 2
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, stale_tick)
+        save_state(state_path, state)
+        state = load_state(state_path)
+        chs = state["999"]
+        self.assertIn(
+            str(missing_path), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        self.assertTrue(chs.get("alerting"))
+
+        rt.haystack = norm("new missing B")
+        tick_channel(rt, TICK_CHANNEL, state, stale_tick + 1)
+        chs = state["999"]
+        self.assertFalse(chs.get("alerting", False))
+        self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
+        self.assertEqual(
+            relay_watchdog._validated_recovered_gap_guards(chs)[str(missing_path)][
+                0
+            ],
+            missing_path.stat().st_size,
+        )
+
+    def test_invariant_4435_multi_owner_partial_recovery_keeps_incident_open(self):
+        anchor = float(int(self.now - 2000))
+        owner_a = self.proj_dir / "partial-owner-a.jsonl"
+        owner_b = self.proj_dir / "partial-owner-b.jsonl"
+
+        def record(text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner_a.write_text(record("partial delivered A") + "\n", encoding="utf-8")
+        owner_b.write_text(record("partial missing B") + "\n", encoding="utf-8")
+        owners = [str(owner_a), str(owner_b)]
+        original_gap_since = self.now - 5000
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(owner_a),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(owner_a): owner_a.stat().st_size,
+                    str(owner_b): owner_b.stat().st_size,
+                },
+                relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: owners,
+                relay_watchdog.GAP_TRANSCRIPT_KEY: str(owner_a),
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {
+                        "delivered_ts": anchor - 1,
+                        "updated_at": self.now - 100,
+                    }
+                    for path in owners
+                },
+                "alerting": True,
+                "gap_since": original_gap_since,
+                "last_alert": self.now,
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = norm("partial delivered A")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        state_path = self.root / "partial-recovery-state.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        chs = state["999"]
+        self.assertIn(
+            str(owner_a), relay_watchdog._validated_recovered_gap_guards(chs)
+        )
+        self.assertNotIn(
+            str(owner_a), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        self.assertIn(str(owner_b), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_sequential_recovery_churn_exceeds_one_gap_wave(self):
+        anchor = float(int(self.now - 2000))
+
+        def record(text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        state: dict = {"999": {}}
+        state_path = self.root / "sequential-recovery-state.json"
+        rt = self.make_rt()
+        recovery_count = relay_watchdog.MAX_GAP_OWNER_TRANSCRIPTS + 1
+        for index in range(recovery_count):
+            path = self.proj_dir / f"sequential-recovered-{index:03d}.jsonl"
+            text = f"sequential delivered recovery {index:03d}"
+            path.write_text(record(text) + "\n", encoding="utf-8")
+            tick_at = self.now + index + 1
+            os.utime(path, (tick_at, tick_at))
+            chs = state["999"]
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY] = [str(path)]
+            chs[relay_watchdog.GAP_TRANSCRIPT_KEY] = str(path)
+            chs["alerting"] = True
+            chs["gap_since"] = self.now - 5000
+            chs["last_alert"] = self.now
+            rt.haystack = norm(text)
+
+            tick_channel(rt, TICK_CHANNEL, state, tick_at)
+            save_state(state_path, state)
+            state = load_state(state_path)
+            guards = relay_watchdog._validated_recovered_gap_guards(state["999"])
+            self.assertIn(str(path), guards)
+            self.assertEqual(len(guards), index + 1)
+            self.assertFalse(state["999"].get("alerting", False))
+
+        self.assertGreater(
+            len(relay_watchdog._validated_recovered_gap_guards(state["999"])),
+            relay_watchdog.MAX_GAP_OWNER_TRANSCRIPTS,
+        )
+        self.assertFalse(
+            any("recovered-gap-guard-capacity-blocked" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_full_recovered_guard_store_blocks_false_recovery(self):
+        anchor = float(int(self.now - 2000))
+        owner = self.proj_dir / "full-store-owner.jsonl"
+        owner.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "owner delivered"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        guards = {
+            str(self.proj_dir / f"absent-full-guard-{index:03d}.jsonl"): {
+                "size": 1,
+                "confirmed_at": self.now,
+                "last_seen_at": self.now,
+                "absent_since": None,
+            }
+            for index in range(relay_watchdog.MAX_RECOVERED_GAP_GUARDS)
+        }
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(owner),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(owner): owner.stat().st_size
+                },
+                relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [str(owner)],
+                relay_watchdog.GAP_TRANSCRIPT_KEY: str(owner),
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: guards,
+                DELIVERED_WATERMARKS_KEY: {
+                    str(owner): {
+                        "delivered_ts": anchor - 1,
+                        "updated_at": self.now,
+                    }
+                },
+                "alerting": True,
+                "gap_since": self.now - 5000,
+                "last_alert": self.now,
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = norm("owner delivered")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        state_path = self.root / "full-store-state.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        chs = state["999"]
+
+        self.assertEqual(
+            len(relay_watchdog._validated_recovered_gap_guards(chs)),
+            relay_watchdog.MAX_RECOVERED_GAP_GUARDS,
+        )
+        self.assertIn(str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
+        self.assertTrue(chs.get("alerting"))
+        self.assertTrue(
+            any("recovered-gap-guard-capacity-blocked" in line for line in rt.log_lines)
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_invalid_persisted_selection_is_ignored_before_fallback(
+        self,
+    ):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+        current.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "confirmed current"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        touched_old.write_text(
+            current.read_text(encoding="utf-8").replace(
+                "confirmed current", "historic missing output"
+            ),
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: "relative/stale-selection.jsonl",
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(touched_old): touched_old.stat().st_size,
+                },
+            }
+        }
+        advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
+
+        rt = self.make_rt()
+        rt.haystack = norm("confirmed current historic missing output")
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(touched_old))
+        self.assertTrue(
+            any(
+                "transcript-select reason=bootstrap" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_partial_watermark_coverage_cannot_hide_newer_gap(self):
+        delivered_old = self.proj_dir / "delivered-old.jsonl"
+        missed_newer = self.proj_dir / "missed-newer.jsonl"
+        old_anchor = float(int(self.now - 3000))
+        missed_ts = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        delivered_old.write_text(
+            record(old_anchor, "delivered old") + "\n", encoding="utf-8"
+        )
+        missed_newer.write_text(
+            record(missed_ts, "stale missed final block") + "\n", encoding="utf-8"
+        )
+        os.utime(delivered_old, (self.now - 100, self.now - 100))
+        os.utime(missed_newer, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: "relative/corrupt-selection.jsonl",
+                "transcript_sizes": {
+                    str(delivered_old): delivered_old.stat().st_size,
+                    str(missed_newer): missed_newer.stat().st_size,
+                },
+            }
+        }
+        advance_delivered_watermark(
+            state["999"], delivered_old, old_anchor, self.now - 1
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("delivered old")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(missed_newer))
+        self.assertTrue(
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
+        )
+
     def test_invariant_4435_older_haystack_cannot_regress_persisted_anchor(self):
         older = float(int(self.now - 3000))
         newer = float(int(self.now - 1000))
@@ -1637,7 +4935,7 @@ class TickChannelTests(unittest.TestCase):
             delivered_watermark_for_path(state["999"], transcript), newer
         )
 
-    def test_invariant_4435_new_transcript_does_not_inherit_old_path_anchor(self):
+    def test_invariant_4435_unseen_newer_transcript_wins_without_growth_baseline(self):
         old_anchor = float(int(self.now - 1000))
         self.write_transcript([(old_anchor, "old path delivered")])
         old_transcript = self.proj_dir / "s.jsonl"
@@ -1666,9 +4964,12 @@ class TickChannelTests(unittest.TestCase):
         os.utime(new_transcript, (self.now + 1, self.now + 1))
         rt.haystack = ""
         tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
-
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(new_transcript))
+        self.assertTrue(
+            any("transcript-select reason=unseen_newer" in line for line in rt.log_lines)
+        )
         self.assertEqual(
             delivered_watermark_for_path(state["999"], old_transcript), old_anchor
         )

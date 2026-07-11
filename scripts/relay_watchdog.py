@@ -53,11 +53,17 @@ import math
 import os
 import re
 import shutil
+import stat as stat_mode
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback; regular files ignore it
+    fcntl = None  # type: ignore[assignment]
 
 # ── Verdict states (pure judgment output, see evaluate()) ─────────────────────
 STATE_OK = "ok"
@@ -93,9 +99,47 @@ SELECTOR_UNKNOWN = "unknown"
 SELECTOR_PATH_PROVIDER_PROJECT = "provider_project"
 SELECTOR_PATH_RUNTIME_MIRROR = "runtime_session_mirror"
 SELECTOR_PATH_UNCOMPARABLE = "uncomparable"
+SELECTOR_DIVERGED_TRANSCRIPT_KEY = "selector_diverged_transcript"
 
 DELIVERED_WATERMARKS_KEY = "delivered_watermarks"
-MAX_DELIVERED_WATERMARKS = 16
+SELECTED_TRANSCRIPT_KEY = "selected_transcript"
+TRANSCRIPT_SIZES_KEY = "transcript_sizes"
+TRANSCRIPT_SEEN_AT_KEY = "transcript_seen_at"
+TRANSCRIPT_KNOWN_AT_KEY = "transcript_known_at"
+PENDING_TRANSCRIPTS_KEY = "pending_transcripts"
+PENDING_TRANSCRIPT_FAILURES_KEY = "pending_transcript_failures"
+PENDING_TRANSCRIPT_SINCE_KEY = "pending_transcript_since"
+RETIRED_TRANSCRIPTS_KEY = "retired_transcripts"
+PENDING_TRANSCRIPT_OVERFLOW_KEY = "pending_transcript_overflow"
+LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY = (
+    "last_pending_transcript_overflow_alert"
+)
+LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY = (
+    "last_pending_transcript_retirement_alert"
+)
+GAP_TRANSCRIPT_KEY = "gap_transcript"
+GAP_OWNER_TRANSCRIPTS_KEY = "gap_owner_transcripts"
+RECOVERED_GAP_GUARDS_KEY = "recovered_gap_replay_guards"
+MAX_TRANSCRIPT_HISTORY = 64
+MAX_KNOWN_TRANSCRIPTS = 256
+MAX_PENDING_TRANSCRIPTS = 32
+MAX_GAP_OWNER_TRANSCRIPTS = MAX_PENDING_TRANSCRIPTS + 1
+MAX_RECOVERED_GAP_GUARDS = MAX_KNOWN_TRANSCRIPTS
+MAX_RETIRED_TRANSCRIPTS = 32
+# Selected, pending, unresolved GAP-owner, and recovered replay-guard paths
+# each retain independent delivery authority. The watermark cap fits their
+# full deduplicated worst-case union. Recovered guards follow the same bounded
+# path-lifecycle budget as known transcripts: a guard is reclaimed only after
+# one full history TTL of definite absence. If their store is full, recovery
+# stays open rather than evicting an older replay floor.
+MAX_DELIVERED_WATERMARKS = (
+    1
+    + MAX_PENDING_TRANSCRIPTS
+    + MAX_GAP_OWNER_TRANSCRIPTS
+    + MAX_RECOVERED_GAP_GUARDS
+)
+TRANSCRIPT_HISTORY_TTL_SECS = 7 * 24 * 60 * 60
+RECOVERED_GAP_GUARD_TTL_SECS = TRANSCRIPT_HISTORY_TTL_SECS
 
 PG_TOPOLOGY_TUNNEL = "tunnel"
 PG_TOPOLOGY_DIRECT = "direct"
@@ -336,9 +380,164 @@ def main_channel_project_re(worktree_root: str, worktree_prefix: str) -> re.Patt
 
 def channel_project_dirs(root: Path, pattern: re.Pattern[str]) -> list[Path]:
     try:
-        return [d for d in root.iterdir() if d.is_dir() and pattern.match(d.name)]
+        entries = list(root.iterdir())
     except OSError:
         return []
+    return [
+        entry
+        for entry in entries
+        if _directory_without_symlink(entry) and pattern.match(entry.name)
+    ]
+
+
+def _directory_without_symlink(path: Path) -> bool:
+    try:
+        path_stat = path.stat(follow_symlinks=False)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return stat_mode.S_ISDIR(path_stat.st_mode)
+
+
+def _regular_file_stat_without_symlink(path: Path) -> os.stat_result | None:
+    try:
+        parent_stat = path.parent.stat(follow_symlinks=False)
+        path_stat = path.stat(follow_symlinks=False)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not stat_mode.S_ISDIR(parent_stat.st_mode):
+        return None
+    if not stat_mode.S_ISREG(path_stat.st_mode):
+        return None
+    return path_stat
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _open_regular_file_beneath_parent(
+    path: Path, flags: int, trusted_root: Path
+) -> int | None:
+    """Open one regular file beneath a pinned, explicitly trusted root.
+
+    A final-component ``O_NOFOLLOW`` is insufficient: after discovery an
+    attacker can rename an ancestor such as the provider ``projects`` root and
+    replace it with a symlink to an outside, same-shaped tree.  Pin the trusted
+    root, then resolve *every* descendant directory with ``openat`` plus
+    ``O_NOFOLLOW|O_DIRECTORY``.  The trusted root itself must be an absolute,
+    non-symlink directory; symlinks above that explicit trust boundary retain
+    their normal platform semantics (notably macOS ``/var`` -> ``/private/var``).
+
+    Every pre-open identity is revalidated against the resulting descriptor.
+    The final open is nonblocking so a raced FIFO/device cannot hang the
+    watchdog before its regular-file ``fstat`` gate.  Unsupported platforms,
+    malformed paths, and every race fail closed, with all intermediate file
+    descriptors released.
+    """
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    nonblock_flag = getattr(os, "O_NONBLOCK", 0)
+    if not directory_flag or not nofollow_flag or not nonblock_flag:
+        return None
+
+    normalized_path = _lexical_absolute_path(path)
+    normalized_root = _lexical_absolute_path(trusted_root)
+    if (
+        normalized_path is None
+        or normalized_root is None
+        or normalized_path != path
+        or normalized_root != trusted_root
+    ):
+        return None
+    try:
+        relative = normalized_path.relative_to(normalized_root)
+    except ValueError:
+        return None
+    components = relative.parts
+    if not components or any(
+        component in ("", ".", "..") for component in components
+    ):
+        return None
+
+    directory_descriptors: list[int] = []
+    descriptor = -1
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | directory_flag
+        | nofollow_flag
+        | nonblock_flag
+    )
+    file_flags = (
+        flags
+        | getattr(os, "O_CLOEXEC", 0)
+        | nofollow_flag
+        | nonblock_flag
+    )
+    try:
+        expected_root = normalized_root.stat(follow_symlinks=False)
+        if not stat_mode.S_ISDIR(expected_root.st_mode):
+            return None
+        root_descriptor = os.open(normalized_root, directory_flags)
+        directory_descriptors.append(root_descriptor)
+        try:
+            opened_root = os.fstat(root_descriptor)
+        except OSError:
+            return None
+        if not stat_mode.S_ISDIR(opened_root.st_mode) or not _same_file_identity(
+            expected_root, opened_root
+        ):
+            return None
+
+        for component in components[:-1]:
+            parent_descriptor = directory_descriptors[-1]
+            expected_directory = os.stat(
+                component, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if not stat_mode.S_ISDIR(expected_directory.st_mode):
+                return None
+            child_descriptor = os.open(
+                component, directory_flags, dir_fd=parent_descriptor
+            )
+            directory_descriptors.append(child_descriptor)
+            try:
+                opened_directory = os.fstat(child_descriptor)
+            except OSError:
+                return None
+            if not stat_mode.S_ISDIR(
+                opened_directory.st_mode
+            ) or not _same_file_identity(expected_directory, opened_directory):
+                return None
+
+        parent_descriptor = directory_descriptors[-1]
+        filename = components[-1]
+        expected_file = os.stat(
+            filename, dir_fd=parent_descriptor, follow_symlinks=False
+        )
+        if not stat_mode.S_ISREG(expected_file.st_mode):
+            return None
+        descriptor = os.open(filename, file_flags, dir_fd=parent_descriptor)
+        opened_file = os.fstat(descriptor)
+        if not stat_mode.S_ISREG(opened_file.st_mode) or not _same_file_identity(
+            expected_file, opened_file
+        ):
+            return None
+        opened = descriptor
+        descriptor = -1
+        return opened
+    except (OSError, NotImplementedError, TypeError, ValueError, UnicodeError):
+        return None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        for opened_directory in reversed(directory_descriptors):
+            try:
+                os.close(opened_directory)
+            except OSError:
+                pass
 
 
 @dataclass(frozen=True)
@@ -346,6 +545,15 @@ class TranscriptCandidate:
     path: Path
     size: int
     mtime: float
+
+
+@dataclass(frozen=True)
+class TranscriptReadResult:
+    blocks: list[tuple[float, str]]
+    error: str | None = None
+    incomplete_tail: bool = False
+    semantic_end_offset: int = 0
+    observed_size: int = 0
 
 
 def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
@@ -356,39 +564,660 @@ def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
         except OSError:
             continue
         for path in paths:
-            try:
-                stat = path.stat()
-            except OSError:
+            path_stat = _regular_file_stat_without_symlink(path)
+            if path_stat is None:
                 continue
-            candidates.append(TranscriptCandidate(path, stat.st_size, stat.st_mtime))
+            candidates.append(
+                TranscriptCandidate(path, path_stat.st_size, path_stat.st_mtime)
+            )
     return candidates
 
 
-def select_watch_transcript(
-    candidates: list[TranscriptCandidate], previous_sizes: Mapping[str, int]
-) -> Path | None:
-    """Choose a transcript by observed growth, falling back to newest mtime.
+def recheck_selected_transcript(
+    value: object,
+    project_root: Path,
+    pattern: re.Pattern[str],
+    tracked_paths: set[str],
+) -> TranscriptCandidate | None:
+    """Recover a tracked selection omitted by a partial directory listing.
 
-    A newly discovered candidate has no growth proof yet.  Once a prior size
-    exists, any file that grew wins over a newer-but-stagnant file; mtime and
-    path provide deterministic tie-breaking within the chosen pool.  The
-    caller owns I/O and persistence, keeping this selector pure.
+    Only an exact, absolute provider-project path already present in persisted
+    size/watermark state is eligible.  This keeps malformed state from gaining
+    sticky authority while a direct stat closes the transient discovery gap.
     """
-    if not candidates:
+    if not isinstance(value, str) or not value or value not in tracked_paths:
         return None
+    path = _lexical_absolute_path(value)
+    root = _lexical_absolute_path(project_root)
+    if (
+        path is None
+        or root is None
+        or str(path) != value
+        or path.suffix != ".jsonl"
+        or path.parent.parent != root
+        or pattern.fullmatch(path.parent.name) is None
+    ):
+        return None
+    path_stat = _regular_file_stat_without_symlink(path)
+    if path_stat is None:
+        return None
+    return TranscriptCandidate(path, path_stat.st_size, path_stat.st_mtime)
+
+
+def _validated_transcript_sizes(channel_state: Mapping[str, Any]) -> dict[str, int]:
+    raw = channel_state.get(TRANSCRIPT_SIZES_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        path: size
+        for path, size in raw.items()
+        if isinstance(path, str)
+        and path
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and size >= 0
+    }
+
+
+def _validated_transcript_seen_at(
+    channel_state: Mapping[str, Any], sizes: Mapping[str, int], now: float
+) -> dict[str, float]:
+    raw = channel_state.get(TRANSCRIPT_SEEN_AT_KEY, {})
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        path: (
+            float(raw[path])
+            if path in raw and _is_finite_nonnegative_number(raw[path])
+            else now
+        )
+        for path in sizes
+    }
+
+
+def _validated_transcript_known_at(
+    channel_state: Mapping[str, Any], now: float
+) -> dict[str, float]:
+    raw = channel_state.get(TRANSCRIPT_KNOWN_AT_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        path: float(seen_at)
+        for path, seen_at in raw.items()
+        if isinstance(path, str)
+        and path
+        and _is_finite_nonnegative_number(seen_at)
+        and now - float(seen_at) <= TRANSCRIPT_HISTORY_TTL_SECS
+    }
+
+
+def _validated_pending_transcripts(channel_state: Mapping[str, Any]) -> list[str]:
+    raw = channel_state.get(PENDING_TRANSCRIPTS_KEY, [])
+    if not isinstance(raw, list):
+        return []
+    pending: list[str] = []
+    for path in raw:
+        if isinstance(path, str) and path and path not in pending:
+            pending.append(path)
+    return pending[:MAX_PENDING_TRANSCRIPTS]
+
+
+def _read_failure_authority_paths(
+    channel_state: Mapping[str, Any], pending_paths: list[str]
+) -> set[str]:
+    """Paths whose consecutive read-failure counter must survive this tick.
+
+    Selected, unresolved GAP-owner, and recovered replay-guard transcripts have
+    independent evaluation authority in addition to the bounded pending queue.
+    Folding any into a full 32-path queue would evict an existing authority, so
+    pin their counters separately while leaving the pending cap unchanged.
+    """
+    authorities = set(pending_paths)
+    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+    if isinstance(selected, str) and selected:
+        authorities.add(selected)
+    authorities.update(_validated_gap_owner_transcripts(channel_state))
+    authorities.update(_validated_recovered_gap_guards(channel_state))
+    return authorities
+
+
+def _validated_pending_failures(
+    channel_state: Mapping[str, Any], pending_paths: list[str]
+) -> dict[str, int]:
+    raw = channel_state.get(PENDING_TRANSCRIPT_FAILURES_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    pending = _read_failure_authority_paths(channel_state, pending_paths)
+    return {
+        path: failures
+        for path, failures in raw.items()
+        if path in pending
+        and isinstance(failures, int)
+        and not isinstance(failures, bool)
+        and failures > 0
+    }
+
+
+def _validated_pending_since(
+    channel_state: Mapping[str, Any], pending_paths: list[str], now: float
+) -> dict[str, float]:
+    raw = channel_state.get(PENDING_TRANSCRIPT_SINCE_KEY, {})
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        path: (
+            float(raw[path])
+            if path in raw
+            and _is_finite_nonnegative_number(raw[path])
+            and float(raw[path]) <= now
+            else now
+        )
+        for path in pending_paths
+    }
+
+
+def _validated_gap_owner_transcripts(
+    channel_state: Mapping[str, Any],
+) -> list[str]:
+    """Return bounded unresolved GAP owners, including the legacy singleton."""
+    owners: list[str] = []
+    raw = channel_state.get(GAP_OWNER_TRANSCRIPTS_KEY, [])
+    if isinstance(raw, list):
+        for path in raw:
+            if isinstance(path, str) and path and path not in owners:
+                owners.append(path)
+    legacy = channel_state.get(GAP_TRANSCRIPT_KEY)
+    if isinstance(legacy, str) and legacy and legacy not in owners:
+        owners.append(legacy)
+    return owners[:MAX_GAP_OWNER_TRANSCRIPTS]
+
+
+def _store_gap_owner_transcripts(
+    channel_state: dict[str, Any], owners: list[str]
+) -> list[str]:
+    bounded: list[str] = []
+    for path in owners:
+        if isinstance(path, str) and path and path not in bounded:
+            bounded.append(path)
+    bounded = bounded[:MAX_GAP_OWNER_TRANSCRIPTS]
+    if bounded:
+        channel_state[GAP_OWNER_TRANSCRIPTS_KEY] = bounded
+    else:
+        channel_state.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
+    return bounded
+
+
+def _validated_recovered_gap_guards(
+    channel_state: Mapping[str, Any],
+) -> dict[str, tuple[int, float, float, float | None]]:
+    """Return bounded recovered replay guards with absence lifecycle state."""
+    raw = channel_state.get(RECOVERED_GAP_GUARDS_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    guards: dict[str, tuple[int, float, float, float | None]] = {}
+    for path, entry in raw.items():
+        if len(guards) >= MAX_RECOVERED_GAP_GUARDS:
+            break
+        if not isinstance(path, str) or not path or not isinstance(entry, dict):
+            continue
+        size = entry.get("size")
+        confirmed_at = entry.get("confirmed_at")
+        last_seen_at = entry.get("last_seen_at")
+        absent_since = entry.get("absent_since")
+        if (
+            isinstance(size, int)
+            and not isinstance(size, bool)
+            and size >= 0
+            and _is_finite_nonnegative_number(confirmed_at)
+            and _is_finite_nonnegative_number(last_seen_at)
+            and (
+                absent_since is None
+                or (
+                    _is_finite_nonnegative_number(absent_since)
+                    and float(absent_since) >= float(last_seen_at)
+                )
+            )
+        ):
+            guards[path] = (
+                size,
+                float(confirmed_at),
+                float(last_seen_at),
+                None if absent_since is None else float(absent_since),
+            )
+    return guards
+
+
+def _store_recovered_gap_guards(
+    channel_state: dict[str, Any],
+    guards: Mapping[str, tuple[int, float, float, float | None]],
+) -> None:
+    bounded = dict(list(guards.items())[:MAX_RECOVERED_GAP_GUARDS])
+    if bounded:
+        channel_state[RECOVERED_GAP_GUARDS_KEY] = {
+            path: {
+                "size": size,
+                "confirmed_at": confirmed_at,
+                "last_seen_at": last_seen_at,
+                "absent_since": absent_since,
+            }
+            for path, (
+                size,
+                confirmed_at,
+                last_seen_at,
+                absent_since,
+            ) in bounded.items()
+        }
+    else:
+        channel_state.pop(RECOVERED_GAP_GUARDS_KEY, None)
+
+
+RECOVERED_GAP_PATH_PRESENT = "present"
+RECOVERED_GAP_PATH_ABSENT = "absent"
+RECOVERED_GAP_PATH_AMBIGUOUS = "ambiguous"
+RECOVERED_GAP_PATH_INVALID = "invalid"
+
+
+def _recovered_gap_path_presence_beneath_root(
+    path: Path, trusted_root: Path
+) -> str:
+    """Prove path presence/absence beneath a no-follow descriptor root."""
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    nonblock_flag = getattr(os, "O_NONBLOCK", 0)
+    if not directory_flag or not nofollow_flag or not nonblock_flag:
+        return RECOVERED_GAP_PATH_AMBIGUOUS
+    normalized_path = _lexical_absolute_path(path)
+    normalized_root = _lexical_absolute_path(trusted_root)
+    if (
+        normalized_path is None
+        or normalized_root is None
+        or normalized_path != path
+        or normalized_root != trusted_root
+    ):
+        return RECOVERED_GAP_PATH_INVALID
+    try:
+        relative = normalized_path.relative_to(normalized_root)
+    except ValueError:
+        return RECOVERED_GAP_PATH_INVALID
+    components = relative.parts
+    if not components or any(component in ("", ".", "..") for component in components):
+        return RECOVERED_GAP_PATH_INVALID
+
+    descriptors: list[int] = []
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | directory_flag
+        | nofollow_flag
+        | nonblock_flag
+    )
+    try:
+        try:
+            expected_root = normalized_root.stat(follow_symlinks=False)
+            if not stat_mode.S_ISDIR(expected_root.st_mode):
+                return RECOVERED_GAP_PATH_AMBIGUOUS
+            root_descriptor = os.open(normalized_root, directory_flags)
+        except (OSError, NotImplementedError, TypeError, ValueError, UnicodeError):
+            return RECOVERED_GAP_PATH_AMBIGUOUS
+        descriptors.append(root_descriptor)
+        try:
+            opened_root = os.fstat(root_descriptor)
+        except OSError:
+            return RECOVERED_GAP_PATH_AMBIGUOUS
+        if not stat_mode.S_ISDIR(opened_root.st_mode) or not _same_file_identity(
+            expected_root, opened_root
+        ):
+            return RECOVERED_GAP_PATH_AMBIGUOUS
+
+        for component in components[:-1]:
+            parent_descriptor = descriptors[-1]
+            try:
+                expected_directory = os.stat(
+                    component,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return RECOVERED_GAP_PATH_ABSENT
+            except (OSError, NotImplementedError, TypeError, ValueError):
+                return RECOVERED_GAP_PATH_AMBIGUOUS
+            if not stat_mode.S_ISDIR(expected_directory.st_mode):
+                return RECOVERED_GAP_PATH_AMBIGUOUS
+            try:
+                child_descriptor = os.open(
+                    component, directory_flags, dir_fd=parent_descriptor
+                )
+            except (OSError, NotImplementedError, TypeError, ValueError):
+                return RECOVERED_GAP_PATH_AMBIGUOUS
+            descriptors.append(child_descriptor)
+            try:
+                opened_directory = os.fstat(child_descriptor)
+            except OSError:
+                return RECOVERED_GAP_PATH_AMBIGUOUS
+            if not stat_mode.S_ISDIR(
+                opened_directory.st_mode
+            ) or not _same_file_identity(expected_directory, opened_directory):
+                return RECOVERED_GAP_PATH_AMBIGUOUS
+
+        try:
+            leaf = os.stat(
+                components[-1],
+                dir_fd=descriptors[-1],
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return RECOVERED_GAP_PATH_ABSENT
+        except (OSError, NotImplementedError, TypeError, ValueError):
+            return RECOVERED_GAP_PATH_AMBIGUOUS
+        return (
+            RECOVERED_GAP_PATH_PRESENT
+            if stat_mode.S_ISREG(leaf.st_mode)
+            else RECOVERED_GAP_PATH_AMBIGUOUS
+        )
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _recovered_gap_path_presence(
+    value: str,
+    discovered_paths: set[str],
+    project_root: Path,
+    pattern: re.Pattern[str],
+) -> str:
+    """Classify a guarded path without treating discovery/I/O errors as absence."""
+    if value in discovered_paths:
+        return RECOVERED_GAP_PATH_PRESENT
+    path = _lexical_absolute_path(value)
+    root = _lexical_absolute_path(project_root)
+    if (
+        path is None
+        or root is None
+        or str(path) != value
+        or path.suffix != ".jsonl"
+        or path.parent.parent != root
+        or pattern.fullmatch(path.parent.name) is None
+    ):
+        return RECOVERED_GAP_PATH_INVALID
+    return _recovered_gap_path_presence_beneath_root(
+        path,
+        root,
+    )
+
+
+def _refresh_recovered_gap_guards(
+    guards: Mapping[str, tuple[int, float, float, float | None]],
+    discovered_paths: set[str],
+    protected_paths: set[str],
+    project_root: Path,
+    pattern: re.Pattern[str],
+    now: float,
+) -> tuple[dict[str, tuple[int, float, float, float | None]], list[str]]:
+    """Advance guard lifecycles and reclaim only continuously absent paths."""
+    refreshed: dict[str, tuple[int, float, float, float | None]] = {}
+    reclaimed: list[str] = []
+    for path, (size, confirmed_at, last_seen_at, absent_since) in guards.items():
+        presence = _recovered_gap_path_presence(
+            path, discovered_paths, project_root, pattern
+        )
+        if presence == RECOVERED_GAP_PATH_INVALID:
+            reclaimed.append(path)
+            continue
+        if presence == RECOVERED_GAP_PATH_PRESENT:
+            refreshed[path] = (size, confirmed_at, max(last_seen_at, now), None)
+            continue
+        if presence == RECOVERED_GAP_PATH_AMBIGUOUS:
+            # Ambiguity breaks proof of continuous absence. Never expire a
+            # replay floor because a directory read, stat, or file type was
+            # unsafe to interpret.
+            refreshed[path] = (size, confirmed_at, last_seen_at, None)
+            continue
+        if last_seen_at > now:
+            # A wall-clock rollback cannot establish elapsed absence. Keep the
+            # floor armed until time catches up and a fresh absence interval
+            # can be observed.
+            refreshed[path] = (size, confirmed_at, last_seen_at, None)
+            continue
+        missing_since = absent_since
+        if missing_since is None or missing_since > now:
+            missing_since = now
+        if (
+            path not in protected_paths
+            and now - missing_since >= RECOVERED_GAP_GUARD_TTL_SECS
+        ):
+            reclaimed.append(path)
+            continue
+        refreshed[path] = (size, confirmed_at, last_seen_at, missing_since)
+    return refreshed, reclaimed
+
+
+def _upsert_recovered_gap_guard(
+    guards: Mapping[str, tuple[int, float, float, float | None]],
+    path: str,
+    size: int,
+    confirmed_at: float,
+) -> tuple[dict[str, tuple[int, float, float, float | None]], bool]:
+    """Re-arm one guard, refusing new admission when the bound is full."""
+    updated = dict(guards)
+    if (
+        not path
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+        or not _is_finite_nonnegative_number(confirmed_at)
+    ):
+        return updated, False
+    if path not in updated and len(updated) >= MAX_RECOVERED_GAP_GUARDS:
+        return updated, False
+    updated[path] = (
+        size,
+        float(confirmed_at),
+        float(confirmed_at),
+        None,
+    )
+    return updated, True
+
+
+def _bounded_retired_transcripts(
+    entries: Mapping[str, tuple[int, float]],
+) -> dict[str, tuple[int, float]]:
+    ordered = sorted(
+        entries.items(), key=lambda item: (-item[1][1], item[0])
+    )[:MAX_RETIRED_TRANSCRIPTS]
+    return dict(ordered)
+
+
+def _validated_retired_transcripts(
+    channel_state: Mapping[str, Any],
+) -> dict[str, tuple[int, float]]:
+    raw = channel_state.get(RETIRED_TRANSCRIPTS_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    valid: dict[str, tuple[int, float]] = {}
+    for path, entry in raw.items():
+        if not isinstance(path, str) or not path or not isinstance(entry, dict):
+            continue
+        size = entry.get("size")
+        retired_at = entry.get("retired_at")
+        if (
+            isinstance(size, int)
+            and not isinstance(size, bool)
+            and size >= 0
+            and _is_finite_nonnegative_number(retired_at)
+        ):
+            valid[path] = (size, float(retired_at))
+    return _bounded_retired_transcripts(valid)
+
+
+def _store_retired_transcripts(
+    channel_state: dict[str, Any], entries: Mapping[str, tuple[int, float]]
+) -> None:
+    bounded = _bounded_retired_transcripts(entries)
+    if bounded:
+        channel_state[RETIRED_TRANSCRIPTS_KEY] = {
+            path: {"size": size, "retired_at": retired_at}
+            for path, (size, retired_at) in bounded.items()
+        }
+    else:
+        channel_state.pop(RETIRED_TRANSCRIPTS_KEY, None)
+
+
+def _bounded_transcript_history(
+    sizes: Mapping[str, int],
+    seen_at: Mapping[str, float],
+    now: float,
+    priority_paths: list[str],
+) -> tuple[dict[str, int], dict[str, float]]:
+    """Bound path baselines without dropping a transiently undiscovered path."""
+    priority = {
+        path: index
+        for index, path in enumerate(dict.fromkeys(priority_paths))
+    }
+    entries: list[tuple[str, int, float]] = []
+    for path, size in sizes.items():
+        if not isinstance(path, str) or not path:
+            continue
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            continue
+        observed_at = seen_at.get(path, now)
+        if not _is_finite_nonnegative_number(observed_at):
+            observed_at = now
+        observed_at = float(observed_at)
+        if (
+            path not in priority
+            and now - observed_at > TRANSCRIPT_HISTORY_TTL_SECS
+        ):
+            continue
+        entries.append((path, size, observed_at))
+    entries.sort(
+        key=lambda entry: (
+            priority.get(entry[0], len(priority)),
+            -entry[2],
+            entry[0],
+        )
+    )
+    bounded = entries[:MAX_TRANSCRIPT_HISTORY]
+    return (
+        {path: size for path, size, _ in bounded},
+        {path: observed_at for path, _, observed_at in bounded},
+    )
+
+
+def _bounded_pending_transcripts(
+    paths: list[str], history_paths: set[str]
+) -> list[str]:
+    pending: list[str] = []
+    for path in paths:
+        if path in history_paths and path not in pending:
+            pending.append(path)
+    return pending[:MAX_PENDING_TRANSCRIPTS]
+
+
+def _bounded_transcript_known_at(
+    known_at: Mapping[str, float], now: float, priority_paths: list[str]
+) -> dict[str, float]:
+    priority = {
+        path: index
+        for index, path in enumerate(dict.fromkeys(priority_paths))
+    }
+    entries = [
+        (path, float(seen_at))
+        for path, seen_at in known_at.items()
+        if isinstance(path, str)
+        and path
+        and _is_finite_nonnegative_number(seen_at)
+        and (
+            path in priority
+            or now - float(seen_at) <= TRANSCRIPT_HISTORY_TTL_SECS
+        )
+    ]
+    entries.sort(
+        key=lambda entry: (
+            priority.get(entry[0], len(priority)),
+            -entry[1],
+            entry[0],
+        )
+    )
+    return dict(entries[:MAX_KNOWN_TRANSCRIPTS])
+
+
+def select_watch_transcript(
+    candidates: list[TranscriptCandidate],
+    previous_sizes: Mapping[str, int],
+    previous_selected: str | Path | None = None,
+    semantic_growth_paths: set[str] | None = None,
+) -> Path | None:
+    """Choose by semantic growth, then retain the previous selected path.
+
+    The caller proves growth by finding a newly appended, timestamped,
+    deliverable assistant block beyond the prior byte baseline.  Raw bytes,
+    metadata rows, blank lines, and mtime touches never grant selection
+    authority.  The caller owns I/O and persistence, keeping this selector
+    pure.
+    """
+    return select_watch_transcript_with_reason(
+        candidates,
+        previous_sizes,
+        previous_selected,
+        semantic_growth_paths,
+    )[0]
+
+
+def select_watch_transcript_with_reason(
+    candidates: list[TranscriptCandidate],
+    previous_sizes: Mapping[str, int],
+    previous_selected: object = None,
+    semantic_growth_paths: set[str] | None = None,
+) -> tuple[Path | None, str]:
+    if not candidates:
+        return None, "no_candidates"
+    semantic_growth_paths = semantic_growth_paths or set()
     growing = [
         candidate
         for candidate in candidates
         if str(candidate.path) in previous_sizes
-        and candidate.size > previous_sizes[str(candidate.path)]
+        and str(candidate.path) in semantic_growth_paths
     ]
-    pool = growing or candidates
-    return max(pool, key=lambda candidate: (candidate.mtime, str(candidate.path))).path
+    if growing:
+        selected = max(
+            growing, key=lambda candidate: (candidate.mtime, str(candidate.path))
+        )
+        return selected.path, "growth"
+    prior = (
+        str(previous_selected)
+        if isinstance(previous_selected, (str, Path)) and str(previous_selected)
+        else None
+    )
+    if prior is not None:
+        retained = next(
+            (candidate for candidate in candidates if str(candidate.path) == prior),
+            None,
+        )
+        if retained is not None:
+            unseen_newer = [
+                candidate
+                for candidate in candidates
+                if candidate.path != retained.path
+                and str(candidate.path) not in previous_sizes
+                and candidate.mtime > retained.mtime
+            ]
+            if unseen_newer:
+                selected = max(
+                    unseen_newer,
+                    key=lambda candidate: (candidate.mtime, str(candidate.path)),
+                )
+                return selected.path, "unseen_newer"
+            return retained.path, "sticky"
+    selected = max(
+        candidates, key=lambda candidate: (candidate.mtime, str(candidate.path))
+    )
+    return selected.path, "prior_missing" if prior is not None else "bootstrap"
 
 
 def newest_transcript(dirs: list[Path]) -> Path | None:
     """Backward-compatible mtime selector for callers without growth state."""
-    return select_watch_transcript(transcript_candidates(dirs), {})
+    return select_watch_transcript(transcript_candidates(dirs), {}, None, set())
 
 
 # ── Transcript parsing ─────────────────────────────────────────────────────────
@@ -447,12 +1276,70 @@ def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
     return out
 
 
-def assistant_blocks(transcript: Path) -> list[tuple[float, str]]:
+def assistant_blocks(
+    transcript: Path, trusted_root: Path | None = None
+) -> TranscriptReadResult:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = -1
     try:
-        with transcript.open(encoding="utf-8") as f:
-            return assistant_blocks_from_lines(f)
-    except OSError:
-        return []
+        # Provider transcripts have shape ``projects/<session>/<uuid>.jsonl``;
+        # the projects directory is the narrowest stable trust boundary that
+        # still lets the component walk reject a swapped session directory.
+        # Production passes it explicitly; the derived value keeps this helper
+        # fail-closed and useful for focused tests.
+        root = trusted_root if trusted_root is not None else transcript.parent.parent
+        opened = _open_regular_file_beneath_parent(transcript, flags, root)
+        if opened is None:
+            return TranscriptReadResult([], "UnsafePath")
+        descriptor = opened
+        if not stat_mode.S_ISREG(os.fstat(descriptor).st_mode):
+            return TranscriptReadResult([], "UnsafePath")
+        if fcntl is not None and getattr(os, "O_NONBLOCK", 0):
+            current_flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+            fcntl.fcntl(
+                descriptor,
+                fcntl.F_SETFL,
+                current_flags & ~getattr(os, "O_NONBLOCK", 0),
+            )
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = -1
+        with stream as f:
+            raw_lines = f.readlines()
+            lines = [line.decode("utf-8") for line in raw_lines]
+            incomplete_tail = False
+            if raw_lines and not raw_lines[-1].endswith(b"\n"):
+                try:
+                    json.loads(lines[-1])
+                except (json.JSONDecodeError, TypeError):
+                    incomplete_tail = True
+            blocks: list[tuple[float, str]] = []
+            semantic_end_offset = 0
+            byte_offset = 0
+            for raw_line, line in zip(raw_lines, lines):
+                line_blocks = assistant_blocks_from_lines([line])
+                blocks.extend(line_blocks)
+                byte_offset += len(raw_line)
+                if line_blocks:
+                    semantic_end_offset = byte_offset
+            return TranscriptReadResult(
+                blocks,
+                incomplete_tail=incomplete_tail,
+                semantic_end_offset=semantic_end_offset,
+                observed_size=byte_offset,
+            )
+    except (OSError, UnicodeError, ValueError) as exc:
+        return TranscriptReadResult([], type(exc).__name__)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 # ── Delivery matching + judgment (pure) ────────────────────────────────────────
@@ -699,17 +1586,37 @@ def _is_finite_nonnegative_number(value: object) -> bool:
 
 
 def _bounded_delivered_watermarks(
-    entries: Mapping[str, tuple[float, float]], preferred_path: str | None = None
+    entries: Mapping[str, tuple[float, float]],
+    preferred_path: str | None = None,
+    pinned_paths: list[str] | None = None,
 ) -> dict[str, tuple[float, float]]:
+    pinned = {
+        path: index
+        for index, path in enumerate(dict.fromkeys(pinned_paths or []))
+        if path
+    }
     ordered = sorted(
         entries.items(),
         key=lambda item: (
+            pinned.get(item[0], len(pinned)),
             -item[1][1],
             0 if item[0] == preferred_path else 1,
             item[0],
         ),
     )[:MAX_DELIVERED_WATERMARKS]
     return dict(ordered)
+
+
+def _delivered_watermark_authority_paths(
+    channel_state: Mapping[str, Any],
+) -> list[str]:
+    """Return every bounded path that still owns delivery authority."""
+    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+    authorities = [selected] if isinstance(selected, str) and selected else []
+    authorities.extend(_validated_pending_transcripts(channel_state))
+    authorities.extend(_validated_gap_owner_transcripts(channel_state))
+    authorities.extend(_validated_recovered_gap_guards(channel_state))
+    return list(dict.fromkeys(authorities))
 
 
 def delivered_watermarks(
@@ -735,7 +1642,10 @@ def delivered_watermarks(
         ):
             continue
         valid[path] = (float(delivered_ts), float(updated_at))
-    return _bounded_delivered_watermarks(valid)
+    return _bounded_delivered_watermarks(
+        valid,
+        pinned_paths=_delivered_watermark_authority_paths(channel_state),
+    )
 
 
 def delivered_watermark_for_path(
@@ -766,12 +1676,71 @@ def advance_delivered_watermark(
     if candidate <= prior:
         return False
     entries[path] = (candidate, float(now))
-    bounded = _bounded_delivered_watermarks(entries, preferred_path=path)
+    bounded = _bounded_delivered_watermarks(
+        entries,
+        preferred_path=path,
+        pinned_paths=_delivered_watermark_authority_paths(channel_state),
+    )
     channel_state[DELIVERED_WATERMARKS_KEY] = {
         key: {"delivered_ts": watermark, "updated_at": updated_at}
         for key, (watermark, updated_at) in bounded.items()
     }
     return True
+
+
+def _forget_reclaimed_recovered_gap_lifecycles(
+    channel_state: dict[str, Any], paths: list[str]
+) -> None:
+    """Drop all replay identity for guards proven absent for one full TTL."""
+    reclaimed = set(paths)
+    if not reclaimed:
+        return
+
+    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+    if isinstance(selected, str) and selected in reclaimed:
+        channel_state.pop(SELECTED_TRANSCRIPT_KEY, None)
+
+    for key in (
+        TRANSCRIPT_SIZES_KEY,
+        TRANSCRIPT_SEEN_AT_KEY,
+        TRANSCRIPT_KNOWN_AT_KEY,
+        PENDING_TRANSCRIPT_FAILURES_KEY,
+        PENDING_TRANSCRIPT_SINCE_KEY,
+        RETIRED_TRANSCRIPTS_KEY,
+    ):
+        raw = channel_state.get(key)
+        if not isinstance(raw, dict):
+            continue
+        retained = {path: entry for path, entry in raw.items() if path not in reclaimed}
+        if retained:
+            channel_state[key] = retained
+        else:
+            channel_state.pop(key, None)
+
+    raw_pending = channel_state.get(PENDING_TRANSCRIPTS_KEY)
+    if isinstance(raw_pending, list):
+        retained_pending = [path for path in raw_pending if path not in reclaimed]
+        if retained_pending:
+            channel_state[PENDING_TRANSCRIPTS_KEY] = retained_pending
+        else:
+            channel_state.pop(PENDING_TRANSCRIPTS_KEY, None)
+
+    watermarks = {
+        path: entry
+        for path, entry in delivered_watermarks(channel_state).items()
+        if path not in reclaimed
+    }
+    if watermarks:
+        bounded = _bounded_delivered_watermarks(
+            watermarks,
+            pinned_paths=_delivered_watermark_authority_paths(channel_state),
+        )
+        channel_state[DELIVERED_WATERMARKS_KEY] = {
+            path: {"delivered_ts": delivered_ts, "updated_at": updated_at}
+            for path, (delivered_ts, updated_at) in bounded.items()
+        }
+    else:
+        channel_state.pop(DELIVERED_WATERMARKS_KEY, None)
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -1453,19 +2422,38 @@ def tick_selector_sync(
     gap or coverage state machines.
     """
     cid = ch.channel_id
-    if not f_growing or not selected_transcript:
-        # No growing live transcript to compare against — a mismatch is not
-        # actionable, and any pending divergence window is stale.  Skip the HTTP
-        # probe entirely (matches tick_coverage's probe-only-when-needed shape).
+    if not selected_transcript:
         chs.pop("selector_diverged_since", None)
+        chs.pop(SELECTOR_DIVERGED_TRANSCRIPT_KEY, None)
+        return
+    selected_path = str(selected_transcript)
+    window_path = chs.get(SELECTOR_DIVERGED_TRANSCRIPT_KEY)
+    if not f_growing:
+        # A quiet/tool-only tick supplies no new F evidence.  It must not erase
+        # a previously proven divergence for the same selection; otherwise one
+        # normal long tool call resets the 300s confirmation forever.  A changed
+        # selection does invalidate the old window.
+        if (
+            isinstance(chs.get("selector_diverged_since"), (int, float))
+            and not isinstance(chs.get("selector_diverged_since"), bool)
+            and window_path == selected_path
+        ):
+            rt.log(
+                f"[{cid}] selector-sync quiet; retained divergence window "
+                f"F={selected_path}"
+            )
+            return
+        chs.pop("selector_diverged_since", None)
+        chs.pop(SELECTOR_DIVERGED_TRANSCRIPT_KEY, None)
         return
 
     probe = rt.watcher_state(cid)
     bound = probe.bound_output_path if probe.status == 200 else None
-    verdict = evaluate_selector_sync(bound, str(selected_transcript), f_growing)
+    verdict = evaluate_selector_sync(bound, selected_path, f_growing)
 
     if not verdict.diverged:
         chs.pop("selector_diverged_since", None)
+        chs.pop(SELECTOR_DIVERGED_TRANSCRIPT_KEY, None)
         if verdict.state == SELECTOR_UNKNOWN:
             # Fail-closed: old server without the field, JSON null, or dcserver
             # unreachable → never alarm on an unknown bind.
@@ -1475,11 +2463,16 @@ def tick_selector_sync(
         return
 
     raw_since = chs.get("selector_diverged_since")
-    if isinstance(raw_since, (int, float)) and not isinstance(raw_since, bool):
+    if (
+        window_path == selected_path
+        and isinstance(raw_since, (int, float))
+        and not isinstance(raw_since, bool)
+    ):
         since = float(raw_since)
     else:
         since = now
     chs["selector_diverged_since"] = since
+    chs[SELECTOR_DIVERGED_TRANSCRIPT_KEY] = selected_path
     age = now - since
     if not selector_divergence_confirmed(verdict.diverged, age, rt.cfg.swap_confirm_secs):
         rt.log(
@@ -1527,6 +2520,107 @@ def tick_selector_sync(
     )
 
 
+def _alert_pending_retirement(
+    rt: Runtime,
+    ch: ChannelConfig,
+    channel_state: dict[str, Any],
+    paths: list[str],
+    now: float,
+    *,
+    reason: str,
+) -> bool:
+    if not paths:
+        return False
+    raw_last_alert = channel_state.get(
+        LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY, 0.0
+    )
+    last_alert = (
+        float(raw_last_alert)
+        if _is_finite_nonnegative_number(raw_last_alert)
+        else 0.0
+    )
+    if now - last_alert < rt.cfg.realert_secs:
+        rt.log(
+            f"[{ch.channel_id}] transcript-retirement-alert suppressed "
+            f"reason={reason} count={len(paths)} cooldown"
+        )
+        return False
+    if reason == "idle":
+        title = "릴레이 트랜스크립트 평가 권한 만료"
+        detail = (
+            "세션 활동이 idle 한계를 넘겨 더 이상 live GAP으로 반복 평가하지 "
+            "않습니다. 미도달 여부가 해결됐다고 주장하는 복구 알림은 보내지 않습니다."
+        )
+    else:
+        title = "릴레이 트랜스크립트 평가 불능 에스컬레이션"
+        detail = (
+            "연속 읽기 실패 한계를 넘어 해당 pending 권한을 격리했습니다. 정상으로 "
+            "판정한 것이 아니며 원본 트랜스크립트 점검이 필요합니다."
+        )
+    sample = "\n".join(f"- `{path}`" for path in paths[:3])
+    if len(paths) > 3:
+        sample += f"\n- 외 {len(paths) - 3}개"
+    rt.alert(
+        ch,
+        f"🚨 **{title}**\n\n{detail}\n\n{sample}\n\n"
+        f"런타임: {rt.dcserver_snapshot()}",
+    )
+    channel_state[LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = now
+    return True
+
+
+def _clear_gap_alert_without_recovery(
+    rt: Runtime,
+    channel_state: dict[str, Any],
+    channel_id: str,
+    authority_paths: list[str],
+) -> bool:
+    retired = set(authority_paths)
+    gap_path = channel_state.get(GAP_TRANSCRIPT_KEY)
+    previous_owners = _validated_gap_owner_transcripts(channel_state)
+    retained_owners = [path for path in previous_owners if path not in retired]
+    gap_state_open = bool(
+        previous_owners
+        or channel_state.get("alerting")
+        or channel_state.get("gap_since")
+        or channel_state.get("issue_url")
+    )
+    if not retained_owners and gap_state_open:
+        # Legacy singleton state may not yet have the owner set.  Preserve any
+        # still-live selected/pending authority until this tick evaluates it;
+        # only an explicit OK verdict may claim recovery.
+        selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+        fallback = (
+            [selected] if isinstance(selected, str) and selected else []
+        ) + _validated_pending_transcripts(channel_state)
+        retained_owners = [path for path in fallback if path not in retired]
+    retained_owners = _store_gap_owner_transcripts(
+        channel_state, retained_owners
+    )
+    if retained_owners:
+        if gap_path not in retained_owners:
+            selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+            channel_state[GAP_TRANSCRIPT_KEY] = (
+                selected if selected in retained_owners else retained_owners[0]
+            )
+        rt.log(
+            f"[{channel_id}] unrelated transcript retirement preserved live "
+            f"gap authority owners={len(retained_owners)}"
+        )
+        return False
+    if channel_state.get("alerting"):
+        rt.log(
+            f"[{channel_id}] alert state transitioned to unresolved transcript "
+            "escalation — no clean recovery claimed"
+        )
+    channel_state.pop("alerting", None)
+    channel_state.pop("gap_since", None)
+    channel_state.pop("issue_url", None)
+    channel_state.pop(GAP_TRANSCRIPT_KEY, None)
+    channel_state.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
+    return True
+
+
 def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: float) -> None:
     cfg = rt.cfg
     cid = ch.channel_id
@@ -1541,40 +2635,483 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         rt.log(f"[{cid}] coverage tick error: {type(e).__name__}: {e}")
 
     pattern = main_channel_project_re(ch.worktree_root, ch.worktree_prefix)
-    dirs = channel_project_dirs(projects_root(), pattern)
+    project_root = projects_root()
+    dirs = channel_project_dirs(project_root, pattern)
     candidates = transcript_candidates(dirs)
-    raw_previous_sizes = chs.get("transcript_sizes", {})
-    previous_sizes = {
-        str(path): size
-        for path, size in (
-            raw_previous_sizes.items()
-            if isinstance(raw_previous_sizes, dict)
-            else ()
+    discovered_paths = {str(candidate.path) for candidate in candidates}
+    pending_paths = _validated_pending_transcripts(chs)
+    protected_guard_paths = set(pending_paths) | set(
+        _validated_gap_owner_transcripts(chs)
+    )
+    recovered_gap_guards, reclaimed_guard_paths = _refresh_recovered_gap_guards(
+        _validated_recovered_gap_guards(chs),
+        discovered_paths,
+        protected_guard_paths,
+        project_root,
+        pattern,
+        now,
+    )
+    _store_recovered_gap_guards(chs, recovered_gap_guards)
+    if reclaimed_guard_paths:
+        _forget_reclaimed_recovered_gap_lifecycles(chs, reclaimed_guard_paths)
+        rt.log(
+            f"[{cid}] recovered-gap-guard-reclaimed "
+            f"count={len(reclaimed_guard_paths)}"
         )
-        if isinstance(size, int) and not isinstance(size, bool) and size >= 0
+    previous_sizes = _validated_transcript_sizes(chs)
+    previous_seen_at = _validated_transcript_seen_at(chs, previous_sizes, now)
+    known_state_persisted = isinstance(chs.get(TRANSCRIPT_KNOWN_AT_KEY), dict)
+    known_at = _validated_transcript_known_at(chs, now)
+    pending_paths = _validated_pending_transcripts(chs)
+    pending_failures = _validated_pending_failures(chs, pending_paths)
+    pending_since = _validated_pending_since(chs, pending_paths, now)
+    retired_transcripts = _validated_retired_transcripts(chs)
+    read_cache: dict[str, TranscriptReadResult] = {}
+
+    def read_candidate(candidate: TranscriptCandidate) -> TranscriptReadResult:
+        path = str(candidate.path)
+        if path not in read_cache:
+            read_cache[path] = assistant_blocks(candidate.path, project_root)
+        return read_cache[path]
+
+    reactivated_paths: list[str] = []
+    for candidate in candidates:
+        path = str(candidate.path)
+        retired = retired_transcripts.get(path)
+        if retired is None or candidate.size <= retired[0]:
+            continue
+        read_result = read_candidate(candidate)
+        if (
+            read_result.error is None
+            and not read_result.incomplete_tail
+            and read_result.semantic_end_offset > retired[0]
+        ):
+            retired_transcripts.pop(path, None)
+            reactivated_paths.append(path)
+            rt.log(f"[{cid}] transcript-retired-reactivated path={path}")
+    _store_retired_transcripts(chs, retired_transcripts)
+    retired_paths = set(retired_transcripts)
+    selectable_candidates = [
+        candidate
+        for candidate in candidates
+        if str(candidate.path) not in retired_paths
+    ]
+    previous_selected = chs.get(SELECTED_TRANSCRIPT_KEY)
+    persisted_selected = previous_selected
+    watermarks = delivered_watermarks(chs)
+    known_before = (
+        set(known_at)
+        | set(previous_sizes)
+        | set(watermarks)
+        | set(recovered_gap_guards)
+        | retired_paths
+    )
+
+    tracking_initialized = bool(
+        previous_sizes
+        or pending_paths
+        or watermarks
+        or recovered_gap_guards
+        or retired_transcripts
+        or (isinstance(previous_selected, str) and previous_selected)
+    )
+    # Upgrade boundary: pre-known_at state already has a selected/size/
+    # watermark authority.  Its first post-upgrade unseen path is still a true
+    # first observation; otherwise an unreadable debut is labelled
+    # unproven_stale once, persisted as known, then skipped forever.
+    known_state_initialized = known_state_persisted or tracking_initialized
+    bootstrapped_from_watermark = False
+    candidate_paths = {str(candidate.path) for candidate in candidates}
+    selectable_candidate_paths = {
+        str(candidate.path) for candidate in selectable_candidates
     }
-    tr = select_watch_transcript(candidates, previous_sizes)
-    chs["transcript_sizes"] = {
-        str(candidate.path): candidate.size for candidate in candidates
+    if (
+        not isinstance(previous_selected, str)
+        or previous_selected not in selectable_candidate_paths
+    ):
+        rechecked = (
+            None
+            if isinstance(previous_selected, str)
+            and previous_selected in retired_paths
+            else recheck_selected_transcript(
+                previous_selected,
+                project_root,
+                pattern,
+                set(previous_sizes) | set(watermarks) | set(recovered_gap_guards),
+            )
+        )
+        if rechecked is not None:
+            candidates.append(rechecked)
+            selectable_candidates.append(rechecked)
+            candidate_paths.add(str(rechecked.path))
+            selectable_candidate_paths.add(str(rechecked.path))
+            rt.log(f"[{cid}] transcript-recheck recovered path={rechecked.path}")
+    pending_paths = [
+        path
+        for path in pending_paths
+        if path in candidate_paths
+        or now
+        - (
+            previous_seen_at[path]
+            if path in previous_seen_at
+            else pending_since.get(path, 0.0)
+        )
+        <= TRANSCRIPT_HISTORY_TTL_SECS
+    ]
+    tracked_anchor_missing = (
+        isinstance(persisted_selected, str)
+        and persisted_selected in known_before
+        and persisted_selected not in selectable_candidate_paths
+    )
+    if (
+        not isinstance(previous_selected, str)
+        or not previous_selected
+        or previous_selected in retired_paths
+        or (
+            selectable_candidate_paths
+            and previous_selected not in selectable_candidate_paths
+        )
+    ):
+        previous_selected = None
+    selection_sizes = dict(previous_sizes)
+    for path, (size, _, _, _) in recovered_gap_guards.items():
+        selection_sizes.setdefault(path, size)
+    live_debut_paths: list[str] = []
+    if tracking_initialized:
+        debut_candidates = sorted(
+            (
+                candidate
+                for candidate in selectable_candidates
+                if str(candidate.path) not in selection_sizes
+            ),
+            key=lambda candidate: (-candidate.mtime, str(candidate.path)),
+        )
+        for candidate in debut_candidates:
+            path = str(candidate.path)
+            idle = now - candidate.mtime
+            if idle >= cfg.idle_quiet_secs:
+                rt.log(
+                    f"[{cid}] transcript-debut-skip reason=idle "
+                    f"idle_min={int(min(idle, 86400 * 365) // 60)} path={path}"
+                )
+                selection_sizes[path] = candidate.size
+                continue
+            read_result = read_candidate(candidate)
+            content_is_recent = any(
+                now - epoch < cfg.idle_quiet_secs
+                for epoch, _ in read_result.blocks
+            )
+            first_observation = known_state_initialized and path not in known_before
+            first_observation_without_readable_history = first_observation and (
+                read_result.error is not None or not read_result.blocks
+            )
+            if not content_is_recent and not first_observation_without_readable_history:
+                reason = (
+                    "known_stale_content"
+                    if path in known_before
+                    else "unproven_stale_content"
+                )
+                rt.log(f"[{cid}] transcript-debut-skip reason={reason} path={path}")
+                selection_sizes[path] = candidate.size
+                continue
+            if first_observation_without_readable_history:
+                selection_sizes[path] = candidate.size
+            live_debut_paths.append(path)
+        live_debut_set = set(live_debut_paths)
+        pending_paths = live_debut_paths + [
+            path for path in pending_paths if path not in live_debut_set
+        ]
+        for path in live_debut_paths:
+            pending_since.setdefault(path, now)
+    if reactivated_paths:
+        reactivated_set = set(reactivated_paths)
+        pending_paths = reactivated_paths + [
+            path for path in pending_paths if path not in reactivated_set
+        ]
+        for path in reactivated_paths:
+            pending_failures.pop(path, None)
+            pending_since[path] = now
+    watermarked_candidates = [
+        (watermarks[str(candidate.path)][1], str(candidate.path))
+        for candidate in selectable_candidates
+        if str(candidate.path) in watermarks
+    ]
+    if previous_selected is None and watermarked_candidates:
+        all_candidates_watermarked = len(watermarked_candidates) == len(
+            selectable_candidates
+        )
+        if all_candidates_watermarked or tracked_anchor_missing:
+            previous_selected = max(watermarked_candidates)[1]
+            bootstrapped_from_watermark = True
+    if bootstrapped_from_watermark:
+        for candidate in selectable_candidates:
+            path = str(candidate.path)
+            if path in watermarks:
+                selection_sizes.setdefault(path, candidate.size)
+    semantic_growth_paths: set[str] = set()
+    for candidate in selectable_candidates:
+        path = str(candidate.path)
+        guard = recovered_gap_guards.get(path)
+        prior_size = guard[0] if guard is not None else previous_sizes.get(path)
+        if prior_size is None or candidate.size <= prior_size:
+            continue
+        read_result = read_candidate(candidate)
+        if (
+            read_result.error is None
+            and not read_result.incomplete_tail
+            and read_result.semantic_end_offset > prior_size
+        ):
+            semantic_growth_paths.add(path)
+        elif read_result.error is None and not read_result.incomplete_tail:
+            if guard is not None:
+                _, confirmed_at, last_seen_at, absent_since = guard
+                recovered_gap_guards[path] = (
+                    max(prior_size, read_result.observed_size),
+                    confirmed_at,
+                    last_seen_at,
+                    absent_since,
+                )
+            rt.log(
+                f"[{cid}] transcript-growth-ignored reason=non-semantic "
+                f"path={path}"
+            )
+    _store_recovered_gap_guards(chs, recovered_gap_guards)
+    tr, selection_reason = select_watch_transcript_with_reason(
+        selectable_candidates,
+        selection_sizes,
+        previous_selected,
+        semantic_growth_paths,
+    )
+    if bootstrapped_from_watermark and selection_reason == "sticky":
+        selection_reason = (
+            "watermark_anchor_recovery"
+            if tracked_anchor_missing
+            else "watermark_bootstrap"
+        )
+    if tr is not None:
+        chs[SELECTED_TRANSCRIPT_KEY] = str(tr)
+    rt.log(f"[{cid}] transcript-select reason={selection_reason} path={tr}")
+    merged_sizes = dict(previous_sizes)
+    merged_seen_at = dict(previous_seen_at)
+    for candidate in candidates:
+        path = str(candidate.path)
+        read_result = read_cache.get(path)
+        if read_result is not None and (
+            read_result.error is not None or read_result.incomplete_tail
+        ):
+            # A torn/unreadable path has not established a trustworthy growth
+            # baseline.  Preserve the last complete baseline so continuous raw
+            # bytes cannot reset pending age or manufacture later activity.
+            continue
+        merged_sizes[path] = (
+            read_result.observed_size
+            if read_result is not None
+            else candidate.size
+        )
+        merged_seen_at[path] = now
+    priority_paths = (
+        ([str(tr)] if tr is not None else [])
+        + (
+            [previous_selected]
+            if isinstance(previous_selected, str) and previous_selected
+            else []
+        )
+        + pending_paths
+        + list(recovered_gap_guards)
+        + [
+            str(candidate.path)
+            for candidate in sorted(
+                candidates,
+                key=lambda candidate: (-candidate.mtime, str(candidate.path)),
+            )
+        ]
+        + [
+            path
+            for path, _ in sorted(
+                watermarks.items(), key=lambda item: (-item[1][1], item[0])
+            )
+        ]
+    )
+    merged_known_at = dict(known_at)
+    for candidate in candidates:
+        merged_known_at[str(candidate.path)] = now
+    merged_known_at = _bounded_transcript_known_at(
+        merged_known_at, now, priority_paths
+    )
+    merged_sizes, merged_seen_at = _bounded_transcript_history(
+        merged_sizes, merged_seen_at, now, priority_paths
+    )
+    bounded_pending_paths = _bounded_pending_transcripts(
+        pending_paths,
+        set(merged_sizes) | candidate_paths | set(pending_since),
+    )
+    bounded_pending_set = set(bounded_pending_paths)
+    dropped_pending_paths = [
+        path for path in pending_paths if path not in bounded_pending_set
+    ]
+    if dropped_pending_paths:
+        chs[PENDING_TRANSCRIPT_OVERFLOW_KEY] = {
+            "at": now,
+            "dropped": len(dropped_pending_paths),
+            "kept": len(bounded_pending_paths),
+        }
+        rt.log(
+            f"[{cid}] transcript-debut-overflow "
+            f"kept={len(bounded_pending_paths)} "
+            f"dropped={len(dropped_pending_paths)}"
+        )
+        last_overflow_alert = chs.get(
+            LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY, 0.0
+        )
+        if not _is_finite_nonnegative_number(last_overflow_alert):
+            last_overflow_alert = 0.0
+        if now - float(last_overflow_alert) >= cfg.realert_secs:
+            rt.alert(
+                ch,
+                "🚨 **릴레이 트랜스크립트 평가 큐 포화**\n\n"
+                f"한 번의 감시 틱에서 보존 가능한 신규 트랜스크립트 "
+                f"**{len(bounded_pending_paths)}개**를 초과해 "
+                f"**{len(dropped_pending_paths)}개**의 평가 권한을 유지하지 "
+                "못했습니다. 최신 후보를 우선 보존했지만 평가 커버리지가 "
+                "불완전하므로 정상 상태로 간주할 수 없습니다.\n\n"
+                f"런타임: {rt.dcserver_snapshot()}",
+            )
+            chs[LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY] = now
+    else:
+        chs.pop(PENDING_TRANSCRIPT_OVERFLOW_KEY, None)
+    pending_paths = bounded_pending_paths
+    failure_authorities = _read_failure_authority_paths(chs, pending_paths)
+    pending_failures = {
+        path: failures
+        for path, failures in pending_failures.items()
+        if path in failure_authorities
     }
+    pending_since = {
+        path: pending_since.get(path, now) for path in pending_paths
+    }
+    for path in pending_paths:
+        if path in semantic_growth_paths:
+            pending_since[path] = now
+    chs[TRANSCRIPT_SIZES_KEY] = merged_sizes
+    chs[TRANSCRIPT_SEEN_AT_KEY] = merged_seen_at
+    chs[TRANSCRIPT_KNOWN_AT_KEY] = merged_known_at
+    chs[PENDING_TRANSCRIPTS_KEY] = pending_paths
+    if pending_failures:
+        chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+    else:
+        chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+    if pending_since:
+        chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+    else:
+        chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+    candidate_by_path = {str(candidate.path): candidate for candidate in candidates}
+    expired_pending_paths: list[str] = []
+    for path in pending_paths:
+        candidate = candidate_by_path.get(path)
+        last_activity = (
+            candidate.mtime
+            if candidate is not None
+            else max(
+                previous_seen_at.get(path, 0.0),
+                pending_since.get(path, now),
+            )
+        )
+        pending_age = now - pending_since.get(path, now)
+        if (
+            now - last_activity >= cfg.idle_quiet_secs
+            or pending_age >= cfg.idle_quiet_secs
+        ):
+            expired_pending_paths.append(path)
+    if expired_pending_paths:
+        expired = set(expired_pending_paths)
+        for path in expired_pending_paths:
+            candidate = candidate_by_path.get(path)
+            size = candidate.size if candidate is not None else merged_sizes.get(path)
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                retired_transcripts[path] = (size, now)
+        _store_retired_transcripts(chs, retired_transcripts)
+        pending_paths = [path for path in pending_paths if path not in expired]
+        pending_failures = {
+            path: failures
+            for path, failures in pending_failures.items()
+            if path not in expired
+        }
+        pending_since = {
+            path: since
+            for path, since in pending_since.items()
+            if path not in expired
+        }
+        chs[PENDING_TRANSCRIPTS_KEY] = pending_paths
+        if pending_failures:
+            chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+        else:
+            chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+        if pending_since:
+            chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+        else:
+            chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+        rt.log(
+            f"[{cid}] transcript-pending-expired count={len(expired_pending_paths)}"
+        )
+        _alert_pending_retirement(
+            rt, ch, chs, expired_pending_paths, now, reason="idle"
+        )
+        _clear_gap_alert_without_recovery(
+            rt, chs, cid, expired_pending_paths
+        )
+        if tr is not None and str(tr) in expired:
+            chs.pop(SELECTED_TRANSCRIPT_KEY, None)
+            tr = None
+    retired_pending_paths = list(expired_pending_paths)
     selected = next((candidate for candidate in candidates if candidate.path == tr), None)
     # I1 selector sync (#4408 phase 2): compare the dcserver's asserted relay
     # bind (B) against F. Parallel to gap/coverage — its own cooldown key, wrapped
     # so it can never short-circuit or suppress the gap verdict below.
     f_growing = (
         selected is not None
-        and str(selected.path) in previous_sizes
-        and selected.size > previous_sizes[str(selected.path)]
+        and str(selected.path) in semantic_growth_paths
     )
     try:
         tick_selector_sync(rt, ch, chs, tr, f_growing, now)
     except Exception as e:  # noqa: BLE001 — selector sync must never suppress gap checks
         rt.log(f"[{cid}] selector-sync tick error: {type(e).__name__}: {e}")
-    idle = (now - selected.mtime) if selected else float("inf")
-    if idle >= cfg.idle_quiet_secs:
-        # Stale transcript: any "gap" is historic, not live. Never alert.
-        # (No self-uninstall here — see module docstring.)
-        rt.log(f"[{cid}] idle {int(min(idle, 86400 * 365) // 60)}m — no live session, skipping")
+
+    pending_set = set(pending_paths)
+    gap_owner_paths = _validated_gap_owner_transcripts(chs)
+    gap_owner_set = set(gap_owner_paths)
+    recovered_guard_paths = list(_validated_recovered_gap_guards(chs))
+    recovered_guard_set = set(recovered_guard_paths)
+    evaluation_candidates: list[TranscriptCandidate] = []
+    if selected is not None:
+        evaluation_candidates.append(selected)
+    growing_guard_paths = [
+        path for path in recovered_guard_paths if path in semantic_growth_paths
+    ]
+    for path in [*pending_paths, *gap_owner_paths, *growing_guard_paths]:
+        candidate = candidate_by_path.get(path)
+        if candidate is not None and candidate not in evaluation_candidates:
+            evaluation_candidates.append(candidate)
+    active_candidates: list[TranscriptCandidate] = []
+    for candidate in evaluation_candidates:
+        path = str(candidate.path)
+        idle = now - candidate.mtime
+        if (
+            path not in pending_set
+            and path not in gap_owner_set
+            and path not in recovered_guard_set
+            and idle >= cfg.idle_quiet_secs
+        ):
+            rt.log(
+                f"[{cid}] idle {int(min(idle, 86400 * 365) // 60)}m "
+                f"path={path} — no live session, skipping"
+            )
+            continue
+        active_candidates.append(candidate)
+    if not active_candidates:
+        if retired_pending_paths:
+            _clear_gap_alert_without_recovery(
+                rt, chs, cid, retired_pending_paths
+            )
         return
 
     hay = rt.discord_haystack(cid)
@@ -1598,22 +3135,240 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         return
     chs["read_failures"] = 0
 
-    blocks = assistant_blocks(tr) if tr else []
-    prior_delivered_ts = (
-        delivered_watermark_for_path(chs, tr) if tr is not None else 0.0
+    evaluated: list[tuple[TranscriptCandidate, Verdict]] = []
+    fresh_undelivered_by_path: dict[str, int] = {}
+    unreadable_paths: list[str] = []
+    escalated_pending_paths: list[str] = []
+    remaining_pending = list(pending_paths)
+    for candidate in active_candidates:
+        path = str(candidate.path)
+        read_result = read_candidate(candidate)
+        if read_result.error is not None or read_result.incomplete_tail:
+            if read_result.error is not None:
+                rt.log(
+                    f"[{cid}] transcript-read-error path={path} "
+                    f"error={read_result.error}"
+                )
+            else:
+                rt.log(f"[{cid}] transcript-read-incomplete path={path}")
+            owns_read_authority = (
+                path in pending_set
+                or path in gap_owner_set
+                or path in recovered_guard_set
+                or (selected is not None and candidate.path == selected.path)
+            )
+            if owns_read_authority:
+                if path not in pending_set and path not in pending_failures:
+                    rt.log(
+                        f"[{cid}] transcript-selected-read-failure-tracked "
+                        f"path={path}"
+                    )
+                failures = pending_failures.get(path, 0) + 1
+                pending_failures[path] = failures
+                if failures >= cfg.read_fail_alert_after:
+                    remaining_pending = [
+                        pending
+                        for pending in remaining_pending
+                        if pending != path
+                    ]
+                    pending_failures.pop(path, None)
+                    escalated_pending_paths.append(path)
+                    continue
+            unreadable_paths.append(path)
+            continue
+        pending_failures.pop(path, None)
+        prior_delivered_ts = delivered_watermark_for_path(chs, candidate.path)
+        verdict = evaluate(
+            read_result.blocks,
+            hay,
+            now,
+            cfg.grace_secs,
+            cfg.gap_alert_secs,
+            prior_delivered_ts,
+        )
+        if verdict.delivered_ts > prior_delivered_ts:
+            advance_delivered_watermark(
+                chs, candidate.path, verdict.delivered_ts, now
+            )
+        fresh_undelivered = sum(
+            1
+            for epoch, text in read_result.blocks
+            if now - epoch <= cfg.grace_secs
+            and epoch > verdict.delivered_ts
+            and not delivered(text, hay)
+        )
+        fresh_undelivered_by_path[path] = fresh_undelivered
+        if path in pending_set:
+            rt.log(
+                f"[{cid}] transcript-debut-eval path={path} "
+                f"state={verdict.state} lost={verdict.lost} "
+                f"fresh_undelivered={fresh_undelivered}"
+            )
+            if (
+                verdict.state == STATE_OK
+                and fresh_undelivered == 0
+                and read_result.blocks
+            ):
+                remaining_pending = [
+                    pending for pending in remaining_pending if pending != path
+                ]
+        evaluated.append((candidate, verdict))
+    remaining_pending = _bounded_pending_transcripts(
+        remaining_pending,
+        set(merged_sizes) | candidate_paths | set(pending_since),
     )
-    v = evaluate(
-        blocks,
-        hay,
-        now,
-        cfg.grace_secs,
-        cfg.gap_alert_secs,
-        prior_delivered_ts,
+    chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
+    failure_authorities = _read_failure_authority_paths(chs, remaining_pending)
+    pending_failures = {
+        path: failures
+        for path, failures in pending_failures.items()
+        if path in failure_authorities
+    }
+    pending_since = {
+        path: pending_since.get(path, now) for path in remaining_pending
+    }
+    if pending_failures:
+        chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+    else:
+        chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+    if pending_since:
+        chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+    else:
+        chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+    if escalated_pending_paths:
+        retired_pending_paths.extend(escalated_pending_paths)
+        escalated = set(escalated_pending_paths)
+        for path in escalated_pending_paths:
+            candidate = candidate_by_path.get(path)
+            size = candidate.size if candidate is not None else merged_sizes.get(path)
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                retired_transcripts[path] = (size, now)
+        _store_retired_transcripts(chs, retired_transcripts)
+        rt.log(
+            f"[{cid}] transcript-pending-escalated "
+            f"count={len(escalated_pending_paths)}"
+        )
+        _alert_pending_retirement(
+            rt,
+            ch,
+            chs,
+            escalated_pending_paths,
+            now,
+            reason="read_failure",
+        )
+        _clear_gap_alert_without_recovery(
+            rt, chs, cid, escalated_pending_paths
+        )
+        if tr is not None and str(tr) in escalated:
+            chs.pop(SELECTED_TRANSCRIPT_KEY, None)
+            tr = None
+    if not evaluated:
+        if retired_pending_paths:
+            _clear_gap_alert_without_recovery(
+                rt, chs, cid, retired_pending_paths
+            )
+        return
+    state_rank = {STATE_OK: 0, STATE_LAGGING: 1, STATE_GAP: 2}
+    verdict_candidate, v = max(
+        evaluated,
+        key=lambda item: (
+            state_rank[item[1].state],
+            item[1].gap_secs,
+            item[1].lost,
+            item[0].mtime,
+            str(item[0].path),
+        ),
     )
-    if tr is not None and v.delivered_ts > prior_delivered_ts:
-        advance_delivered_watermark(chs, tr, v.delivered_ts, now)
+    verdict_path = str(verdict_candidate.path)
+    previous_gap_owners = _validated_gap_owner_transcripts(chs)
+    evaluated_paths = {str(candidate.path) for candidate, _ in evaluated}
+    incident_open = bool(
+        previous_gap_owners
+        or chs.get("alerting")
+        or chs.get("gap_since")
+        or chs.get("issue_url")
+    )
+    recovered_gap_guards = _validated_recovered_gap_guards(chs)
+    rejected_recoveries: list[str] = []
+    for candidate, verdict in evaluated:
+        path = str(candidate.path)
+        owns_guard = path in recovered_gap_guards
+        recovering_gap_owner = path in previous_gap_owners
+        if verdict.state != STATE_OK or not (owns_guard or recovering_gap_owner):
+            continue
+        if fresh_undelivered_by_path.get(path, 0) > 0:
+            if recovering_gap_owner:
+                rejected_recoveries.append(path)
+            continue
+        if delivered_watermark_for_path(chs, path) <= 0:
+            if recovering_gap_owner:
+                rejected_recoveries.append(path)
+            continue
+        recovered_gap_guards, admitted = _upsert_recovered_gap_guard(
+            recovered_gap_guards,
+            path,
+            read_cache[path].observed_size,
+            now,
+        )
+        if not admitted and recovering_gap_owner:
+            rejected_recoveries.append(path)
+    _store_recovered_gap_guards(chs, recovered_gap_guards)
+
+    next_gap_owners = [
+        path for path in previous_gap_owners if path not in evaluated_paths
+    ]
+    for candidate, verdict in evaluated:
+        path = str(candidate.path)
+        unresolved = verdict.state == STATE_GAP or (
+            incident_open and verdict.state == STATE_LAGGING
+        )
+        if unresolved and path not in next_gap_owners:
+            next_gap_owners.append(path)
+    for path in rejected_recoveries:
+        if path not in next_gap_owners:
+            next_gap_owners.append(path)
+    if rejected_recoveries:
+        rt.log(
+            f"[{cid}] recovered-gap-guard-capacity-blocked "
+            f"count={len(rejected_recoveries)} — recovery remains open"
+        )
+    next_gap_owners = _store_gap_owner_transcripts(chs, next_gap_owners)
+    if next_gap_owners and chs.get(GAP_TRANSCRIPT_KEY) not in next_gap_owners:
+        chs[GAP_TRANSCRIPT_KEY] = (
+            verdict_path if verdict_path in next_gap_owners else next_gap_owners[0]
+        )
+    if unreadable_paths and v.state == STATE_OK:
+        rt.log(
+            f"[{cid}] transcript-verdict-incomplete "
+            f"read_errors={len(unreadable_paths)}"
+        )
+        return
+    if retired_pending_paths and v.state == STATE_OK:
+        if not next_gap_owners:
+            if chs.get("alerting"):
+                rt.log(
+                    f"[{cid}] alert state transitioned to unresolved transcript "
+                    "escalation — no clean recovery claimed"
+                )
+            chs.pop("alerting", None)
+            chs.pop("gap_since", None)
+            chs.pop("issue_url", None)
+            chs.pop(GAP_TRANSCRIPT_KEY, None)
+            chs.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
+        rt.log(
+            f"[{cid}] transcript-verdict-unresolved-retirement "
+            f"retired={len(retired_pending_paths)}"
+        )
+        return
+    if next_gap_owners and v.state == STATE_OK:
+        rt.log(
+            f"[{cid}] transcript-verdict-incomplete "
+            f"unresolved_gap_owners={len(next_gap_owners)}"
+        )
+        return
 
     if v.state == STATE_GAP:
+        chs[GAP_TRANSCRIPT_KEY] = verdict_path
         if rt.in_deploy_window(now):
             rt.log(
                 f"[{cid}] gap lost={v.lost} suppressed — deploy window "
@@ -1647,12 +3402,18 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             )
             chs["last_alert"] = now
             chs["alerting"] = True
-            rt.log(f"[{cid}] ALERT lost={v.lost} gap_min={gap_min}")
+            rt.log(
+                f"[{cid}] ALERT path={verdict_path} lost={v.lost} gap_min={gap_min}"
+            )
         else:
-            rt.log(f"[{cid}] gap persists lost={v.lost} (alert suppressed, cooldown)")
+            rt.log(
+                f"[{cid}] gap persists path={verdict_path} lost={v.lost} "
+                "(alert suppressed, cooldown)"
+            )
     elif v.state == STATE_LAGGING:
         rt.log(
-            f"[{cid}] lagging lost={v.lost} gap={int(v.gap_secs)}s "
+            f"[{cid}] lagging path={verdict_path} lost={v.lost} "
+            f"gap={int(v.gap_secs)}s "
             f"(< {cfg.gap_alert_secs}s alert threshold — relay batching, not down)"
         )
     else:
@@ -1674,7 +3435,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         chs.pop("alerting", None)
         chs.pop("gap_since", None)
         chs.pop("issue_url", None)
-        rt.log(f"[{cid}] ok blocks={v.blocks} stale={v.stale} lost=0")
+        chs.pop(GAP_TRANSCRIPT_KEY, None)
+        chs.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
+        rt.log(
+            f"[{cid}] ok path={verdict_path} blocks={v.blocks} "
+            f"stale={v.stale} lost=0"
+        )
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
