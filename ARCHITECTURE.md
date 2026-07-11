@@ -486,10 +486,12 @@ src/
 │   │   │   ├── save_store/
 │   │   │   │   └── identity_gate.rs
 │   │   │   ├── stall_recovery_tests/
-│   │   │   │   └── flake_isolation_4361.rs
+│   │   │   │   ├── flake_isolation_4361.rs
+│   │   │   │   └── flake_isolation_4422.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
 │   │   │   ├── finalizer_identity.rs
+│   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
