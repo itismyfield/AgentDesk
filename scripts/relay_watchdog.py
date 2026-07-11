@@ -96,6 +96,7 @@ SELECTOR_PATH_UNCOMPARABLE = "uncomparable"
 
 DELIVERED_WATERMARKS_KEY = "delivered_watermarks"
 MAX_DELIVERED_WATERMARKS = 16
+SELECTED_TRANSCRIPT_KEY = "selected_transcript"
 
 PG_TOPOLOGY_TUNNEL = "tunnel"
 PG_TOPOLOGY_DIRECT = "direct"
@@ -365,25 +366,58 @@ def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
 
 
 def select_watch_transcript(
-    candidates: list[TranscriptCandidate], previous_sizes: Mapping[str, int]
+    candidates: list[TranscriptCandidate],
+    previous_sizes: Mapping[str, int],
+    previous_selected: str | Path | None = None,
 ) -> Path | None:
-    """Choose a transcript by observed growth, falling back to newest mtime.
+    """Choose by observed growth, then retain the previously selected path.
 
     A newly discovered candidate has no growth proof yet.  Once a prior size
     exists, any file that grew wins over a newer-but-stagnant file; mtime and
-    path provide deterministic tie-breaking within the chosen pool.  The
-    caller owns I/O and persistence, keeping this selector pure.
+    path provide deterministic tie-breaking within the growing pool.  Without
+    growth, a still-present previous selection is sticky: mtime-only touches on
+    an old continuation transcript are not evidence that it became live again.
+    The caller owns I/O and persistence, keeping this selector pure.
     """
+    return select_watch_transcript_with_reason(
+        candidates, previous_sizes, previous_selected
+    )[0]
+
+
+def select_watch_transcript_with_reason(
+    candidates: list[TranscriptCandidate],
+    previous_sizes: Mapping[str, int],
+    previous_selected: object = None,
+) -> tuple[Path | None, str]:
     if not candidates:
-        return None
+        return None, "no_candidates"
     growing = [
         candidate
         for candidate in candidates
         if str(candidate.path) in previous_sizes
         and candidate.size > previous_sizes[str(candidate.path)]
     ]
-    pool = growing or candidates
-    return max(pool, key=lambda candidate: (candidate.mtime, str(candidate.path))).path
+    if growing:
+        selected = max(
+            growing, key=lambda candidate: (candidate.mtime, str(candidate.path))
+        )
+        return selected.path, "growth"
+    prior = (
+        str(previous_selected)
+        if isinstance(previous_selected, (str, Path)) and str(previous_selected)
+        else None
+    )
+    if prior is not None:
+        retained = next(
+            (candidate for candidate in candidates if str(candidate.path) == prior),
+            None,
+        )
+        if retained is not None:
+            return retained.path, "sticky"
+    selected = max(
+        candidates, key=lambda candidate: (candidate.mtime, str(candidate.path))
+    )
+    return selected.path, "prior_missing" if prior is not None else "bootstrap"
 
 
 def newest_transcript(dirs: list[Path]) -> Path | None:
@@ -1553,7 +1587,27 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         )
         if isinstance(size, int) and not isinstance(size, bool) and size >= 0
     }
-    tr = select_watch_transcript(candidates, previous_sizes)
+    previous_selected = chs.get(SELECTED_TRANSCRIPT_KEY)
+    bootstrapped_from_watermark = False
+    if not isinstance(previous_selected, str) or not previous_selected:
+        previous_selected = None
+        watermarks = delivered_watermarks(chs)
+        watermarked_candidates = [
+            (watermarks[str(candidate.path)][1], str(candidate.path))
+            for candidate in candidates
+            if str(candidate.path) in watermarks
+        ]
+        if watermarked_candidates:
+            previous_selected = max(watermarked_candidates)[1]
+            bootstrapped_from_watermark = True
+    tr, selection_reason = select_watch_transcript_with_reason(
+        candidates, previous_sizes, previous_selected
+    )
+    if bootstrapped_from_watermark and selection_reason == "sticky":
+        selection_reason = "watermark_bootstrap"
+    if tr is not None:
+        chs[SELECTED_TRANSCRIPT_KEY] = str(tr)
+    rt.log(f"[{cid}] transcript-select reason={selection_reason} path={tr}")
     chs["transcript_sizes"] = {
         str(candidate.path): candidate.size for candidate in candidates
     }

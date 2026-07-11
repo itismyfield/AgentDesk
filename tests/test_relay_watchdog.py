@@ -37,6 +37,7 @@ from scripts.relay_watchdog import (
     PG_UNKNOWN,
     PG_UPSTREAM_DOWN,
     SELECTOR_DIVERGED,
+    SELECTED_TRANSCRIPT_KEY,
     SELECTOR_SYNCED,
     SELECTOR_UNKNOWN,
     STATE_GAP,
@@ -69,6 +70,7 @@ from scripts.relay_watchdog import (
     project_slug,
     save_state,
     select_watch_transcript,
+    select_watch_transcript_with_reason,
     selector_divergence_confirmed,
     tick_channel,
     tick_pg_tunnel,
@@ -182,6 +184,39 @@ class TranscriptResolutionTests(unittest.TestCase):
             [older, newer], {str(older.path): 100, str(newer.path): 200}
         )
         self.assertEqual(selected, newer.path)
+
+    def test_invariant_4435_no_growth_retains_previous_selection(self):
+        current = TranscriptCandidate(Path("/tmp/current.jsonl"), 100, 100.0)
+        touched_old = TranscriptCandidate(Path("/tmp/old.jsonl"), 200, 200.0)
+        selected, reason = select_watch_transcript_with_reason(
+            [current, touched_old],
+            {str(current.path): 100, str(touched_old.path): 200},
+            str(current.path),
+        )
+        self.assertEqual(selected, current.path)
+        self.assertEqual(reason, "sticky")
+
+    def test_invariant_4435_missing_previous_selection_bootstraps_newest(self):
+        older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
+        newer = TranscriptCandidate(Path("/tmp/newer.jsonl"), 200, 200.0)
+        selected, reason = select_watch_transcript_with_reason(
+            [older, newer],
+            {str(older.path): 100, str(newer.path): 200},
+            "/tmp/disappeared.jsonl",
+        )
+        self.assertEqual(selected, newer.path)
+        self.assertEqual(reason, "prior_missing")
+
+    def test_invariant_4435_corrupt_previous_selection_fails_open(self):
+        older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
+        newer = TranscriptCandidate(Path("/tmp/newer.jsonl"), 200, 200.0)
+        selected, reason = select_watch_transcript_with_reason(
+            [older, newer],
+            {str(older.path): 100, str(newer.path): 200},
+            True,
+        )
+        self.assertEqual(selected, newer.path)
+        self.assertEqual(reason, "bootstrap")
 
     def test_first_observation_uses_mtime_fallback(self):
         older = TranscriptCandidate(Path("/tmp/older.jsonl"), 100, 100.0)
@@ -1363,6 +1398,7 @@ class TickChannelTests(unittest.TestCase):
 
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.alerts, [], "first tick must use mtime fallback")
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(stagnant))
 
         with growing.open("a", encoding="utf-8") as f:
             f.write("\n")
@@ -1373,6 +1409,10 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(growing))
+        self.assertTrue(
+            any("transcript-select reason=growth" in line for line in rt.log_lines)
+        )
 
     def _grow_selected_transcript(self) -> None:
         tr = self.proj_dir / "s.jsonl"
@@ -1583,10 +1623,19 @@ class TickChannelTests(unittest.TestCase):
         rt = self.make_rt()
         rt.haystack = norm("fresh block")
         transcript = self.proj_dir / "s.jsonl"
-        state = {"999": {"transcript_sizes": {str(transcript): "not-an-int"}}}
+        state = {
+            "999": {
+                "transcript_sizes": {str(transcript): "not-an-int"},
+                SELECTED_TRANSCRIPT_KEY: True,
+            }
+        }
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.alerts, [])
         self.assertIsInstance(state["999"]["transcript_sizes"][str(transcript)], int)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(transcript))
+        self.assertTrue(
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
+        )
 
     def test_invariant_4435_all_stale_restart_keeps_delivered_anchor(self):
         anchor = float(int(self.now - 2000))
@@ -1613,6 +1662,105 @@ class TickChannelTests(unittest.TestCase):
             delivered_watermark_for_path(restarted_state["999"], transcript), anchor
         )
         self.assertTrue(any("stale=1 lost=0" in line for line in restarted.log_lines))
+
+    def test_invariant_4435_restart_ignores_old_transcript_mtime_only_touch(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "confirmed current delivery") + "\n", encoding="utf-8"
+        )
+        touched_old.write_text(
+            record(anchor - 1000, "historic missing output") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(touched_old, (self.now - 100, self.now - 100))
+        os.utime(current, (self.now, self.now))
+
+        first = self.make_rt()
+        first.haystack = norm("confirmed current delivery")
+        state: dict = {}
+        tick_channel(first, TICK_CHANNEL, state, self.now)
+        self.assertEqual(first.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], current), anchor
+        )
+
+        state_path = self.root / "sticky-state.json"
+        save_state(state_path, state)
+        restarted_state = load_state(state_path)
+        os.utime(touched_old, (self.now + 1, self.now + 1))
+
+        restarted = self.make_rt()
+        restarted.haystack = ""
+        tick_channel(restarted, TICK_CHANNEL, restarted_state, self.now + 2)
+        self.assertEqual(restarted.alerts, [])
+        self.assertEqual(
+            restarted_state["999"][SELECTED_TRANSCRIPT_KEY], str(current)
+        )
+        self.assertTrue(
+            any("transcript-select reason=sticky" in line for line in restarted.log_lines)
+        )
+
+    def test_invariant_4435_existing_watermark_bootstraps_sticky_selection(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+        current.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "confirmed current"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        touched_old.write_text(
+            current.read_text(encoding="utf-8").replace("confirmed current", "old"),
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {
+            "999": {
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(touched_old): touched_old.stat().st_size,
+                }
+            }
+        }
+        advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
+
+        rt = self.make_rt()
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any(
+                "transcript-select reason=watermark_bootstrap" in line
+                for line in rt.log_lines
+            )
+        )
 
     def test_invariant_4435_older_haystack_cannot_regress_persisted_anchor(self):
         older = float(int(self.now - 3000))
