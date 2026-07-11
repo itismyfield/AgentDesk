@@ -425,6 +425,31 @@
       "path": "migrations/postgres/0082_task_notification_card_state.sql",
       "sha256": "a0c69739f62c445823d0d8a1bc0b8715d76a251ca61c4ea91badbfc324232ca0",
       "version": 82
+    },
+    {
+      "path": "migrations/postgres/0083_scheduled_messages.sql",
+      "sha256": "94d03ed85d5d9db3dffeff067da22e6a23cf650171d1e3430c39e12a9be70e66",
+      "version": 83
+    },
+    {
+      "path": "migrations/postgres/0084_scheduled_message_notify_default.sql",
+      "sha256": "5e49faf014ac91328d721bb18b35b5b99cf8eba93dfca15f2d41509a2331afc2",
+      "version": 84
+    },
+    {
+      "path": "migrations/postgres/0085_scheduled_message_delivery_handoff_state.sql",
+      "sha256": "37b08c7ba3a5f0ede52b5d06077255cbc3cba9066c40d2bf8c565034b8026fcc",
+      "version": 85
+    },
+    {
+      "path": "migrations/postgres/0086_scheduled_message_resume_anchor_not_null.sql",
+      "sha256": "3213ed7f91fa9531fb304ee90cd1c24fae1ca230d73dab8982fb832bc09908c6",
+      "version": 86
+    },
+    {
+      "path": "migrations/postgres/0087_scheduled_message_launch_commit_and_runtime_defer.sql",
+      "sha256": "dffcc1786298a319875f7a1113b7c7d9a3ea538f2111537daef1f13dae0b2877",
+      "version": 87
     }
   ],
   "version": 1

@@ -47,6 +47,10 @@ pub(super) fn discord_turn_id(channel_id: ChannelId, user_msg_id: MessageId) -> 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Every error from the reserved headless-start API is a pre-spawn outcome:
+/// neither the provider process nor its turn bridge has been spawned. Once the
+/// API returns `Started`, callers must treat any later persistence failure as
+/// ambiguous/fail-closed rather than retrying the external turn.
 pub(crate) enum HeadlessTurnStartError {
     Conflict(String),
     Internal(String),

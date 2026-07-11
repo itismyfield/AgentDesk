@@ -100,6 +100,7 @@ pub mod remote_stub;
 pub mod retrospectives;
 pub mod review_decision;
 pub mod routines;
+pub mod scheduled_messages;
 pub mod service_error;
 pub mod session_activity;
 pub(crate) mod session_selector_validity;

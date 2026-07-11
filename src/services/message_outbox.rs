@@ -426,6 +426,89 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
     enqueue_outbox_pg_returning_id_with_ttl_and_cancel(pool, message, dedupe_ttl_secs, None).await
 }
 
+/// Enqueue an event whose dedupe identity must survive indefinitely.
+///
+/// This is intentionally narrower than the TTL helpers: callers must supply a
+/// reason/session identity that names one immutable event (for example one
+/// scheduled-message fire slot). The active partial unique index keeps the key
+/// while the row is pending or sent. A failed row releases the key so an
+/// operator or recovery path may stage a genuine retry. On duplicate, the
+/// existing row id is returned so callers retain an auditable handoff link.
+pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+) -> Result<i64, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
+    let reason_code = normalized_reason_code(message.reason_code);
+    let session_key = normalized_session_key(message.target, message.session_key);
+    let dedupe_key = dedupe_key_for_message(
+        message.target,
+        message.content,
+        reason_code,
+        session_key.as_deref(),
+    );
+
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO message_outbox
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+         ON CONFLICT (dedupe_key)
+             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+         DO UPDATE SET dedupe_expires_at = NULL
+         RETURNING id",
+    )
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(session_key.as_deref())
+    .bind(dedupe_key.as_deref())
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Transaction-scoped variant of the persistent handoff helper.
+///
+/// Callers use this when the outbox reservation and their own state transition
+/// must commit atomically. Keeping the same dedupe identity as the pool helper
+/// makes crash recovery and competing workers converge on one durable row.
+pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+) -> Result<i64, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
+    let reason_code = normalized_reason_code(message.reason_code);
+    let session_key = normalized_session_key(message.target, message.session_key);
+    let dedupe_key = dedupe_key_for_message(
+        message.target,
+        message.content,
+        reason_code,
+        session_key.as_deref(),
+    );
+
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO message_outbox
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+         ON CONFLICT (dedupe_key)
+             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+         DO UPDATE SET dedupe_expires_at = NULL
+         RETURNING id",
+    )
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(session_key.as_deref())
+    .bind(dedupe_key.as_deref())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
 pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
     pool: &PgPool,
     message: OutboxMessage<'_>,
@@ -694,7 +777,10 @@ pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64
     let sent = sqlx::query(
         "DELETE FROM message_outbox
           WHERE status = 'sent'
-            AND created_at < NOW() - INTERVAL '30 days'",
+            AND created_at < NOW() - INTERVAL '30 days'
+            -- NULL expiry + a live dedupe key is an intentional permanent
+            -- sentinel (scheduled-message fire slots use this contract).
+            AND NOT (dedupe_key IS NOT NULL AND dedupe_expires_at IS NULL)",
     )
     .execute(pool)
     .await?
@@ -848,6 +934,17 @@ mod postgres_source_contract_tests {
         }
     }
 
+    fn scheduled_message_for_slot(reason_code: &str) -> OutboxMessage<'_> {
+        OutboxMessage {
+            target: "channel:4424",
+            content: "scheduled announcement",
+            bot: "announce",
+            source: "scheduled_message",
+            reason_code: Some(reason_code),
+            session_key: None,
+        }
+    }
+
     fn assert_source_error<T>(result: Result<T, OutboxEnqueueError>) {
         assert!(matches!(
             result,
@@ -885,6 +982,9 @@ mod postgres_source_contract_tests {
             )
             .await,
         );
+        assert_source_error(
+            enqueue_outbox_pg_returning_id_with_persistent_dedupe(&pool, forbidden_message()).await,
+        );
         assert_source_error(enqueue_outbox_pg_with_ttl(&pool, forbidden_message(), 60).await);
         assert_source_error(enqueue_outbox_pg(&pool, forbidden_message()).await);
         assert_source_error(enqueue_outbox_best_effort(Some(&pool), forbidden_message()).await);
@@ -910,6 +1010,7 @@ mod postgres_source_contract_tests {
             "system",
             "lifecycle_notifier",
             "routine-runtime",
+            "scheduled_message",
             "headless_turn",
             "slo_alerter",
             "quality_regression_alerter",
@@ -972,6 +1073,60 @@ mod postgres_source_contract_tests {
             .expect("enqueue fixed lifecycle source")
         );
         assert_eq!(row_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_dedupe_returns_old_row_and_distinct_slot_inserts_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_message_outbox_persistent_dedupe",
+            "message_outbox persistent dedupe tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        let first_id = enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &pool,
+            scheduled_message_for_slot("scheduled_message:v1:test:1000"),
+        )
+        .await
+        .expect("enqueue first scheduled-message slot");
+        sqlx::query(
+            "UPDATE message_outbox
+                SET created_at = NOW() - INTERVAL '2 hours'
+              WHERE id = $1",
+        )
+        .bind(first_id)
+        .execute(&pool)
+        .await
+        .expect("age first outbox row beyond the legacy TTL");
+
+        let duplicate_id = enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &pool,
+            scheduled_message_for_slot("scheduled_message:v1:test:1000"),
+        )
+        .await
+        .expect("dedupe the same old scheduled-message slot");
+        assert_eq!(duplicate_id, first_id);
+        assert_eq!(row_count(&pool).await, 1);
+        let dedupe_expires_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT dedupe_expires_at FROM message_outbox WHERE id = $1")
+                .bind(first_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read persistent dedupe expiry");
+        assert_eq!(dedupe_expires_at, None);
+
+        let next_slot_id = enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &pool,
+            scheduled_message_for_slot("scheduled_message:v1:test:2000"),
+        )
+        .await
+        .expect("enqueue a distinct scheduled-message slot");
+        assert_ne!(next_slot_id, first_id);
+        assert_eq!(row_count(&pool).await, 2);
     }
 }
 
@@ -1036,6 +1191,69 @@ mod postgres_held_gc_tests {
             .await
             .expect("query live held row")
         );
+    }
+
+    #[tokio::test]
+    async fn gc_preserves_persistent_dedupe_sentinels_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_message_outbox_gc_persistent_dedupe",
+            "message_outbox persistent dedupe GC contract",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        let persistent_id = enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &pool,
+            OutboxMessage {
+                target: "channel:4465",
+                content: "persistent",
+                bot: "notify",
+                source: "scheduled_message",
+                reason_code: Some("scheduled_message:v1:gc-test:slot"),
+                session_key: None,
+            },
+        )
+        .await
+        .expect("enqueue persistent sentinel");
+        let ordinary_id = enqueue_outbox_pg_returning_id_with_ttl(
+            &pool,
+            OutboxMessage {
+                target: "channel:4465",
+                content: "ordinary",
+                bot: "notify",
+                source: "system",
+                reason_code: None,
+                session_key: None,
+            },
+            0,
+        )
+        .await
+        .expect("enqueue ordinary row")
+        .expect("ordinary row inserted");
+        sqlx::query(
+            "UPDATE message_outbox
+             SET status = 'sent', created_at = NOW() - INTERVAL '31 days',
+                 sent_at = NOW() - INTERVAL '31 days'
+             WHERE id = ANY($1)",
+        )
+        .bind(vec![persistent_id, ordinary_id])
+        .execute(&pool)
+        .await
+        .expect("age sent outbox rows");
+
+        let (held_pruned, failed_pruned, sent_pruned) =
+            gc_stale_outbox_rows(&pool).await.expect("run outbox gc");
+        assert_eq!((held_pruned, failed_pruned, sent_pruned), (0, 0, 1));
+
+        let remaining: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM message_outbox ORDER BY content")
+                .fetch_all(&pool)
+                .await
+                .expect("read GC survivors");
+        assert_eq!(remaining, vec!["persistent"]);
     }
 }
 

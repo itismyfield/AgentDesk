@@ -17,6 +17,8 @@
 > uses the protected `/api/message-outbox/monitor-alerts` durable enqueue route,
 > so a crash before its local commit retries the same obligation.)
 
+> Last refreshed: 2026-07-11 (manual: scheduled-message source registration and touch gate).
+
 > Last refreshed: 2026-07-11 (#4247 S0 review follow-up — removing the sole
 > destructive reaction-removal intake route also retires the unreachable
 > `AlreadyStopping` reaction-control reply reason. The live
@@ -116,6 +118,12 @@ HTTP path.
 | `shared_outbound_deduper()` | `outbound/mod.rs` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
 | `validate_send_source_for(...)` / `SendCallerClass` | `outbound/source_registry.rs` | active — shared by enqueue and send gates | Exact, case-sensitive source authorization with one typed static policy table plus the unchanged known-agent fallback. New internal producers must be registered here and remain caller-class scoped; `message_outbox` validates as `LoopbackInternal` before DB work. |
 | **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | **all six owners structurally routed; rollout flags retired in #3998 S1-f2; rollback is git revert** | The single delivery entry point routes the turn-output surfaces through the controller (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay) whenever each owner’s structural conditions are satisfied. A4/A5 route anchored short-replace and anchored long-chunk-with-delete terminal delivery through the controller; anchored long chunks use `SendNewChunks { delete_anchor: true }` (chunks first, best-effort anchor delete after full success, delete failure records cleanup but stays Delivered). The watcher no-placeholder new-message direct fallback remains legacy because anchor-less fresh-send is not yet a controller verb. The retained exclusions are empty body, `NoRange` deliver-without-advance, headless enqueue, watcher no-placeholder new-message fresh-send, and the TUI completion gate (see §8.1.1). A2b (`session_relay_sink` short-replace) owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The held lease is RAII-released on future cancel/panic via the internal `ControllerLeaseGuard` (review-fix H1 r2), matching legacy `SinkDeliveryLeaseGuard::Drop`; the guard now keys acquire/renew/commit/release on `DeliveryLeaseKey` instead of `TurnKey`, preserving non-zero turn identity while disambiguating id-0 rows with inflight `started_at` + `turn_start_offset` when both are present and otherwise using the explicit degenerate legacy fallback. If no `lease_key` is supplied, the controller uses the existing markerless path and never commits/releases a lease. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. |
+
+`scheduled_message` is a `LoopbackInternal`-only static source used by scheduled
+push delivery and agent `push_raw` fallback enqueue. Normal agent delivery is a
+headless-turn relay and does not enqueue this source. Any change to that producer
+label or caller class must update `outbound/source_registry.rs`, its exact-label
+and caller-class tests, and this coverage page in the same change.
 
 `DeliveryOutcome::Delivered` replace metadata is additive: `FreshFallbackAfterEditFailure` carries the fallback replacement anchor when Discord returns one, so A6a recovery can re-record D1 idempotency while non-recovery owners continue to ignore the extra field.
 

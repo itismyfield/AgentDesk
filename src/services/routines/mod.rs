@@ -31,3 +31,4 @@ pub use store::{
     DeleteRoutineResult, NewRoutine, RoutinePatch, RoutineStore,
     is_resume_routine_requires_next_due_at, validate_routine_schedule,
 };
+pub(crate) use store::{next_due_after, next_due_after_anchor};

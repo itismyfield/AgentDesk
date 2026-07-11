@@ -1344,6 +1344,23 @@ mod recovery_context_take_order_tests {
     }
 
     #[test]
+    fn reserved_headless_start_has_no_post_spawn_error_path() {
+        let module_src = include_str!("headless_turn.rs");
+        let spawn_pos = module_src
+            .find("tokio::task::spawn_blocking")
+            .expect("headless provider spawn boundary exists");
+        let started_return = module_src[spawn_pos..]
+            .find("status: HeadlessTurnStartStatus::Started")
+            .map(|offset| spawn_pos + offset)
+            .expect("headless Started return exists after provider spawn");
+        let post_spawn = &module_src[spawn_pos..started_return];
+        assert!(
+            !post_spawn.contains("HeadlessTurnStartError::"),
+            "post-spawn failures must flow through the bridge, never a retryable start error"
+        );
+    }
+
+    #[test]
     fn recovery_context_survives_headless_goal_lifecycle_consumed_return() {
         let root = tempfile::tempdir().expect("create temp runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());

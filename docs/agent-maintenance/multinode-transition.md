@@ -10,6 +10,8 @@
 >
 > Last refreshed: 2026-07-11 (#4424 — message_outbox source authorization and leader-owned durable failed-row recovery).
 >
+> Last refreshed: 2026-07-11 (manual: scheduled-message leader worker ownership and touch gate).
+>
 > PR #3456 made the `src/server/worker_registry.rs` worker-lifecycle log fields
 > consistent: every started / stopped / future-exited / self-fenced /
 > supervisor-shutdown tracing event now emits the same structured spec fields
@@ -83,21 +85,33 @@
   worker inventory, with `dispatch_outbox_loop` at
   `src/server/worker_registry.rs:206`. `src/server/mod.rs:201` creates the
   registry, `src/server/mod.rs:207` runs boot-only steps, and
-  `src/server/mod.rs:208` starts workers after boot reconcile.
+  `src/server/mod.rs:208` starts workers after boot reconcile. The
+  `ScheduledMessages` spec registers `scheduled_message_loop` as
+  `WorkerExecutionScope::LeaderOnly`; its durable claim/recovery implementation
+  lives in `src/services/scheduled_messages.rs` and
+  `src/db/scheduled_messages.rs`.
 - legacy_modules: none. Workers are centrally registered, but most entries still
   assume that every server process may start its local loop.
 - do_not_edit_without_migration_plan: `src/server/worker_registry.rs` and the
-  worker starts in `src/server/mod.rs`.
+  worker starts in `src/server/mod.rs`. Scheduled-message ownership changes must
+  review `src/services/scheduled_messages.rs`,
+  `src/db/scheduled_messages.rs`, and the `ScheduledMessages` registry spec
+  together; do not make the loop worker-local without a replacement ownership
+  and Discord side-effect plan.
 - active_callsite_coverage: partial. Cluster identity and heartbeat are persisted
   through `src/server/cluster.rs`, and `src/server/worker_registry.rs` now
   classifies supervised workers as `leader_only` or `worker_local` before
   startup. `policy_tick_loop` already uses a PG advisory lock at
   `src/server/mod.rs:297`, and `github_sync_loop` uses one at
   `src/server/mod.rs:2798`; leader lease loss still needs per-loop self-fencing
-  before every side effect is considered failover-safe.
+  before every side effect is considered failover-safe. Scheduled messages are
+  leader-started and additionally fence each delivery attempt with a Postgres
+  lease, a per-attempt `claim_token`, and a durable fire-slot uniqueness key.
 - invariants: `singleton_on_leader`, `pg_lease_backed_claim`.
 - allowed_changes: `bugfix` for existing workers. `new_feature` workers must add
   a leader-only, lease-backed, or worker-local classification in the same change.
+  Any scheduled-message worker/service ownership change must refresh this page
+  in the same change.
 - tests: leader failover, duplicate singleton worker suppression, and the #884
   chaos suite.
 - related_issues: #876, #877, #878, #884.

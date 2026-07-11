@@ -6,7 +6,7 @@
 //! |--------------------------|-----------|-----------------------------------|
 //! | `agent_quality_event`    | 90 days   | Monthly aggregate, then DELETE    |
 //! | `session_transcripts`    | 90 days   | Archive-table copy, then DELETE   |
-//! | `message_outbox` (sent)  | 7 days    | DELETE                            |
+//! | `message_outbox` (sent)  | 7 days    | DELETE (durable sentinels exempt) |
 //! | `auto_queue_entries`     | 30 days   | DELETE (status='completed')       |
 //! | `task_dispatches`        | 90 days   | Monthly aggregate, then DELETE    |
 //! | `turn_lifecycle_events`  | 30 days   | DELETE (on `created_at`)          |
@@ -255,7 +255,8 @@ async fn retain_session_transcripts(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 3. message_outbox: delete sent rows older than 7 days.
+// 3. message_outbox: delete sent rows older than 7 days, except permanent
+// dedupe sentinels (`dedupe_key IS NOT NULL AND dedupe_expires_at IS NULL`).
 //
 // Schema uses `sent_at` (not `delivered_at`) — the DoD's "delivered" maps to
 // status='sent' + sent_at set. Treat both as interchangeable here.
@@ -269,7 +270,8 @@ async fn retain_message_outbox(
         let would = sqlx::query(
             "SELECT COUNT(*)::BIGINT AS n FROM message_outbox \
              WHERE sent_at IS NOT NULL \
-               AND sent_at < NOW() - ($1::INT || ' days')::INTERVAL",
+               AND sent_at < NOW() - ($1::INT || ' days')::INTERVAL \
+               AND NOT (dedupe_key IS NOT NULL AND dedupe_expires_at IS NULL)",
         )
         .bind(OUTBOX_RETENTION_DAYS)
         .fetch_one(pool)
@@ -286,7 +288,8 @@ async fn retain_message_outbox(
     let del = sqlx::query(
         "DELETE FROM message_outbox \
          WHERE sent_at IS NOT NULL \
-           AND sent_at < NOW() - ($1::INT || ' days')::INTERVAL",
+           AND sent_at < NOW() - ($1::INT || ' days')::INTERVAL \
+           AND NOT (dedupe_key IS NOT NULL AND dedupe_expires_at IS NULL)",
     )
     .bind(OUTBOX_RETENTION_DAYS)
     .execute(pool)
@@ -614,6 +617,109 @@ mod tests {
             .unwrap_or_else(|err| panic!("count query `{sql}`: {err}"))
             .try_get::<i64, _>("n")
             .unwrap_or(0)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_preserves_permanent_outbox_dedupe_sentinels() {
+        let Some(db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_db_retention_outbox_persistent_dedupe",
+            "db_retention persistent outbox dedupe contract",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = db.connect_and_migrate().await;
+
+        use crate::services::message_outbox::{
+            OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe,
+            enqueue_outbox_pg_returning_id_with_ttl,
+        };
+        let persistent_id = enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &pool,
+            OutboxMessage {
+                target: "channel:1",
+                content: "persistent",
+                bot: "notify",
+                source: "scheduled_message",
+                reason_code: Some("scheduled_message:v1:retention-test:slot"),
+                session_key: None,
+            },
+        )
+        .await
+        .expect("enqueue permanent sentinel");
+        let ordinary_id = enqueue_outbox_pg_returning_id_with_ttl(
+            &pool,
+            OutboxMessage {
+                target: "channel:1",
+                content: "ordinary",
+                bot: "notify",
+                source: "system",
+                reason_code: None,
+                session_key: None,
+            },
+            0,
+        )
+        .await
+        .expect("enqueue ordinary row")
+        .expect("ordinary row inserted");
+        let ttl_id = enqueue_outbox_pg_returning_id_with_ttl(
+            &pool,
+            OutboxMessage {
+                target: "channel:1",
+                content: "ttl-expired",
+                bot: "notify",
+                source: "system",
+                reason_code: Some("retention-test-ttl"),
+                session_key: None,
+            },
+            60,
+        )
+        .await
+        .expect("enqueue TTL row")
+        .expect("TTL row inserted");
+        sqlx::query(
+            "UPDATE message_outbox
+             SET status = 'sent', sent_at = NOW() - INTERVAL '8 days',
+                 created_at = NOW() - INTERVAL '8 days',
+                 dedupe_expires_at = CASE WHEN id = $2
+                     THEN NOW() - INTERVAL '7 days' ELSE dedupe_expires_at END
+             WHERE id = ANY($1)",
+        )
+        .bind(vec![persistent_id, ordinary_id, ttl_id])
+        .bind(ttl_id)
+        .execute(&pool)
+        .await
+        .expect("age stale sent outbox rows");
+
+        let dry = db_retention_job(&pool, true)
+            .await
+            .expect("dry-run retention pass");
+        assert_eq!(
+            dry.get("message_outbox", "delete_would")
+                .map(|entry| entry.rows_affected),
+            Some(2),
+            "dry-run must exclude the permanent sentinel"
+        );
+
+        let report = db_retention_job(&pool, false)
+            .await
+            .expect("retention pass");
+        assert_eq!(
+            report
+                .get("message_outbox", "delete")
+                .map(|entry| entry.rows_affected),
+            Some(2)
+        );
+        let survivors: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM message_outbox ORDER BY content")
+                .fetch_all(&pool)
+                .await
+                .expect("read outbox survivors");
+        assert_eq!(survivors, vec!["persistent"]);
+
+        pool.close().await;
+        db.drop().await;
     }
 
     /// Insert one `turns` row windowed on `finished_at`, with explicit BIGINT

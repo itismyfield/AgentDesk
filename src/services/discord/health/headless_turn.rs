@@ -76,7 +76,6 @@ pub async fn start_reserved_headless_agent_turn(
         )));
     }
 
-    let expected_turn_id = reservation.turn_id.clone();
     let shared = resolve_direct_meeting_shared(registry, channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
@@ -92,7 +91,6 @@ pub async fn start_reserved_headless_agent_turn(
         None,
         None,
         reservation,
-        expected_turn_id,
     )
     .await
 }
@@ -122,7 +120,6 @@ pub async fn start_reserved_headless_agent_turn_with_owner_channel(
         )));
     }
 
-    let expected_turn_id = reservation.turn_id.clone();
     let shared = resolve_direct_meeting_shared(registry, owner_channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
@@ -138,7 +135,6 @@ pub async fn start_reserved_headless_agent_turn_with_owner_channel(
         tmux_session_label,
         Some(false),
         reservation,
-        expected_turn_id,
     )
     .await
 }
@@ -176,7 +172,6 @@ pub async fn start_headless_agent_turn_in_dm(
         })?;
     let dm_channel_id = dm_channel.id;
     let reservation = reserve_headless_agent_turn(dm_channel_id);
-    let expected_turn_id = reservation.turn_id.clone();
     let channel_name_hint = Some(format!("dm-{dm_user_id}"));
 
     start_reserved_headless_agent_turn_with_shared(
@@ -190,7 +185,6 @@ pub async fn start_headless_agent_turn_in_dm(
         None,
         Some(true),
         reservation,
-        expected_turn_id,
     )
     .await
 }
@@ -249,7 +243,6 @@ pub async fn start_reserved_headless_agent_turn_in_dm(
     let (_, shared) = resolve_direct_meeting_runtime(registry, owner_channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
-    let expected_turn_id = reservation.turn_id.clone();
     let channel_name_hint = Some(format!("dm-{dm_user_id}"));
 
     start_reserved_headless_agent_turn_with_shared(
@@ -263,7 +256,6 @@ pub async fn start_reserved_headless_agent_turn_in_dm(
         None,
         Some(true),
         reservation,
-        expected_turn_id,
     )
     .await
 }
@@ -284,7 +276,6 @@ async fn start_reserved_headless_agent_turn_with_shared(
     tmux_session_label: Option<String>,
     is_dm_hint: Option<bool>,
     reservation: HeadlessAgentTurnReservation,
-    expected_turn_id: String,
 ) -> Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError> {
     if reservation.channel_id != channel_id {
         return Err(router::HeadlessTurnStartError::Internal(format!(
@@ -318,6 +309,10 @@ async fn start_reserved_headless_agent_turn_with_shared(
             ))
         })?;
 
+    // The router derives its outcome id from this same opaque reservation.
+    // Keep mismatches as a debug invariant instead of a post-spawn error: an
+    // error after `Started` would invite callers to launch a duplicate retry.
+    let expected_turn_id = reservation.turn_id.clone();
     let outcome = router::start_reserved_headless_turn(
         &ctx,
         channel_id,
@@ -335,10 +330,11 @@ async fn start_reserved_headless_agent_turn_with_shared(
     .await?;
 
     if outcome.turn_id != expected_turn_id {
-        return Err(router::HeadlessTurnStartError::Internal(format!(
-            "reserved headless turn id mismatch: expected {} but started {}",
-            expected_turn_id, outcome.turn_id
-        )));
+        tracing::error!(
+            expected_turn_id = %expected_turn_id,
+            actual_turn_id = %outcome.turn_id,
+            "reserved headless turn returned an unexpected id after start; caller must fail closed"
+        );
     }
 
     Ok(outcome)

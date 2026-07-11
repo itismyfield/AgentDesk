@@ -3492,7 +3492,9 @@ fn parse_routine_schedule(schedule: &str) -> Result<ParsedRoutineSchedule> {
     Ok(ParsedRoutineSchedule::Cron(cron))
 }
 
-fn next_due_after(
+// pub(crate): scheduled messages reuse the routine schedule grammar
+// ('@every <duration>' | 5-field cron) for their optional recurrence.
+pub(crate) fn next_due_after(
     schedule: &str,
     default_timezone: &str,
     now: DateTime<Utc>,
@@ -3503,7 +3505,7 @@ fn next_due_after(
     }
 }
 
-fn next_due_after_anchor(
+pub(crate) fn next_due_after_anchor(
     schedule: &str,
     default_timezone: &str,
     anchor: DateTime<Utc>,
