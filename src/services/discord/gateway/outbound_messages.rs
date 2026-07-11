@@ -63,17 +63,73 @@ pub(in crate::services::discord) async fn send_outbound_message(
         .ok_or_else(|| "message delivery was skipped".to_string())
 }
 
-pub(in crate::services::discord) async fn send_outbound_message_with_nonce(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum ClassifiedOutboundPostError {
+    Transient(String),
+    Permanent(String),
+}
+
+fn classify_terminal_post_result(result: &DeliveryResult) -> Option<ClassifiedOutboundPostError> {
+    match result {
+        DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => {
+            Some(ClassifiedOutboundPostError::Permanent(reason.clone()))
+        }
+        DeliveryResult::Skip { reason } => {
+            Some(ClassifiedOutboundPostError::Transient(reason.clone()))
+        }
+        _ => None,
+    }
+}
+
+pub(in crate::services::discord) async fn send_outbound_message_with_nonce_classified(
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,
     channel_id: ChannelId,
     content: &str,
     nonce: &str,
-) -> Result<MessageId, String> {
+) -> Result<MessageId, ClassifiedOutboundPostError> {
     let client = SerenityTurnOutboundClient { http, shared };
     let msg = task_card_outbound_message(channel_id, content, nonce);
-    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)?
-        .ok_or_else(|| "message delivery was skipped".to_string())
+    let result = deliver_outbound(&client, shared_outbound_deduper(), msg, None).await;
+    if let Some(error) = classify_terminal_post_result(&result) {
+        return Err(error);
+    }
+    match result {
+        committed => outbound_delivery_error(committed)
+            .map_err(ClassifiedOutboundPostError::Transient)?
+            .ok_or_else(|| {
+                ClassifiedOutboundPostError::Transient(
+                    "message delivery was skipped without an authoritative rejection".to_string(),
+                )
+            }),
+    }
+}
+
+#[cfg(test)]
+mod classified_post_tests {
+    use super::*;
+
+    #[test]
+    fn authoritative_card_post_rejection_stays_permanent() {
+        let result = DeliveryResult::PermanentFailure {
+            reason: "Discord rejected task card POST with 403".to_string(),
+        };
+        assert_eq!(
+            classify_terminal_post_result(&result),
+            Some(ClassifiedOutboundPostError::Permanent(
+                "Discord rejected task card POST with 403".to_string()
+            ))
+        );
+        assert_eq!(
+            classify_terminal_post_result(&DeliveryResult::Skip {
+                reason: "in flight".to_string(),
+            }),
+            Some(ClassifiedOutboundPostError::Transient(
+                "in flight".to_string()
+            ))
+        );
+    }
 }
 
 #[derive(Debug)]

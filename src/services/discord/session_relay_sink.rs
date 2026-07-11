@@ -870,6 +870,16 @@ impl SessionBoundDiscordRelaySink {
                 return Ok(SessionRelayDeliveryOutcome::NotDelivered);
             }
             Some(ResponseDeliveryClaimOutcome::Delivered { .. }) => (None, true),
+            Some(ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id }) => {
+                tracing::error!(
+                    provider = provider.as_str(),
+                    channel_id,
+                    tmux_session = %delivery.session_name,
+                    task_card_message_id = card_message_id,
+                    "task response was already sent but its final delivery CAS is uncommitted; refusing a duplicate POST"
+                );
+                (None, true)
+            }
             None => (None, false),
         };
 
@@ -1131,7 +1141,7 @@ impl SessionBoundDiscordRelaySink {
                 &delivery,
                 &relay_text,
                 task_card_message_id,
-                task_response_claim.as_ref(),
+                task_response_claim,
                 &trace,
                 sink_lease_guard.as_ref(),
             )
@@ -1150,6 +1160,7 @@ impl SessionBoundDiscordRelaySink {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionRelayDeliveryOutcome {
     Delivered,
+    SentButUncommitted,
     NotDelivered,
 }
 
@@ -1173,6 +1184,10 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                     // `deliver_response` — see `advance_after_confirmed_post`.
                     terminal_delivered = true;
                     self.finish_terminal_candidate(&session_name);
+                }
+                Ok(SessionRelayDeliveryOutcome::SentButUncommitted) => {
+                    self.finish_terminal_candidate(&session_name);
+                    return Ok(RelaySinkOutcome::TerminalUnknown);
                 }
                 Ok(SessionRelayDeliveryOutcome::NotDelivered) => {
                     terminal_not_delivered = true;

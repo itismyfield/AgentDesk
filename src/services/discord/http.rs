@@ -6,6 +6,47 @@ use serenity::{
 
 const DISCORD_EMPTY_MESSAGE_SENTINEL: &str = "\u{200b}";
 
+#[derive(Debug, thiserror::Error)]
+pub(in crate::services::discord) enum RequiredReferenceSendError {
+    #[error("Discord rejected the required message reference: {0}")]
+    UnknownReference(#[source] serenity::Error),
+    #[error(transparent)]
+    Other(#[from] serenity::Error),
+}
+
+fn is_unknown_required_reference_response(
+    status: u16,
+    discord_code: isize,
+    error_paths: impl IntoIterator<Item = String>,
+) -> bool {
+    if status == 404 && discord_code == 10008 {
+        return true;
+    }
+    status == 400
+        && discord_code == 50035
+        && error_paths
+            .into_iter()
+            .any(|path| path.to_ascii_lowercase().contains("message_reference"))
+}
+
+fn classify_required_reference_error(error: serenity::Error) -> RequiredReferenceSendError {
+    let unknown = match &error {
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response)) => {
+            is_unknown_required_reference_response(
+                response.status_code.as_u16(),
+                response.error.code,
+                response.error.errors.iter().map(|error| error.path.clone()),
+            )
+        }
+        _ => false,
+    };
+    if unknown {
+        RequiredReferenceSendError::UnknownReference(error)
+    } else {
+        RequiredReferenceSendError::Other(error)
+    }
+}
+
 fn discord_content_or_zwsp(content: &str) -> &str {
     if content.is_empty() {
         DISCORD_EMPTY_MESSAGE_SENTINEL
@@ -65,6 +106,24 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
                 .allowed_mentions(relay_allowed_mentions()),
         )
         .await
+}
+
+pub(in crate::services::discord) async fn send_channel_message_with_required_reference(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    content: &str,
+    reference_channel_id: ChannelId,
+    reference_message_id: MessageId,
+) -> Result<Message, RequiredReferenceSendError> {
+    send_channel_message_with_reference(
+        http,
+        channel_id,
+        content,
+        reference_channel_id,
+        reference_message_id,
+    )
+    .await
+    .map_err(classify_required_reference_error)
 }
 
 /// Send a channel message with attached interactive components (buttons,
@@ -138,7 +197,10 @@ pub(in crate::services::discord) async fn delete_channel_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{DISCORD_EMPTY_MESSAGE_SENTINEL, discord_content_or_zwsp, relay_allowed_mentions};
+    use super::{
+        DISCORD_EMPTY_MESSAGE_SENTINEL, discord_content_or_zwsp,
+        is_unknown_required_reference_response, relay_allowed_mentions,
+    };
 
     #[test]
     fn discord_content_or_zwsp_replaces_empty_content() {
@@ -174,5 +236,29 @@ mod tests {
             !parse.iter().any(|p| p == "roles"),
             "roles suppressed: {parse:?}"
         );
+    }
+
+    #[test]
+    fn required_reference_classifier_is_structured_and_narrow() {
+        assert!(is_unknown_required_reference_response(
+            400,
+            50035,
+            ["message_reference.message_id".to_string()],
+        ));
+        assert!(is_unknown_required_reference_response(
+            404,
+            10008,
+            std::iter::empty(),
+        ));
+        assert!(!is_unknown_required_reference_response(
+            400,
+            50035,
+            ["content".to_string()],
+        ));
+        assert!(!is_unknown_required_reference_response(
+            429,
+            0,
+            ["message_reference.message_id".to_string()],
+        ));
     }
 }

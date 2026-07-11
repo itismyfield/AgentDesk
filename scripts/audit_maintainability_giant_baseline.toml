@@ -526,7 +526,9 @@
 # fully-successful multi-chunk edit path), and the pure `watcher_completion_footer_anchor`
 # selection helper. Placed in this giant (rather than the 700-capped
 # `tmux_watcher/**` namespace) so the tmux_watcher.rs hot file grows minimally.
-"src/services/discord/formatting.rs" = 2862 # 2026-07-07 #4214 (char-based chunking): 2860 -> 2862 (+2 prod LoC), reviewable admission.
+# 2026-07-11 #4055: lowered 2862 -> 2566 by extracting the durable
+# continuation rollback journal to formatting/rollback_journal.rs.
+"src/services/discord/formatting.rs" = 2566
 # #3038 run_bot S0/S1: lowered 2802 -> 1918 by adding characterization tests and
 # moving restored_state, queued_placeholders, startup_doctor, orphan_recovery,
 # and session_gc into sub-700 `runtime_bootstrap/` modules.

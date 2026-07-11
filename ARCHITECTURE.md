@@ -456,7 +456,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
 │   │   ├── formatting/
-│   │   │   └── long_send_rollback.rs
+│   │   │   ├── long_send_rollback.rs
+│   │   │   └── rollback_journal.rs
 │   │   ├── gateway/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
@@ -650,6 +651,7 @@ src/
 │   │   │   └── write.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
+│   │   │   │   ├── missing_card_replacement.rs
 │   │   │   │   └── response_fence.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs

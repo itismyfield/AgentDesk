@@ -47,10 +47,11 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
     referenced_card_message_id BIGINT NOT NULL
         CHECK (referenced_card_message_id > 0),
     delivery_state TEXT NOT NULL
-        CHECK (delivery_state IN ('claimed', 'delivered')),
+        CHECK (delivery_state IN ('claimed', 'sent', 'delivered')),
     owner_kind TEXT CHECK (owner_kind IN ('sink', 'watcher')),
     owner_token TEXT,
     lease_expires_at TIMESTAMPTZ,
+    sent_at TIMESTAMPTZ,
     delivered_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -60,19 +61,28 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
             AND owner_kind IS NOT NULL
             AND owner_token IS NOT NULL
             AND lease_expires_at IS NOT NULL
+            AND sent_at IS NULL
+            AND delivered_at IS NULL)
+        OR
+        (delivery_state = 'sent'
+            AND owner_kind IS NOT NULL
+            AND owner_token IS NOT NULL
+            AND lease_expires_at IS NOT NULL
+            AND sent_at IS NOT NULL
             AND delivered_at IS NULL)
         OR
         (delivery_state = 'delivered'
             AND owner_kind IS NULL
             AND owner_token IS NULL
             AND lease_expires_at IS NULL
+            AND sent_at IS NOT NULL
             AND delivered_at IS NOT NULL)
     )
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_notification_response_claim_lease
     ON task_notification_response_delivery (lease_expires_at)
-    WHERE delivery_state = 'claimed';
+    WHERE delivery_state IN ('claimed', 'sent');
 
 CREATE INDEX IF NOT EXISTS idx_task_notification_response_retention
     ON task_notification_response_delivery (updated_at);

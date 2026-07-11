@@ -1270,15 +1270,19 @@
   assumption is introduced. The core-4 serial hotfiles (`turn_bridge/mod.rs`,
   `tmux_watcher.rs`, `session_relay_sink.rs`, `turn_finalizer.rs`) are untouched, as
   in #4018.
-- #4055 task-notification card authority — **PG-shared card and response-fence
+- #4055 task-notification card authority — **PG-shared card and per-turn response
   authority plus node-local response frontier**: `task_notification_card_state` uniquely keys
   `(channel_id, provider, session_key, event_key)` and stores the selected bot,
-  stable Discord create nonce, message id/revision, short lease, exact response
-  turn key, and response-delivered marker. Multiple workers therefore converge
-  through PG CAS. An ambiguous create retries the same `enforce_nonce=true`
+  stable Discord create nonce, message id/revision, and short lease. The separate
+  `task_notification_response_delivery` table is 1:N from that semantic event and
+  uniquely keys each restart-stable `response_turn_key`; it stores the exact
+  referenced card id, owner token/lease, and `claimed → sent → delivered` state.
+  Multiple workers therefore converge through PG CAS. An ambiguous create retries the same `enforce_nonce=true`
   nonce within Discord's bounded nonce-replay window; the PG row/message id,
-  rather than the nonce window, remains the durable authority. Only a structured
-  Discord `404/10008` can advance to a revision nonce/replacement. Prompt-side footer deferral and the
+  rather than the nonce window, remains the durable authority. A structured
+  Discord missing-reference rejection can CAS-replace the missing card and then
+  rebind only the still-claimed exact response owner from the old id to the new
+  id; no unreferenced response fallback is allowed. Prompt-side footer deferral and the
   `SessionRelayParser` context remain node-local observations, but the terminal
   sink must confirm the PG-owned card before sending/committing its node-local
   answer frontier, bind the exact turn in PG, and reference that confirmed card.
@@ -1286,7 +1290,9 @@
   eviction is node-local UI state keyed by `tool_use_id`; it occurs only after
   the shared card is confirmed. The watcher queries the exact event key or
   restart-stable response-turn key in PG and fails closed for missing/error/card-
-  pending state; only the durable response-delivered marker releases fallback.
+  pending state. `sent` is a no-POST tombstone even after lease expiry, so a
+  final delivered-CAS failure is observable without allowing another worker to
+  duplicate the Discord POST; `delivered` completes the response fence.
   An unrelated event in the same session cannot release or suppress that turn.
   The in-memory card store is used only when PG is absent (tests/non-release
   fallback), never as multi-worker authority. This adds no leader-only singleton

@@ -34,10 +34,17 @@ pub(in crate::services::discord) struct ResponseDeliveryClaim {
     pub(in super::super) owner_token: String,
 }
 
+impl ResponseDeliveryClaim {
+    pub(in crate::services::discord) fn response_turn_key(&self) -> &str {
+        &self.response_turn_key
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum ResponseDeliveryClaimOutcome {
     Owned(ResponseDeliveryClaim),
     Wait,
+    SentUncommitted { card_message_id: u64 },
     Delivered { card_message_id: u64 },
 }
 
@@ -107,6 +114,31 @@ pub(in super::super) async fn mark_response_delivered(
     }
 }
 
+pub(in super::super) async fn mark_response_sent(
+    pool: Option<&PgPool>,
+    claim: &ResponseDeliveryClaim,
+) -> Result<(), String> {
+    match pool {
+        Some(pool) => mark_response_sent_pg(pool, claim).await,
+        None if cfg!(any(test, debug_assertions)) => mark_response_sent_memory(claim),
+        None => Err(memory_fallback_unavailable()),
+    }
+}
+
+pub(in super::super) async fn rebind_response_card(
+    pool: Option<&PgPool>,
+    claim: &ResponseDeliveryClaim,
+    replacement_card_message_id: u64,
+) -> Result<ResponseDeliveryClaim, String> {
+    match pool {
+        Some(pool) => rebind_response_card_pg(pool, claim, replacement_card_message_id).await,
+        None if cfg!(any(test, debug_assertions)) => {
+            rebind_response_card_memory(claim, replacement_card_message_id)
+        }
+        None => Err(memory_fallback_unavailable()),
+    }
+}
+
 async fn claim_response_delivery_pg(
     pool: &PgPool,
     scope: &TaskCardScope,
@@ -170,6 +202,9 @@ async fn claim_response_delivery_pg(
     let state: String = current.get("delivery_state");
     if state == "delivered" {
         return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+    }
+    if state == "sent" {
+        return Ok(ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id });
     }
     let lease_active: bool = current.get("lease_active");
     if lease_active {
@@ -254,7 +289,7 @@ async fn renew_response_delivery_pg(
          SET lease_expires_at = NOW() + make_interval(secs => $7), updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3
            AND event_key = $4 AND response_turn_key = $5 AND owner_token = $6
-           AND delivery_state = 'claimed'",
+           AND delivery_state IN ('claimed', 'sent')",
     )
     .bind(db_id(claim.scope.channel_id, "channel_id")?)
     .bind(&claim.scope.provider)
@@ -277,11 +312,12 @@ async fn mark_response_delivered_pg(
     let changed = sqlx::query(
         "UPDATE task_notification_response_delivery
          SET delivery_state = 'delivered', owner_kind = NULL, owner_token = NULL,
-             lease_expires_at = NULL, delivered_at = NOW(), updated_at = NOW()
+             lease_expires_at = NULL, sent_at = COALESCE(sent_at, NOW()),
+             delivered_at = NOW(), updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3
            AND event_key = $4 AND response_turn_key = $5
            AND referenced_card_message_id = $6 AND owner_token = $7
-           AND delivery_state = 'claimed'",
+           AND delivery_state IN ('claimed', 'sent')",
     )
     .bind(db_id(claim.scope.channel_id, "channel_id")?)
     .bind(&claim.scope.provider)
@@ -297,9 +333,64 @@ async fn mark_response_delivered_pg(
     exact_claim_change(changed, "commit exact task response delivery")
 }
 
+async fn mark_response_sent_pg(pool: &PgPool, claim: &ResponseDeliveryClaim) -> Result<(), String> {
+    let changed = sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET delivery_state = 'sent', sent_at = COALESCE(sent_at, NOW()), updated_at = NOW()
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+           AND event_key = $4 AND response_turn_key = $5
+           AND referenced_card_message_id = $6 AND owner_token = $7
+           AND delivery_state = 'claimed'",
+    )
+    .bind(db_id(claim.scope.channel_id, "channel_id")?)
+    .bind(&claim.scope.provider)
+    .bind(&claim.scope.session_key)
+    .bind(&claim.scope.event_key)
+    .bind(&claim.response_turn_key)
+    .bind(db_id(claim.card_message_id, "message_id")?)
+    .bind(&claim.owner_token)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("record exact task response send: {error}"))?
+    .rows_affected();
+    exact_claim_change(changed, "record exact task response send")
+}
+
+async fn rebind_response_card_pg(
+    pool: &PgPool,
+    claim: &ResponseDeliveryClaim,
+    replacement_card_message_id: u64,
+) -> Result<ResponseDeliveryClaim, String> {
+    let changed = sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET referenced_card_message_id = $8, updated_at = NOW()
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+           AND event_key = $4 AND response_turn_key = $5
+           AND referenced_card_message_id = $6 AND owner_token = $7
+           AND delivery_state = 'claimed'",
+    )
+    .bind(db_id(claim.scope.channel_id, "channel_id")?)
+    .bind(&claim.scope.provider)
+    .bind(&claim.scope.session_key)
+    .bind(&claim.scope.event_key)
+    .bind(&claim.response_turn_key)
+    .bind(db_id(claim.card_message_id, "message_id")?)
+    .bind(&claim.owner_token)
+    .bind(db_id(replacement_card_message_id, "message_id")?)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("rebind exact task response card: {error}"))?
+    .rows_affected();
+    exact_claim_change(changed, "rebind exact task response card")?;
+    let mut rebound = claim.clone();
+    rebound.card_message_id = replacement_card_message_id;
+    Ok(rebound)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemoryResponseState {
     Claimed,
+    Sent,
     Delivered,
 }
 
@@ -316,6 +407,21 @@ type MemoryResponseKey = (u64, String, String, String);
 
 static MEMORY_RESPONSES: LazyLock<Mutex<HashMap<MemoryResponseKey, MemoryResponseRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+static FORCED_DELIVER_FAILURES: LazyLock<Mutex<HashMap<MemoryResponseKey, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(in super::super) fn force_response_deliver_failures(
+    claim: &ResponseDeliveryClaim,
+    attempts: usize,
+) {
+    FORCED_DELIVER_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(memory_key(&claim.scope, &claim.response_turn_key), attempts);
+}
 
 fn memory_key(scope: &TaskCardScope, response_turn_key: &str) -> MemoryResponseKey {
     (
@@ -360,6 +466,9 @@ fn claim_response_delivery_memory(
         }
         Some(row) if row.state == MemoryResponseState::Delivered => {
             return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+        }
+        Some(row) if row.state == MemoryResponseState::Sent => {
+            return Ok(ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id });
         }
         Some(row) if row.lease_expires_at.is_some_and(|expiry| expiry > now) => {
             return Ok(ResponseDeliveryClaimOutcome::Wait);
@@ -410,8 +519,10 @@ fn renew_response_delivery_memory(claim: &ResponseDeliveryClaim) -> Result<(), S
     let row = rows
         .get_mut(&memory_key(&claim.scope, &claim.response_turn_key))
         .ok_or_else(|| "task response memory claim disappeared".to_string())?;
-    if row.state != MemoryResponseState::Claimed
-        || row.owner_token.as_deref() != Some(claim.owner_token.as_str())
+    if !matches!(
+        row.state,
+        MemoryResponseState::Claimed | MemoryResponseState::Sent
+    ) || row.owner_token.as_deref() != Some(claim.owner_token.as_str())
     {
         return Err("task response memory claim ownership changed".to_string());
     }
@@ -420,7 +531,7 @@ fn renew_response_delivery_memory(claim: &ResponseDeliveryClaim) -> Result<(), S
     Ok(())
 }
 
-fn mark_response_delivered_memory(claim: &ResponseDeliveryClaim) -> Result<(), String> {
+fn mark_response_sent_memory(claim: &ResponseDeliveryClaim) -> Result<(), String> {
     let mut rows = MEMORY_RESPONSES
         .lock()
         .map_err(|_| "task response memory store poisoned".to_string())?;
@@ -429,6 +540,61 @@ fn mark_response_delivered_memory(claim: &ResponseDeliveryClaim) -> Result<(), S
         .ok_or_else(|| "task response memory claim disappeared".to_string())?;
     if row.state != MemoryResponseState::Claimed
         || row.owner_token.as_deref() != Some(claim.owner_token.as_str())
+        || row.card_message_id != claim.card_message_id
+    {
+        return Err("task response memory claim ownership changed".to_string());
+    }
+    row.state = MemoryResponseState::Sent;
+    Ok(())
+}
+
+fn rebind_response_card_memory(
+    claim: &ResponseDeliveryClaim,
+    replacement_card_message_id: u64,
+) -> Result<ResponseDeliveryClaim, String> {
+    let mut rows = MEMORY_RESPONSES
+        .lock()
+        .map_err(|_| "task response memory store poisoned".to_string())?;
+    let row = rows
+        .get_mut(&memory_key(&claim.scope, &claim.response_turn_key))
+        .ok_or_else(|| "task response memory claim disappeared".to_string())?;
+    if row.state != MemoryResponseState::Claimed
+        || row.owner_token.as_deref() != Some(claim.owner_token.as_str())
+        || row.card_message_id != claim.card_message_id
+    {
+        return Err("task response memory claim ownership changed".to_string());
+    }
+    row.card_message_id = replacement_card_message_id;
+    let mut rebound = claim.clone();
+    rebound.card_message_id = replacement_card_message_id;
+    Ok(rebound)
+}
+
+fn mark_response_delivered_memory(claim: &ResponseDeliveryClaim) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let key = memory_key(&claim.scope, &claim.response_turn_key);
+        let mut failures = FORCED_DELIVER_FAILURES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(remaining) = failures.get_mut(&key)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            return Err("forced final task response delivery CAS failure".to_string());
+        }
+        failures.remove(&key);
+    }
+    let mut rows = MEMORY_RESPONSES
+        .lock()
+        .map_err(|_| "task response memory store poisoned".to_string())?;
+    let row = rows
+        .get_mut(&memory_key(&claim.scope, &claim.response_turn_key))
+        .ok_or_else(|| "task response memory claim disappeared".to_string())?;
+    if !matches!(
+        row.state,
+        MemoryResponseState::Claimed | MemoryResponseState::Sent
+    ) || row.owner_token.as_deref() != Some(claim.owner_token.as_str())
         || row.card_message_id != claim.card_message_id
     {
         return Err("task response memory claim ownership changed".to_string());

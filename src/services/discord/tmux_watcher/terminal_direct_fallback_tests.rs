@@ -73,7 +73,21 @@ fn watcher_task_response_wiring_prepares_reference_before_send_and_marks_after_f
         .find("commit_watcher_task_response_fence(")
         .expect("watcher response commit helper");
     assert!(
-        helper[commit..].contains("mark_task_response_delivered("),
-        "the production commit helper must token-CAS the exact response claim"
+        helper[commit..].contains("commit_task_response_delivered_bounded("),
+        "the production commit helper must bounded-retry the exact response token CAS"
+    );
+    let commit_body = &helper[commit..];
+    let heartbeat = commit_body
+        .find("task_response_delivery_heartbeat(")
+        .expect("final response CAS must retain a live heartbeat");
+    let bounded_commit = commit_body
+        .find("commit_task_response_delivered_bounded(")
+        .expect("bounded final response CAS");
+    let stop = commit_body
+        .find("heartbeat.stop()")
+        .expect("heartbeat must stop after bounded final response CAS");
+    assert!(
+        heartbeat < bounded_commit && bounded_commit < stop,
+        "heartbeat must cover the full bounded final response CAS window"
     );
 }

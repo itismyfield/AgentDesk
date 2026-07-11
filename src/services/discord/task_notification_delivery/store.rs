@@ -1,5 +1,6 @@
 //! PostgreSQL-backed task-card state and lease authority (#4055).
 
+mod missing_card_replacement;
 mod response_fence;
 
 use std::collections::HashMap;
@@ -10,12 +11,18 @@ use sqlx::{PgPool, Row};
 
 use super::{TaskCardScope, stable_nonce};
 
+pub(super) use missing_card_replacement::{
+    MissingCardReplacementClaim, claim_missing_card_replacement,
+};
+
+#[cfg(test)]
+pub(super) use response_fence::force_response_deliver_failures;
 pub(in crate::services::discord) use response_fence::{
     ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
 };
 pub(super) use response_fence::{
     claim_existing_response_delivery, claim_response_delivery, mark_response_delivered,
-    renew_response_delivery,
+    mark_response_sent, rebind_response_card, renew_response_delivery,
 };
 
 const LEASE_SECONDS: i64 = 30;

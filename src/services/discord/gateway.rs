@@ -26,10 +26,12 @@ use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
 
 mod outbound_messages;
+#[cfg(test)]
 use self::outbound_messages::await_answer_flush_if_queued_notice;
 pub(super) use self::outbound_messages::{
-    ClassifiedOutboundEditError, edit_outbound_message, edit_outbound_message_classified,
-    send_intake_placeholder, send_outbound_message, send_outbound_message_with_nonce,
+    ClassifiedOutboundEditError, ClassifiedOutboundPostError, edit_outbound_message,
+    edit_outbound_message_classified, send_intake_placeholder, send_outbound_message,
+    send_outbound_message_with_nonce_classified,
 };
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

@@ -25,7 +25,7 @@
 | `src/services/discord/relay_recovery.rs` | 1471 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1541 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2834 | discord-relay | 2026-10-31 | #3837 |
-| `src/services/discord/session_relay_sink.rs` | 1666 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/session_relay_sink.rs` | 1681 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1624 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 3558 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tmux_watcher/turn_stream_collector.rs` | 1158 | discord-relay | 2026-10-31 | #4229 |
@@ -88,7 +88,7 @@
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
 | `src/services/codex_tui/input.rs` | 1659 |
 | `src/services/discord/commands/text_commands.rs` | 1480 |
-| `src/services/discord/formatting.rs` | 2862 |
+| `src/services/discord/formatting.rs` | 2566 |
 | `src/services/discord/meeting_orchestrator.rs` | 3221 |
 | `src/services/discord/mod.rs` | 4167 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1337 |

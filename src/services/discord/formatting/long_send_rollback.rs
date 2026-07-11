@@ -17,6 +17,37 @@ fn watcher_rollback_incomplete_error(message: impl std::fmt::Display) -> Error {
     )
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(in crate::services::discord) enum RequiredReferenceRollbackError {
+    #[error("required task-card reference is no longer valid: {detail}")]
+    UnknownReference { detail: String },
+    #[error(transparent)]
+    Other(#[from] Error),
+}
+
+impl RequiredReferenceRollbackError {
+    pub(in crate::services::discord) fn as_error(&self) -> &(dyn std::error::Error + 'static) {
+        match self {
+            Self::UnknownReference { .. } => self,
+            Self::Other(error) => error.as_ref(),
+        }
+    }
+}
+
+fn is_unknown_required_reference(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if matches!(
+            error.downcast_ref::<super::super::http::RequiredReferenceSendError>(),
+            Some(super::super::http::RequiredReferenceSendError::UnknownReference(_))
+        ) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
 pub(in crate::services::discord) async fn send_long_message_raw_with_rollback(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -45,8 +76,9 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_required_re
     text: &str,
     shared: &Arc<SharedData>,
     reference: (ChannelId, MessageId),
-) -> Result<Vec<MessageId>, Error> {
-    send_long_message_raw_with_reference_rollback_policy(
+    response_turn_key: &str,
+) -> Result<Vec<MessageId>, RequiredReferenceRollbackError> {
+    let result = send_long_message_raw_with_reference_rollback_policy(
         http,
         channel_id,
         rollback_anchor_msg_id,
@@ -54,8 +86,18 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_required_re
         shared,
         Some(reference),
         true,
+        Some(response_turn_key),
     )
-    .await
+    .await;
+    match result {
+        Ok(message_ids) => Ok(message_ids),
+        Err(error) if is_unknown_required_reference(error.as_ref()) => {
+            Err(RequiredReferenceRollbackError::UnknownReference {
+                detail: error.to_string(),
+            })
+        }
+        Err(error) => Err(RequiredReferenceRollbackError::Other(error)),
+    }
 }
 
 pub(in crate::services::discord) async fn send_long_message_raw_with_reference_rollback(
@@ -74,6 +116,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
         shared,
         reference,
         false,
+        None,
     )
     .await
 }
@@ -86,13 +129,19 @@ async fn send_long_message_raw_with_reference_rollback_policy(
     shared: &Arc<SharedData>,
     reference: Option<(ChannelId, MessageId)>,
     require_reference: bool,
+    response_turn_key: Option<&str>,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
     let chunks = split_message(text);
     let total = chunks.len();
-    let rollback_key = replace_continuation_rollback_key(channel_id, rollback_anchor_msg_id);
+    let rollback_key = response_turn_key.map_or_else(
+        || replace_continuation_rollback_key(channel_id, rollback_anchor_msg_id),
+        |turn_key| {
+            task_response_continuation_rollback_key(channel_id, rollback_anchor_msg_id, turn_key)
+        },
+    );
 
-    match claim_replace_continuation_rollback(rollback_key) {
+    match claim_replace_continuation_rollback(&rollback_key) {
         ReplaceContinuationRollbackClaim::None => {}
         ReplaceContinuationRollbackClaim::InProgress(pending_ids) => {
             return Err(watcher_rollback_incomplete_error(format!(
@@ -107,8 +156,8 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                 cleanup_replace_continuations_after_failure(http, channel_id, &pending_ids, shared)
                     .await;
             if cleanup.failed_message_ids.is_empty() {
-                if let Err(error) = clear_replace_continuation_rollback(rollback_key) {
-                    unclaim_replace_continuation_rollback(rollback_key);
+                if let Err(error) = clear_replace_continuation_rollback(&rollback_key) {
+                    unclaim_replace_continuation_rollback(&rollback_key);
                     return Err(watcher_send_error(
                         crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::Transient,
                         format!(
@@ -120,11 +169,11 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                 }
             } else {
                 if let Err(error) = record_replace_continuation_rollback(
-                    rollback_key,
+                    &rollback_key,
                     cleanup.failed_message_ids.clone(),
                 ) {
                     record_replace_continuation_rollback_memory_only(
-                        rollback_key,
+                        &rollback_key,
                         cleanup.failed_message_ids,
                     );
                     return Err(watcher_rollback_incomplete_error(format!(
@@ -198,7 +247,7 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                     .note_relay_progress_heartbeat(chrono::Utc::now().timestamp_millis());
                 sent_message_ids.push(message_id.get());
                 if let Err(error) =
-                    record_replace_continuation_rollback(rollback_key, sent_message_ids.clone())
+                    record_replace_continuation_rollback(&rollback_key, sent_message_ids.clone())
                 {
                     let cleanup = cleanup_replace_continuations_after_failure(
                         http,
@@ -211,16 +260,16 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                     errors.push(error.clone());
                     let rollback_cleanup_complete = cleanup.failed_message_ids.is_empty();
                     if rollback_cleanup_complete {
-                        if let Err(clear_error) = clear_replace_continuation_rollback(rollback_key)
+                        if let Err(clear_error) = clear_replace_continuation_rollback(&rollback_key)
                         {
                             errors.push(clear_error);
                         }
                     } else if let Err(record_error) = record_replace_continuation_rollback(
-                        rollback_key,
+                        &rollback_key,
                         cleanup.failed_message_ids.clone(),
                     ) {
                         record_replace_continuation_rollback_memory_only(
-                            rollback_key,
+                            &rollback_key,
                             cleanup.failed_message_ids,
                         );
                         errors.push(record_error);
@@ -242,6 +291,17 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                 }
             }
             Err(err) => {
+                if require_reference && i == 0 && is_unknown_required_reference(err.as_ref()) {
+                    clear_replace_continuation_rollback(&rollback_key).map_err(|clear_error| {
+                        watcher_send_error(
+                            crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::Transient,
+                            format!(
+                                "required reference was rejected and empty rollback state was not cleared: {clear_error}"
+                            ),
+                        )
+                    })?;
+                    return Err(err);
+                }
                 let failure_class =
                     crate::services::discord::replace_outcome_policy::classify_watcher_send_failure(
                         err.as_ref(),
@@ -267,8 +327,8 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                 )
                 .await;
                 if cleanup.failed_message_ids.is_empty() {
-                    if let Err(clear_error) = clear_replace_continuation_rollback(rollback_key) {
-                        unclaim_replace_continuation_rollback(rollback_key);
+                    if let Err(clear_error) = clear_replace_continuation_rollback(&rollback_key) {
+                        unclaim_replace_continuation_rollback(&rollback_key);
                         return Err(watcher_send_error(
                             failure_class,
                             format!(
@@ -279,11 +339,11 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                         ));
                     }
                 } else if let Err(record_error) = record_replace_continuation_rollback(
-                    rollback_key,
+                    &rollback_key,
                     cleanup.failed_message_ids.clone(),
                 ) {
                     record_replace_continuation_rollback_memory_only(
-                        rollback_key,
+                        &rollback_key,
                         cleanup.failed_message_ids,
                     );
                     return Err(watcher_rollback_incomplete_error(format!(
@@ -304,8 +364,8 @@ async fn send_long_message_raw_with_reference_rollback_policy(
         }
     }
 
-    if let Err(error) = clear_replace_continuation_rollback(rollback_key) {
-        clear_replace_continuation_rollback_memory_only(rollback_key);
+    if let Err(error) = clear_replace_continuation_rollback(&rollback_key) {
+        clear_replace_continuation_rollback_memory_only(&rollback_key);
         tracing::warn!(
             target: "discord::chunker",
             path = "send_long_message_raw_with_rollback",
@@ -334,7 +394,7 @@ async fn send_rollback_channel_message(
 
     match (reference, require_reference) {
         (Some((reference_channel_id, reference_message_id)), true) => {
-            super::super::http::send_channel_message_with_reference(
+            super::super::http::send_channel_message_with_required_reference(
                 http,
                 channel_id,
                 content,

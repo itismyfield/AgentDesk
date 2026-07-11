@@ -90,6 +90,19 @@ impl DiscordTaskCardTransport {
     }
 }
 
+fn map_card_post_error(
+    error: super::super::gateway::ClassifiedOutboundPostError,
+) -> TaskCardTransportError {
+    match error {
+        super::super::gateway::ClassifiedOutboundPostError::Transient(error) => {
+            TaskCardTransportError::Transient(error)
+        }
+        super::super::gateway::ClassifiedOutboundPostError::Permanent(error) => {
+            TaskCardTransportError::Permanent(error)
+        }
+    }
+}
+
 impl TaskCardTransport for DiscordTaskCardTransport {
     async fn post_card(
         &self,
@@ -98,7 +111,7 @@ impl TaskCardTransport for DiscordTaskCardTransport {
         content: &str,
         nonce: &str,
     ) -> Result<u64, TaskCardTransportError> {
-        super::super::gateway::send_outbound_message_with_nonce(
+        super::super::gateway::send_outbound_message_with_nonce_classified(
             bot.http.clone(),
             self.shared.clone(),
             ChannelId::new(channel_id),
@@ -107,7 +120,7 @@ impl TaskCardTransport for DiscordTaskCardTransport {
         )
         .await
         .map(|message_id| message_id.get())
-        .map_err(TaskCardTransportError::Transient)
+        .map_err(map_card_post_error)
     }
 
     async fn edit_card(
@@ -133,5 +146,20 @@ impl TaskCardTransport for DiscordTaskCardTransport {
                 TaskCardTransportError::Transient(error)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authoritative_card_post_4xx_maps_to_permanent_transport_failure() {
+        let error = map_card_post_error(
+            super::super::super::gateway::ClassifiedOutboundPostError::Permanent(
+                "Discord rejected task card POST with 403".to_string(),
+            ),
+        );
+        assert!(matches!(error, TaskCardTransportError::Permanent(_)));
     }
 }

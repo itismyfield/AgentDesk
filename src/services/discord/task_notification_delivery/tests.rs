@@ -768,6 +768,323 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
 }
 
 #[tokio::test]
+async fn sent_response_claim_never_reopens_post_authority_after_lease_expiry_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_sent_4055",
+        "sent but uncommitted task response fence",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("postgres-response-sent-uncommitted");
+    let turn_key = response_turn_key(4057, "2026-07-11T03:37:00Z", Some(4057));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        90_057,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim response before Discord accepts the POST");
+    assert!(matches!(claim, ResponseDeliveryClaimOutcome::Owned(_)));
+
+    // Model the boundary under review: Discord accepted the required-reference
+    // POST, but the final `delivered` CAS did not commit. This durable state must
+    // remain a no-POST tombstone even after the old lease expires.
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET delivery_state = 'sent', sent_at = NOW(),
+             lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+           AND event_key = $4 AND response_turn_key = $5",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(event.event_key())
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("persist sent-but-uncommitted response state");
+
+    let second_owner = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        90_057,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("inspect sent response after its former lease expires");
+    assert!(matches!(
+        second_owner,
+        ResponseDeliveryClaimOutcome::SentUncommitted {
+            card_message_id: 90_057
+        }
+    ));
+}
+
+#[tokio::test]
+async fn response_card_rebind_requires_exact_owner_token_and_old_card_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_rebind_4055",
+        "exact task response card rebind",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("postgres-response-card-rebind");
+    let turn_key = response_turn_key(4058, "2026-07-11T03:38:00Z", Some(4058));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        90_058,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim response bound to deleted card C1");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("first response claimant must own C1")
+    };
+
+    let mut stale_token = claim.clone();
+    stale_token.owner_token = "stale-owner-token".to_string();
+    assert!(
+        rebind_task_response_card(Some(&pool), &stale_token, 90_059)
+            .await
+            .is_err(),
+        "a stale owner token cannot rebind C1 to C2"
+    );
+    let rebound = rebind_task_response_card(Some(&pool), &claim, 90_059)
+        .await
+        .expect("exact C1 owner rebinds to replacement C2");
+    assert_eq!(rebound.card_message_id, 90_059);
+    assert!(
+        rebind_task_response_card(Some(&pool), &claim, 90_060)
+            .await
+            .is_err(),
+        "the old C1 binding cannot be reused after the exact CAS"
+    );
+    assert!(
+        mark_task_response_sent(Some(&pool), &claim).await.is_err(),
+        "the old C1-bound claim cannot record a send"
+    );
+    mark_task_response_sent(Some(&pool), &rebound)
+        .await
+        .expect("only the C2-bound claim records the required-reference POST");
+    assert!(matches!(
+        claim_task_response_delivery(
+            Some(&pool),
+            event.scope.channel_id,
+            &event.scope.provider,
+            &event.scope.session_key,
+            event.event_key(),
+            &turn_key,
+            90_059,
+            ResponseDeliveryOwner::Watcher,
+        )
+        .await
+        .expect("inspect rebound response"),
+        ResponseDeliveryClaimOutcome::SentUncommitted {
+            card_message_id: 90_059
+        }
+    ));
+}
+
+#[tokio::test]
+async fn missing_required_reference_replaces_once_and_exactly_rebinds_response() {
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let event = event("missing-required-reference-rebind");
+    let first_card = ensure_card(None, &clients, &transport, &event, EnsureIntent::Promotion)
+        .await
+        .expect("create original task card");
+    let turn_key = response_turn_key(4060, "2026-07-11T03:40:00Z", Some(4060));
+    let claim = claim_task_response_delivery(
+        None,
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        first_card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim response bound to original card");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("first response claimant must own the send")
+    };
+
+    let replacement =
+        replace_confirmed_missing_card(None, &clients, &transport, &event, first_card.message_id)
+            .await
+            .expect("replace Discord-confirmed missing card");
+    assert_ne!(replacement.message_id, first_card.message_id);
+    assert_eq!(transport.physical_posts.load(Ordering::Acquire), 2);
+
+    let mut stale_token = claim.clone();
+    stale_token.owner_token = "not-the-owner".to_string();
+    assert!(
+        rebind_task_response_card(None, &stale_token, replacement.message_id)
+            .await
+            .is_err(),
+        "card rebind must require the exact response owner token"
+    );
+    let rebound = rebind_task_response_card(None, &claim, replacement.message_id)
+        .await
+        .expect("exact owner rebinds response to replacement card");
+    assert_eq!(rebound.card_message_id, replacement.message_id);
+    assert!(
+        mark_task_response_sent(None, &claim).await.is_err(),
+        "the stale C1-bound claim cannot commit after rebind"
+    );
+    mark_task_response_sent(None, &rebound)
+        .await
+        .expect("record the C2-bound required-reference send");
+
+    let retry = claim_task_response_delivery(
+        None,
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        replacement.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("inspect sent response after replacement");
+    assert!(matches!(
+        retry,
+        ResponseDeliveryClaimOutcome::SentUncommitted {
+            card_message_id
+        } if card_message_id == replacement.message_id
+    ));
+
+    let converged =
+        replace_confirmed_missing_card(None, &clients, &transport, &event, first_card.message_id)
+            .await
+            .expect("concurrent stale repair converges on installed replacement");
+    assert_eq!(converged.message_id, replacement.message_id);
+    assert_eq!(
+        transport.physical_posts.load(Ordering::Acquire),
+        2,
+        "a stale repair must not POST a second replacement"
+    );
+}
+
+#[tokio::test]
+async fn successful_send_with_failed_final_cas_surfaces_sent_but_uncommitted() {
+    let event = event("sent-final-cas-failure");
+    let turn_key = response_turn_key(4061, "2026-07-11T03:41:00Z", Some(4061));
+    let claim = claim_task_response_delivery(
+        None,
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        90_061,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim response before successful Discord POST");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("first response claimant must own the send")
+    };
+    mark_task_response_sent(None, &claim)
+        .await
+        .expect("Discord POST success is durably recorded first");
+    force_task_response_delivered_failures(&claim, 3);
+
+    let heartbeat = task_response_delivery_heartbeat(None, Some(&claim));
+    let outcome = commit_task_response_delivered_bounded(None, &claim).await;
+    heartbeat.stop();
+    assert!(matches!(
+        outcome,
+        TaskResponseCommitOutcome::SentButUncommitted { .. }
+    ));
+    assert!(matches!(
+        claim_task_response_delivery(
+            None,
+            event.scope.channel_id,
+            &event.scope.provider,
+            &event.scope.session_key,
+            event.event_key(),
+            &turn_key,
+            90_061,
+            ResponseDeliveryOwner::Watcher,
+        )
+        .await
+        .expect("second owner inspects sent response"),
+        ResponseDeliveryClaimOutcome::SentUncommitted { .. }
+    ));
+
+    assert_eq!(
+        commit_task_response_delivered_bounded(None, &claim).await,
+        TaskResponseCommitOutcome::Delivered,
+        "the same exact owner can reconcile the final CAS later without another POST"
+    );
+}
+
+#[tokio::test]
+async fn missing_card_replacement_replays_same_nonce_after_post_commit_ambiguity() {
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let event = event("missing-card-replacement-restart");
+    let first_card = ensure_card(None, &clients, &transport, &event, EnsureIntent::Promotion)
+        .await
+        .expect("create original task card");
+    let claim = store::claim_missing_card_replacement(None, &event.scope, first_card.message_id)
+        .await
+        .expect("claim missing-card replacement");
+    let store::MissingCardReplacementClaim::Owned(claim) = claim else {
+        panic!("first replacement worker must own the revision")
+    };
+    let bot = clients.by_key(&claim.bot_key).expect("pinned card bot");
+    let discord_replacement_id = transport
+        .post_card(
+            bot,
+            event.scope.channel_id,
+            &claim.rendered_content,
+            &claim.discord_nonce,
+        )
+        .await
+        .expect("Discord accepts replacement before DB ambiguity");
+    store::mark_post_failure(None, &claim, "ambiguous DB response after Discord commit")
+        .await
+        .expect("release failed worker while retaining posting nonce");
+
+    let recovered =
+        replace_confirmed_missing_card(None, &clients, &transport, &event, first_card.message_id)
+            .await
+            .expect("replacement retry resumes the same revision nonce");
+    assert_eq!(recovered.message_id, discord_replacement_id);
+    assert_eq!(transport.post_calls.load(Ordering::Acquire), 3);
+    assert_eq!(
+        transport.physical_posts.load(Ordering::Acquire),
+        2,
+        "original card plus one physical replacement; retry must reuse the replacement nonce"
+    );
+}
+
+#[tokio::test]
 async fn unclaimed_response_turn_does_not_block_watcher_owned_delivery_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_task_response_unclaimed_4055",

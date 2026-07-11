@@ -12,8 +12,11 @@ use super::super::placeholder_live_events::PlaceholderLiveEvents;
 use super::super::task_notification_delivery::{
     CardBot, CardDeliveryClients, CardEnsureError, CardEnsureOutcome, DiscordTaskCardTransport,
     EnsureIntent, ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
-    TaskCardTransport, TaskNotificationContext, claim_task_response_delivery,
-    durable_response_turn_key, ensure_card, mark_task_response_delivered, provider_bot_key,
+    TaskCardTransport, TaskNotificationContext, TaskResponseCommitOutcome,
+    claim_existing_task_response_delivery, claim_task_response_delivery,
+    commit_task_response_delivered_bounded, durable_response_turn_key, ensure_card,
+    provider_bot_key, rebind_task_response_card, record_task_response_sent_bounded,
+    replace_confirmed_missing_card,
 };
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
@@ -85,10 +88,13 @@ pub(super) async fn ensure_task_context_card(
         Some(context),
     )
     .await
-    .map_err(|error| {
-        RelaySinkError::Transient(format!(
+    .map_err(|error| match error {
+        CardEnsureError::Permanent(error) => RelaySinkError::Permanent(format!(
+            "task-notification card permanently rejected before response delivery: {error}"
+        )),
+        error => RelaySinkError::Transient(format!(
             "task-notification card must be confirmed before response delivery: {error}"
-        ))
+        )),
     })?;
 
     let Some(outcome) = outcome else {
@@ -134,39 +140,76 @@ pub(super) async fn ensure_card_and_route(
         delivery.task_notification_context.as_ref(),
     )
     .await?;
-    let response_claim =
-        if let (Some(message_id), Some(context)) =
-            (card, delivery.task_notification_context.as_ref())
-        {
-            let turn_key = durable_response_turn_key(
-                delivery.channel_id,
-                delivery.provider.as_str(),
-                &delivery.session_name,
-                delivery.frame_turn_user_msg_id,
-                &delivery.frame_turn_started_at,
-                delivery.frame_turn_start_offset,
-                delivery.terminal_consumed_end.unwrap_or_default(),
-                &delivery.response_text,
-            );
-            Some(claim_task_response_delivery(
+    let response_claim = if let (Some(message_id), Some(context)) =
+        (card, delivery.task_notification_context.as_ref())
+    {
+        let turn_key = durable_response_turn_key(
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            delivery.frame_turn_user_msg_id,
+            &delivery.frame_turn_started_at,
+            delivery.frame_turn_start_offset,
+            delivery.terminal_consumed_end.unwrap_or_default(),
+            &delivery.response_text,
+        );
+        let existing = claim_existing_task_response_delivery(
             shared.pg_pool.as_ref(),
             delivery.channel_id,
             delivery.provider.as_str(),
             &delivery.session_name,
-            context.event_key(),
             &turn_key,
-            message_id.get(),
             ResponseDeliveryOwner::Sink,
         )
         .await
         .map_err(|error| {
             RelaySinkError::Transient(format!(
-                "task-notification response turn must be durably bound before delivery: {error}"
+                "resume task-notification response turn before delivery: {error}"
             ))
-        })?)
+        })?;
+        let outcome = if let Some((outcome, persisted_card_message_id)) = existing {
+            match outcome {
+                ResponseDeliveryClaimOutcome::Owned(claim)
+                    if persisted_card_message_id != message_id.get() =>
+                {
+                    ResponseDeliveryClaimOutcome::Owned(
+                        rebind_task_response_card(
+                            shared.pg_pool.as_ref(),
+                            &claim,
+                            message_id.get(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            RelaySinkError::Transient(format!(
+                                "rebind resumed response to confirmed replacement card: {error}"
+                            ))
+                        })?,
+                    )
+                }
+                outcome => outcome,
+            }
         } else {
-            None
+            claim_task_response_delivery(
+                shared.pg_pool.as_ref(),
+                delivery.channel_id,
+                delivery.provider.as_str(),
+                &delivery.session_name,
+                context.event_key(),
+                &turn_key,
+                message_id.get(),
+                ResponseDeliveryOwner::Sink,
+            )
+            .await
+            .map_err(|error| {
+                RelaySinkError::Transient(format!(
+                    "task-notification response turn must be durably bound before delivery: {error}"
+                ))
+            })?
         };
+        Some(outcome)
+    } else {
+        None
+    };
     let route = if card.is_some() {
         super::SessionBoundTerminalDeliveryRoute::NewMessage
     } else {
@@ -188,30 +231,26 @@ pub(super) fn answer_reference(
 /// Release the watcher fail-closed gate only after the referenced response has
 /// been confirmed and the sink's commit-fence decision has run. Card
 /// confirmation by itself is not response confirmation.
-pub(super) async fn mark_response_delivered(
-    pool: Option<&PgPool>,
-    response_claim: Option<&ResponseDeliveryClaim>,
-) -> Result<(), String> {
-    match response_claim {
-        Some(claim) => mark_task_response_delivered(pool, claim).await,
-        None => Ok(()),
-    }
-}
-
 pub(super) async fn commit_response_fence(
     shared: &Arc<SharedData>,
     delivery: &super::SessionRelayDelivery,
     response_claim: Option<&ResponseDeliveryClaim>,
-) {
-    if let Err(error) = mark_response_delivered(shared.pg_pool.as_ref(), response_claim).await {
+) -> TaskResponseCommitOutcome {
+    let Some(response_claim) = response_claim else {
+        return TaskResponseCommitOutcome::Delivered;
+    };
+    let outcome =
+        commit_task_response_delivered_bounded(shared.pg_pool.as_ref(), response_claim).await;
+    if let TaskResponseCommitOutcome::SentButUncommitted { error } = &outcome {
         tracing::error!(
             provider = delivery.provider.as_str(),
             channel_id = delivery.channel_id,
             tmux_session = %delivery.session_name,
             error = %error,
-            "task response was delivered but its PostgreSQL fallback fence stayed fail-closed"
+            "task response was sent but its final PostgreSQL delivery CAS stayed uncommitted"
         );
     }
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -225,7 +264,7 @@ impl super::SessionBoundDiscordRelaySink {
         delivery: &super::SessionRelayDelivery,
         relay_text: &str,
         task_card_message_id: Option<MessageId>,
-        task_response_claim: Option<&ResponseDeliveryClaim>,
+        task_response_claim: Option<ResponseDeliveryClaim>,
         trace: &super::SessionRelayTraceContext,
         sink_lease_guard: Option<&super::SinkDeliveryLeaseGuard>,
     ) -> Result<super::SessionRelayDeliveryOutcome, RelaySinkError> {
@@ -235,10 +274,13 @@ impl super::SessionBoundDiscordRelaySink {
             &delivery.session_name,
             channel_id,
         );
-        let prompt_anchor_reference =
+        let mut task_card_message_id = task_card_message_id;
+        let mut task_response_claim = task_response_claim;
+        let mut response_heartbeat = None;
+        let mut prompt_anchor_reference =
             answer_reference(channel, task_card_message_id, prompt_anchor);
-        if let Some(task_card_message_id) = task_card_message_id {
-            if let Some(claim) = task_response_claim {
+        if let Some(current_card_message_id) = task_card_message_id {
+            if let Some(claim) = task_response_claim.as_ref() {
                 super::super::task_notification_delivery::renew_task_response_delivery(
                     shared.pg_pool.as_ref(),
                     claim,
@@ -253,19 +295,107 @@ impl super::SessionBoundDiscordRelaySink {
             let heartbeat =
                 super::super::task_notification_delivery::task_response_delivery_heartbeat(
                     shared.pg_pool.as_ref(),
-                    task_response_claim,
+                    task_response_claim.as_ref(),
                 );
+            let response_turn_key = task_response_claim
+                .as_ref()
+                .map(ResponseDeliveryClaim::response_turn_key)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    RelaySinkError::Transient(
+                        "task-card response omitted its exact delivery claim".to_string(),
+                    )
+                })?;
             let send_result = super::super::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
                 http,
                 channel,
-                task_card_message_id,
+                current_card_message_id,
                 relay_text,
                 shared,
-                (channel, task_card_message_id),
+                (channel, current_card_message_id),
+                &response_turn_key,
             )
             .await;
-            heartbeat.stop();
-            send_result.map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            let send_result = match send_result {
+                Err(super::super::formatting::long_send_rollback::RequiredReferenceRollbackError::UnknownReference { .. }) => {
+                    let context = delivery.task_notification_context.as_ref().ok_or_else(|| {
+                        RelaySinkError::Permanent(
+                            "missing task context prevents exact missing-card repair".to_string(),
+                        )
+                    })?;
+                    let event = context.to_event(
+                        delivery.channel_id,
+                        provider.as_str(),
+                        &delivery.session_name,
+                    );
+                    let provider_http = shared.serenity_http_or_token_fallback();
+                    let notify_http = super::super::health::resolve_bot_http(
+                        self.health_registry.as_ref(),
+                        "notify",
+                    )
+                    .await
+                    .ok();
+                    let clients = CardDeliveryClients::new(
+                        notify_http
+                            .map(|http| CardBot::new("notify", http))
+                            .into_iter()
+                            .chain(provider_http.map(|http| {
+                                CardBot::new(provider_bot_key(provider.as_str()), http)
+                            })),
+                    );
+                    let transport = DiscordTaskCardTransport::new(shared.clone());
+                    let replacement = replace_confirmed_missing_card(
+                        shared.pg_pool.as_ref(),
+                        &clients,
+                        &transport,
+                        &event,
+                        current_card_message_id.get(),
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        CardEnsureError::Permanent(error) => RelaySinkError::Permanent(error),
+                        error => RelaySinkError::Transient(error.to_string()),
+                    })?;
+                    let rebound = rebind_task_response_card(
+                        shared.pg_pool.as_ref(),
+                        task_response_claim.as_ref().expect("claim checked above"),
+                        replacement.message_id,
+                    )
+                    .await
+                    .map_err(|error| {
+                        RelaySinkError::Transient(format!(
+                            "rebind response to replacement task card: {error}"
+                        ))
+                    })?;
+                    let replacement_id = MessageId::new(replacement.message_id);
+                    task_response_claim = Some(rebound);
+                    task_card_message_id = Some(replacement_id);
+                    super::super::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
+                        http,
+                        channel,
+                        replacement_id,
+                        relay_text,
+                        shared,
+                        (channel, replacement_id),
+                        &response_turn_key,
+                    )
+                    .await
+                }
+                result => result,
+            };
+            send_result.map_err(|error| match error {
+                super::super::formatting::long_send_rollback::RequiredReferenceRollbackError::UnknownReference { .. } => {
+                    RelaySinkError::Permanent(error.to_string())
+                }
+                _ => RelaySinkError::Transient(error.to_string()),
+            })?;
+            record_task_response_sent_bounded(
+                shared.pg_pool.as_ref(),
+                task_response_claim.as_ref().expect("claim checked above"),
+            )
+            .await
+            .map_err(RelaySinkError::Transient)?;
+            response_heartbeat = Some(heartbeat);
         } else {
             super::super::formatting::send_long_message_raw_with_reference(
                 http,
@@ -277,6 +407,7 @@ impl super::SessionBoundDiscordRelaySink {
             .await
             .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
         }
+        prompt_anchor_reference = answer_reference(channel, task_card_message_id, prompt_anchor);
         if let Some(prompt_anchor) = prompt_anchor {
             super::relay_format::clear_ssh_direct_prompt_anchor(
                 provider,
@@ -323,8 +454,19 @@ impl super::SessionBoundDiscordRelaySink {
             delivery,
             sink_lease_guard,
         );
-        commit_response_fence(shared, delivery, task_response_claim).await;
-        Ok(super::SessionRelayDeliveryOutcome::Delivered)
+        let commit_outcome =
+            commit_response_fence(shared, delivery, task_response_claim.as_ref()).await;
+        if let Some(heartbeat) = response_heartbeat {
+            heartbeat.stop();
+        }
+        match commit_outcome {
+            TaskResponseCommitOutcome::Delivered => {
+                Ok(super::SessionRelayDeliveryOutcome::Delivered)
+            }
+            TaskResponseCommitOutcome::SentButUncommitted { .. } => {
+                Ok(super::SessionRelayDeliveryOutcome::SentButUncommitted)
+            }
+        }
     }
 }
 
@@ -360,7 +502,7 @@ mod tests {
 
     use super::*;
     use crate::services::discord::task_notification_delivery::{
-        TaskCardTransportError, claim_existing_task_response_delivery,
+        TaskCardTransportError, mark_task_response_delivered,
     };
     use crate::services::session_backend::StreamLineState;
 
@@ -566,7 +708,7 @@ mod tests {
         assert_eq!(pending_card, card.message_id);
         assert!(matches!(pending, ResponseDeliveryClaimOutcome::Wait));
 
-        mark_response_delivered(None, Some(&claim))
+        mark_task_response_delivered(None, &claim)
             .await
             .expect("mark response delivered");
         let (delivered, delivered_card) = claim_existing_task_response_delivery(
@@ -627,6 +769,13 @@ mod tests {
         assert!(
             advance < unblock,
             "watcher fallback must stay blocked through answer confirmation and commit-fence decision"
+        );
+        let heartbeat_stop = after_send
+            .find("heartbeat.stop()")
+            .expect("task response heartbeat must stop explicitly");
+        assert!(
+            unblock < heartbeat_stop,
+            "sink task response heartbeat must cover the bounded final delivery CAS"
         );
     }
 }

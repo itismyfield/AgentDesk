@@ -419,6 +419,74 @@ pub(in crate::services::discord) async fn mark_task_response_delivered(
     store::mark_response_delivered(pool, claim).await
 }
 
+pub(in crate::services::discord) async fn mark_task_response_sent(
+    pool: Option<&PgPool>,
+    claim: &ResponseDeliveryClaim,
+) -> Result<(), String> {
+    store::mark_response_sent(pool, claim).await
+}
+
+pub(in crate::services::discord) async fn rebind_task_response_card(
+    pool: Option<&PgPool>,
+    claim: &ResponseDeliveryClaim,
+    replacement_card_message_id: u64,
+) -> Result<ResponseDeliveryClaim, String> {
+    store::rebind_response_card(pool, claim, replacement_card_message_id).await
+}
+
+const RESPONSE_COMMIT_ATTEMPTS: usize = 3;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum TaskResponseCommitOutcome {
+    Delivered,
+    SentButUncommitted { error: String },
+}
+
+pub(in crate::services::discord) async fn record_task_response_sent_bounded(
+    pool: Option<&PgPool>,
+    claim: &ResponseDeliveryClaim,
+) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..RESPONSE_COMMIT_ATTEMPTS {
+        match mark_task_response_sent(pool, claim).await {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
+        }
+        if attempt + 1 < RESPONSE_COMMIT_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+    Err(format!(
+        "task response POST succeeded but sent-state CAS failed after {RESPONSE_COMMIT_ATTEMPTS} attempts: {last_error}"
+    ))
+}
+
+pub(in crate::services::discord) async fn commit_task_response_delivered_bounded(
+    pool: Option<&PgPool>,
+    claim: &ResponseDeliveryClaim,
+) -> TaskResponseCommitOutcome {
+    let mut last_error = String::new();
+    for attempt in 0..RESPONSE_COMMIT_ATTEMPTS {
+        match mark_task_response_delivered(pool, claim).await {
+            Ok(()) => return TaskResponseCommitOutcome::Delivered,
+            Err(error) => last_error = error,
+        }
+        if attempt + 1 < RESPONSE_COMMIT_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+    TaskResponseCommitOutcome::SentButUncommitted {
+        error: format!(
+            "final delivered-state CAS failed after {RESPONSE_COMMIT_ATTEMPTS} attempts: {last_error}"
+        ),
+    }
+}
+
+#[cfg(test)]
+fn force_task_response_delivered_failures(claim: &ResponseDeliveryClaim, attempts: usize) {
+    store::force_response_deliver_failures(claim, attempts);
+}
+
 pub(in crate::services::discord) async fn renew_task_response_delivery(
     pool: Option<&PgPool>,
     claim: &ResponseDeliveryClaim,
@@ -564,6 +632,86 @@ pub(super) async fn ensure_card<T: TaskCardTransport>(
     unreachable!("bounded card lease loop returns on its last attempt")
 }
 
+/// Replace a task card only after Discord authoritatively rejects it as a
+/// required response reference. The old message id is an exact CAS input: a
+/// concurrent worker that already installed a replacement returns that card
+/// instead of issuing another POST.
+pub(in crate::services::discord) async fn replace_confirmed_missing_card<T: TaskCardTransport>(
+    pool: Option<&PgPool>,
+    clients: &CardDeliveryClients,
+    transport: &T,
+    event: &TaskCardEvent,
+    missing_message_id: u64,
+) -> Result<CardEnsureOutcome, CardEnsureError> {
+    for attempt in 0..20 {
+        let claim = store::claim_missing_card_replacement(pool, &event.scope, missing_message_id)
+            .await
+            .map_err(CardEnsureError::Store)?;
+        match claim {
+            store::MissingCardReplacementClaim::Existing {
+                message_id,
+                bot_key,
+            } => {
+                return Ok(CardEnsureOutcome {
+                    message_id,
+                    bot_key,
+                    disposition: CardDisposition::Replaced,
+                });
+            }
+            store::MissingCardReplacementClaim::Busy { bot_key } if attempt < 19 => {
+                let _ = bot_key;
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            store::MissingCardReplacementClaim::Busy { bot_key } => {
+                return Err(CardEnsureError::Busy(format!(
+                    "another worker owns the missing-card replacement lease (bot={bot_key})"
+                )));
+            }
+            store::MissingCardReplacementClaim::Owned(claimed) => {
+                let Some(bot) = clients.by_key(&claimed.bot_key) else {
+                    let error = format!(
+                        "the replacement card's pinned bot {} is unavailable",
+                        claimed.bot_key
+                    );
+                    store::mark_post_failure(pool, &claimed, &error)
+                        .await
+                        .map_err(CardEnsureError::Store)?;
+                    return Err(CardEnsureError::Permanent(error));
+                };
+                let content = claimed.rendered_content.clone();
+                let hash = content_hash(&content);
+                match transport
+                    .post_card(
+                        bot,
+                        event.scope.channel_id,
+                        &content,
+                        &claimed.discord_nonce,
+                    )
+                    .await
+                {
+                    Ok(message_id) => {
+                        store::mark_posted(pool, &claimed, message_id, &content, &hash)
+                            .await
+                            .map_err(CardEnsureError::Store)?;
+                        return Ok(CardEnsureOutcome {
+                            message_id,
+                            bot_key: claimed.bot_key,
+                            disposition: CardDisposition::Replaced,
+                        });
+                    }
+                    Err(error) => {
+                        store::mark_post_failure(pool, &claimed, &error.to_string())
+                            .await
+                            .map_err(CardEnsureError::Store)?;
+                        return Err(map_transport_error(error));
+                    }
+                }
+            }
+        }
+    }
+    unreachable!("bounded missing-card replacement loop returns on its last attempt")
+}
+
 async fn deliver_claim<T: TaskCardTransport>(
     pool: Option<&PgPool>,
     clients: &CardDeliveryClients,
@@ -581,7 +729,7 @@ async fn deliver_claim<T: TaskCardTransport>(
             }
         }
         .map_err(CardEnsureError::Store)?;
-        return Err(CardEnsureError::Transient(error));
+        return Err(CardEnsureError::Permanent(error));
     };
     let content = match (&claimed.action, intent) {
         (store::ClaimAction::Post, EnsureIntent::Promotion)
