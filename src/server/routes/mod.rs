@@ -524,6 +524,7 @@ fn compose_api_router(state: AppState) -> ApiRouter {
         .merge(domains::access::router())
         .merge(domains::onboarding::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
+        .merge(domains::analytics::router(state.clone()))
         .merge(domains::kanban::router(state.clone()))
         .merge(domains::reviews::router(state.clone()))
         .merge(domains::ops::router(state.clone()))

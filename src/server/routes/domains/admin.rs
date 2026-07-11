@@ -5,10 +5,10 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, analytics, departments, escalation, home_metrics, offices,
-    protected_api_domain, receipt, settings, stats, voice_config,
+    protected_api_domain, settings, stats, voice_config,
 };
 
-// Category: admin and ops
+// Category: admin
 
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
@@ -73,19 +73,9 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/internal/escalation/emit",
                 post(escalation::emit_escalation),
             )
-            .route("/analytics", get(analytics::analytics))
-            .route("/analytics/invariants", get(analytics::invariants))
-            .route("/analytics/observability", get(analytics::observability))
-            .route("/analytics/policy-hooks", get(analytics::policy_hooks))
-            .route("/quality/events", get(analytics::quality_events))
-            .route("/streaks", get(analytics::streaks))
-            .route("/achievements", get(analytics::achievements))
-            .route("/activity-heatmap", get(analytics::activity_heatmap))
             .route("/audit-logs", get(analytics::audit_logs))
             .route("/machine-status", get(analytics::machine_status))
             .route("/rate-limits", get(analytics::rate_limits))
-            .route("/receipt", get(receipt::get_receipt))
-            .route("/token-analytics", get(receipt::get_token_analytics))
             .route("/home/kpi-trends", get(home_metrics::home_kpi_trends))
             .route("/skills-trend", get(analytics::skills_trend)),
         state,
