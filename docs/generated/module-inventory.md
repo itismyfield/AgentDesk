@@ -707,7 +707,7 @@
 | `services::discord::task_notification_delivery::store::missing_card_replacement` | `src/services/discord/task_notification_delivery/store/missing_card_replacement.rs` | 189 | 189 | 0 |  |
 | `services::discord::task_notification_delivery::store::response_chunks` | `src/services/discord/task_notification_delivery/store/response_chunks.rs` | 569 | 569 | 0 |  |
 | `services::discord::task_notification_delivery::store::response_fence` | `src/services/discord/task_notification_delivery/store/response_fence.rs` | 999 | 999 | 0 |  |
-| `services::discord::task_notification_delivery::store::response_identity` | `src/services/discord/task_notification_delivery/store/response_identity.rs` | 121 | 96 | 25 |  |
+| `services::discord::task_notification_delivery::store::response_identity` | `src/services/discord/task_notification_delivery/store/response_identity.rs` | 132 | 98 | 34 |  |
 | `services::discord::task_supervisor` | `src/services/discord/task_supervisor.rs` | 105 | 83 | 22 |  |
 | `services::discord::terminal_ui_obligation` | `src/services/discord/terminal_ui_obligation.rs` | 570 | 507 | 63 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 2515 | 1624 | 891 | giant-file |
