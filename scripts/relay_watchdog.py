@@ -1589,7 +1589,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     }
     previous_selected = chs.get(SELECTED_TRANSCRIPT_KEY)
     bootstrapped_from_watermark = False
-    if not isinstance(previous_selected, str) or not previous_selected:
+    candidate_paths = {str(candidate.path) for candidate in candidates}
+    if (
+        not isinstance(previous_selected, str)
+        or not previous_selected
+        or (candidate_paths and previous_selected not in candidate_paths)
+    ):
         previous_selected = None
         watermarks = delivered_watermarks(chs)
         watermarked_candidates = [

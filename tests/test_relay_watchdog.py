@@ -1659,7 +1659,7 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
         self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(replacement))
         self.assertTrue(
-            any("transcript-select reason=prior_missing" in line for line in rt.log_lines)
+            any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
         )
 
     def test_invariant_4435_all_stale_restart_keeps_delivered_anchor(self):
@@ -1771,6 +1771,58 @@ class TickChannelTests(unittest.TestCase):
                     str(current): current.stat().st_size,
                     str(touched_old): touched_old.stat().st_size,
                 }
+            }
+        }
+        advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
+
+        rt = self.make_rt()
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any(
+                "transcript-select reason=watermark_bootstrap" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_invalid_persisted_selection_allows_watermark_bootstrap(
+        self,
+    ):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+        current.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "confirmed current"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        touched_old.write_text(
+            current.read_text(encoding="utf-8").replace(
+                "confirmed current", "historic missing output"
+            ),
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: "relative/stale-selection.jsonl",
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(touched_old): touched_old.stat().st_size,
+                },
             }
         }
         advance_delivered_watermark(state["999"], current, anchor, self.now - 1)
