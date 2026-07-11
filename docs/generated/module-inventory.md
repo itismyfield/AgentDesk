@@ -915,7 +915,7 @@
 | `services::observability::helpers` | `src/services/observability/helpers.rs` | 127 | 127 | 0 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 358 | 358 | 0 |  |
 | `services::observability::pg_io` | `src/services/observability/pg_io.rs` | 970 | 970 | 0 |  |
-| `services::observability::queries` | `src/services/observability/queries.rs` | 222 | 160 | 62 |  |
+| `services::observability::queries` | `src/services/observability/queries.rs` | 229 | 160 | 69 |  |
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 537 | 352 | 185 |  |
 | `services::observability::relay_signal_alert` | `src/services/observability/relay_signal_alert.rs` | 412 | 247 | 165 |  |
 | `services::observability::retention` | `src/services/observability/retention.rs` | 99 | 99 | 0 |  |
