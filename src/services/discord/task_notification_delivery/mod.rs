@@ -386,6 +386,21 @@ pub(in crate::services::discord) fn durable_response_turn_key(
     }
 }
 
+/// Discord only reconciles duplicate creates when every retry reuses the same
+/// nonce. Bind each physical reply chunk to the durable response turn and its
+/// stable chunk index so sink/watcher takeover cannot create a second copy.
+pub(in crate::services::discord) fn response_chunk_nonce(
+    response_turn_key: &str,
+    chunk_index: usize,
+) -> String {
+    let digest = full_fingerprint(&[
+        "task-response-chunk-nonce-v1",
+        response_turn_key,
+        &chunk_index.to_string(),
+    ]);
+    format!("adktr{}", &digest[..20])
+}
+
 pub(in crate::services::discord) async fn claim_task_response_delivery(
     pool: Option<&PgPool>,
     channel_id: u64,

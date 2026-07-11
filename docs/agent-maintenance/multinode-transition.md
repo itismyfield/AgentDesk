@@ -1277,9 +1277,14 @@
   `task_notification_response_delivery` table is 1:N from that semantic event and
   uniquely keys each restart-stable `response_turn_key`; it stores the exact
   referenced card id, owner token/lease, and `claimed → sent → delivered` state.
-  Multiple workers therefore converge through PG CAS. An ambiguous create retries the same `enforce_nonce=true`
-  nonce within Discord's bounded nonce-replay window; the PG row/message id,
-  rather than the nonce window, remains the durable authority. A structured
+  Multiple workers therefore converge through PG CAS. An ambiguous card create retries the same
+  `enforce_nonce=true` nonce within Discord's bounded nonce-replay window; the
+  PG row/message id, rather than the nonce window, remains the durable card
+  authority. Every response POST chunk separately derives a bounded Discord
+  nonce from `(response_turn_key, chunk_index)` and enforces it on both the sink
+  and watcher required-reference transports. If Discord accepts the reply but
+  the `sent` CAS fails, an expired-lease takeover therefore reconciles the same
+  returned message id instead of creating a duplicate reply. A structured
   Discord missing-reference rejection can CAS-replace the missing card and then
   rebind only the still-claimed exact response owner from the old id to the new
   id; no unreferenced response fallback is allowed. Prompt-side footer deferral and the

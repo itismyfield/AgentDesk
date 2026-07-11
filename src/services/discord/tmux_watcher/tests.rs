@@ -2926,21 +2926,23 @@ fn placeholderless_rollback_sender_cleans_prefix_before_rewind_4154() {
         let delete_active = Arc::clone(&active_messages);
         let delete_count = Arc::clone(&delete_calls);
         let _hook = crate::services::discord::formatting::rollback_transport_test_hook::install(
-            Box::new(move |seen_channel, content, _reference| {
-                if seen_channel != channel_id {
-                    return None;
-                }
-                let call = send_count.fetch_add(1, Ordering::SeqCst) + 1;
-                if call == 2 {
-                    return Some(Err("Error while sending HTTP request.".to_string()));
-                }
-                let id = MessageId::new(send_next_id.fetch_add(1, Ordering::SeqCst));
-                send_active
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .push((id, content.to_string()));
-                Some(Ok(id))
-            }),
+            Box::new(
+                move |seen_channel, content, _reference, _nonce, _enforce_nonce| {
+                    if seen_channel != channel_id {
+                        return None;
+                    }
+                    let call = send_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    if call == 2 {
+                        return Some(Err("Error while sending HTTP request.".to_string()));
+                    }
+                    let id = MessageId::new(send_next_id.fetch_add(1, Ordering::SeqCst));
+                    send_active
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push((id, content.to_string()));
+                    Some(Ok(id))
+                },
+            ),
             Box::new(move |seen_channel, message_id| {
                 if seen_channel != channel_id {
                     return None;
@@ -3026,15 +3028,17 @@ fn rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154() {
         let channel_id = ChannelId::new(9_154_155);
         let anchor_id = MessageId::new(41_541);
         let _hook = crate::services::discord::formatting::rollback_transport_test_hook::install(
-            Box::new(move |seen_channel, _content, _reference| {
-                if seen_channel != channel_id {
-                    return None;
-                }
-                Some(Err(
+            Box::new(
+                move |seen_channel, _content, _reference, _nonce, _enforce_nonce| {
+                    if seen_channel != channel_id {
+                        return None;
+                    }
+                    Some(Err(
                     "[Serenity] Could not decode json when receiving error response from discord:"
                         .to_string(),
                 ))
-            }),
+                },
+            ),
             Box::new(move |_seen_channel, _message_id| Some(Ok(()))),
         );
 

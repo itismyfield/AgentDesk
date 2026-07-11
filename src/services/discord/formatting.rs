@@ -61,7 +61,13 @@ pub(in crate::services::discord) mod rollback_transport_test_hook {
     use super::*;
 
     type SendHook = Box<
-        dyn Fn(ChannelId, &str, Option<(ChannelId, MessageId)>) -> Option<Result<MessageId, String>>
+        dyn Fn(
+                ChannelId,
+                &str,
+                Option<(ChannelId, MessageId)>,
+                Option<&str>,
+                bool,
+            ) -> Option<Result<MessageId, String>>
             + Send
             + Sync,
     >;
@@ -93,13 +99,16 @@ pub(in crate::services::discord) mod rollback_transport_test_hook {
         channel_id: ChannelId,
         content: &str,
         reference: Option<(ChannelId, MessageId)>,
+        nonce: Option<&str>,
+        enforce_nonce: bool,
     ) -> Option<Result<MessageId, Error>> {
         SEND_HOOK
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .as_ref()
             .and_then(|hook| {
-                hook(channel_id, content, reference).map(|result| result.map_err(Into::into))
+                hook(channel_id, content, reference, nonce, enforce_nonce)
+                    .map(|result| result.map_err(Into::into))
             })
     }
 
@@ -2708,15 +2717,17 @@ mod replace_long_message_tests {
             let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let seen = attempts.clone();
             let _hook = super::rollback_transport_test_hook::install(
-                Box::new(move |seen_channel, _content, reference| {
-                    if seen_channel != channel {
-                        return None;
-                    }
-                    seen.lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .push(reference);
-                    Some(Err("referenced send rejected".to_string()))
-                }),
+                Box::new(
+                    move |seen_channel, _content, reference, _nonce, _enforce_nonce| {
+                        if seen_channel != channel {
+                            return None;
+                        }
+                        seen.lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .push(reference);
+                        Some(Err("referenced send rejected".to_string()))
+                    },
+                ),
                 Box::new(|_, _| Some(Ok(()))),
             );
             let http = poise::serenity_prelude::Http::new("test-token");

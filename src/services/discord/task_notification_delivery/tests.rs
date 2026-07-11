@@ -6,6 +6,27 @@ use poise::serenity_prelude as serenity;
 
 use super::*;
 
+struct TestRuntimeRootGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl TestRuntimeRootGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+        Self { previous }
+    }
+}
+
+impl Drop for TestRuntimeRootGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+    }
+}
+
 #[test]
 fn response_turn_key_is_stable_and_separates_offsets() {
     let first = response_turn_key(4055, "2026-07-11T01:37:00Z", Some(10));
@@ -18,6 +39,23 @@ fn response_turn_key_is_stable_and_separates_offsets() {
         first,
         response_turn_key(4055, "2026-07-11T01:37:00Z", Some(11))
     );
+}
+
+#[test]
+fn response_chunk_nonce_is_stable_bounded_and_distinct() {
+    let turn = response_turn_key(4055, "2026-07-11T01:37:00Z", Some(10));
+    let first = response_chunk_nonce(&turn, 0);
+    assert_eq!(first, response_chunk_nonce(&turn, 0));
+    assert_ne!(first, response_chunk_nonce(&turn, 1));
+    assert_ne!(
+        first,
+        response_chunk_nonce(
+            &response_turn_key(4055, "2026-07-11T01:37:00Z", Some(11)),
+            0,
+        )
+    );
+    assert!(first.starts_with("adktr"));
+    assert!(first.len() <= 25, "Discord nonce length: {first}");
 }
 
 #[test]
@@ -831,6 +869,192 @@ async fn sent_response_claim_never_reopens_post_authority_after_lease_expiry_pg(
             card_message_id: 90_057
         }
     ));
+}
+
+#[test]
+fn response_reply_nonce_reconciles_after_sent_cas_failure_and_lease_takeover_pg() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let tempdir = tempfile::tempdir().expect("temp runtime root");
+    let _root = TestRuntimeRootGuard::set(tempdir.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+    runtime.block_on(async {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_task_response_nonce_takeover_4055",
+            "task response nonce takeover reconciliation",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let event = event("postgres-response-reply-nonce-takeover");
+        let turn_key = response_turn_key(4062, "2026-07-11T03:42:00Z", Some(4062));
+        let card_message_id = 90_062;
+        let claim = claim_task_response_delivery(
+            Some(&pool),
+            event.scope.channel_id,
+            &event.scope.provider,
+            &event.scope.session_key,
+            event.event_key(),
+            &turn_key,
+            card_message_id,
+            ResponseDeliveryOwner::Sink,
+        )
+        .await
+        .expect("sink claims response before reply POST");
+        let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+            panic!("first response claimant must own the reply POST")
+        };
+
+        let channel = serenity::ChannelId::new(event.scope.channel_id);
+        let card = serenity::MessageId::new(card_message_id);
+        let by_nonce = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
+        let physical_posts = Arc::new(AtomicUsize::new(0));
+        let next_message_id = Arc::new(AtomicU64::new(100_000));
+        let observations = Arc::new(Mutex::new(Vec::<(
+            Option<String>,
+            bool,
+            Option<(serenity::ChannelId, serenity::MessageId)>,
+        )>::new()));
+        let hook_by_nonce = Arc::clone(&by_nonce);
+        let hook_physical_posts = Arc::clone(&physical_posts);
+        let hook_next_message_id = Arc::clone(&next_message_id);
+        let hook_observations = Arc::clone(&observations);
+        let _hook =
+            crate::services::discord::formatting::rollback_transport_test_hook::install(
+                Box::new(move |seen_channel, _content, reference, nonce, enforce_nonce| {
+                    if seen_channel != channel {
+                        return None;
+                    }
+                    hook_observations
+                        .lock()
+                        .expect("reply observations")
+                        .push((nonce.map(str::to_string), enforce_nonce, reference));
+                    let message_id = match nonce {
+                        Some(nonce) if enforce_nonce => {
+                            let mut messages = hook_by_nonce.lock().expect("reply nonce map");
+                            *messages.entry(nonce.to_string()).or_insert_with(|| {
+                                hook_physical_posts.fetch_add(1, Ordering::AcqRel);
+                                hook_next_message_id.fetch_add(1, Ordering::AcqRel)
+                            })
+                        }
+                        _ => {
+                            hook_physical_posts.fetch_add(1, Ordering::AcqRel);
+                            hook_next_message_id.fetch_add(1, Ordering::AcqRel)
+                        }
+                    };
+                    Some(Ok(serenity::MessageId::new(message_id)))
+                }),
+                Box::new(|_, _| Some(Ok(()))),
+            );
+        let http = serenity::Http::new("test-token");
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let reply_text = "x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 32);
+        let first = crate::services::discord::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
+            &http,
+            channel,
+            card,
+            &reply_text,
+            &shared,
+            (channel, card),
+            &turn_key,
+        )
+        .await
+        .expect("Discord accepts the first required-reference reply POST");
+        assert_eq!(first.len(), 2, "test reply must include a continuation");
+
+        let mut lost_sent_cas = claim.clone();
+        lost_sent_cas.owner_token = "lost-owner-token".to_string();
+        record_task_response_sent_bounded(Some(&pool), &lost_sent_cas)
+            .await
+            .expect_err("model POST success followed by sent-state CAS failure");
+        let expired = sqlx::query(
+            "UPDATE task_notification_response_delivery
+             SET lease_expires_at = NOW() - INTERVAL '1 second'
+             WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+               AND event_key = $4 AND response_turn_key = $5
+               AND delivery_state = 'claimed'",
+        )
+        .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
+        .bind(&event.scope.provider)
+        .bind(&event.scope.session_key)
+        .bind(event.event_key())
+        .bind(&turn_key)
+        .execute(&pool)
+        .await
+        .expect("expire the sink lease after its sent-state CAS failure");
+        assert_eq!(expired.rows_affected(), 1);
+
+        let (takeover, persisted_card) = claim_existing_task_response_delivery(
+            Some(&pool),
+            event.scope.channel_id,
+            &event.scope.provider,
+            &event.scope.session_key,
+            &turn_key,
+            ResponseDeliveryOwner::Watcher,
+        )
+        .await
+        .expect("watcher inspects expired sink claim")
+        .expect("response row survives the failed sent CAS");
+        assert_eq!(persisted_card, card_message_id);
+        let ResponseDeliveryClaimOutcome::Owned(takeover) = takeover else {
+            panic!("watcher must take over the expired claimed reply")
+        };
+        let replay = crate::services::discord::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
+            &http,
+            channel,
+            card,
+            &reply_text,
+            &shared,
+            (channel, card),
+            &turn_key,
+        )
+        .await
+        .expect("watcher reconciles the first reply by its enforced nonce");
+        assert_eq!(replay, first, "takeover must reconcile the same message id");
+        assert_eq!(
+            physical_posts.load(Ordering::Acquire),
+            first.len(),
+            "POST-Ok followed by sent-CAS failure must not duplicate reply chunks"
+        );
+        let observed = observations.lock().expect("reply observations");
+        assert_eq!(observed.len(), 4);
+        assert_ne!(observed[0].0, observed[1].0, "chunks need distinct nonces");
+        assert_eq!(observed[0].0, observed[2].0);
+        assert_eq!(observed[1].0, observed[3].0);
+        assert!(observed.iter().all(|(_, enforced, _)| *enforced));
+        assert_eq!(observed[0].2, Some((channel, card)));
+        assert_eq!(observed[1].2, None);
+        assert_eq!(observed[2].2, Some((channel, card)));
+        assert_eq!(observed[3].2, None);
+        drop(observed);
+
+        record_task_response_sent_bounded(Some(&pool), &takeover)
+            .await
+            .expect("takeover records the reconciled reply as sent");
+        assert!(matches!(
+            claim_task_response_delivery(
+                Some(&pool),
+                event.scope.channel_id,
+                &event.scope.provider,
+                &event.scope.session_key,
+                event.event_key(),
+                &turn_key,
+                card_message_id,
+                ResponseDeliveryOwner::Sink,
+            )
+            .await
+            .expect("inspect reconciled sent response"),
+            ResponseDeliveryClaimOutcome::SentUncommitted {
+                card_message_id: 90_062
+            }
+        ));
+    });
 }
 
 #[tokio::test]

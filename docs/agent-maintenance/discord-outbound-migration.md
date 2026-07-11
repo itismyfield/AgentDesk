@@ -190,6 +190,7 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/services/discord/gateway/outbound_messages.rs` (`send_intake_placeholder`) | `placeholder_sends` (intake) | **migrated_v3**. Posts the `"..."` placeholder before a turn via direct v3. Uses `preserve_inline_content().without_idempotency()` to preserve streaming behavior. |
 | `src/services/discord/gateway/outbound_messages.rs` (`edit_outbound_message`) | `placeholder_sends` (edit) | **migrated_v3**. Encodes edit through `OutboundOperation::Edit`. |
 | `src/services/discord/task_notification_delivery/gateway.rs` via `gateway/outbound_messages.rs` | durable task-notification cards | **migrated_v3**. Create uses the row's stable nonce with enforcement; edit returns a classified confirmed-missing result only for structured Discord `404/10008`. The PG card authority, not the process deduper, decides create/edit/replacement ownership. |
+| `src/services/discord/formatting/long_send_rollback.rs` via `http.rs` | durable task-response replies | **nonce-hardened required-reference compatibility path**. Sink and watcher share the exact `response_turn_key`; each physical reply chunk derives a distinct stable nonce and sets `enforce_nonce=true`. A retry after Discord POST success but response `sent`-CAS failure reconciles the returned message id instead of duplicating the reply. |
 | `src/services/discord/gateway.rs:400` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
 | `src/services/discord/router/intake_gate.rs` (`send_reaction_control_reply`) | reaction-control lifecycle replies | **migrated_v3**. Short fixed replies for queued-card POST fallback and duplicate stop now use referenced v3 lifecycle notices. Correlation = `intake-reaction-control:<channel_id>:<message_id>`, semantic = `intake-reaction-control:<channel_id>:<message_id>:<reason_key>`. |
 | `src/services/discord/monitoring_status.rs:115` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
@@ -379,6 +380,13 @@ button hits the manual outbound API, which is covered under §3.A
   `task_notification_card_outbound_message_enforces_nonce_reconciliation` and
   `task_notification_edit_replacement_requires_structured_discord_unknown_message`
   pin nonce enforcement and the exact edit `404/10008` replacement boundary.
+- `src/services/discord/task_notification_delivery/tests.rs` and
+  `src/services/discord/http.rs`:
+  `response_chunk_nonce_is_stable_bounded_and_distinct`,
+  `required_reference_nonce_builder_enforces_discord_reconciliation`, and
+  `response_reply_nonce_reconciles_after_sent_cas_failure_and_lease_takeover_pg`
+  pin per-chunk reply nonces, required references, and the POST-success / failed
+  `sent`-CAS / expired-lease takeover boundary without a second physical reply.
 - `src/services/discord/outbound/reaction_control.rs`:
   `reaction_control_reply_ids_are_stable_per_message_and_reason` verifies the
   reaction-control lifecycle replies keep stable correlation and semantic ids.

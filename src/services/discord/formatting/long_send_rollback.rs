@@ -228,12 +228,16 @@ async fn send_long_message_raw_with_reference_rollback_policy(
         );
         rate_limit_wait(shared, channel_id).await;
         let chunk_reference = if i == 0 { reference.clone() } else { None };
+        let chunk_nonce = response_turn_key.map(|turn_key| {
+            super::super::task_notification_delivery::response_chunk_nonce(turn_key, i)
+        });
         match send_rollback_channel_message(
             http,
             channel_id,
             chunk,
             chunk_reference,
             require_reference && i == 0,
+            chunk_nonce.as_deref(),
         )
         .await
         {
@@ -385,15 +389,34 @@ async fn send_rollback_channel_message(
     content: &str,
     reference: Option<(ChannelId, MessageId)>,
     require_reference: bool,
+    nonce: Option<&str>,
 ) -> Result<MessageId, Error> {
     #[cfg(test)]
-    if let Some(result) = super::rollback_transport_test_hook::send(channel_id, content, reference)
-    {
+    if let Some(result) = super::rollback_transport_test_hook::send(
+        channel_id,
+        content,
+        reference,
+        nonce,
+        nonce.is_some(),
+    ) {
         return result;
     }
 
-    match (reference, require_reference) {
-        (Some((reference_channel_id, reference_message_id)), true) => {
+    match (reference, require_reference, nonce) {
+        (Some((reference_channel_id, reference_message_id)), true, Some(nonce)) => {
+            super::super::http::send_channel_message_with_required_reference_and_nonce(
+                http,
+                channel_id,
+                content,
+                reference_channel_id,
+                reference_message_id,
+                nonce,
+            )
+            .await
+            .map(|message| message.id)
+            .map_err(Into::into)
+        }
+        (Some((reference_channel_id, reference_message_id)), true, None) => {
             super::super::http::send_channel_message_with_required_reference(
                 http,
                 channel_id,
@@ -405,7 +428,20 @@ async fn send_rollback_channel_message(
             .map(|message| message.id)
             .map_err(Into::into)
         }
-        (Some((reference_channel_id, reference_message_id)), false) => {
+        (Some((reference_channel_id, reference_message_id)), false, Some(nonce)) => {
+            super::super::http::send_channel_message_with_reference_and_nonce(
+                http,
+                channel_id,
+                content,
+                reference_channel_id,
+                reference_message_id,
+                nonce,
+            )
+            .await
+            .map(|message| message.id)
+            .map_err(Into::into)
+        }
+        (Some((reference_channel_id, reference_message_id)), false, None) => {
             send_channel_message_with_optional_reference(
                 http,
                 channel_id,
@@ -416,7 +452,13 @@ async fn send_rollback_channel_message(
             .map(|message| message.id)
             .map_err(Into::into)
         }
-        (None, _) => super::super::http::send_channel_message(http, channel_id, content)
+        (None, _, Some(nonce)) => {
+            super::super::http::send_channel_message_with_nonce(http, channel_id, content, nonce)
+                .await
+                .map(|message| message.id)
+                .map_err(Into::into)
+        }
+        (None, _, None) => super::super::http::send_channel_message(http, channel_id, content)
             .await
             .map(|message| message.id)
             .map_err(Into::into),

@@ -55,6 +55,25 @@ fn discord_content_or_zwsp(content: &str) -> &str {
     }
 }
 
+fn channel_message_builder(
+    content: &str,
+    reference: Option<(ChannelId, MessageId)>,
+    nonce: Option<&str>,
+) -> CreateMessage {
+    let mut message = CreateMessage::new()
+        .content(discord_content_or_zwsp(content))
+        .allowed_mentions(relay_allowed_mentions());
+    if let Some((reference_channel_id, reference_message_id)) = reference {
+        message = message.reference_message((reference_channel_id, reference_message_id));
+    }
+    if let Some(nonce) = nonce {
+        message = message
+            .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
+            .enforce_nonce(true);
+    }
+    message
+}
+
 /// #2839 (relay-stability): mention policy applied to EVERY relay send/edit.
 ///
 /// Relayed agent output regularly contains `@everyone`/`@here` or role mentions
@@ -81,12 +100,21 @@ pub(in crate::services::discord) async fn send_channel_message(
     content: &str,
 ) -> serenity::Result<Message> {
     channel_id
-        .send_message(
-            http,
-            CreateMessage::new()
-                .content(discord_content_or_zwsp(content))
-                .allowed_mentions(relay_allowed_mentions()),
-        )
+        .send_message(http, channel_message_builder(content, None, None))
+        .await
+}
+
+/// Send an idempotent create. With `enforce_nonce`, Discord returns the
+/// existing message for a recent duplicate nonce and the caller reconciles on
+/// that returned message id instead of creating a second physical reply.
+pub(in crate::services::discord) async fn send_channel_message_with_nonce(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    content: &str,
+    nonce: &str,
+) -> serenity::Result<Message> {
+    channel_id
+        .send_message(http, channel_message_builder(content, None, Some(nonce)))
         .await
 }
 
@@ -100,10 +128,31 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
     channel_id
         .send_message(
             http,
-            CreateMessage::new()
-                .reference_message((reference_channel_id, reference_message_id))
-                .content(discord_content_or_zwsp(content))
-                .allowed_mentions(relay_allowed_mentions()),
+            channel_message_builder(
+                content,
+                Some((reference_channel_id, reference_message_id)),
+                None,
+            ),
+        )
+        .await
+}
+
+pub(in crate::services::discord) async fn send_channel_message_with_reference_and_nonce(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    content: &str,
+    reference_channel_id: ChannelId,
+    reference_message_id: MessageId,
+    nonce: &str,
+) -> serenity::Result<Message> {
+    channel_id
+        .send_message(
+            http,
+            channel_message_builder(
+                content,
+                Some((reference_channel_id, reference_message_id)),
+                Some(nonce),
+            ),
         )
         .await
 }
@@ -121,6 +170,26 @@ pub(in crate::services::discord) async fn send_channel_message_with_required_ref
         content,
         reference_channel_id,
         reference_message_id,
+    )
+    .await
+    .map_err(classify_required_reference_error)
+}
+
+pub(in crate::services::discord) async fn send_channel_message_with_required_reference_and_nonce(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    content: &str,
+    reference_channel_id: ChannelId,
+    reference_message_id: MessageId,
+    nonce: &str,
+) -> Result<Message, RequiredReferenceSendError> {
+    send_channel_message_with_reference_and_nonce(
+        http,
+        channel_id,
+        content,
+        reference_channel_id,
+        reference_message_id,
+        nonce,
     )
     .await
     .map_err(classify_required_reference_error)
@@ -198,9 +267,10 @@ pub(in crate::services::discord) async fn delete_channel_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        DISCORD_EMPTY_MESSAGE_SENTINEL, discord_content_or_zwsp,
+        DISCORD_EMPTY_MESSAGE_SENTINEL, channel_message_builder, discord_content_or_zwsp,
         is_unknown_required_reference_response, relay_allowed_mentions,
     };
+    use poise::serenity_prelude::{ChannelId, MessageId};
 
     #[test]
     fn discord_content_or_zwsp_replaces_empty_content() {
@@ -260,5 +330,31 @@ mod tests {
             0,
             ["message_reference.message_id".to_string()],
         ));
+    }
+
+    #[test]
+    fn required_reference_nonce_builder_enforces_discord_reconciliation() {
+        let channel = ChannelId::new(4_055);
+        let reference = MessageId::new(90_062);
+        let value = serde_json::to_value(channel_message_builder(
+            "reply",
+            Some((channel, reference)),
+            Some("adktr01234567890123456789"),
+        ))
+        .expect("serialize create-message payload");
+        assert_eq!(
+            value.get("nonce").and_then(serde_json::Value::as_str),
+            Some("adktr01234567890123456789")
+        );
+        assert_eq!(
+            value
+                .get("enforce_nonce")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            value.get("message_reference").is_some(),
+            "idempotent reply must retain its required card reference"
+        );
     }
 }
