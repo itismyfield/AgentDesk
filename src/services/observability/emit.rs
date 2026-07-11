@@ -275,6 +275,121 @@ pub enum InvariantSeverity {
     Warn,
 }
 
+const INVARIANT_WARN_DOWNGRADE_SUFFIX: &str = "(handled by downstream guard — downgraded to WARN)";
+
+// Keep the tracing call and its test witness behind one token. A regression
+// that routes `Warn` through the `error` arm (or removes the arm entirely)
+// therefore changes both the real emission and the deterministic witness.
+macro_rules! emit_invariant_log {
+    (error, $invariant:expr, $violation:expr) => {{
+        tracing::error!(
+            invariant = %$invariant,
+            provider = $violation.provider.unwrap_or_default(),
+            channel_id = $violation.channel_id.unwrap_or_default(),
+            dispatch_id = $violation.dispatch_id.unwrap_or_default(),
+            session_key = $violation.session_key.unwrap_or_default(),
+            turn_id = $violation.turn_id.unwrap_or_default(),
+            code_location = $violation.code_location,
+            "[invariant] {}",
+            $violation.message
+        );
+        #[cfg(test)]
+        invariant_log_test_capture::record(
+            InvariantSeverity::Error,
+            &$invariant,
+            format!("[invariant] {}", $violation.message),
+        );
+    }};
+    (warn, $invariant:expr, $violation:expr) => {{
+        tracing::warn!(
+            invariant = %$invariant,
+            provider = $violation.provider.unwrap_or_default(),
+            channel_id = $violation.channel_id.unwrap_or_default(),
+            dispatch_id = $violation.dispatch_id.unwrap_or_default(),
+            session_key = $violation.session_key.unwrap_or_default(),
+            turn_id = $violation.turn_id.unwrap_or_default(),
+            code_location = $violation.code_location,
+            "[invariant] {} {}",
+            $violation.message,
+            INVARIANT_WARN_DOWNGRADE_SUFFIX
+        );
+        #[cfg(test)]
+        invariant_log_test_capture::record(
+            InvariantSeverity::Warn,
+            &$invariant,
+            format!(
+                "[invariant] {} {}",
+                $violation.message, INVARIANT_WARN_DOWNGRADE_SUFFIX
+            ),
+        );
+    }};
+}
+
+#[cfg(test)]
+mod invariant_log_test_capture {
+    use std::cell::RefCell;
+
+    use super::InvariantSeverity;
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) struct CapturedInvariantLog {
+        pub(super) severity: InvariantSeverity,
+        pub(super) invariant: String,
+        pub(super) rendered_message: String,
+    }
+
+    thread_local! {
+        static CAPTURE: RefCell<Option<Vec<CapturedInvariantLog>>> = const { RefCell::new(None) };
+    }
+
+    struct CaptureGuard {
+        active: bool,
+    }
+
+    impl CaptureGuard {
+        fn begin() -> Self {
+            CAPTURE.with(|slot| {
+                let previous = slot.borrow_mut().replace(Vec::new());
+                assert!(previous.is_none(), "nested invariant log test capture");
+            });
+            Self { active: true }
+        }
+
+        fn finish(mut self) -> Vec<CapturedInvariantLog> {
+            self.active = false;
+            CAPTURE.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+        }
+    }
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            if self.active {
+                CAPTURE.with(|slot| {
+                    slot.borrow_mut().take();
+                });
+            }
+        }
+    }
+
+    pub(super) fn record(severity: InvariantSeverity, invariant: &str, rendered_message: String) {
+        CAPTURE.with(|slot| {
+            if let Some(logs) = slot.borrow_mut().as_mut() {
+                logs.push(CapturedInvariantLog {
+                    severity,
+                    invariant: invariant.to_string(),
+                    rendered_message,
+                });
+            }
+        });
+    }
+
+    pub(super) fn capture<T>(run: impl FnOnce() -> T) -> (T, Vec<CapturedInvariantLog>) {
+        let guard = CaptureGuard::begin();
+        let result = run();
+        (result, guard.finish())
+    }
+}
+
 pub fn record_invariant_check_with_severity(
     condition: bool,
     violation: InvariantViolation<'_>,
@@ -286,28 +401,8 @@ pub fn record_invariant_check_with_severity(
 
     let invariant = normalize_string(violation.invariant).unwrap_or_else(|| "unknown".to_string());
     match severity {
-        InvariantSeverity::Error => tracing::error!(
-            invariant = %invariant,
-            provider = violation.provider.unwrap_or_default(),
-            channel_id = violation.channel_id.unwrap_or_default(),
-            dispatch_id = violation.dispatch_id.unwrap_or_default(),
-            session_key = violation.session_key.unwrap_or_default(),
-            turn_id = violation.turn_id.unwrap_or_default(),
-            code_location = violation.code_location,
-            "[invariant] {}",
-            violation.message
-        ),
-        InvariantSeverity::Warn => tracing::warn!(
-            invariant = %invariant,
-            provider = violation.provider.unwrap_or_default(),
-            channel_id = violation.channel_id.unwrap_or_default(),
-            dispatch_id = violation.dispatch_id.unwrap_or_default(),
-            session_key = violation.session_key.unwrap_or_default(),
-            turn_id = violation.turn_id.unwrap_or_default(),
-            code_location = violation.code_location,
-            "[invariant] {} (handled by downstream guard — downgraded to WARN)",
-            violation.message
-        ),
+        InvariantSeverity::Error => emit_invariant_log!(error, invariant, violation),
+        InvariantSeverity::Warn => emit_invariant_log!(warn, invariant, violation),
     }
 
     emit_event(
@@ -1033,6 +1128,68 @@ mod tests {
         // is emitted identically and carries the same provider/channel as ERROR.
         assert_eq!(downgraded_event.provider.as_deref(), Some("codex"));
         assert_eq!(downgraded_event.channel_id, Some(7));
+    }
+
+    #[test]
+    fn invariant_severity_routes_to_exact_log_level_and_suffix_4422() {
+        let ((), logs) = super::invariant_log_test_capture::capture(|| {
+            assert!(record_invariant_check_with_severity(
+                true,
+                InvariantViolation {
+                    provider: Some("Codex"),
+                    channel_id: Some(44_220),
+                    dispatch_id: None,
+                    session_key: None,
+                    turn_id: None,
+                    invariant: "condition_true_must_not_emit",
+                    code_location: "src/services/observability/emit.rs:test",
+                    message: "no emission",
+                    details: json!({}),
+                },
+                InvariantSeverity::Warn,
+            ));
+            assert!(!record_invariant_check_with_severity(
+                false,
+                InvariantViolation {
+                    provider: Some("Codex"),
+                    channel_id: Some(44_220),
+                    dispatch_id: None,
+                    session_key: None,
+                    turn_id: None,
+                    invariant: "warn_route_4422",
+                    code_location: "src/services/observability/emit.rs:test",
+                    message: "handled rewind",
+                    details: json!({}),
+                },
+                InvariantSeverity::Warn,
+            ));
+            assert!(!record_invariant_check_with_severity(
+                false,
+                InvariantViolation {
+                    provider: Some("Codex"),
+                    channel_id: Some(44_220),
+                    dispatch_id: None,
+                    session_key: None,
+                    turn_id: None,
+                    invariant: "error_route_4422",
+                    code_location: "src/services/observability/emit.rs:test",
+                    message: "persisted rewind",
+                    details: json!({}),
+                },
+                InvariantSeverity::Error,
+            ));
+        });
+
+        assert_eq!(logs.len(), 2, "condition=true must not emit: {logs:?}");
+        assert_eq!(logs[0].severity, InvariantSeverity::Warn);
+        assert_eq!(logs[0].invariant, "warn_route_4422");
+        assert_eq!(
+            logs[0].rendered_message,
+            format!("[invariant] handled rewind {INVARIANT_WARN_DOWNGRADE_SUFFIX}")
+        );
+        assert_eq!(logs[1].severity, InvariantSeverity::Error);
+        assert_eq!(logs[1].invariant, "error_route_4422");
+        assert_eq!(logs[1].rendered_message, "[invariant] persisted rewind");
     }
 
     #[test]

@@ -39,8 +39,8 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
             }))
         });
         assert!(
-            tripwire.is_err(),
-            "the production monotonic debug tripwire must remain active"
+            tripwire.is_err() || cfg!(not(debug_assertions)),
+            "the production monotonic tripwire must fire when debug assertions are enabled"
         );
 
         let severities: Vec<_> = events
@@ -82,8 +82,8 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
         }))
     });
     assert!(
-        tripwire.is_err(),
-        "the production monotonic debug tripwire must remain active"
+        tripwire.is_err() || cfg!(not(debug_assertions)),
+        "the production monotonic tripwire must fire when debug assertions are enabled"
     );
     let severities: Vec<_> = events
         .iter()
