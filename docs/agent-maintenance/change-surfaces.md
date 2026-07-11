@@ -175,9 +175,11 @@
   - `src/dispatch/dispatch_context.rs` (2817 lines).
   - `src/dispatch/dispatch_create.rs` (1334 lines).
   - `src/dispatch/dispatch_status.rs` (1445 lines).
-  - `src/services/dispatches/outbox_route.rs` (1172 lines; route extraction
+  - `src/services/dispatches/outbox_route.rs` (1173 lines; +1 from #4055
+    preserving the typed transient delivery result; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1495 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1496 lines;
+    +1 from #4055 preserving the typed transient delivery result;
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -1300,8 +1302,9 @@
     `min(now+timeout, ceiling)` cap + one-shot ceiling warn and the auto-extend
     `clamp_auto_extend_deadline_ms` clamp, reusing the shared discord/mod.rs
     helpers, so headless Codex honors its 4h ceiling end to end).
-  - `src/services/discord/meeting_orchestrator.rs` (3221 lines after #3034
-    dead-code sweep removed `is_meeting_channel`).
+  - `src/services/discord/meeting_orchestrator.rs` (3222 lines; +1 from #4055
+    preserving the typed transient delivery result; #3034 dead-code sweep
+    removed `is_meeting_channel`).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (993 prod lines; provider
     stop-token/tmux binding runtime + the async interrupt/cancel/hard-stop
     orchestration + session-teardown. #3169: the claude-anonymous-teardown
@@ -1820,7 +1823,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/settings.rs` (1114) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
-- `src/services/dispatches/outbox_route.rs` (1172) — dispatch outbox route
+- `src/services/dispatches/outbox_route.rs` (1173) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2948; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1358),
