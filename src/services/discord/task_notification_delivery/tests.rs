@@ -7,21 +7,17 @@ use poise::serenity_prelude as serenity;
 use super::*;
 
 #[test]
-fn task_response_fallback_gate_normalizes_provider_and_clears_exact_scope() {
-    let session = "AgentDesk-claude-4055-normalized-gate";
-    block_unanchored_task_response_fallback(" CLAUDE ", session, 4_055_801);
-
-    assert!(unanchored_task_response_fallback_blocked(
-        "claude", session, 4_055_801,
-    ));
-    assert!(!unanchored_task_response_fallback_blocked(
-        "claude", session, 4_055_802,
-    ));
-
-    clear_unanchored_task_response_fallback("Claude", session, 4_055_801);
-    assert!(!unanchored_task_response_fallback_blocked(
-        "claude", session, 4_055_801,
-    ));
+fn response_turn_key_is_stable_and_separates_offsets() {
+    let first = response_turn_key(4055, "2026-07-11T01:37:00Z", Some(10));
+    assert_eq!(first.len(), 64);
+    assert_eq!(
+        first,
+        response_turn_key(4055, "2026-07-11T01:37:00Z", Some(10))
+    );
+    assert_ne!(
+        first,
+        response_turn_key(4055, "2026-07-11T01:37:00Z", Some(11))
+    );
 }
 
 #[derive(Default)]
@@ -526,6 +522,134 @@ async fn concurrent_ensure_card_unique_winner_pg() {
         .await
         .expect("task card row count");
     assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_fence_4055",
+        "task response durable fallback fence",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let delivered_event = event("postgres-response-delivered");
+    let unrelated_pending_event = event("postgres-unrelated-pending");
+
+    record_footer_only(Some(&pool), &unrelated_pending_event)
+        .await
+        .expect("seed unrelated card-pending row");
+    assert!(
+        task_response_fallback_must_wait(
+            Some(&pool),
+            unrelated_pending_event.scope.channel_id,
+            &unrelated_pending_event.scope.provider,
+            &unrelated_pending_event.scope.session_key,
+            Some(unrelated_pending_event.event_key()),
+            None,
+        )
+        .await
+        .expect("card-pending response fence")
+    );
+
+    let confirmed = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &delivered_event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm response card");
+    let turn_key = response_turn_key(4055, "2026-07-11T01:37:00Z", Some(4055));
+    bind_task_response_turn(
+        Some(&pool),
+        delivered_event.scope.channel_id,
+        &delivered_event.scope.provider,
+        &delivered_event.scope.session_key,
+        delivered_event.event_key(),
+        &turn_key,
+        confirmed.message_id,
+    )
+    .await
+    .expect("bind exact response turn");
+    assert!(
+        task_response_fallback_must_wait(
+            Some(&pool),
+            delivered_event.scope.channel_id,
+            &delivered_event.scope.provider,
+            &delivered_event.scope.session_key,
+            None,
+            Some(&turn_key),
+        )
+        .await
+        .expect("confirmed card still waits for response")
+    );
+
+    sqlx::query(
+        "UPDATE task_notification_card_state
+         SET lease_owner = 'crashed-worker', lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+    )
+    .bind(i64::try_from(delivered_event.scope.channel_id).expect("test channel id"))
+    .bind(&delivered_event.scope.provider)
+    .bind(&delivered_event.scope.session_key)
+    .bind(delivered_event.event_key())
+    .execute(&pool)
+    .await
+    .expect("seed stale process owner");
+    mark_task_response_delivered(
+        Some(&pool),
+        delivered_event.scope.channel_id,
+        &delivered_event.scope.provider,
+        &delivered_event.scope.session_key,
+        delivered_event.event_key(),
+        confirmed.message_id,
+    )
+    .await
+    .expect("commit exact response delivery despite stale owner");
+
+    assert!(
+        !task_response_fallback_must_wait(
+            Some(&pool),
+            delivered_event.scope.channel_id,
+            &delivered_event.scope.provider,
+            &delivered_event.scope.session_key,
+            Some(delivered_event.event_key()),
+            None,
+        )
+        .await
+        .expect("delivered event fence")
+    );
+    assert!(
+        !task_response_fallback_must_wait(
+            Some(&pool),
+            delivered_event.scope.channel_id,
+            &delivered_event.scope.provider,
+            &delivered_event.scope.session_key,
+            None,
+            Some(&turn_key),
+        )
+        .await
+        .expect("delivered turn fence")
+    );
+    assert!(
+        task_response_fallback_must_wait(
+            Some(&pool),
+            unrelated_pending_event.scope.channel_id,
+            &unrelated_pending_event.scope.provider,
+            &unrelated_pending_event.scope.session_key,
+            Some(unrelated_pending_event.event_key()),
+            None,
+        )
+        .await
+        .expect("unrelated pending event remains fenced"),
+        "a delivered event must not release an unrelated task response",
+    );
 }
 
 #[tokio::test]

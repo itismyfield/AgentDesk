@@ -10,8 +10,6 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-use std::sync::LazyLock;
-
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
@@ -24,56 +22,6 @@ pub(super) use gateway::{
 };
 
 use self::store::{CardClaim, ClaimedCard, StoreIntent};
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TaskResponseFallbackKey {
-    channel_id: u64,
-    provider: String,
-    session_key: String,
-}
-
-static TASK_RESPONSE_FALLBACK_BLOCKS: LazyLock<dashmap::DashSet<TaskResponseFallbackKey>> =
-    LazyLock::new(dashmap::DashSet::new);
-
-fn response_fallback_key(
-    provider: &str,
-    session_key: &str,
-    channel_id: u64,
-) -> TaskResponseFallbackKey {
-    TaskResponseFallbackKey {
-        channel_id,
-        provider: provider.trim().to_ascii_lowercase(),
-        session_key: session_key.to_string(),
-    }
-}
-
-pub(in crate::services::discord) fn block_unanchored_task_response_fallback(
-    provider: &str,
-    session_key: &str,
-    channel_id: u64,
-) {
-    TASK_RESPONSE_FALLBACK_BLOCKS.insert(response_fallback_key(provider, session_key, channel_id));
-}
-
-pub(in crate::services::discord) fn clear_unanchored_task_response_fallback(
-    provider: &str,
-    session_key: &str,
-    channel_id: u64,
-) {
-    TASK_RESPONSE_FALLBACK_BLOCKS.remove(&response_fallback_key(provider, session_key, channel_id));
-}
-
-pub(in crate::services::discord) fn unanchored_task_response_fallback_blocked(
-    provider: &str,
-    session_key: &str,
-    channel_id: u64,
-) -> bool {
-    TASK_RESPONSE_FALLBACK_BLOCKS.contains(&response_fallback_key(
-        provider,
-        session_key,
-        channel_id,
-    ))
-}
 
 /// Provider-normalized context retained beside terminal response text.
 ///
@@ -163,6 +111,10 @@ impl TaskNotificationContext {
             "monitor_auto_turn" => TaskNotificationKind::MonitorAutoTurn,
             _ => TaskNotificationKind::Background,
         }
+    }
+
+    pub(super) fn event_key(&self) -> &str {
+        &self.event_key
     }
 
     pub(super) fn to_event(
@@ -350,6 +302,70 @@ impl TaskCardEvent {
     pub(super) fn kind(&self) -> &str {
         &self.kind
     }
+
+    #[cfg(test)]
+    pub(super) fn event_key(&self) -> &str {
+        &self.scope.event_key
+    }
+}
+
+pub(in crate::services::discord) fn response_turn_key(
+    user_msg_id: u64,
+    started_at: &str,
+    turn_start_offset: Option<u64>,
+) -> String {
+    full_fingerprint(&[
+        "task-response-turn-v1",
+        &user_msg_id.to_string(),
+        started_at,
+        &turn_start_offset
+            .map(|offset| offset.to_string())
+            .unwrap_or_else(|| "legacy-none".to_string()),
+    ])
+}
+
+pub(in crate::services::discord) async fn bind_task_response_turn(
+    pool: Option<&PgPool>,
+    channel_id: u64,
+    provider: &str,
+    session_key: &str,
+    event_key: &str,
+    response_turn_key: &str,
+    card_message_id: u64,
+) -> Result<(), String> {
+    let scope = TaskCardScope::new(channel_id, provider, session_key, event_key);
+    store::bind_response_turn(pool, &scope, response_turn_key, card_message_id).await
+}
+
+pub(in crate::services::discord) async fn task_response_fallback_must_wait(
+    pool: Option<&PgPool>,
+    channel_id: u64,
+    provider: &str,
+    session_key: &str,
+    event_key: Option<&str>,
+    response_turn_key: Option<&str>,
+) -> Result<bool, String> {
+    store::response_fallback_must_wait(
+        pool,
+        channel_id,
+        provider,
+        session_key,
+        event_key,
+        response_turn_key,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn mark_task_response_delivered(
+    pool: Option<&PgPool>,
+    channel_id: u64,
+    provider: &str,
+    session_key: &str,
+    event_key: &str,
+    card_message_id: u64,
+) -> Result<(), String> {
+    let scope = TaskCardScope::new(channel_id, provider, session_key, event_key);
+    store::mark_response_delivered(pool, &scope, card_message_id).await
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

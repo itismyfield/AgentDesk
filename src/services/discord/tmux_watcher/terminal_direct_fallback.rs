@@ -16,20 +16,41 @@ use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
 
-fn task_response_fallback_must_wait_for_sink(
+async fn task_response_fallback_must_wait_for_sink(
     has_direct_terminal_response: bool,
     task_notification_kind: Option<TaskNotificationKind>,
+    task_notification_event_key: Option<&str>,
+    response_turn_key: Option<&str>,
+    pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
     tmux_session_name: &str,
     channel_id: ChannelId,
 ) -> bool {
-    has_direct_terminal_response
-        && task_notification_kind.is_some()
-        && crate::services::discord::task_notification_delivery::unanchored_task_response_fallback_blocked(
-            provider.as_str(),
-            tmux_session_name,
-            channel_id.get(),
-        )
+    if !has_direct_terminal_response || task_notification_kind.is_none() {
+        return false;
+    }
+    match crate::services::discord::task_notification_delivery::task_response_fallback_must_wait(
+        pg_pool,
+        channel_id.get(),
+        provider.as_str(),
+        tmux_session_name,
+        task_notification_event_key,
+        response_turn_key,
+    )
+    .await
+    {
+        Ok(must_wait) => must_wait,
+        Err(error) => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session = tmux_session_name,
+                error = %error,
+                "task response PostgreSQL fallback fence is unavailable; failing closed"
+            );
+            true
+        }
+    }
 }
 
 pub(in crate::services::discord) struct WatcherDirectFallbackLocals<'a> {
@@ -64,6 +85,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     turn_data_start_offset: u64,
     response_sent_offset: usize,
     task_notification_kind: Option<TaskNotificationKind>,
+    task_notification_event_key: Option<&str>,
     terminal_kind: Option<WatcherTerminalKind>,
     has_direct_terminal_response: bool,
     session_bound_fallback_uses_full_body: bool,
@@ -98,13 +120,25 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         last_relayed_offset,
         last_observed_generation_mtime_ns,
     } = locals;
+    let response_turn_key = inflight_identity_before_relay.as_ref().map(|identity| {
+        crate::services::discord::task_notification_delivery::response_turn_key(
+            identity.user_msg_id,
+            &identity.started_at,
+            identity.turn_start_offset,
+        )
+    });
     if task_response_fallback_must_wait_for_sink(
         has_direct_terminal_response,
         task_notification_kind,
+        task_notification_event_key,
+        response_turn_key.as_deref(),
+        shared.pg_pool.as_ref(),
         watcher_provider,
         tmux_session_name,
         channel_id,
-    ) {
+    )
+    .await
+    {
         *retry_terminal_delivery_from_offset = true;
         tracing::warn!(
             provider = watcher_provider.as_str(),
@@ -647,52 +681,5 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn task_notification_response_fallback_waits_until_sink_commits_referenced_answer() {
-        let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(4_055_901);
-        let session_name = "AgentDesk-claude-4055-fallback-gate";
-
-        crate::services::discord::task_notification_delivery::block_unanchored_task_response_fallback(
-            "CLAUDE",
-            session_name,
-            channel_id.get(),
-        );
-        assert!(task_response_fallback_must_wait_for_sink(
-            true,
-            Some(TaskNotificationKind::Background),
-            &provider,
-            session_name,
-            channel_id,
-        ));
-        assert!(!task_response_fallback_must_wait_for_sink(
-            false,
-            Some(TaskNotificationKind::Background),
-            &provider,
-            session_name,
-            channel_id,
-        ));
-        assert!(!task_response_fallback_must_wait_for_sink(
-            true,
-            None,
-            &provider,
-            session_name,
-            channel_id,
-        ));
-
-        crate::services::discord::task_notification_delivery::clear_unanchored_task_response_fallback(
-            "claude",
-            session_name,
-            channel_id.get(),
-        );
-        assert!(!task_response_fallback_must_wait_for_sink(
-            true,
-            Some(TaskNotificationKind::Background),
-            &provider,
-            session_name,
-            channel_id,
-        ));
-    }
+    include!("terminal_direct_fallback_tests.rs");
 }

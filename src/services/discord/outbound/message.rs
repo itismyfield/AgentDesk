@@ -327,9 +327,12 @@ pub(crate) struct DiscordOutboundMessage {
     pub(crate) target: OutboundTarget,
     pub(crate) operation: OutboundOperation,
     /// Optional Discord create-message nonce. When `enforce_nonce` is true,
-    /// Discord returns the already-created message for a same-author replay.
-    /// This is used only by single-message durable authorities (#4055).
+    /// Discord can return the already-created message for a same-author replay
+    /// within its bounded nonce-replay window. This is used only by
+    /// single-message durable authorities (#4055).
+    #[serde(default)]
     pub(crate) create_nonce: Option<String>,
+    #[serde(default)]
     pub(crate) enforce_nonce: bool,
     pub(crate) producer: Option<OutboundProducer>,
     pub(crate) bot: OutboundBotSelector,
@@ -439,5 +442,30 @@ impl DiscordOutboundMessage {
     /// Structured dedup key derived from idempotency + target + operation.
     pub(crate) fn dedup_key(&self) -> OutboundDedupKey {
         self.idempotency.key_for(self.target, self.operation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_outbound_envelope_defaults_create_nonce_fields() {
+        let message = DiscordOutboundMessage::new(
+            "legacy",
+            "legacy:event",
+            "body",
+            OutboundTarget::Channel(ChannelId::new(4055)),
+            DiscordOutboundPolicy::default(),
+        );
+        let mut value = serde_json::to_value(message).expect("serialize outbound envelope");
+        let object = value.as_object_mut().expect("outbound envelope object");
+        object.remove("create_nonce");
+        object.remove("enforce_nonce");
+
+        let restored: DiscordOutboundMessage =
+            serde_json::from_value(value).expect("deserialize legacy outbound envelope");
+        assert_eq!(restored.create_nonce, None);
+        assert!(!restored.enforce_nonce);
     }
 }

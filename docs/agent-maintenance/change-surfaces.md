@@ -124,12 +124,14 @@
     boundary and enforces the create nonce.
 - durable_state: PostgreSQL `task_notification_card_state` is cluster-shared
   authority. The process-local store is a test/non-PG fallback only.
-- invariants: one logical event row and nonce; ambiguous creates retry the same
-  enforced nonce; transient edits never repost; replacement requires structured
-  Discord `404/10008`; a non-empty task response is sent only after card
-  confirmation and references that card; watcher direct fallback stays blocked
-  until the referenced response is confirmed and its commit-fence decision has
-  run; footer eviction requires the exact terminal `tool_use_id`.
+- invariants: one logical event row and stable nonce; ambiguous creates retry
+  that nonce within Discord's bounded replay window (the PG row/message id is
+  the durable authority, not an indefinite Discord nonce guarantee); transient
+  edits never repost; replacement requires structured Discord `404/10008`; a
+  non-empty task response is sent only after card confirmation and references
+  that card; watcher direct fallback consults the exact PG event/turn fence and
+  stays blocked until the referenced response is confirmed and its commit-fence
+  decision has run; footer eviction requires the exact terminal `tool_use_id`.
 - tests: `task_notification_delivery/tests.rs`,
   `session_relay_sink/task_notification_context.rs`, and
   `placeholder_live_events/tests.rs`, plus

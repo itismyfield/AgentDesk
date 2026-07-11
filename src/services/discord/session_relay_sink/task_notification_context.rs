@@ -10,9 +10,8 @@ use super::super::health::HealthRegistry;
 use super::super::placeholder_live_events::PlaceholderLiveEvents;
 use super::super::task_notification_delivery::{
     CardBot, CardDeliveryClients, CardEnsureError, CardEnsureOutcome, DiscordTaskCardTransport,
-    EnsureIntent, TaskCardTransport, TaskNotificationContext,
-    block_unanchored_task_response_fallback, clear_unanchored_task_response_fallback, ensure_card,
-    provider_bot_key,
+    EnsureIntent, TaskCardTransport, TaskNotificationContext, bind_task_response_turn, ensure_card,
+    mark_task_response_delivered, provider_bot_key, response_turn_key,
 };
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
@@ -60,7 +59,6 @@ pub(super) async fn ensure_task_context_card(
     let Some(context) = context else {
         return Ok(None);
     };
-    block_unanchored_task_response_fallback(provider.as_str(), session_name, channel_id);
     let provider_http = shared.serenity_http_or_token_fallback();
     let notify_http = super::super::health::resolve_bot_http(health_registry.as_ref(), "notify")
         .await
@@ -127,6 +125,28 @@ pub(super) async fn ensure_card_and_route(
         delivery.task_notification_context.as_ref(),
     )
     .await?;
+    if let (Some(message_id), Some(context)) = (card, delivery.task_notification_context.as_ref()) {
+        let turn_key = response_turn_key(
+            delivery.frame_turn_user_msg_id,
+            &delivery.frame_turn_started_at,
+            delivery.frame_turn_start_offset,
+        );
+        bind_task_response_turn(
+            shared.pg_pool.as_ref(),
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            context.event_key(),
+            &turn_key,
+            message_id.get(),
+        )
+        .await
+        .map_err(|error| {
+            RelaySinkError::Transient(format!(
+                "task-notification response turn must be durably bound before delivery: {error}"
+            ))
+        })?;
+    }
     let route = if card.is_some() {
         super::SessionBoundTerminalDeliveryRoute::NewMessage
     } else {
@@ -148,15 +168,44 @@ pub(super) fn answer_reference(
 /// Release the watcher fail-closed gate only after the referenced response has
 /// been confirmed and the sink's commit-fence decision has run. Card
 /// confirmation by itself is not response confirmation.
-pub(super) fn mark_response_delivered(
+pub(super) async fn mark_response_delivered(
+    pool: Option<&PgPool>,
+    delivery: &super::SessionRelayDelivery,
+    task_card_message_id: Option<MessageId>,
+) -> Result<(), String> {
+    match (
+        task_card_message_id,
+        delivery.task_notification_context.as_ref(),
+    ) {
+        (Some(message_id), Some(context)) => {
+            mark_task_response_delivered(
+                pool,
+                delivery.channel_id,
+                delivery.provider.as_str(),
+                &delivery.session_name,
+                context.event_key(),
+                message_id.get(),
+            )
+            .await
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(super) async fn commit_response_fence(
+    shared: &Arc<SharedData>,
     delivery: &super::SessionRelayDelivery,
     task_card_message_id: Option<MessageId>,
 ) {
-    if task_card_message_id.is_some() {
-        clear_unanchored_task_response_fallback(
-            delivery.provider.as_str(),
-            &delivery.session_name,
-            delivery.channel_id,
+    if let Err(error) =
+        mark_response_delivered(shared.pg_pool.as_ref(), delivery, task_card_message_id).await
+    {
+        tracing::error!(
+            provider = delivery.provider.as_str(),
+            channel_id = delivery.channel_id,
+            tmux_session = %delivery.session_name,
+            error = %error,
+            "task response was delivered but its PostgreSQL fallback fence stayed fail-closed"
         );
     }
 }
@@ -325,39 +374,83 @@ mod tests {
         );
     }
 
-    #[test]
-    fn task_notification_fallback_gate_clears_only_after_referenced_answer_delivery() {
+    #[tokio::test]
+    async fn task_notification_fallback_gate_releases_only_after_referenced_answer_delivery() {
+        let context = context("response-commit");
         let delivery = super::super::SessionRelayDelivery {
             provider: ProviderKind::Claude,
             channel_id: 4_055_902,
             session_name: "AgentDesk-claude-4055-response-commit".to_string(),
             response_text: "answer".to_string(),
             task_notification_kind: Some(TaskNotificationKind::Background),
-            task_notification_context: None,
+            task_notification_context: Some(context.clone()),
             terminal_consumed_end: None,
             frame_turn_user_msg_id: 0,
-            frame_turn_started_at: String::new(),
-            frame_turn_start_offset: None,
+            frame_turn_started_at: "2026-07-11T01:37:00Z".to_string(),
+            frame_turn_start_offset: Some(4055),
         };
-        block_unanchored_task_response_fallback(
+        let transport = OrderedTransport {
+            fail: AtomicBool::new(false),
+            next_id: AtomicU64::new(4_055_902),
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let card = confirm_task_context_card(
+            None,
+            &clients(),
+            &transport,
+            &PlaceholderLiveEvents::default(),
+            delivery.channel_id,
             delivery.provider.as_str(),
             &delivery.session_name,
+            Some(&context),
+        )
+        .await
+        .expect("confirm response card")
+        .expect("response card");
+        let turn_key = response_turn_key(
+            delivery.frame_turn_user_msg_id,
+            &delivery.frame_turn_started_at,
+            delivery.frame_turn_start_offset,
+        );
+        bind_task_response_turn(
+            None,
             delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            context.event_key(),
+            &turn_key,
+            card.message_id,
+        )
+        .await
+        .expect("bind response turn");
+        assert!(
+            super::super::super::task_notification_delivery::task_response_fallback_must_wait(
+                None,
+                delivery.channel_id,
+                delivery.provider.as_str(),
+                &delivery.session_name,
+                Some(context.event_key()),
+                Some(&turn_key),
+            )
+            .await
+            .expect("pending response fence")
         );
 
-        mark_response_delivered(&delivery, None);
-        assert!(super::super::super::task_notification_delivery::unanchored_task_response_fallback_blocked(
-            delivery.provider.as_str(),
-            &delivery.session_name,
-            delivery.channel_id,
-        ));
-
-        mark_response_delivered(&delivery, Some(MessageId::new(4_055_902)));
-        assert!(!super::super::super::task_notification_delivery::unanchored_task_response_fallback_blocked(
-            delivery.provider.as_str(),
-            &delivery.session_name,
-            delivery.channel_id,
-        ));
+        mark_response_delivered(None, &delivery, Some(MessageId::new(card.message_id)))
+            .await
+            .expect("mark response delivered");
+        assert!(
+            !super::super::super::task_notification_delivery::task_response_fallback_must_wait(
+                None,
+                delivery.channel_id,
+                delivery.provider.as_str(),
+                &delivery.session_name,
+                None,
+                Some(&turn_key),
+            )
+            .await
+            .expect("delivered response fence")
+        );
     }
 
     #[test]
@@ -378,7 +471,7 @@ mod tests {
             .find("self.advance_after_confirmed_post(")
             .expect("confirmed answer must advance its delivery frontier");
         let unblock = after_send
-            .find("task_notification_context::mark_response_delivered(")
+            .find("commit_response_fence(")
             .expect("watcher fallback gate must be released after answer commit");
         assert!(
             reference < send,

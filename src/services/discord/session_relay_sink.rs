@@ -46,7 +46,7 @@ use self::idle_jsonl::{
     prune_idle_jsonl_session_state, read_jsonl_range,
 };
 use self::task_notification_context::{
-    answer_reference, ensure_card_and_route, merge_task_notification_kind,
+    answer_reference, commit_response_fence, ensure_card_and_route, merge_task_notification_kind,
 };
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1157,7 +1157,7 @@ impl SessionBoundDiscordRelaySink {
                 &delivery,
                 sink_lease_guard.as_ref(),
             );
-            task_notification_context::mark_response_delivered(&delivery, task_card_message_id);
+            commit_response_fence(&shared, &delivery, task_card_message_id).await;
             Ok(SessionRelayDeliveryOutcome::Delivered)
         }
     }

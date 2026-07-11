@@ -559,6 +559,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             provider_overload_message,
             stale_resume_detected,
             task_notification_kind,
+            task_notification_event_key,
             assistant_text_seen,
             fresh_assistant_text_seen,
             was_paused,
@@ -1495,10 +1496,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `slot_guard.release()` explicitly to preserve their timing.
         let mut slot_guard = RelaySlotGuard::new(relay_coord.relay_slot.clone());
 
-        // Send the terminal response to Discord, or delegate it to the
-        // supervisor-owned StreamRelay sink when the matched session's
-        // inflight metadata says session-bound delivery owns this terminal
-        // envelope.
+        // Send the terminal response to Discord, or delegate it when matched
+        // session-bound inflight metadata assigns delivery to the StreamRelay sink.
         let relay_decision = terminal_relay_decision(
             has_assistant_response,
             task_notification_kind,
@@ -2122,6 +2121,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 turn_data_start_offset,
                 response_sent_offset,
                 task_notification_kind,
+                task_notification_event_key.as_deref(),
                 terminal_kind,
                 has_direct_terminal_response,
                 session_bound_fallback_uses_full_body,
