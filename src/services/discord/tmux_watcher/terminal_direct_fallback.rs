@@ -11,123 +11,11 @@ use std::sync::Arc;
 use super::*;
 
 use crate::services::agent_protocol::TaskNotificationKind;
-use crate::services::discord::formatting;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
-
-struct PreparedWatcherTaskResponse {
-    claim: task_delivery::ResponseDeliveryClaimOutcome,
-    card_message_id: MessageId,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) async fn commit_watcher_task_response_fence(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    frontier_committed: bool,
-    claim: Option<&task_delivery::ResponseDeliveryClaim>,
-) {
-    if frontier_committed
-        && let Some(claim) = claim
-        && let Err(error) =
-            task_delivery::mark_task_response_delivered(shared.pg_pool.as_ref(), claim).await
-    {
-        tracing::error!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session = %tmux_session_name,
-            error = %error,
-            "watcher advanced the task response frontier but could not commit its exact delivery claim"
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn prepare_watcher_task_response(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    kind: TaskNotificationKind,
-    context: Option<&task_delivery::TaskNotificationContext>,
-    response_turn_key: &str,
-) -> Result<PreparedWatcherTaskResponse, String> {
-    if let Some((claim, card_message_id)) = task_delivery::claim_existing_task_response_delivery(
-        shared.pg_pool.as_ref(),
-        channel_id.get(),
-        provider.as_str(),
-        tmux_session_name,
-        response_turn_key,
-        task_delivery::ResponseDeliveryOwner::Watcher,
-    )
-    .await
-    .map_err(|error| format!("resume watcher task response: {error}"))?
-    {
-        if let Some(context) = context {
-            let event = context.to_event(channel_id.get(), provider.as_str(), tmux_session_name);
-            shared
-                .ui
-                .placeholder_live_events
-                .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
-        }
-        return Ok(PreparedWatcherTaskResponse {
-            claim,
-            card_message_id: MessageId::new(card_message_id),
-        });
-    }
-    let event = context.map_or_else(
-        || {
-            task_delivery::TaskCardEvent::from_recovered_terminal(
-                channel_id.get(),
-                provider.as_str(),
-                tmux_session_name,
-                kind,
-                response_turn_key,
-            )
-        },
-        |context| context.to_event(channel_id.get(), provider.as_str(), tmux_session_name),
-    );
-    let clients = task_delivery::CardDeliveryClients::new([task_delivery::CardBot::new(
-        task_delivery::provider_bot_key(provider.as_str()),
-        http.clone(),
-    )]);
-    let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
-    let card = task_delivery::ensure_card(
-        shared.pg_pool.as_ref(),
-        &clients,
-        &transport,
-        &event,
-        task_delivery::EnsureIntent::Promotion,
-    )
-    .await
-    .map_err(|error| format!("confirm watcher task card: {error}"))?;
-    shared
-        .ui
-        .placeholder_live_events
-        .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
-    let claim = task_delivery::claim_task_response_delivery(
-        shared.pg_pool.as_ref(),
-        channel_id.get(),
-        provider.as_str(),
-        tmux_session_name,
-        event.event_key(),
-        response_turn_key,
-        card.message_id,
-        task_delivery::ResponseDeliveryOwner::Watcher,
-    )
-    .await
-    .map_err(|error| format!("claim watcher task response: {error}"))?;
-    Ok(PreparedWatcherTaskResponse {
-        claim,
-        card_message_id: MessageId::new(card.message_id),
-    })
-}
 
 pub(in crate::services::discord) struct WatcherDirectFallbackLocals<'a> {
     pub(in crate::services::discord) tui_direct_anchor_terminal_body_visible: &'a mut bool,
@@ -250,7 +138,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     match (task_response_path, *placeholder_msg_id) {
         (true, _) => {
             let kind = task_notification_kind.expect("task response path requires a kind");
-            match prepare_watcher_task_response(
+            let outcome = super::task_response_authority::apply_watcher_task_response(
                 http,
                 shared,
                 watcher_provider,
@@ -259,137 +147,24 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                 kind,
                 task_notification_context,
                 &response_turn_key,
+                &relay_text,
+                external_input_lease_before_relay,
+                super::task_response_authority::WatcherTaskResponseLocals {
+                    placeholder_msg_id: &mut *placeholder_msg_id,
+                    placeholder_from_restored_inflight: &mut *placeholder_from_restored_inflight,
+                    last_edit_text: &mut *last_edit_text,
+                    retry_terminal_delivery_from_offset: &mut *retry_terminal_delivery_from_offset,
+                    tui_direct_anchor_terminal_body_visible:
+                        &mut *tui_direct_anchor_terminal_body_visible,
+                    tui_direct_anchor_or_lease_present_for_lifecycle:
+                        &mut *tui_direct_anchor_or_lease_present_for_lifecycle,
+                    task_response_claim: &mut *task_response_claim,
+                },
             )
-            .await
-            {
-                Err(error) => {
-                    tracing::warn!(
-                        provider = watcher_provider.as_str(),
-                        channel_id = channel_id.get(),
-                        tmux_session = tmux_session_name,
-                        error = %error,
-                        "watcher task response preparation failed; preserving the delivery frontier"
-                    );
-                    relay_ok = false;
-                    *retry_terminal_delivery_from_offset = true;
-                }
-                Ok(prepared) => {
-                    use task_delivery::ResponseDeliveryClaimOutcome;
-                    match prepared.claim {
-                        ResponseDeliveryClaimOutcome::Wait => {
-                            tracing::info!(
-                                provider = watcher_provider.as_str(),
-                                channel_id = channel_id.get(),
-                                tmux_session = tmux_session_name,
-                                "watcher task response waits for the live sink claim"
-                            );
-                            relay_ok = false;
-                            *retry_terminal_delivery_from_offset = true;
-                        }
-                        ResponseDeliveryClaimOutcome::Delivered { .. } => {
-                            direct_send_delivered = true;
-                            *tui_direct_anchor_terminal_body_visible = true;
-                            *tui_direct_anchor_or_lease_present_for_lifecycle = true;
-                            external_input_lease_consumed_by_relay =
-                                external_input_lease_before_relay;
-                        }
-                        ResponseDeliveryClaimOutcome::Owned(claim) => {
-                            let renewed = task_delivery::renew_task_response_delivery(
-                                shared.pg_pool.as_ref(),
-                                &claim,
-                            )
-                            .await;
-                            if let Err(error) = renewed {
-                                tracing::warn!(
-                                    provider = watcher_provider.as_str(),
-                                    channel_id = channel_id.get(),
-                                    tmux_session = tmux_session_name,
-                                    error = %error,
-                                    "watcher lost its task response claim before send"
-                                );
-                                relay_ok = false;
-                                *retry_terminal_delivery_from_offset = true;
-                            } else {
-                                let heartbeat = task_delivery::task_response_delivery_heartbeat(
-                                    shared.pg_pool.as_ref(),
-                                    Some(&claim),
-                                );
-                                let send_result = formatting::send_long_message_raw_with_required_reference_rollback(
-                                    http,
-                                    channel_id,
-                                    prepared.card_message_id,
-                                    &relay_text,
-                                    shared,
-                                    (channel_id, prepared.card_message_id),
-                                )
-                                .await;
-                                heartbeat.stop();
-                                match send_result {
-                                    Ok(_) => {
-                                        *task_response_claim = Some(claim);
-                                        direct_send_delivered = true;
-                                        *tui_direct_anchor_terminal_body_visible = true;
-                                        *tui_direct_anchor_or_lease_present_for_lifecycle = true;
-                                        external_input_lease_consumed_by_relay =
-                                            external_input_lease_before_relay;
-                                    }
-                                    Err(error) => {
-                                        info_watcher_failed_relay(error.as_ref());
-                                        let plan = watcher_send_failure_plan_warned(
-                                            classify_watcher_send_failure(error.as_ref()),
-                                            WatcherNoRewindWarnSite::PlaceholderlessFull,
-                                            watcher_provider,
-                                            channel_id,
-                                            tmux_session_name,
-                                            error.as_ref(),
-                                        );
-                                        relay_ok = plan.relay_ok;
-                                        *retry_terminal_delivery_from_offset = plan.retry_offset;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if direct_send_delivered {
-                        if let Some(stale_placeholder) = *placeholder_msg_id {
-                            if stale_placeholder == prepared.card_message_id {
-                                *placeholder_msg_id = None;
-                                *placeholder_from_restored_inflight = false;
-                                last_edit_text.clear();
-                            } else {
-                                let cleanup = delete_terminal_placeholder(
-                                    http,
-                                    channel_id,
-                                    shared,
-                                    watcher_provider,
-                                    tmux_session_name,
-                                    stale_placeholder,
-                                    "watcher_task_response_placeholder_cleanup",
-                                )
-                                .await;
-                                if cleanup.is_committed() {
-                                    *placeholder_msg_id = None;
-                                    *placeholder_from_restored_inflight = false;
-                                    last_edit_text.clear();
-                                    drop_placeholder_orphan_record(
-                                        watcher_provider,
-                                        shared,
-                                        channel_id,
-                                        stale_placeholder,
-                                    );
-                                } else {
-                                    tracing::warn!(
-                                        provider = watcher_provider.as_str(),
-                                        channel_id = channel_id.get(),
-                                        message_id = stale_placeholder.get(),
-                                        "task response delivered; stale placeholder cleanup will retry independently"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            .await;
+            relay_ok = outcome.relay_ok;
+            direct_send_delivered = outcome.direct_send_delivered;
+            external_input_lease_consumed_by_relay = outcome.external_input_lease_consumed_by_relay;
         }
         (false, Some(msg_id)) => {
             if has_direct_terminal_response {

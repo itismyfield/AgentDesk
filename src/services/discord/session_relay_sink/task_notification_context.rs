@@ -1,6 +1,7 @@
 //! Card-before-answer orchestration for session-bound task notifications (#4055).
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use serenity::model::id::{ChannelId, MessageId};
 use sqlx::PgPool;
@@ -210,6 +211,120 @@ pub(super) async fn commit_response_fence(
             error = %error,
             "task response was delivered but its PostgreSQL fallback fence stayed fail-closed"
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl super::SessionBoundDiscordRelaySink {
+    pub(super) async fn deliver_new_message_with_task_authority(
+        &self,
+        http: &Arc<serenity::http::Http>,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: u64,
+        delivery: &super::SessionRelayDelivery,
+        relay_text: &str,
+        task_card_message_id: Option<MessageId>,
+        task_response_claim: Option<&ResponseDeliveryClaim>,
+        trace: &super::SessionRelayTraceContext,
+        sink_lease_guard: Option<&super::SinkDeliveryLeaseGuard>,
+    ) -> Result<super::SessionRelayDeliveryOutcome, RelaySinkError> {
+        let channel = ChannelId::new(channel_id);
+        let prompt_anchor = super::relay_format::ssh_direct_prompt_anchor_for_response(
+            provider,
+            &delivery.session_name,
+            channel_id,
+        );
+        let prompt_anchor_reference =
+            answer_reference(channel, task_card_message_id, prompt_anchor);
+        if let Some(task_card_message_id) = task_card_message_id {
+            if let Some(claim) = task_response_claim {
+                super::super::task_notification_delivery::renew_task_response_delivery(
+                    shared.pg_pool.as_ref(),
+                    claim,
+                )
+                .await
+                .map_err(|error| {
+                    RelaySinkError::Transient(format!(
+                        "task response claim was lost before send: {error}"
+                    ))
+                })?;
+            }
+            let heartbeat =
+                super::super::task_notification_delivery::task_response_delivery_heartbeat(
+                    shared.pg_pool.as_ref(),
+                    task_response_claim,
+                );
+            let send_result = super::super::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
+                http,
+                channel,
+                task_card_message_id,
+                relay_text,
+                shared,
+                (channel, task_card_message_id),
+            )
+            .await;
+            heartbeat.stop();
+            send_result.map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+        } else {
+            super::super::formatting::send_long_message_raw_with_reference(
+                http,
+                channel,
+                relay_text,
+                shared,
+                prompt_anchor_reference,
+            )
+            .await
+            .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+        }
+        if let Some(prompt_anchor) = prompt_anchor {
+            super::relay_format::clear_ssh_direct_prompt_anchor(
+                provider,
+                &delivery.session_name,
+                prompt_anchor,
+            );
+        }
+        self.delivered_total.fetch_add(1, Ordering::AcqRel);
+        // #3041 P1-4 (§4-④): lease released by the RAII guard on exit.
+        tracing::info!(
+            provider = provider.as_str(),
+            channel_id,
+            tmux_session = %delivery.session_name,
+            turn_id = trace.turn_id().unwrap_or(""),
+            dispatch_id = trace.dispatch_id().unwrap_or(""),
+            session_key = trace.session_key().unwrap_or(""),
+            relay_owner = trace.relay_owner(),
+            runtime_kind = trace.runtime_kind(),
+            prompt_anchor_message_id = prompt_anchor_reference
+                .map(|(_, message_id)| message_id.get()),
+            chars = relay_text.chars().count(),
+            "session-bound relay sink delivered terminal response via new message"
+        );
+        crate::services::observability::emit_relay_delivery(
+            provider.as_str(),
+            channel_id,
+            trace.dispatch_id(),
+            trace.session_key(),
+            trace.turn_id(),
+            prompt_anchor_reference.map(|(_, message_id)| message_id.get()),
+            "session_relay_sink",
+            "post",
+            None,
+            None,
+            true,
+            Some("new message"),
+        );
+        // #3041 P1-3: post-POST fresh identity re-check before frontier advance.
+        self.advance_after_confirmed_post(
+            shared,
+            provider,
+            channel_id,
+            &delivery.session_name,
+            delivery,
+            sink_lease_guard,
+        );
+        commit_response_fence(shared, delivery, task_response_claim).await;
+        Ok(super::SessionRelayDeliveryOutcome::Delivered)
     }
 }
 
@@ -478,14 +593,27 @@ mod tests {
         let gate = source
             .find("ensure_card_and_route(")
             .expect("sink must invoke task card gate");
-        let after_gate = &source[gate..];
-        let reference = after_gate
+        let delegate = source[gate..]
+            .find("deliver_new_message_with_task_authority(")
+            .map(|offset| gate + offset)
+            .expect("sink must delegate new-message delivery to task authority");
+        assert!(
+            gate < delegate,
+            "card gate must precede task-aware delivery"
+        );
+
+        let helper = include_str!("task_notification_context.rs");
+        let authority = helper
+            .find("deliver_new_message_with_task_authority(")
+            .expect("task-aware new-message authority");
+        let after_authority = &helper[authority..];
+        let reference = after_authority
             .find("answer_reference(channel")
             .expect("confirmed card id must become answer reference");
-        let send = after_gate
-            .find("formatting::send_long_message_raw_with_required_reference_rollback(")
+        let send = after_authority
+            .find("send_long_message_raw_with_required_reference_rollback(")
             .expect("required-reference answer send");
-        let after_send = &after_gate[send..];
+        let after_send = &after_authority[send..];
         let advance = after_send
             .find("self.advance_after_confirmed_post(")
             .expect("confirmed answer must advance its delivery frontier");

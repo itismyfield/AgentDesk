@@ -690,6 +690,7 @@ src/
 │   │   │   ├── streaming_status_tick.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
+│   │   │   ├── task_response_authority.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_direct_fallback.rs

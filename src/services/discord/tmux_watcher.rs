@@ -77,6 +77,9 @@ mod terminal_long_chunks;
 #[path = "tmux_watcher/terminal_direct_fallback.rs"]
 mod terminal_direct_fallback;
 
+#[path = "tmux_watcher/task_response_authority.rs"]
+mod task_response_authority;
+
 // #3479 item-2: the watcher-direct orphan status-panel cleanup/completion/refresh
 // cluster extracted to a sibling submodule (pure move, zero logic change). Items
 // are `pub(super)` there and re-imported below so the watcher loop's call sites —
@@ -2797,7 +2800,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
             watcher_response_frontier_committed = true;
         }
-        terminal_direct_fallback::commit_watcher_task_response_fence(
+        task_response_authority::commit_watcher_task_response_fence(
             &shared,
             &watcher_provider,
             channel_id,

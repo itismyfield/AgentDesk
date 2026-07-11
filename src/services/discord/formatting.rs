@@ -48,11 +48,10 @@ static REPLACE_CONTINUATION_ROLLBACK_FORCED_REMOVE_FAILURES: LazyLock<Mutex<Hash
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[path = "formatting/long_send_rollback.rs"]
-mod long_send_rollback;
+pub(in crate::services::discord) mod long_send_rollback;
 
 use self::long_send_rollback::delete_rollback_channel_message;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
-pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_required_reference_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
 
 #[cfg(test)]
@@ -3018,7 +3017,7 @@ mod replace_long_message_tests {
             );
             let http = poise::serenity_prelude::Http::new("test-token");
             let shared = crate::services::discord::make_shared_data_for_tests();
-            super::send_long_message_raw_with_required_reference_rollback(
+            super::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
                 &http,
                 channel,
                 card,

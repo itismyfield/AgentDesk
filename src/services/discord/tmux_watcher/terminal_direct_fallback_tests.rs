@@ -40,7 +40,7 @@ fn recovered_task_response_identity_is_stable_without_inflight_or_context() {
 
 #[test]
 fn watcher_task_response_wiring_prepares_reference_before_send_and_marks_after_frontier() {
-    let helper = include_str!("terminal_direct_fallback.rs");
+    let helper = include_str!("task_response_authority.rs");
     let prepare = helper
         .find("prepare_watcher_task_response")
         .expect("watcher task fallback must prepare a durable card/reference");
@@ -49,6 +49,12 @@ fn watcher_task_response_wiring_prepares_reference_before_send_and_marks_after_f
         .map(|offset| prepare + offset)
         .expect("watcher task fallback must use a referenced response send");
     assert!(prepare < send, "card/bind preparation must precede response send");
+
+    let fallback = include_str!("terminal_direct_fallback.rs");
+    assert!(
+        fallback.contains("task_response_authority::apply_watcher_task_response("),
+        "the production fallback must delegate task responses to the durable authority"
+    );
 
     let parent = include_str!("../tmux_watcher.rs");
     let apply = parent
