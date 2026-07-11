@@ -280,7 +280,7 @@
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 | 17 | 0 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 1290 | 1290 | 0 | giant-file |
 | `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 901 | 465 | 436 |  |
-| `server::routes::message_outbox` | `src/server/routes/message_outbox.rs` | 426 | 264 | 162 |  |
+| `server::routes::message_outbox` | `src/server/routes/message_outbox.rs` | 421 | 264 | 157 |  |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 185 | 185 | 0 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 96 | 96 | 0 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 485 | 485 | 0 |  |
@@ -905,7 +905,7 @@
 | `services::memory::memento_instructions_cache` | `src/services/memory/memento_instructions_cache.rs` | 241 | 143 | 98 |  |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 836 | 752 | 84 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 315 | 315 | 0 |  |
-| `services::message_outbox` | `src/services/message_outbox.rs` | 925 | 602 | 323 |  |
+| `services::message_outbox` | `src/services/message_outbox.rs` | 938 | 615 | 323 |  |
 | `services::message_outbox_recovery` | `src/services/message_outbox_recovery.rs` | 166 | 166 | 0 |  |
 | `services::message_outbox_recovery_support` | `src/services/message_outbox_recovery_support.rs` | 138 | 138 | 0 |  |
 | `services::monitoring_store` | `src/services/monitoring_store.rs` | 141 | 141 | 0 |  |
