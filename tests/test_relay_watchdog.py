@@ -1637,6 +1637,31 @@ class TickChannelTests(unittest.TestCase):
             any("transcript-select reason=bootstrap" in line for line in rt.log_lines)
         )
 
+    def test_invariant_4435_empty_discovery_tick_retains_previous_selection(self):
+        previous = self.proj_dir / "temporarily-hidden.jsonl"
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(previous),
+                "transcript_sizes": {str(previous): 100},
+            }
+        }
+        rt = self.make_rt()
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(previous))
+        self.assertTrue(
+            any("transcript-select reason=no_candidates" in line for line in rt.log_lines)
+        )
+
+        replacement = self.proj_dir / "replacement.jsonl"
+        replacement.write_text("{}\n", encoding="utf-8")
+        os.utime(replacement, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(replacement))
+        self.assertTrue(
+            any("transcript-select reason=prior_missing" in line for line in rt.log_lines)
+        )
+
     def test_invariant_4435_all_stale_restart_keeps_delivered_anchor(self):
         anchor = float(int(self.now - 2000))
         self.write_transcript([(anchor, "old delivered anchor")])
