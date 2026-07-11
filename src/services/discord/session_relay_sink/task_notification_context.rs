@@ -162,7 +162,7 @@ pub(super) async fn ensure_card_and_route(
             delivery.terminal_consumed_end.unwrap_or_default(),
             &delivery.response_text,
         );
-        let existing = claim_existing_task_response_delivery(
+        let mut existing = claim_existing_task_response_delivery(
             shared.pg_pool.as_ref(),
             delivery.channel_id,
             delivery.provider.as_str(),
@@ -176,6 +176,22 @@ pub(super) async fn ensure_card_and_route(
                 "resume task-notification response turn before delivery: {error}"
             ))
         })?;
+        if existing.is_none() && recovery_turn_key != turn_key {
+            existing = claim_existing_task_response_delivery(
+                shared.pg_pool.as_ref(),
+                delivery.channel_id,
+                delivery.provider.as_str(),
+                &delivery.session_name,
+                &recovery_turn_key,
+                ResponseDeliveryOwner::Sink,
+            )
+            .await
+            .map_err(|error| {
+                RelaySinkError::Transient(format!(
+                    "resume task-notification response by recovery identity: {error}"
+                ))
+            })?;
+        }
         let outcome = if let Some(existing) = existing {
             match existing.outcome {
                 ResponseDeliveryClaimOutcome::Owned(claim)
@@ -718,7 +734,11 @@ mod tests {
             "card gate must precede task-aware delivery"
         );
 
-        let helper = include_str!("task_notification_context.rs");
+        let helper_source = include_str!("task_notification_context.rs");
+        let helper = helper_source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(production, _)| production)
+            .expect("task authority test must inspect production code only");
         let authority = helper
             .find("deliver_new_message_with_task_authority(")
             .expect("task-aware new-message authority");
@@ -727,8 +747,8 @@ mod tests {
             .find("answer_reference(channel")
             .expect("confirmed card id must become answer reference");
         let send = after_authority
-            .find("send_long_message_raw_with_required_reference_rollback(")
-            .expect("required-reference answer send");
+            .find("send_task_response_chunks_with_card_repair(")
+            .expect("durable required-reference answer send");
         let after_send = &after_authority[send..];
         let advance = after_send
             .find("self.advance_after_confirmed_post(")

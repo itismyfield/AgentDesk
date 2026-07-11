@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS task_notification_card_state (
     content_hash VARCHAR(64) NOT NULL CHECK (char_length(content_hash) = 64),
     lease_owner TEXT,
     lease_expires_at TIMESTAMPTZ,
+    -- First persisted crossing of the Discord POST network boundary. NULL
+    -- means the durable intent is still safe to post; a non-NULL expired
+    -- attempt must stay within the bounded nonce window or reconcile history.
+    post_started_at TIMESTAMPTZ,
     last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

@@ -103,7 +103,7 @@ async fn claim_missing_card_replacement_pg(
          SET delivery_state = 'posting', discord_message_id = NULL,
              revision = $7, discord_nonce = $8, lease_owner = $9,
              lease_expires_at = NOW() + make_interval(secs => $10),
-             last_error = NULL, updated_at = NOW()
+             post_started_at = NULL, last_error = NULL, updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
            AND delivery_state = 'card_posted' AND discord_message_id = $5
            AND revision = $6 AND (lease_owner IS NULL OR lease_expires_at <= NOW())
@@ -176,6 +176,7 @@ fn claim_missing_card_replacement_memory(
     row.nonce = stable_nonce(scope, row.revision);
     row.state = MemoryState::Posting;
     row.message_id = None;
+    row.post_started_at = None;
     row.lease_owner = Some(lease_owner.clone());
     row.lease_expires_at = Some(now + Duration::from_secs(LEASE_SECONDS as u64));
     row.last_error = None;

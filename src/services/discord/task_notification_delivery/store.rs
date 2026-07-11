@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use super::{TaskCardScope, stable_nonce};
@@ -70,6 +71,12 @@ pub(super) enum CardClaim {
     Busy { bot_key: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CardPostAttempt {
+    pub(super) started_at: DateTime<Utc>,
+    pub(super) resumed: bool,
+}
+
 pub(super) async fn record_footer_only(
     pool: Option<&PgPool>,
     scope: &TaskCardScope,
@@ -123,6 +130,31 @@ pub(super) async fn mark_posted(
         Some(pool) => mark_posted_pg(pool, claimed, message_id, content, content_hash).await,
         None if cfg!(any(test, debug_assertions)) => {
             mark_posted_memory(claimed, message_id, content, content_hash)
+        }
+        None => Err(memory_fallback_unavailable()),
+    }
+}
+
+pub(super) async fn begin_card_post(
+    pool: Option<&PgPool>,
+    claimed: &ClaimedCard,
+) -> Result<CardPostAttempt, String> {
+    match pool {
+        Some(pool) => begin_card_post_pg(pool, claimed).await,
+        None if cfg!(any(test, debug_assertions)) => begin_card_post_memory(claimed),
+        None => Err(memory_fallback_unavailable()),
+    }
+}
+
+pub(super) async fn mark_card_post_ambiguous(
+    pool: Option<&PgPool>,
+    claimed: &ClaimedCard,
+    error: &str,
+) -> Result<(), String> {
+    match pool {
+        Some(pool) => mark_failure_pg(pool, claimed, None, "posting", error).await,
+        None if cfg!(any(test, debug_assertions)) => {
+            mark_failure_memory(claimed, None, MemoryState::Posting, error)
         }
         None => Err(memory_fallback_unavailable()),
     }
@@ -330,6 +362,10 @@ async fn claim_card_pg(
                  discord_nonce = CASE WHEN bot_key = '' THEN $6 ELSE discord_nonce END,
                  rendered_content = CASE WHEN $9 THEN rendered_content ELSE $7 END,
                  content_hash = CASE WHEN $9 THEN content_hash ELSE $8 END,
+                 post_started_at = CASE
+                     WHEN delivery_state = 'footer_only' THEN NULL
+                     ELSE post_started_at
+                 END,
                  lease_owner = $10,
                  lease_expires_at = NOW() + make_interval(secs => $11),
                  last_error = NULL,
@@ -396,6 +432,53 @@ fn claimed_from_row(
     })
 }
 
+async fn begin_card_post_pg(
+    pool: &PgPool,
+    claimed: &ClaimedCard,
+) -> Result<CardPostAttempt, String> {
+    let existing: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT post_started_at FROM task_notification_card_state
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
+           AND lease_owner = $5 AND delivery_state = 'posting'",
+    )
+    .bind(db_id(claimed.scope.channel_id, "channel_id")?)
+    .bind(&claimed.scope.provider)
+    .bind(&claimed.scope.session_key)
+    .bind(&claimed.scope.event_key)
+    .bind(&claimed.lease_owner)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load task card POST boundary: {error}"))?
+    .ok_or_else(|| "task card POST boundary lost exact lease ownership".to_string())?;
+    if let Some(started_at) = existing {
+        return Ok(CardPostAttempt {
+            started_at,
+            resumed: true,
+        });
+    }
+    let started_at: DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE task_notification_card_state
+         SET post_started_at = NOW(), updated_at = NOW()
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
+           AND lease_owner = $5 AND delivery_state = 'posting'
+           AND post_started_at IS NULL
+         RETURNING post_started_at",
+    )
+    .bind(db_id(claimed.scope.channel_id, "channel_id")?)
+    .bind(&claimed.scope.provider)
+    .bind(&claimed.scope.session_key)
+    .bind(&claimed.scope.event_key)
+    .bind(&claimed.lease_owner)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("persist task card POST boundary: {error}"))?
+    .ok_or_else(|| "task card POST boundary CAS changed zero rows".to_string())?;
+    Ok(CardPostAttempt {
+        started_at,
+        resumed: false,
+    })
+}
+
 async fn mark_posted_pg(
     pool: &PgPool,
     claimed: &ClaimedCard,
@@ -408,6 +491,7 @@ async fn mark_posted_pg(
          SET surface_owner = 'card', delivery_state = 'card_posted',
              discord_message_id = $6, rendered_content = $7, content_hash = $8,
              lease_owner = NULL, lease_expires_at = NULL, last_error = NULL,
+             post_started_at = NULL,
              updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
            AND lease_owner = $5 AND delivery_state = 'posting'",
@@ -506,7 +590,7 @@ async fn prepare_replacement_pg(
              revision = $7, discord_nonce = $8,
              lease_expires_at = NOW() + make_interval(secs => $9),
              rendered_content = $10, content_hash = $11,
-             last_error = NULL, updated_at = NOW()
+             post_started_at = NULL, last_error = NULL, updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
            AND lease_owner = $5 AND delivery_state = 'card_posted'
            AND discord_message_id = $6
@@ -622,6 +706,7 @@ struct MemoryRow {
     content_hash: String,
     lease_owner: Option<String>,
     lease_expires_at: Option<Instant>,
+    post_started_at: Option<DateTime<Utc>>,
     last_error: Option<String>,
 }
 
@@ -656,6 +741,7 @@ fn record_footer_only_memory(
                     content_hash: content_hash.to_string(),
                     lease_owner: None,
                     lease_expires_at: None,
+                    post_started_at: None,
                     last_error: None,
                 },
             );
@@ -688,6 +774,7 @@ fn claim_card_memory(
         content_hash: seed_hash.to_string(),
         lease_owner: Some(lease_owner.clone()),
         lease_expires_at: Some(lease_expires_at),
+        post_started_at: None,
         last_error: None,
     });
     if row.lease_owner.as_deref() == Some(lease_owner.as_str()) {
@@ -726,7 +813,11 @@ fn claim_card_memory(
                 .ok_or_else(|| "memory card row omitted message id".to_string())?,
         }
     } else {
+        let was_footer_only = row.state == MemoryState::FooterOnly;
         row.state = MemoryState::Posting;
+        if was_footer_only {
+            row.post_started_at = None;
+        }
         if row.bot_key.is_empty() {
             row.bot_key = preferred_bot_key.to_string();
             row.nonce = stable_nonce(scope, row.revision);
@@ -743,6 +834,32 @@ fn claim_card_memory(
         row,
         action,
     )))
+}
+
+fn begin_card_post_memory(claimed: &ClaimedCard) -> Result<CardPostAttempt, String> {
+    let mut rows = MEMORY_STORE
+        .lock()
+        .map_err(|_| "task card memory store poisoned".to_string())?;
+    let row = rows
+        .get_mut(&claimed.scope)
+        .ok_or_else(|| "memory task card row disappeared".to_string())?;
+    if row.lease_owner.as_deref() != Some(claimed.lease_owner.as_str())
+        || row.state != MemoryState::Posting
+    {
+        return Err("memory task card POST boundary lost exact ownership".to_string());
+    }
+    if let Some(started_at) = row.post_started_at {
+        return Ok(CardPostAttempt {
+            started_at,
+            resumed: true,
+        });
+    }
+    let started_at = Utc::now();
+    row.post_started_at = Some(started_at);
+    Ok(CardPostAttempt {
+        started_at,
+        resumed: false,
+    })
 }
 
 fn memory_claim(
@@ -779,6 +896,7 @@ fn mark_posted_memory(
         row.content_hash = content_hash.to_string();
         row.lease_owner = None;
         row.lease_expires_at = None;
+        row.post_started_at = None;
         row.last_error = None;
         Ok(())
     })
@@ -842,6 +960,7 @@ fn prepare_replacement_memory(
     row.nonce = stable_nonce(&claimed.scope, row.revision);
     row.state = MemoryState::Posting;
     row.message_id = None;
+    row.post_started_at = None;
     row.rendered_content = content.to_string();
     row.content_hash = content_hash.to_string();
     row.lease_expires_at = Some(Instant::now() + Duration::from_secs(LEASE_SECONDS as u64));

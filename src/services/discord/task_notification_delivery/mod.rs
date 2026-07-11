@@ -4,6 +4,7 @@
 //! semantic event owns one durable row and one stable Discord nonce; only this
 //! module may create, edit, or replace its completion card.
 
+mod card_post;
 mod gateway;
 mod response_chunks;
 mod store;
@@ -17,8 +18,9 @@ use sqlx::PgPool;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::session_backend::{StreamLineState, classify_task_notification_kind};
 
+use self::card_post::deliver_card_post_claim;
 pub(super) use gateway::{
-    CardBot, CardDeliveryClients, DiscordTaskCardTransport, TaskCardTransport,
+    CardBot, CardDeliveryClients, CardPostReconcile, DiscordTaskCardTransport, TaskCardTransport,
     TaskCardTransportError,
 };
 #[cfg(test)]
@@ -443,7 +445,11 @@ pub(in crate::services::discord) async fn claim_task_response_delivery(
         session_key,
         event_key,
         response_turn_key,
-        None,
+        // A self-alias makes the recovery-key uniqueness constraint symmetric:
+        // if a watcher persists its fallback/content key first, a later sink
+        // frame-key claim with that fallback alias conflicts onto the same row
+        // instead of creating a second delivery authority.
+        Some(response_turn_key),
         card_message_id,
         owner,
     )
@@ -640,6 +646,8 @@ pub(super) enum CardEnsureError {
     Transient(String),
     #[error("task card delivery failed permanently: {0}")]
     Permanent(String),
+    #[error("task card delivery is ambiguous and fail-closed: {0}")]
+    Ambiguous(String),
     #[error("task card state error: {0}")]
     Store(String),
 }
@@ -754,32 +762,14 @@ pub(in crate::services::discord) async fn replace_confirmed_missing_card<T: Task
                 };
                 let content = claimed.rendered_content.clone();
                 let hash = content_hash(&content);
-                match transport
-                    .post_card(
-                        bot,
-                        event.scope.channel_id,
-                        &content,
-                        &claimed.discord_nonce,
-                    )
-                    .await
-                {
-                    Ok(message_id) => {
-                        store::mark_posted(pool, &claimed, message_id, &content, &hash)
-                            .await
-                            .map_err(CardEnsureError::Store)?;
-                        return Ok(CardEnsureOutcome {
-                            message_id,
-                            bot_key: claimed.bot_key,
-                            disposition: CardDisposition::Replaced,
-                        });
-                    }
-                    Err(error) => {
-                        store::mark_post_failure(pool, &claimed, &error.to_string())
-                            .await
-                            .map_err(CardEnsureError::Store)?;
-                        return Err(map_transport_error(error));
-                    }
-                }
+                let message_id =
+                    deliver_card_post_claim(pool, transport, bot, &claimed, &content, &hash)
+                        .await?;
+                return Ok(CardEnsureOutcome {
+                    message_id,
+                    bot_key: claimed.bot_key,
+                    disposition: CardDisposition::Replaced,
+                });
             }
         }
     }
@@ -817,36 +807,17 @@ async fn deliver_claim<T: TaskCardTransport>(
 
     match claimed.action {
         store::ClaimAction::Post => {
-            match transport
-                .post_card(
-                    bot,
-                    event.scope.channel_id,
-                    &content,
-                    &claimed.discord_nonce,
-                )
-                .await
-            {
-                Ok(message_id) => {
-                    store::mark_posted(pool, &claimed, message_id, &content, &hash)
-                        .await
-                        .map_err(CardEnsureError::Store)?;
-                    Ok(CardEnsureOutcome {
-                        message_id,
-                        bot_key: claimed.bot_key,
-                        disposition: if claimed.revision > 1 {
-                            CardDisposition::Replaced
-                        } else {
-                            CardDisposition::Created
-                        },
-                    })
-                }
-                Err(error) => {
-                    store::mark_post_failure(pool, &claimed, &error.to_string())
-                        .await
-                        .map_err(CardEnsureError::Store)?;
-                    Err(map_transport_error(error))
-                }
-            }
+            let message_id =
+                deliver_card_post_claim(pool, transport, bot, &claimed, &content, &hash).await?;
+            Ok(CardEnsureOutcome {
+                message_id,
+                bot_key: claimed.bot_key,
+                disposition: if claimed.revision > 1 {
+                    CardDisposition::Replaced
+                } else {
+                    CardDisposition::Created
+                },
+            })
         }
         store::ClaimAction::Edit { message_id } => {
             match transport
@@ -868,32 +839,20 @@ async fn deliver_claim<T: TaskCardTransport>(
                         store::prepare_replacement(pool, &claimed, message_id, &content, &hash)
                             .await
                             .map_err(CardEnsureError::Store)?;
-                    match transport
-                        .post_card(
-                            bot,
-                            event.scope.channel_id,
-                            &content,
-                            &replacement.discord_nonce,
-                        )
-                        .await
-                    {
-                        Ok(replacement_id) => {
-                            store::mark_posted(pool, &replacement, replacement_id, &content, &hash)
-                                .await
-                                .map_err(CardEnsureError::Store)?;
-                            Ok(CardEnsureOutcome {
-                                message_id: replacement_id,
-                                bot_key: replacement.bot_key,
-                                disposition: CardDisposition::Replaced,
-                            })
-                        }
-                        Err(post_error) => {
-                            store::mark_post_failure(pool, &replacement, &post_error.to_string())
-                                .await
-                                .map_err(CardEnsureError::Store)?;
-                            Err(map_transport_error(post_error))
-                        }
-                    }
+                    let replacement_id = deliver_card_post_claim(
+                        pool,
+                        transport,
+                        bot,
+                        &replacement,
+                        &content,
+                        &hash,
+                    )
+                    .await?;
+                    Ok(CardEnsureOutcome {
+                        message_id: replacement_id,
+                        bot_key: replacement.bot_key,
+                        disposition: CardDisposition::Replaced,
+                    })
                 }
                 Err(error) => {
                     store::mark_edit_failure(pool, &claimed, message_id, &error.to_string())

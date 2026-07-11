@@ -262,10 +262,36 @@ async fn claim_response_delivery_pg(
     if state == "delivered" {
         return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
     }
+    let lease_active: bool = current.get("lease_active");
     if state == "sent" {
+        if lease_active {
+            return Ok(ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id });
+        }
+        let finalized = sqlx::query(
+            "UPDATE task_notification_response_delivery
+             SET delivery_state = 'delivered', owner_kind = NULL, owner_token = NULL,
+                 lease_expires_at = NULL, delivered_at = NOW(), updated_at = NOW()
+             WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+               AND event_key = $4 AND response_turn_key = $5
+               AND referenced_card_message_id = $6 AND delivery_state = 'sent'
+               AND lease_expires_at <= NOW()",
+        )
+        .bind(channel_id)
+        .bind(&scope.provider)
+        .bind(&scope.session_key)
+        .bind(&scope.event_key)
+        .bind(&canonical_turn_key)
+        .bind(card_message_id_db)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("finalize expired sent task response: {error}"))?
+        .rows_affected();
+        if finalized == 1 {
+            super::cleanup_old_rows_pg(pool).await;
+            return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+        }
         return Ok(ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id });
     }
-    let lease_active: bool = current.get("lease_active");
     if lease_active {
         return Ok(ResponseDeliveryClaimOutcome::Wait);
     }
@@ -538,13 +564,36 @@ fn claim_response_delivery_memory(
     let mut rows = MEMORY_RESPONSES
         .lock()
         .map_err(|_| "task response memory store poisoned".to_string())?;
-    let key = memory_key(scope, response_turn_key);
+    let matching_keys: Vec<MemoryResponseKey> = rows
+        .iter()
+        .filter(|((channel_id, provider, session_key, canonical), row)| {
+            *channel_id == scope.channel_id
+                && provider == &scope.provider
+                && session_key == &scope.session_key
+                && (canonical == response_turn_key
+                    || row.recovery_turn_key.as_deref() == Some(response_turn_key)
+                    || recovery_turn_key.is_some_and(|recovery| {
+                        canonical == recovery || row.recovery_turn_key.as_deref() == Some(recovery)
+                    }))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    if matching_keys.len() > 1 {
+        return Err(
+            "task response canonical/recovery identity matched multiple memory rows".into(),
+        );
+    }
+    let key = matching_keys
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| memory_key(scope, response_turn_key));
+    let canonical_turn_key = key.3.clone();
     let owner_token = uuid::Uuid::new_v4().to_string();
     let now = Instant::now();
     match rows.get_mut(&key) {
         None => {
             rows.insert(
-                key,
+                key.clone(),
                 MemoryResponseRow {
                     event_key: scope.event_key.clone(),
                     recovery_turn_key: recovery_turn_key.map(str::to_string),
@@ -574,8 +623,17 @@ fn claim_response_delivery_memory(
         Some(row) if row.state == MemoryResponseState::Delivered => {
             return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
         }
-        Some(row) if row.state == MemoryResponseState::Sent => {
+        Some(row)
+            if row.state == MemoryResponseState::Sent
+                && row.lease_expires_at.is_some_and(|expiry| expiry > now) =>
+        {
             return Ok(ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id });
+        }
+        Some(row) if row.state == MemoryResponseState::Sent => {
+            row.state = MemoryResponseState::Delivered;
+            row.owner_token = None;
+            row.lease_expires_at = None;
+            return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
         }
         Some(row) if row.lease_expires_at.is_some_and(|expiry| expiry > now) => {
             return Ok(ResponseDeliveryClaimOutcome::Wait);
@@ -587,10 +645,10 @@ fn claim_response_delivery_memory(
     }
     Ok(ResponseDeliveryClaimOutcome::Owned(ResponseDeliveryClaim {
         scope: scope.clone(),
-        response_turn_key: response_turn_key.to_string(),
+        response_turn_key: canonical_turn_key,
         card_message_id,
         response_generation: rows
-            .get(&memory_key(scope, response_turn_key))
+            .get(&key)
             .map(|row| row.response_generation)
             .unwrap_or(1),
         owner_token,

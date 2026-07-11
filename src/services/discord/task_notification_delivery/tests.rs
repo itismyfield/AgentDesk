@@ -97,6 +97,7 @@ fn durable_response_turn_key_uses_shared_recovery_identity_for_degenerate_turns(
 #[derive(Default)]
 struct FakeTransport {
     by_nonce: Mutex<HashMap<String, u64>>,
+    content_hash_by_nonce: Mutex<HashMap<String, String>>,
     next_message_id: AtomicU64,
     physical_posts: AtomicUsize,
     post_calls: AtomicUsize,
@@ -120,7 +121,7 @@ impl TaskCardTransport for FakeTransport {
         &self,
         _bot: &CardBot,
         _channel_id: u64,
-        _content: &str,
+        content: &str,
         nonce: &str,
     ) -> Result<u64, TaskCardTransportError> {
         self.post_calls.fetch_add(1, Ordering::AcqRel);
@@ -132,6 +133,10 @@ impl TaskCardTransport for FakeTransport {
                 self.next_message_id.fetch_add(1, Ordering::AcqRel)
             })
         };
+        self.content_hash_by_nonce
+            .lock()
+            .expect("fake card content hashes")
+            .insert(nonce.to_string(), content_hash(content));
         if self
             .fail_next_post_after_commit
             .swap(false, Ordering::AcqRel)
@@ -141,6 +146,39 @@ impl TaskCardTransport for FakeTransport {
             ));
         }
         Ok(message_id)
+    }
+
+    async fn reconcile_card_post(
+        &self,
+        _bot: &CardBot,
+        _channel_id: u64,
+        nonce: &str,
+        expected_content_hash: &str,
+        _post_started_at: chrono::DateTime<chrono::Utc>,
+    ) -> CardPostReconcile {
+        let message_id = self
+            .by_nonce
+            .lock()
+            .expect("fake nonce map")
+            .get(nonce)
+            .copied();
+        let actual_hash = self
+            .content_hash_by_nonce
+            .lock()
+            .expect("fake card content hashes")
+            .get(nonce)
+            .cloned();
+        match (message_id, actual_hash) {
+            (Some(message_id), Some(actual_hash)) if actual_hash == expected_content_hash => {
+                CardPostReconcile::Found(message_id)
+            }
+            (Some(_), Some(_)) => CardPostReconcile::Ambiguous(
+                "fake history found the card nonce with different content".into(),
+            ),
+            _ => CardPostReconcile::Ambiguous(
+                "fake history cannot disprove card POST-then-delete".into(),
+            ),
+        }
     }
 
     async fn edit_card(
@@ -1096,6 +1134,94 @@ async fn watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_p
 }
 
 #[tokio::test]
+async fn watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_reverse_alias_4055",
+        "watcher fallback primary to late sink frame alias",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let transport = FakeTransport::new();
+    let event = event("watcher-primary-frame-alias");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("notify-pinned task card");
+    let frame_key = response_turn_key(4_446, "2026-07-11T10:38:00Z", Some(44_461));
+    let fallback_key = fallback_response_turn_key(
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        55_501,
+        "watcher delivered before the frame sink resumed",
+    );
+    assert_ne!(frame_key, fallback_key);
+
+    let watcher = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &fallback_key,
+        card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("watcher persists fallback-primary response");
+    assert!(matches!(watcher, ResponseDeliveryClaimOutcome::Owned(_)));
+
+    let sink = claim_task_response_delivery_with_recovery_key(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &frame_key,
+        Some(&fallback_key),
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("late sink resolves watcher fallback-primary authority");
+    assert!(
+        matches!(sink, ResponseDeliveryClaimOutcome::Wait),
+        "late sink must observe the active watcher lease, not own a second row"
+    );
+
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .fetch_one(&pool)
+    .await
+    .expect("count reverse-alias response rows");
+    assert_eq!(rows, 1, "watcher/sink aliases must share one fence row");
+    let persisted_alias: Option<String> = sqlx::query_scalar(
+        "SELECT recovery_turn_key FROM task_notification_response_delivery
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load reverse-alias response row");
+    assert_eq!(persisted_alias.as_deref(), Some(fallback_key.as_str()));
+}
+
+#[tokio::test]
 async fn response_chunk_journal_preserves_confirmed_prefix_and_rejects_payload_drift_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_response_chunk_prefix_4446",
@@ -1865,13 +1991,27 @@ async fn old_posting_chunk_with_bounded_history_ambiguity_fails_closed_and_backs
             "ambiguous POST boundary",
         )
         .await,
-        Err(ResponseChunkDeliveryError::Permanent(ref reason))
+        Err(ResponseChunkDeliveryError::Ambiguous { ref reason })
             if reason.contains("403")
     ));
     assert_eq!(
         response_transport.post_calls.load(Ordering::Acquire),
         0,
         "permanent history authorization failure never opens POST authority"
+    );
+    let permanent_alerts: i64 = sqlx::query_scalar(
+        "SELECT alert_count FROM task_notification_response_chunk
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         ) AND response_generation = 1 AND chunk_index = 0",
+    )
+    .bind(&turn_key)
+    .fetch_one(&pool)
+    .await
+    .expect("permanent history rejection remains operator-visible");
+    assert_eq!(
+        permanent_alerts, 2,
+        "permanent history rejection must pass through fail-closed quarantine"
     );
     response_transport
         .history_permanent_error
@@ -2228,7 +2368,8 @@ async fn sent_response_claim_never_reopens_post_authority_after_lease_expiry_pg(
 
     // Model the boundary under review: Discord accepted the required-reference
     // POST, but the final `delivered` CAS did not commit. This durable state must
-    // remain a no-POST tombstone even after the old lease expires.
+    // remain a no-POST tombstone and become a bounded delivered record after
+    // the old owner lease expires.
     sqlx::query(
         "UPDATE task_notification_response_delivery
          SET delivery_state = 'sent', sent_at = NOW(),
@@ -2259,10 +2400,24 @@ async fn sent_response_claim_never_reopens_post_authority_after_lease_expiry_pg(
     .expect("inspect sent response after its former lease expires");
     assert!(matches!(
         second_owner,
-        ResponseDeliveryClaimOutcome::SentUncommitted {
+        ResponseDeliveryClaimOutcome::Delivered {
             card_message_id: 90_057
         }
     ));
+    let state: String = sqlx::query_scalar(
+        "SELECT delivery_state FROM task_notification_response_delivery
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+           AND event_key = $4 AND response_turn_key = $5",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(event.event_key())
+    .bind(&turn_key)
+    .fetch_one(&pool)
+    .await
+    .expect("expired sent response finalized durably");
+    assert_eq!(state, "delivered");
 }
 
 #[tokio::test]
@@ -2743,10 +2898,10 @@ async fn bigint_update_count_above_u32_max_remains_claimable_pg() {
 }
 
 #[tokio::test]
-async fn restart_after_discord_post_before_db_commit_recovers_by_nonce_pg() {
+async fn old_restart_after_card_post_reconciles_history_without_nonce_replay_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_task_card_restart_4055",
-        "task notification card restart nonce recovery",
+        "task notification card old restart history recovery",
     )
     .await
     else {
@@ -2770,6 +2925,10 @@ async fn restart_after_discord_post_before_db_commit_recovers_by_nonce_pg() {
     let CardClaim::Owned(claimed) = claim else {
         panic!("first worker must own the post lease");
     };
+    let boundary = store::begin_card_post(Some(&pool), &claimed)
+        .await
+        .expect("persist card POST boundary before Discord call");
+    assert!(!boundary.resumed);
     let bot = clients.by_key("notify").expect("notify test bot");
     let original_id = transport
         .post_card(bot, event.scope.channel_id, &seed, &claimed.discord_nonce)
@@ -2777,7 +2936,8 @@ async fn restart_after_discord_post_before_db_commit_recovers_by_nonce_pg() {
         .expect("Discord accepted create before worker crash");
     sqlx::query(
         "UPDATE task_notification_card_state
-         SET lease_expires_at = NOW() - INTERVAL '1 second'
+         SET lease_expires_at = NOW() - INTERVAL '1 second',
+             post_started_at = NOW() - INTERVAL '10 minutes'
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
     )
     .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
@@ -2796,8 +2956,81 @@ async fn restart_after_discord_post_before_db_commit_recovers_by_nonce_pg() {
         EnsureIntent::Promotion,
     )
     .await
-    .expect("stale lease replay reconciles the same nonce");
+    .expect("old stale lease reconciles Discord history without nonce replay");
     assert_eq!(recovered.message_id, original_id);
-    assert_eq!(transport.post_calls.load(Ordering::Acquire), 2);
+    assert_eq!(
+        transport.post_calls.load(Ordering::Acquire),
+        1,
+        "POST outside the bounded nonce window must reconcile history instead of replaying"
+    );
     assert_eq!(transport.physical_posts.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn old_card_post_boundary_without_history_fails_closed_without_repost_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_card_old_ambiguous_4055",
+        "old task card POST boundary without history proof",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let event = event("postgres-old-ambiguous-card");
+    let seed = event.payload.render(1);
+    let claim = store::claim_card(
+        Some(&pool),
+        &event.scope,
+        "notify",
+        &seed,
+        &content_hash(&seed),
+        store::StoreIntent::Observation,
+    )
+    .await
+    .expect("claim card before ambiguous boundary");
+    let CardClaim::Owned(claimed) = claim else {
+        panic!("first worker must own the post lease");
+    };
+    store::begin_card_post(Some(&pool), &claimed)
+        .await
+        .expect("persist ambiguous network boundary");
+    sqlx::query(
+        "UPDATE task_notification_card_state
+         SET lease_expires_at = NOW() - INTERVAL '1 second',
+             post_started_at = NOW() - INTERVAL '10 minutes'
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(&event.scope.event_key)
+    .execute(&pool)
+    .await
+    .expect("age ambiguous card boundary");
+
+    let result = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await;
+    assert!(matches!(result, Err(CardEnsureError::Ambiguous(_))));
+    assert_eq!(transport.post_calls.load(Ordering::Acquire), 0);
+    let persisted_boundary: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT post_started_at FROM task_notification_card_state
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(&event.scope.event_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load quarantined card boundary");
+    assert!(persisted_boundary.is_some());
 }

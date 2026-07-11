@@ -423,7 +423,7 @@
     },
     {
       "path": "migrations/postgres/0082_task_notification_card_state.sql",
-      "sha256": "6686fe2685062ba98462a76cc7cf55f1fcba556502be7692c300696e0fb6fd89",
+      "sha256": "981335c09bfd96aa41ad347dbb0f1b4044b3e85e2a41867ade12d2008a62e8e1",
       "version": 82
     }
   ],

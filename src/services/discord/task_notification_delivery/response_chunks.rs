@@ -321,7 +321,13 @@ pub(in crate::services::discord) async fn send_task_response_chunks<T: ResponseC
                             return Err(ResponseChunkDeliveryError::Transient(reason));
                         }
                         HistoryReconcile::Permanent(reason) => {
-                            return Err(ResponseChunkDeliveryError::Permanent(reason));
+                            // A permanent history rejection still cannot prove
+                            // whether the prior POST crossed Discord's network
+                            // boundary. Quarantine and retain retry/operator
+                            // authority instead of converting uncertainty into
+                            // a terminal delivery loss.
+                            fail_closed(pool, claim, &posting, &reason).await?;
+                            return Err(ResponseChunkDeliveryError::Ambiguous { reason });
                         }
                     }
                 }
