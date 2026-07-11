@@ -10,8 +10,9 @@ use super::super::health::HealthRegistry;
 use super::super::placeholder_live_events::PlaceholderLiveEvents;
 use super::super::task_notification_delivery::{
     CardBot, CardDeliveryClients, CardEnsureError, CardEnsureOutcome, DiscordTaskCardTransport,
-    EnsureIntent, TaskCardTransport, TaskNotificationContext, bind_task_response_turn, ensure_card,
-    mark_task_response_delivered, provider_bot_key, response_turn_key,
+    EnsureIntent, ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
+    TaskCardTransport, TaskNotificationContext, claim_task_response_delivery,
+    durable_response_turn_key, ensure_card, mark_task_response_delivered, provider_bot_key,
 };
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
@@ -115,7 +116,14 @@ pub(super) async fn ensure_card_and_route(
     shared: &Arc<SharedData>,
     delivery: &super::SessionRelayDelivery,
     route: super::SessionBoundTerminalDeliveryRoute,
-) -> Result<(super::SessionBoundTerminalDeliveryRoute, Option<MessageId>), RelaySinkError> {
+) -> Result<
+    (
+        super::SessionBoundTerminalDeliveryRoute,
+        Option<MessageId>,
+        Option<ResponseDeliveryClaimOutcome>,
+    ),
+    RelaySinkError,
+> {
     let card = ensure_task_context_card(
         health_registry,
         shared,
@@ -125,13 +133,21 @@ pub(super) async fn ensure_card_and_route(
         delivery.task_notification_context.as_ref(),
     )
     .await?;
-    if let (Some(message_id), Some(context)) = (card, delivery.task_notification_context.as_ref()) {
-        let turn_key = response_turn_key(
-            delivery.frame_turn_user_msg_id,
-            &delivery.frame_turn_started_at,
-            delivery.frame_turn_start_offset,
-        );
-        bind_task_response_turn(
+    let response_claim =
+        if let (Some(message_id), Some(context)) =
+            (card, delivery.task_notification_context.as_ref())
+        {
+            let turn_key = durable_response_turn_key(
+                delivery.channel_id,
+                delivery.provider.as_str(),
+                &delivery.session_name,
+                delivery.frame_turn_user_msg_id,
+                &delivery.frame_turn_started_at,
+                delivery.frame_turn_start_offset,
+                delivery.terminal_consumed_end.unwrap_or_default(),
+                &delivery.response_text,
+            );
+            Some(claim_task_response_delivery(
             shared.pg_pool.as_ref(),
             delivery.channel_id,
             delivery.provider.as_str(),
@@ -139,20 +155,23 @@ pub(super) async fn ensure_card_and_route(
             context.event_key(),
             &turn_key,
             message_id.get(),
+            ResponseDeliveryOwner::Sink,
         )
         .await
         .map_err(|error| {
             RelaySinkError::Transient(format!(
                 "task-notification response turn must be durably bound before delivery: {error}"
             ))
-        })?;
-    }
+        })?)
+        } else {
+            None
+        };
     let route = if card.is_some() {
         super::SessionBoundTerminalDeliveryRoute::NewMessage
     } else {
         route
     };
-    Ok((route, card))
+    Ok((route, card, response_claim))
 }
 
 pub(super) fn answer_reference(
@@ -170,36 +189,20 @@ pub(super) fn answer_reference(
 /// confirmation by itself is not response confirmation.
 pub(super) async fn mark_response_delivered(
     pool: Option<&PgPool>,
-    delivery: &super::SessionRelayDelivery,
-    task_card_message_id: Option<MessageId>,
+    response_claim: Option<&ResponseDeliveryClaim>,
 ) -> Result<(), String> {
-    match (
-        task_card_message_id,
-        delivery.task_notification_context.as_ref(),
-    ) {
-        (Some(message_id), Some(context)) => {
-            mark_task_response_delivered(
-                pool,
-                delivery.channel_id,
-                delivery.provider.as_str(),
-                &delivery.session_name,
-                context.event_key(),
-                message_id.get(),
-            )
-            .await
-        }
-        _ => Ok(()),
+    match response_claim {
+        Some(claim) => mark_task_response_delivered(pool, claim).await,
+        None => Ok(()),
     }
 }
 
 pub(super) async fn commit_response_fence(
     shared: &Arc<SharedData>,
     delivery: &super::SessionRelayDelivery,
-    task_card_message_id: Option<MessageId>,
+    response_claim: Option<&ResponseDeliveryClaim>,
 ) {
-    if let Err(error) =
-        mark_response_delivered(shared.pg_pool.as_ref(), delivery, task_card_message_id).await
-    {
+    if let Err(error) = mark_response_delivered(shared.pg_pool.as_ref(), response_claim).await {
         tracing::error!(
             provider = delivery.provider.as_str(),
             channel_id = delivery.channel_id,
@@ -241,7 +244,9 @@ mod tests {
     use poise::serenity_prelude as serenity;
 
     use super::*;
-    use crate::services::discord::task_notification_delivery::TaskCardTransportError;
+    use crate::services::discord::task_notification_delivery::{
+        TaskCardTransportError, claim_existing_task_response_delivery,
+    };
     use crate::services::session_backend::StreamLineState;
 
     struct OrderedTransport {
@@ -407,12 +412,17 @@ mod tests {
         .await
         .expect("confirm response card")
         .expect("response card");
-        let turn_key = response_turn_key(
+        let turn_key = durable_response_turn_key(
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
             delivery.frame_turn_user_msg_id,
             &delivery.frame_turn_started_at,
             delivery.frame_turn_start_offset,
+            delivery.terminal_consumed_end.unwrap_or_default(),
+            &delivery.response_text,
         );
-        bind_task_response_turn(
+        let claim = claim_task_response_delivery(
             None,
             delivery.channel_id,
             delivery.provider.as_str(),
@@ -420,37 +430,46 @@ mod tests {
             context.event_key(),
             &turn_key,
             card.message_id,
+            ResponseDeliveryOwner::Sink,
         )
         .await
-        .expect("bind response turn");
-        assert!(
-            super::super::super::task_notification_delivery::task_response_fallback_must_wait(
-                None,
-                delivery.channel_id,
-                delivery.provider.as_str(),
-                &delivery.session_name,
-                Some(context.event_key()),
-                Some(&turn_key),
-            )
-            .await
-            .expect("pending response fence")
-        );
+        .expect("claim response turn");
+        let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+            panic!("first response claimant must own the turn")
+        };
+        let (pending, pending_card) = claim_existing_task_response_delivery(
+            None,
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            &turn_key,
+            ResponseDeliveryOwner::Watcher,
+        )
+        .await
+        .expect("load pending response claim")
+        .expect("response row");
+        assert_eq!(pending_card, card.message_id);
+        assert!(matches!(pending, ResponseDeliveryClaimOutcome::Wait));
 
-        mark_response_delivered(None, &delivery, Some(MessageId::new(card.message_id)))
+        mark_response_delivered(None, Some(&claim))
             .await
             .expect("mark response delivered");
-        assert!(
-            !super::super::super::task_notification_delivery::task_response_fallback_must_wait(
-                None,
-                delivery.channel_id,
-                delivery.provider.as_str(),
-                &delivery.session_name,
-                None,
-                Some(&turn_key),
-            )
-            .await
-            .expect("delivered response fence")
-        );
+        let (delivered, delivered_card) = claim_existing_task_response_delivery(
+            None,
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            &turn_key,
+            ResponseDeliveryOwner::Watcher,
+        )
+        .await
+        .expect("load delivered response claim")
+        .expect("response row");
+        assert_eq!(delivered_card, card.message_id);
+        assert!(matches!(
+            delivered,
+            ResponseDeliveryClaimOutcome::Delivered { .. }
+        ));
     }
 
     #[test]
@@ -464,8 +483,8 @@ mod tests {
             .find("answer_reference(channel")
             .expect("confirmed card id must become answer reference");
         let send = after_gate
-            .find("formatting::send_long_message_raw_with_reference(")
-            .expect("referenced answer send");
+            .find("formatting::send_long_message_raw_with_required_reference_rollback(")
+            .expect("required-reference answer send");
         let after_send = &after_gate[send..];
         let advance = after_send
             .find("self.advance_after_confirmed_post(")

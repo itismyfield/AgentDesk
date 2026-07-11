@@ -35,6 +35,29 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_rollback(
     .await
 }
 
+/// Task responses must remain visibly attached to their durable completion
+/// card. Unlike the general-purpose optional-reference sender, a rejected
+/// reference is a delivery failure and never degrades to an unthreaded POST.
+pub(in crate::services::discord) async fn send_long_message_raw_with_required_reference_rollback(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    rollback_anchor_msg_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: (ChannelId, MessageId),
+) -> Result<Vec<MessageId>, Error> {
+    send_long_message_raw_with_reference_rollback_policy(
+        http,
+        channel_id,
+        rollback_anchor_msg_id,
+        text,
+        shared,
+        Some(reference),
+        true,
+    )
+    .await
+}
+
 pub(in crate::services::discord) async fn send_long_message_raw_with_reference_rollback(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -42,6 +65,27 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     text: &str,
     shared: &Arc<SharedData>,
     reference: Option<(ChannelId, MessageId)>,
+) -> Result<Vec<MessageId>, Error> {
+    send_long_message_raw_with_reference_rollback_policy(
+        http,
+        channel_id,
+        rollback_anchor_msg_id,
+        text,
+        shared,
+        reference,
+        false,
+    )
+    .await
+}
+
+async fn send_long_message_raw_with_reference_rollback_policy(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    rollback_anchor_msg_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: Option<(ChannelId, MessageId)>,
+    require_reference: bool,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
     let chunks = split_message(text);
@@ -135,7 +179,15 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
         );
         rate_limit_wait(shared, channel_id).await;
         let chunk_reference = if i == 0 { reference.clone() } else { None };
-        match send_rollback_channel_message(http, channel_id, chunk, chunk_reference).await {
+        match send_rollback_channel_message(
+            http,
+            channel_id,
+            chunk,
+            chunk_reference,
+            require_reference && i == 0,
+        )
+        .await
+        {
             Ok(message_id) => {
                 // #3082 P1-2: chunk landed — refresh the answer-flush barrier's
                 // inactivity window so a long rollback-tracked answer never
@@ -272,6 +324,7 @@ async fn send_rollback_channel_message(
     channel_id: ChannelId,
     content: &str,
     reference: Option<(ChannelId, MessageId)>,
+    require_reference: bool,
 ) -> Result<MessageId, Error> {
     #[cfg(test)]
     if let Some(result) = super::rollback_transport_test_hook::send(channel_id, content, reference)
@@ -279,8 +332,20 @@ async fn send_rollback_channel_message(
         return result;
     }
 
-    match reference {
-        Some((reference_channel_id, reference_message_id)) => {
+    match (reference, require_reference) {
+        (Some((reference_channel_id, reference_message_id)), true) => {
+            super::super::http::send_channel_message_with_reference(
+                http,
+                channel_id,
+                content,
+                reference_channel_id,
+                reference_message_id,
+            )
+            .await
+            .map(|message| message.id)
+            .map_err(Into::into)
+        }
+        (Some((reference_channel_id, reference_message_id)), false) => {
             send_channel_message_with_optional_reference(
                 http,
                 channel_id,
@@ -291,7 +356,7 @@ async fn send_rollback_channel_message(
             .map(|message| message.id)
             .map_err(Into::into)
         }
-        None => super::super::http::send_channel_message(http, channel_id, content)
+        (None, _) => super::super::http::send_channel_message(http, channel_id, content)
             .await
             .map(|message| message.id)
             .map_err(Into::into),

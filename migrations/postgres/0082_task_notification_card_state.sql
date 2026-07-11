@@ -23,10 +23,6 @@ CREATE TABLE IF NOT EXISTS task_notification_card_state (
     content_hash VARCHAR(64) NOT NULL CHECK (char_length(content_hash) = 64),
     lease_owner TEXT,
     lease_expires_at TIMESTAMPTZ,
-    response_turn_key VARCHAR(64)
-        CHECK (response_turn_key IS NULL OR char_length(response_turn_key) = 64),
-    response_delivered_at TIMESTAMPTZ,
-    response_card_message_id BIGINT CHECK (response_card_message_id > 0),
     last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -34,14 +30,52 @@ CREATE TABLE IF NOT EXISTS task_notification_card_state (
     CHECK (delivery_state <> 'card_posted' OR discord_message_id IS NOT NULL),
     CHECK ((surface_owner = 'footer_only') = (delivery_state = 'footer_only')),
     CHECK (delivery_state = 'footer_only' OR btrim(bot_key) <> ''),
-    CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL)),
-    CHECK ((response_delivered_at IS NULL) = (response_card_message_id IS NULL))
+    CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL))
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_task_notification_response_turn
-    ON task_notification_card_state
-        (channel_id, provider, session_key, response_turn_key)
-    WHERE response_turn_key IS NOT NULL;
+-- A card is a semantic-event surface, while responses are per terminal turn.
+-- Keeping response claims 1:N preserves delivered tombstones for sequential
+-- turns and lets an expired sink claim be taken over without rewriting history.
+CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
+    id BIGSERIAL PRIMARY KEY,
+    channel_id BIGINT NOT NULL CHECK (channel_id > 0),
+    provider TEXT NOT NULL CHECK (btrim(provider) <> ''),
+    session_key TEXT NOT NULL CHECK (btrim(session_key) <> ''),
+    event_key TEXT NOT NULL CHECK (btrim(event_key) <> ''),
+    response_turn_key VARCHAR(64) NOT NULL
+        CHECK (char_length(response_turn_key) = 64),
+    referenced_card_message_id BIGINT NOT NULL
+        CHECK (referenced_card_message_id > 0),
+    delivery_state TEXT NOT NULL
+        CHECK (delivery_state IN ('claimed', 'delivered')),
+    owner_kind TEXT CHECK (owner_kind IN ('sink', 'watcher')),
+    owner_token TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (channel_id, provider, session_key, response_turn_key),
+    CHECK (
+        (delivery_state = 'claimed'
+            AND owner_kind IS NOT NULL
+            AND owner_token IS NOT NULL
+            AND lease_expires_at IS NOT NULL
+            AND delivered_at IS NULL)
+        OR
+        (delivery_state = 'delivered'
+            AND owner_kind IS NULL
+            AND owner_token IS NULL
+            AND lease_expires_at IS NULL
+            AND delivered_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_notification_response_claim_lease
+    ON task_notification_response_delivery (lease_expires_at)
+    WHERE delivery_state = 'claimed';
+
+CREATE INDEX IF NOT EXISTS idx_task_notification_response_retention
+    ON task_notification_response_delivery (updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_task_notification_card_state_lease
     ON task_notification_card_state (lease_expires_at)

@@ -20,6 +20,59 @@ fn response_turn_key_is_stable_and_separates_offsets() {
     );
 }
 
+#[test]
+fn durable_response_turn_key_uses_shared_recovery_identity_for_degenerate_turns() {
+    let recovered = fallback_response_turn_key(
+        4_055_902,
+        "claude",
+        "AgentDesk-claude-4055-recovered",
+        20,
+        "done",
+    );
+    assert_eq!(
+        durable_response_turn_key(
+            4_055_902,
+            "CLAUDE",
+            "AgentDesk-claude-4055-recovered",
+            0,
+            "",
+            None,
+            20,
+            "done",
+        ),
+        recovered,
+        "sink and watcher must converge when neither retains a provider turn identity"
+    );
+    assert_ne!(
+        recovered,
+        durable_response_turn_key(
+            4_055_902,
+            "claude",
+            "AgentDesk-claude-4055-recovered",
+            0,
+            "",
+            None,
+            20,
+            "different response",
+        ),
+        "response content separates same-offset recovered turns"
+    );
+    assert_eq!(
+        durable_response_turn_key(
+            4_055_902,
+            "claude",
+            "AgentDesk-claude-4055-recovered",
+            0,
+            "2026-07-11T01:37:00Z",
+            Some(20),
+            30,
+            "done",
+        ),
+        response_turn_key(0, "2026-07-11T01:37:00Z", Some(20)),
+        "a zero user id is still durable when timestamp and start offset are present"
+    );
+}
+
 #[derive(Default)]
 struct FakeTransport {
     by_nonce: Mutex<HashMap<String, u64>>,
@@ -222,11 +275,34 @@ fn fully_unkeyed_task_event_cannot_be_deferred_to_footer() {
 }
 
 #[test]
-fn subagent_agent_path_is_hashed_and_never_enters_identity() {
+fn subagent_agent_path_is_ignored_and_never_enters_identity() {
     let raw = r#"<subagent_notification>{"agent_path":"/private/secret/agent-42","status":{"completed":"done"}}</subagent_notification>"#;
     let event = TaskCardEvent::from_subagent_prompt(1, "codex", "session", raw);
     assert!(!event.scope.event_key.contains("/private/secret"));
     assert!(!event.payload.render(1).contains("/private/secret"));
+}
+
+#[test]
+fn identity_less_subagent_prompt_and_stream_share_one_semantic_event() {
+    let prompt = r#"<subagent_notification>{"agent_path":"/private/secret/agent-42","status":{"completed":"done"}}</subagent_notification>"#;
+    let prompt_event = TaskCardEvent::from_subagent_prompt(1, "codex", "session", prompt);
+    let stream_event = TaskNotificationContext::from_stream_json(
+        &serde_json::json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "status": "completed",
+            "summary": "done",
+            "task_notification_kind": "subagent"
+        }),
+        &crate::services::session_backend::StreamLineState::new(),
+    )
+    .expect("identity-less stream context")
+    .to_event(1, "codex", "session");
+
+    assert_eq!(
+        prompt_event.scope.event_key, stream_event.scope.event_key,
+        "prompt observation and stream delivery must converge on one card",
+    );
 }
 
 #[test]
@@ -539,22 +615,47 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
     let clients = clients();
     let delivered_event = event("postgres-response-delivered");
     let unrelated_pending_event = event("postgres-unrelated-pending");
-
-    record_footer_only(Some(&pool), &unrelated_pending_event)
-        .await
-        .expect("seed unrelated card-pending row");
-    assert!(
-        task_response_fallback_must_wait(
+    let unrelated_card = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &unrelated_pending_event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm unrelated response card");
+    let unrelated_turn = response_turn_key(4054, "2026-07-11T01:36:00Z", Some(4054));
+    let unrelated_claim = claim_task_response_delivery(
+        Some(&pool),
+        unrelated_pending_event.scope.channel_id,
+        &unrelated_pending_event.scope.provider,
+        &unrelated_pending_event.scope.session_key,
+        unrelated_pending_event.event_key(),
+        &unrelated_turn,
+        unrelated_card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim unrelated response");
+    assert!(matches!(
+        unrelated_claim,
+        ResponseDeliveryClaimOutcome::Owned(_)
+    ));
+    assert!(matches!(
+        claim_task_response_delivery(
             Some(&pool),
             unrelated_pending_event.scope.channel_id,
             &unrelated_pending_event.scope.provider,
             &unrelated_pending_event.scope.session_key,
-            Some(unrelated_pending_event.event_key()),
-            None,
+            unrelated_pending_event.event_key(),
+            &unrelated_turn,
+            unrelated_card.message_id,
+            ResponseDeliveryOwner::Sink,
         )
         .await
-        .expect("card-pending response fence")
-    );
+        .expect("load unrelated pending response"),
+        ResponseDeliveryClaimOutcome::Wait
+    ));
 
     let confirmed = ensure_card(
         Some(&pool),
@@ -566,7 +667,7 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
     .await
     .expect("confirm response card");
     let turn_key = response_turn_key(4055, "2026-07-11T01:37:00Z", Some(4055));
-    bind_task_response_turn(
+    let sink_claim = claim_task_response_delivery(
         Some(&pool),
         delivered_event.scope.channel_id,
         &delivered_event.scope.provider,
@@ -574,81 +675,256 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
         delivered_event.event_key(),
         &turn_key,
         confirmed.message_id,
+        ResponseDeliveryOwner::Sink,
     )
     .await
-    .expect("bind exact response turn");
-    assert!(
-        task_response_fallback_must_wait(
-            Some(&pool),
-            delivered_event.scope.channel_id,
-            &delivered_event.scope.provider,
-            &delivered_event.scope.session_key,
-            None,
-            Some(&turn_key),
-        )
-        .await
-        .expect("confirmed card still waits for response")
-    );
+    .expect("claim exact response turn");
+    let ResponseDeliveryClaimOutcome::Owned(sink_claim) = sink_claim else {
+        panic!("first exact claimant must own the response")
+    };
+    let (pending, persisted_card) = claim_existing_task_response_delivery(
+        Some(&pool),
+        delivered_event.scope.channel_id,
+        &delivered_event.scope.provider,
+        &delivered_event.scope.session_key,
+        &turn_key,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("resume confirmed response without provider context")
+    .expect("durable response row");
+    assert_eq!(persisted_card, confirmed.message_id);
+    assert!(matches!(pending, ResponseDeliveryClaimOutcome::Wait));
 
     sqlx::query(
-        "UPDATE task_notification_card_state
-         SET lease_owner = 'crashed-worker', lease_expires_at = NOW() - INTERVAL '1 second'
-         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+        "UPDATE task_notification_response_delivery
+         SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+           AND event_key = $4 AND response_turn_key = $5",
     )
     .bind(i64::try_from(delivered_event.scope.channel_id).expect("test channel id"))
     .bind(&delivered_event.scope.provider)
     .bind(&delivered_event.scope.session_key)
     .bind(delivered_event.event_key())
+    .bind(&turn_key)
     .execute(&pool)
     .await
-    .expect("seed stale process owner");
-    mark_task_response_delivered(
+    .expect("expire the sink response claim");
+    let (watcher_claim, resumed_card) = claim_existing_task_response_delivery(
         Some(&pool),
         delivered_event.scope.channel_id,
         &delivered_event.scope.provider,
         &delivered_event.scope.session_key,
-        delivered_event.event_key(),
-        confirmed.message_id,
+        &turn_key,
+        ResponseDeliveryOwner::Watcher,
     )
     .await
-    .expect("commit exact response delivery despite stale owner");
+    .expect("take over response without provider context")
+    .expect("durable response row");
+    assert_eq!(resumed_card, confirmed.message_id);
+    let ResponseDeliveryClaimOutcome::Owned(watcher_claim) = watcher_claim else {
+        panic!("watcher must own the expired response claim")
+    };
+    assert!(
+        mark_task_response_delivered(Some(&pool), &sink_claim)
+            .await
+            .is_err(),
+        "the stale sink token must not commit the watcher-owned response"
+    );
+    mark_task_response_delivered(Some(&pool), &watcher_claim)
+        .await
+        .expect("commit exact watcher response delivery");
 
-    assert!(
-        !task_response_fallback_must_wait(
+    assert!(matches!(
+        claim_task_response_delivery(
             Some(&pool),
             delivered_event.scope.channel_id,
             &delivered_event.scope.provider,
             &delivered_event.scope.session_key,
-            Some(delivered_event.event_key()),
-            None,
+            delivered_event.event_key(),
+            &turn_key,
+            confirmed.message_id,
+            ResponseDeliveryOwner::Watcher,
         )
         .await
-        .expect("delivered event fence")
-    );
-    assert!(
-        !task_response_fallback_must_wait(
-            Some(&pool),
-            delivered_event.scope.channel_id,
-            &delivered_event.scope.provider,
-            &delivered_event.scope.session_key,
-            None,
-            Some(&turn_key),
-        )
-        .await
-        .expect("delivered turn fence")
-    );
-    assert!(
-        task_response_fallback_must_wait(
+        .expect("delivered event fence"),
+        ResponseDeliveryClaimOutcome::Delivered { .. }
+    ));
+    assert!(matches!(
+        claim_task_response_delivery(
             Some(&pool),
             unrelated_pending_event.scope.channel_id,
             &unrelated_pending_event.scope.provider,
             &unrelated_pending_event.scope.session_key,
-            Some(unrelated_pending_event.event_key()),
-            None,
+            unrelated_pending_event.event_key(),
+            &unrelated_turn,
+            unrelated_card.message_id,
+            ResponseDeliveryOwner::Sink,
         )
         .await
         .expect("unrelated pending event remains fenced"),
-        "a delivered event must not release an unrelated task response",
+        ResponseDeliveryClaimOutcome::Wait
+    ));
+}
+
+#[tokio::test]
+async fn unclaimed_response_turn_does_not_block_watcher_owned_delivery_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_unclaimed_4055",
+        "unclaimed task response watcher handoff",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let turn_key = response_turn_key(4055, "2026-07-11T02:37:00Z", Some(8055));
+
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        44_055,
+        "claude",
+        "AgentDesk-claude-4055-unclaimed",
+        "task:missing",
+        &turn_key,
+        90_055,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim unbound response turn");
+    assert!(
+        matches!(claim, ResponseDeliveryClaimOutcome::Owned(_)),
+        "a missing row must hand delivery authority to the watcher"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_response_claims_elect_one_physical_delivery_owner_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_concurrent_4055",
+        "concurrent task response ownership",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let transport = FakeTransport::new();
+    let event = event("concurrent-response-claim");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm concurrent response card");
+    let turn = response_turn_key(4055, "2026-07-11T02:39:00Z", Some(30));
+    let claim = |owner| {
+        claim_task_response_delivery(
+            Some(&pool),
+            event.scope.channel_id,
+            &event.scope.provider,
+            &event.scope.session_key,
+            event.event_key(),
+            &turn,
+            card.message_id,
+            owner,
+        )
+    };
+    let (sink, watcher) = tokio::join!(
+        claim(ResponseDeliveryOwner::Sink),
+        claim(ResponseDeliveryOwner::Watcher)
+    );
+    let outcomes = [sink.expect("sink claim"), watcher.expect("watcher claim")];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ResponseDeliveryClaimOutcome::Owned(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ResponseDeliveryClaimOutcome::Wait))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn delivered_semantic_event_accepts_a_second_response_turn_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_cycle_4055",
+        "sequential task response turns",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let event = event("sequential-response-cycle");
+    let card = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm card");
+    let first = response_turn_key(4055, "2026-07-11T02:37:00Z", Some(10));
+    let second = response_turn_key(4056, "2026-07-11T02:38:00Z", Some(20));
+
+    let first_claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &first,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("claim first response turn");
+    let ResponseDeliveryClaimOutcome::Owned(first_claim) = first_claim else {
+        panic!("first response turn must be owned")
+    };
+    mark_task_response_delivered(Some(&pool), &first_claim)
+        .await
+        .expect("deliver first response turn");
+
+    let second_claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &second,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("a delivered event must open a fresh exact response cycle");
+    assert!(matches!(
+        second_claim,
+        ResponseDeliveryClaimOutcome::Owned(_)
+    ));
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE event_key = $1",
+    )
+    .bind(event.event_key())
+    .fetch_one(&pool)
+    .await
+    .expect("response cycle row count");
+    assert_eq!(
+        rows, 2,
+        "one semantic card must retain one row per response turn"
     );
 }
 

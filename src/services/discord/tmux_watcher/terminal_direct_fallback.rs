@@ -11,46 +11,122 @@ use std::sync::Arc;
 use super::*;
 
 use crate::services::agent_protocol::TaskNotificationKind;
+use crate::services::discord::formatting;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
+use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
 
-async fn task_response_fallback_must_wait_for_sink(
-    has_direct_terminal_response: bool,
-    task_notification_kind: Option<TaskNotificationKind>,
-    task_notification_event_key: Option<&str>,
-    response_turn_key: Option<&str>,
-    pg_pool: Option<&sqlx::PgPool>,
+struct PreparedWatcherTaskResponse {
+    claim: task_delivery::ResponseDeliveryClaimOutcome,
+    card_message_id: MessageId,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) async fn commit_watcher_task_response_fence(
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    tmux_session_name: &str,
     channel_id: ChannelId,
-) -> bool {
-    if !has_direct_terminal_response || task_notification_kind.is_none() {
-        return false;
+    tmux_session_name: &str,
+    frontier_committed: bool,
+    claim: Option<&task_delivery::ResponseDeliveryClaim>,
+) {
+    if frontier_committed
+        && let Some(claim) = claim
+        && let Err(error) =
+            task_delivery::mark_task_response_delivered(shared.pg_pool.as_ref(), claim).await
+    {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            error = %error,
+            "watcher advanced the task response frontier but could not commit its exact delivery claim"
+        );
     }
-    match crate::services::discord::task_notification_delivery::task_response_fallback_must_wait(
-        pg_pool,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_watcher_task_response(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    kind: TaskNotificationKind,
+    context: Option<&task_delivery::TaskNotificationContext>,
+    response_turn_key: &str,
+) -> Result<PreparedWatcherTaskResponse, String> {
+    if let Some((claim, card_message_id)) = task_delivery::claim_existing_task_response_delivery(
+        shared.pg_pool.as_ref(),
         channel_id.get(),
         provider.as_str(),
         tmux_session_name,
-        task_notification_event_key,
         response_turn_key,
+        task_delivery::ResponseDeliveryOwner::Watcher,
     )
     .await
+    .map_err(|error| format!("resume watcher task response: {error}"))?
     {
-        Ok(must_wait) => must_wait,
-        Err(error) => {
-            tracing::warn!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session = tmux_session_name,
-                error = %error,
-                "task response PostgreSQL fallback fence is unavailable; failing closed"
-            );
-            true
+        if let Some(context) = context {
+            let event = context.to_event(channel_id.get(), provider.as_str(), tmux_session_name);
+            shared
+                .ui
+                .placeholder_live_events
+                .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
         }
+        return Ok(PreparedWatcherTaskResponse {
+            claim,
+            card_message_id: MessageId::new(card_message_id),
+        });
     }
+    let event = context.map_or_else(
+        || {
+            task_delivery::TaskCardEvent::from_recovered_terminal(
+                channel_id.get(),
+                provider.as_str(),
+                tmux_session_name,
+                kind,
+                response_turn_key,
+            )
+        },
+        |context| context.to_event(channel_id.get(), provider.as_str(), tmux_session_name),
+    );
+    let clients = task_delivery::CardDeliveryClients::new([task_delivery::CardBot::new(
+        task_delivery::provider_bot_key(provider.as_str()),
+        http.clone(),
+    )]);
+    let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
+    let card = task_delivery::ensure_card(
+        shared.pg_pool.as_ref(),
+        &clients,
+        &transport,
+        &event,
+        task_delivery::EnsureIntent::Promotion,
+    )
+    .await
+    .map_err(|error| format!("confirm watcher task card: {error}"))?;
+    shared
+        .ui
+        .placeholder_live_events
+        .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
+    let claim = task_delivery::claim_task_response_delivery(
+        shared.pg_pool.as_ref(),
+        channel_id.get(),
+        provider.as_str(),
+        tmux_session_name,
+        event.event_key(),
+        response_turn_key,
+        card.message_id,
+        task_delivery::ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .map_err(|error| format!("claim watcher task response: {error}"))?;
+    Ok(PreparedWatcherTaskResponse {
+        claim,
+        card_message_id: MessageId::new(card.message_id),
+    })
 }
 
 pub(in crate::services::discord) struct WatcherDirectFallbackLocals<'a> {
@@ -69,6 +145,8 @@ pub(in crate::services::discord) struct WatcherDirectFallbackLocals<'a> {
     pub(in crate::services::discord) watcher_direct_terminal_idle_committed: &'a mut bool,
     pub(in crate::services::discord) last_relayed_offset: &'a mut Option<u64>,
     pub(in crate::services::discord) last_observed_generation_mtime_ns: &'a mut Option<i64>,
+    pub(in crate::services::discord) task_response_claim:
+        &'a mut Option<task_delivery::ResponseDeliveryClaim>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -85,7 +163,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     turn_data_start_offset: u64,
     response_sent_offset: usize,
     task_notification_kind: Option<TaskNotificationKind>,
-    task_notification_event_key: Option<&str>,
+    task_notification_context: Option<&task_delivery::TaskNotificationContext>,
     terminal_kind: Option<WatcherTerminalKind>,
     has_direct_terminal_response: bool,
     session_bound_fallback_uses_full_body: bool,
@@ -119,35 +197,27 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         watcher_direct_terminal_idle_committed,
         last_relayed_offset,
         last_observed_generation_mtime_ns,
+        task_response_claim,
     } = locals;
-    let response_turn_key = inflight_identity_before_relay.as_ref().map(|identity| {
-        crate::services::discord::task_notification_delivery::response_turn_key(
-            identity.user_msg_id,
-            &identity.started_at,
-            identity.turn_start_offset,
-        )
-    });
-    if task_response_fallback_must_wait_for_sink(
-        has_direct_terminal_response,
-        task_notification_kind,
-        task_notification_event_key,
-        response_turn_key.as_deref(),
-        shared.pg_pool.as_ref(),
-        watcher_provider,
+    let (user_msg_id, started_at, turn_start_offset) = inflight_identity_before_relay
+        .as_ref()
+        .map_or((0, "", None), |identity| {
+            (
+                identity.user_msg_id,
+                identity.started_at.as_str(),
+                identity.turn_start_offset,
+            )
+        });
+    let response_turn_key = task_delivery::durable_response_turn_key(
+        channel_id.get(),
+        watcher_provider.as_str(),
         tmux_session_name,
-        channel_id,
-    )
-    .await
-    {
-        *retry_terminal_delivery_from_offset = true;
-        tracing::warn!(
-            provider = watcher_provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session = tmux_session_name,
-            "#4055: suppressed watcher direct fallback until the sink confirms the referenced task response"
-        );
-        return false;
-    }
+        user_msg_id,
+        started_at,
+        turn_start_offset,
+        watcher_lease_end,
+        direct_terminal_response,
+    );
     let formatted = if shared.ui.status_panel_v2_enabled {
         crate::services::discord::formatting::format_for_discord_with_status_panel(
             direct_terminal_response,
@@ -176,8 +246,152 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     let mut relay_ok = true;
     let mut direct_send_delivered = false;
     let mut external_input_lease_consumed_by_relay = false;
-    match *placeholder_msg_id {
-        Some(msg_id) => {
+    let task_response_path = has_direct_terminal_response && task_notification_kind.is_some();
+    match (task_response_path, *placeholder_msg_id) {
+        (true, _) => {
+            let kind = task_notification_kind.expect("task response path requires a kind");
+            match prepare_watcher_task_response(
+                http,
+                shared,
+                watcher_provider,
+                channel_id,
+                tmux_session_name,
+                kind,
+                task_notification_context,
+                &response_turn_key,
+            )
+            .await
+            {
+                Err(error) => {
+                    tracing::warn!(
+                        provider = watcher_provider.as_str(),
+                        channel_id = channel_id.get(),
+                        tmux_session = tmux_session_name,
+                        error = %error,
+                        "watcher task response preparation failed; preserving the delivery frontier"
+                    );
+                    relay_ok = false;
+                    *retry_terminal_delivery_from_offset = true;
+                }
+                Ok(prepared) => {
+                    use task_delivery::ResponseDeliveryClaimOutcome;
+                    match prepared.claim {
+                        ResponseDeliveryClaimOutcome::Wait => {
+                            tracing::info!(
+                                provider = watcher_provider.as_str(),
+                                channel_id = channel_id.get(),
+                                tmux_session = tmux_session_name,
+                                "watcher task response waits for the live sink claim"
+                            );
+                            relay_ok = false;
+                            *retry_terminal_delivery_from_offset = true;
+                        }
+                        ResponseDeliveryClaimOutcome::Delivered { .. } => {
+                            direct_send_delivered = true;
+                            *tui_direct_anchor_terminal_body_visible = true;
+                            *tui_direct_anchor_or_lease_present_for_lifecycle = true;
+                            external_input_lease_consumed_by_relay =
+                                external_input_lease_before_relay;
+                        }
+                        ResponseDeliveryClaimOutcome::Owned(claim) => {
+                            let renewed = task_delivery::renew_task_response_delivery(
+                                shared.pg_pool.as_ref(),
+                                &claim,
+                            )
+                            .await;
+                            if let Err(error) = renewed {
+                                tracing::warn!(
+                                    provider = watcher_provider.as_str(),
+                                    channel_id = channel_id.get(),
+                                    tmux_session = tmux_session_name,
+                                    error = %error,
+                                    "watcher lost its task response claim before send"
+                                );
+                                relay_ok = false;
+                                *retry_terminal_delivery_from_offset = true;
+                            } else {
+                                let heartbeat = task_delivery::task_response_delivery_heartbeat(
+                                    shared.pg_pool.as_ref(),
+                                    Some(&claim),
+                                );
+                                let send_result = formatting::send_long_message_raw_with_required_reference_rollback(
+                                    http,
+                                    channel_id,
+                                    prepared.card_message_id,
+                                    &relay_text,
+                                    shared,
+                                    (channel_id, prepared.card_message_id),
+                                )
+                                .await;
+                                heartbeat.stop();
+                                match send_result {
+                                    Ok(_) => {
+                                        *task_response_claim = Some(claim);
+                                        direct_send_delivered = true;
+                                        *tui_direct_anchor_terminal_body_visible = true;
+                                        *tui_direct_anchor_or_lease_present_for_lifecycle = true;
+                                        external_input_lease_consumed_by_relay =
+                                            external_input_lease_before_relay;
+                                    }
+                                    Err(error) => {
+                                        info_watcher_failed_relay(error.as_ref());
+                                        let plan = watcher_send_failure_plan_warned(
+                                            classify_watcher_send_failure(error.as_ref()),
+                                            WatcherNoRewindWarnSite::PlaceholderlessFull,
+                                            watcher_provider,
+                                            channel_id,
+                                            tmux_session_name,
+                                            error.as_ref(),
+                                        );
+                                        relay_ok = plan.relay_ok;
+                                        *retry_terminal_delivery_from_offset = plan.retry_offset;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if direct_send_delivered {
+                        if let Some(stale_placeholder) = *placeholder_msg_id {
+                            if stale_placeholder == prepared.card_message_id {
+                                *placeholder_msg_id = None;
+                                *placeholder_from_restored_inflight = false;
+                                last_edit_text.clear();
+                            } else {
+                                let cleanup = delete_terminal_placeholder(
+                                    http,
+                                    channel_id,
+                                    shared,
+                                    watcher_provider,
+                                    tmux_session_name,
+                                    stale_placeholder,
+                                    "watcher_task_response_placeholder_cleanup",
+                                )
+                                .await;
+                                if cleanup.is_committed() {
+                                    *placeholder_msg_id = None;
+                                    *placeholder_from_restored_inflight = false;
+                                    last_edit_text.clear();
+                                    drop_placeholder_orphan_record(
+                                        watcher_provider,
+                                        shared,
+                                        channel_id,
+                                        stale_placeholder,
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        provider = watcher_provider.as_str(),
+                                        channel_id = channel_id.get(),
+                                        message_id = stale_placeholder.get(),
+                                        "task response delivered; stale placeholder cleanup will retry independently"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (false, Some(msg_id)) => {
             if has_direct_terminal_response {
                 if watcher_should_send_ordered_new_chunks_for_terminal_fallback(
                     session_bound_fallback_uses_full_body,
@@ -527,7 +741,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                 }
             }
         }
-        None => {
+        (false, None) => {
             if has_direct_terminal_response {
                 let prompt_anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                     watcher_provider.as_str(),

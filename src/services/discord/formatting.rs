@@ -52,6 +52,7 @@ mod long_send_rollback;
 
 use self::long_send_rollback::delete_rollback_channel_message;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
+pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_required_reference_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
 
 #[cfg(test)]
@@ -139,7 +140,7 @@ enum ReplaceContinuationRollbackClaim {
 }
 
 fn remove_replace_continuation_rollback_file(
-    key: (u64, u64),
+    _key: (u64, u64),
     path: &PathBuf,
 ) -> std::io::Result<()> {
     #[cfg(test)]
@@ -147,7 +148,7 @@ fn remove_replace_continuation_rollback_file(
         if REPLACE_CONTINUATION_ROLLBACK_FORCED_REMOVE_FAILURES
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remove(&key)
+            .remove(&_key)
         {
             return Err(std::io::Error::other("forced rollback remove failure"));
         }
@@ -2985,6 +2986,54 @@ mod replace_long_message_tests {
                 None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
             }
         }
+    }
+
+    #[test]
+    fn required_reference_failure_never_retries_as_plain_message() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = RuntimeRootEnvGuard::new(tempdir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let channel = ChannelId::new(4_055_771);
+            let card = MessageId::new(4_055_772);
+            let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = attempts.clone();
+            let _hook = super::rollback_transport_test_hook::install(
+                Box::new(move |seen_channel, _content, reference| {
+                    if seen_channel != channel {
+                        return None;
+                    }
+                    seen.lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(reference);
+                    Some(Err("referenced send rejected".to_string()))
+                }),
+                Box::new(|_, _| Some(Ok(()))),
+            );
+            let http = poise::serenity_prelude::Http::new("test-token");
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            super::send_long_message_raw_with_required_reference_rollback(
+                &http,
+                channel,
+                card,
+                "task answer",
+                &shared,
+                (channel, card),
+            )
+            .await
+            .expect_err("a rejected required reference must fail delivery");
+            assert_eq!(
+                *attempts.lock().unwrap_or_else(|error| error.into_inner()),
+                vec![Some((channel, card))],
+                "the sender must not make a second unreferenced POST"
+            );
+        });
     }
 
     // #3805 P1: a multi-chunk answer must re-anchor the completion footer onto the

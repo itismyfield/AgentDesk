@@ -22,6 +22,9 @@ pub(super) use gateway::{
 };
 
 use self::store::{CardClaim, ClaimedCard, StoreIntent};
+pub(super) use self::store::{
+    ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
+};
 
 /// Provider-normalized context retained beside terminal response text.
 ///
@@ -91,7 +94,6 @@ impl TaskNotificationContext {
         let event_key = semantic_event_key(
             task_id.as_deref(),
             tool_use_id.as_deref(),
-            None,
             &payload_fingerprint,
         );
 
@@ -236,7 +238,6 @@ impl TaskCardEvent {
         let event_key = semantic_event_key(
             task_id.as_deref(),
             tool_use_id.as_deref(),
-            None,
             &normalized_payload,
         );
         Self {
@@ -264,7 +265,6 @@ impl TaskCardEvent {
             super::response_sanitizer::subagent_notification_card::SubagentNotificationSemantic {
                 task_id: None,
                 tool_use_id: None,
-                agent_path_fingerprint: None,
                 payload_fingerprint: fingerprint(&[
                     "malformed-subagent",
                     &super::tui_task_card::strip_terminal_controls(raw_prompt),
@@ -274,7 +274,6 @@ impl TaskCardEvent {
         let event_key = semantic_event_key(
             semantic.task_id.as_deref(),
             semantic.tool_use_id.as_deref(),
-            semantic.agent_path_fingerprint.as_deref(),
             &semantic.payload_fingerprint,
         );
         Self {
@@ -291,6 +290,35 @@ impl TaskCardEvent {
         }
     }
 
+    /// A restored watcher can observe terminal task output without the original
+    /// provider envelope. Give that turn a deterministic, sanitized card rather
+    /// than waiting forever for context that can no longer arrive.
+    pub(super) fn from_recovered_terminal(
+        channel_id: u64,
+        provider: &str,
+        session_key: &str,
+        kind: TaskNotificationKind,
+        response_turn_key: &str,
+    ) -> Self {
+        let note = super::tui_task_card::TaskNotification {
+            status: Some("completed".to_string()),
+            summary: Some("Recovered task completion".to_string()),
+            ..Default::default()
+        };
+        Self {
+            scope: TaskCardScope::new(
+                channel_id,
+                provider,
+                session_key,
+                format!("turn:{response_turn_key}"),
+            ),
+            task_id: None,
+            tool_use_id: None,
+            kind: kind.as_str().to_string(),
+            payload: TaskCardPayload::Task(note),
+        }
+    }
+
     pub(super) fn supports_footer_deferral(&self) -> bool {
         self.task_id.is_some() || self.tool_use_id.is_some()
     }
@@ -303,7 +331,6 @@ impl TaskCardEvent {
         &self.kind
     }
 
-    #[cfg(test)]
     pub(super) fn event_key(&self) -> &str {
         &self.scope.event_key
     }
@@ -324,7 +351,42 @@ pub(in crate::services::discord) fn response_turn_key(
     ])
 }
 
-pub(in crate::services::discord) async fn bind_task_response_turn(
+pub(in crate::services::discord) fn fallback_response_turn_key(
+    channel_id: u64,
+    provider: &str,
+    session_key: &str,
+    end_offset: u64,
+    response: &str,
+) -> String {
+    full_fingerprint(&[
+        "task-response-recovered-v1",
+        &channel_id.to_string(),
+        &provider.trim().to_ascii_lowercase(),
+        session_key,
+        &end_offset.to_string(),
+        &full_fingerprint(&[response]),
+    ])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) fn durable_response_turn_key(
+    channel_id: u64,
+    provider: &str,
+    session_key: &str,
+    user_msg_id: u64,
+    started_at: &str,
+    turn_start_offset: Option<u64>,
+    end_offset: u64,
+    response: &str,
+) -> String {
+    if user_msg_id != 0 || (!started_at.trim().is_empty() && turn_start_offset.is_some()) {
+        response_turn_key(user_msg_id, started_at, turn_start_offset)
+    } else {
+        fallback_response_turn_key(channel_id, provider, session_key, end_offset, response)
+    }
+}
+
+pub(in crate::services::discord) async fn claim_task_response_delivery(
     pool: Option<&PgPool>,
     channel_id: u64,
     provider: &str,
@@ -332,40 +394,79 @@ pub(in crate::services::discord) async fn bind_task_response_turn(
     event_key: &str,
     response_turn_key: &str,
     card_message_id: u64,
-) -> Result<(), String> {
+    owner: ResponseDeliveryOwner,
+) -> Result<ResponseDeliveryClaimOutcome, String> {
     let scope = TaskCardScope::new(channel_id, provider, session_key, event_key);
-    store::bind_response_turn(pool, &scope, response_turn_key, card_message_id).await
+    store::claim_response_delivery(pool, &scope, response_turn_key, card_message_id, owner).await
 }
 
-pub(in crate::services::discord) async fn task_response_fallback_must_wait(
+pub(in crate::services::discord) async fn claim_existing_task_response_delivery(
     pool: Option<&PgPool>,
     channel_id: u64,
     provider: &str,
     session_key: &str,
-    event_key: Option<&str>,
-    response_turn_key: Option<&str>,
-) -> Result<bool, String> {
-    store::response_fallback_must_wait(
-        pool,
-        channel_id,
-        provider,
-        session_key,
-        event_key,
-        response_turn_key,
-    )
-    .await
+    response_turn_key: &str,
+    owner: ResponseDeliveryOwner,
+) -> Result<Option<(ResponseDeliveryClaimOutcome, u64)>, String> {
+    let lookup_scope = TaskCardScope::new(channel_id, provider, session_key, "lookup-only");
+    store::claim_existing_response_delivery(pool, &lookup_scope, response_turn_key, owner).await
 }
 
 pub(in crate::services::discord) async fn mark_task_response_delivered(
     pool: Option<&PgPool>,
-    channel_id: u64,
-    provider: &str,
-    session_key: &str,
-    event_key: &str,
-    card_message_id: u64,
+    claim: &ResponseDeliveryClaim,
 ) -> Result<(), String> {
-    let scope = TaskCardScope::new(channel_id, provider, session_key, event_key);
-    store::mark_response_delivered(pool, &scope, card_message_id).await
+    store::mark_response_delivered(pool, claim).await
+}
+
+pub(in crate::services::discord) async fn renew_task_response_delivery(
+    pool: Option<&PgPool>,
+    claim: &ResponseDeliveryClaim,
+) -> Result<(), String> {
+    store::renew_response_delivery(pool, claim).await
+}
+
+pub(in crate::services::discord) struct TaskResponseDeliveryHeartbeat {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TaskResponseDeliveryHeartbeat {
+    pub(in crate::services::discord) fn stop(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for TaskResponseDeliveryHeartbeat {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+pub(in crate::services::discord) fn task_response_delivery_heartbeat(
+    pool: Option<&PgPool>,
+    claim: Option<&ResponseDeliveryClaim>,
+) -> TaskResponseDeliveryHeartbeat {
+    let task = pool.cloned().zip(claim.cloned()).map(|(pool, claim)| {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = store::renew_response_delivery(Some(&pool), &claim).await {
+                    tracing::warn!(
+                        error = %error,
+                        "task response delivery heartbeat lost exact claim ownership"
+                    );
+                    break;
+                }
+            }
+        })
+    });
+    TaskResponseDeliveryHeartbeat { task }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -594,7 +695,6 @@ fn map_transport_error(error: TaskCardTransportError) -> CardEnsureError {
 fn semantic_event_key(
     task_id: Option<&str>,
     tool_use_id: Option<&str>,
-    agent_path_fingerprint: Option<&str>,
     payload_fingerprint: &str,
 ) -> String {
     if let Some(task_id) = task_id.filter(|value| !value.trim().is_empty()) {
@@ -602,9 +702,6 @@ fn semantic_event_key(
     }
     if let Some(tool_use_id) = tool_use_id.filter(|value| !value.trim().is_empty()) {
         return format!("tool:{}", fingerprint(&[tool_use_id]));
-    }
-    if let Some(agent_path) = agent_path_fingerprint.filter(|value| !value.trim().is_empty()) {
-        return format!("agent:{agent_path}");
     }
     format!("payload:{payload_fingerprint}")
 }

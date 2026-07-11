@@ -10,8 +10,12 @@ use sqlx::{PgPool, Row};
 
 use super::{TaskCardScope, stable_nonce};
 
+pub(in crate::services::discord) use response_fence::{
+    ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
+};
 pub(super) use response_fence::{
-    bind_response_turn, mark_response_delivered, response_fallback_must_wait,
+    claim_existing_response_delivery, claim_response_delivery, mark_response_delivered,
+    renew_response_delivery,
 };
 
 const LEASE_SECONDS: i64 = 30;
@@ -520,6 +524,23 @@ async fn prepare_replacement_pg(
 
 async fn cleanup_old_rows_pg(pool: &PgPool) {
     if let Err(error) = sqlx::query(
+        "DELETE FROM task_notification_response_delivery
+         WHERE id IN (
+             SELECT id FROM task_notification_response_delivery
+             WHERE updated_at < NOW() - make_interval(days => $1)
+               AND (delivery_state = 'delivered' OR lease_expires_at <= NOW())
+             ORDER BY updated_at ASC
+             LIMIT $2
+         )",
+    )
+    .bind(RETENTION_DAYS)
+    .bind(RETENTION_DELETE_LIMIT)
+    .execute(pool)
+    .await
+    {
+        tracing::debug!(error = %error, "task response bounded retention cleanup failed");
+    }
+    if let Err(error) = sqlx::query(
         "DELETE FROM task_notification_card_state
          WHERE id IN (
              SELECT id FROM task_notification_card_state
@@ -572,8 +593,6 @@ struct MemoryRow {
     content_hash: String,
     lease_owner: Option<String>,
     lease_expires_at: Option<Instant>,
-    response_turn_key: Option<String>,
-    response_card_message_id: Option<u64>,
     last_error: Option<String>,
 }
 
@@ -608,8 +627,6 @@ fn record_footer_only_memory(
                     content_hash: content_hash.to_string(),
                     lease_owner: None,
                     lease_expires_at: None,
-                    response_turn_key: None,
-                    response_card_message_id: None,
                     last_error: None,
                 },
             );
@@ -642,8 +659,6 @@ fn claim_card_memory(
         content_hash: seed_hash.to_string(),
         lease_owner: Some(lease_owner.clone()),
         lease_expires_at: Some(lease_expires_at),
-        response_turn_key: None,
-        response_card_message_id: None,
         last_error: None,
     });
     if row.lease_owner.as_deref() == Some(lease_owner.as_str()) {

@@ -48,6 +48,10 @@ use self::idle_jsonl::{
 use self::task_notification_context::{
     answer_reference, commit_response_fence, ensure_card_and_route, merge_task_notification_kind,
 };
+use super::task_notification_delivery::{
+    ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, renew_task_response_delivery,
+    task_response_delivery_heartbeat,
+};
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
 const IDLE_JSONL_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -854,8 +858,25 @@ impl SessionBoundDiscordRelaySink {
             delivery.task_notification_kind.as_ref(),
         );
         let channel = ChannelId::new(channel_id);
-        let (route, task_card_message_id) =
+        let (route, task_card_message_id, task_response_claim_outcome) =
             ensure_card_and_route(&self.health_registry, &shared, &delivery, route).await?;
+        let (task_response_claim, task_response_already_delivered): (
+            Option<ResponseDeliveryClaim>,
+            bool,
+        ) = match task_response_claim_outcome {
+            Some(ResponseDeliveryClaimOutcome::Owned(claim)) => (Some(claim), false),
+            Some(ResponseDeliveryClaimOutcome::Wait) => {
+                tracing::warn!(
+                    provider = provider.as_str(),
+                    channel_id,
+                    tmux_session = %delivery.session_name,
+                    "task response is owned by another live delivery claimant"
+                );
+                return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+            }
+            Some(ResponseDeliveryClaimOutcome::Delivered { .. }) => (None, true),
+            None => (None, false),
+        };
 
         // #3089 A2b/#3998 S1-f2: structurally eligible short-replace
         // (PlaceholderEdit + single-message body) routes to the controller
@@ -894,6 +915,18 @@ impl SessionBoundDiscordRelaySink {
                 let cell = shared.delivery_lease(channel);
                 SinkDeliveryLeaseGuard::acquire(&cell, sink_lease_key, start, end)
             });
+
+        if task_response_already_delivered {
+            self.advance_after_confirmed_post(
+                &shared,
+                &provider,
+                channel_id,
+                &delivery.session_name,
+                &delivery,
+                sink_lease_guard.as_ref(),
+            );
+            return Ok(SessionRelayDeliveryOutcome::Delivered);
+        }
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             if let Some((start, end)) = cutover_range.filter(|_| cutover_short_replace) {
@@ -1102,15 +1135,43 @@ impl SessionBoundDiscordRelaySink {
             );
             let prompt_anchor_reference =
                 answer_reference(channel, task_card_message_id, prompt_anchor);
-            formatting::send_long_message_raw_with_reference(
-                &http,
-                channel,
-                &relay_text,
-                &shared,
-                prompt_anchor_reference,
-            )
-            .await
-            .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            if let Some(task_card_message_id) = task_card_message_id {
+                if let Some(claim) = task_response_claim.as_ref() {
+                    renew_task_response_delivery(shared.pg_pool.as_ref(), claim)
+                        .await
+                        .map_err(|error| {
+                            RelaySinkError::Transient(format!(
+                                "task response claim was lost before send: {error}"
+                            ))
+                        })?;
+                }
+                let heartbeat = task_response_delivery_heartbeat(
+                    shared.pg_pool.as_ref(),
+                    task_response_claim.as_ref(),
+                );
+                let send_result =
+                    formatting::send_long_message_raw_with_required_reference_rollback(
+                        &http,
+                        channel,
+                        task_card_message_id,
+                        &relay_text,
+                        &shared,
+                        (channel, task_card_message_id),
+                    )
+                    .await;
+                heartbeat.stop();
+                send_result.map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            } else {
+                formatting::send_long_message_raw_with_reference(
+                    &http,
+                    channel,
+                    &relay_text,
+                    &shared,
+                    prompt_anchor_reference,
+                )
+                .await
+                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            }
             if let Some(prompt_anchor) = prompt_anchor {
                 relay_format::clear_ssh_direct_prompt_anchor(
                     &provider,
@@ -1157,7 +1218,7 @@ impl SessionBoundDiscordRelaySink {
                 &delivery,
                 sink_lease_guard.as_ref(),
             );
-            commit_response_fence(&shared, &delivery, task_card_message_id).await;
+            commit_response_fence(&shared, &delivery, task_response_claim.as_ref()).await;
             Ok(SessionRelayDeliveryOutcome::Delivered)
         }
     }

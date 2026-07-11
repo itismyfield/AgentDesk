@@ -25,8 +25,6 @@ struct Envelope {
     task_id: Option<String>,
     #[serde(default, alias = "tool-use-id", alias = "toolUseId")]
     tool_use_id: Option<String>,
-    #[serde(default, alias = "agent-path", alias = "agentPath")]
-    agent_path: Option<String>,
     status: Option<Status>,
 }
 
@@ -45,9 +43,6 @@ enum Render {
 pub(in crate::services::discord) struct SubagentNotificationSemantic {
     pub(in crate::services::discord) task_id: Option<String>,
     pub(in crate::services::discord) tool_use_id: Option<String>,
-    /// One-way fingerprint only; the raw local agent path never leaves this
-    /// parser or enters durable state/log/card content.
-    pub(in crate::services::discord) agent_path_fingerprint: Option<String>,
     pub(in crate::services::discord) payload_fingerprint: String,
 }
 
@@ -76,23 +71,15 @@ pub(in crate::services::discord) fn semantic_event(
     };
     let task_id = clean_semantic_id(envelope.task_id);
     let tool_use_id = clean_semantic_id(envelope.tool_use_id);
-    let agent_path_fingerprint = envelope
-        .agent_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|path| fingerprint(&[path]));
     Some(SubagentNotificationSemantic {
         payload_fingerprint: fingerprint(&[
             task_id.as_deref().unwrap_or(""),
             tool_use_id.as_deref().unwrap_or(""),
-            agent_path_fingerprint.as_deref().unwrap_or(""),
             status_name,
             &strip_terminal_controls(report),
         ]),
         task_id,
         tool_use_id,
-        agent_path_fingerprint,
     })
 }
 

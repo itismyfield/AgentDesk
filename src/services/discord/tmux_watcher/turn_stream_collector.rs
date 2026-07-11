@@ -135,7 +135,8 @@ pub(super) struct CollectedTurnStream {
     pub(super) provider_overload_message: Option<String>,
     pub(super) stale_resume_detected: bool,
     pub(super) task_notification_kind: Option<TaskNotificationKind>,
-    pub(super) task_notification_event_key: Option<String>,
+    pub(super) task_notification_context:
+        Option<crate::services::discord::task_notification_delivery::TaskNotificationContext>,
     pub(super) assistant_text_seen: bool,
     pub(super) fresh_assistant_text_seen: bool,
     pub(super) was_paused: bool,
@@ -1148,9 +1149,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         provider_overload_message,
         stale_resume_detected,
         task_notification_kind,
-        task_notification_event_key: task_notification_context
-            .as_ref()
-            .map(|context| context.event_key().to_string()),
+        task_notification_context,
         assistant_text_seen,
         fresh_assistant_text_seen,
         was_paused,
