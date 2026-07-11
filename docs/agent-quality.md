@@ -116,29 +116,30 @@ agent prompt should not interpret a missing rate as a failure.
 
 ## 4. Alert Rules
 
-Alerts fire from `agent_quality_daily` after the hourly rollup. Each rule is a
-predicate over the 7d or 30d window plus the sample-size guard.
+The hourly `agent_quality_rollup` job only materializes
+`agent_quality_daily`. Fifteen seconds later, the
+`quality_regression_alerter` maintenance job calls the sole alert authority,
+`services::agent_quality::regression_alerts`. Keeping those scheduler jobs
+separate prevents the rollup and rule engine from emitting the same regression
+twice.
 
-| ID                      | Window | Predicate                                                     | Severity | Suppress When                         |
-|-------------------------|--------|---------------------------------------------------------------|----------|---------------------------------------|
-| `quality.turn_drop`     | 7d     | `turn_success_rate_7d < 0.85`                                 | warn     | `measurement_unavailable_7d = TRUE`   |
-| `quality.turn_critical` | 7d     | `turn_success_rate_7d < 0.70`                                 | error    | `measurement_unavailable_7d = TRUE`   |
-| `quality.review_drop`   | 7d     | `review_pass_rate_7d < 0.60`                                  | warn     | `measurement_unavailable_7d = TRUE`   |
-| `quality.recovery_high` | 7d     | `recovery_burden_7d > 0.05`                                   | warn     | `turn_start_7d < 5`                   |
-| `quality.regression`    | 7d→30d | `turn_success_rate_7d < turn_success_rate_30d − 0.10`         | warn     | either window unavailable             |
+| Reason code | Metric | Window | Predicate | Suppress when |
+|-------------|--------|--------|-----------|---------------|
+| `agent_quality.regression` | `turn_success_rate` | 7d→30d | `rate_30d - rate_7d >= 0.20` | either sample window `< 5` or marked unavailable |
+| `agent_quality.regression` | `review_pass_rate` | 7d→30d | `rate_30d - rate_7d >= 0.20` | either sample window `< 5` or marked unavailable |
 
-Wiring into the alert dispatch path is owned by **#1103 (911-4)**. This doc is
-the source of truth for *thresholds and predicates* — alert delivery, dedup,
-and quiet hours are described in `docs/alerts/agent-quality-alerts.md` (created
-under 911-4). When tuning a threshold here, edit the row above first, then
-file a follow-up to bump the predicate in the alert config.
+Each `(agent_id, metric)` has one row in
+`quality_regression_cooldowns`; a successful outbox enqueue advances its
+24-hour cooldown. The outbox producer is always
+`quality_regression_alerter`. The legacy `agent_quality_rollup` producer and
+its `kv_meta` alert slot were removed in #4448. The `alert_count` field on
+`AgentQualityRollupReport` remains as a compatibility field and is always 0.
 
-### 4.1 Hysteresis
-
-Each alert clears only after **2 consecutive hourly rollups** show the
-predicate false. This prevents flap on agents that hover at the threshold —
-particularly relevant for `quality.regression`, where a single good turn can
-move 7d above 30d momentarily.
+The coexistence wording in immutable migration
+`0020_quality_regression_cooldowns.sql` describes its historical rollout
+state, not current runtime ownership. Numbered migrations are not rewritten
+after deployment; this section and the module/scheduler contracts above are
+the current authority.
 
 ---
 

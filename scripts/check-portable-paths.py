@@ -13,6 +13,8 @@ SPECIFIC_USER_HOME = re.compile(r"/Users/(?!(?:REPLACE_ME|user|me|example)(?:/|$
 
 DEFAULT_PATTERNS = (
     "scripts/_defaults.sh",
+    "scripts/auto-queue-monitor.sh",
+    "scripts/auto_queue_monitor_state.py",
     "scripts/build-release.sh",
     "scripts/deploy.sh",
     "scripts/deploy-dashboard.sh",

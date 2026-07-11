@@ -21,13 +21,13 @@ pub mod turn_lifecycle;
 pub mod watcher_latency;
 
 // #2049: mod.rs was a 3,946-line monolith. Splitting along responsibility
-// boundaries (helpers / emit / worker / retention / pg I/O / quality alerts
-// / queries) without changing the public API. Global state (`OnceLock`
+// boundaries (helpers / emit / worker / retention / pg I/O / queries) without
+// changing the public API. Regression alerting is intentionally owned only by
+// `services::agent_quality::regression_alerts`. Global state (`OnceLock`
 // runtime) stays in this module to avoid relocating the singleton.
 mod emit;
 mod helpers;
 mod pg_io;
-mod quality_alert;
 mod queries;
 mod relay_signal_alert;
 mod retention;
@@ -72,9 +72,6 @@ pub(super) const MAX_QUALITY_DAILY_LIMIT: usize = 180;
 pub(super) const DEFAULT_QUALITY_RANKING_LIMIT: usize = 50;
 pub(super) const MAX_QUALITY_RANKING_LIMIT: usize = 200;
 pub(super) const QUALITY_SAMPLE_GUARD: i64 = 5;
-pub(super) const QUALITY_ALERT_DEDUPE_MS: i64 = 24 * 60 * 60 * 1000;
-pub(super) const QUALITY_REVIEW_DROP_THRESHOLD: f64 = 0.20;
-pub(super) const QUALITY_TURN_DROP_THRESHOLD: f64 = 0.15;
 
 // #3561 — relay-loss operator monitor. Each signal alerts at most once per
 // hour (`RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS`), so the dedupe window matches the

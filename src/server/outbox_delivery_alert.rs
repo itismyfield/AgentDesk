@@ -32,7 +32,7 @@ pub(super) fn outbox_alert_snippet(content: &str) -> String {
 }
 
 /// Resolve the operator alert target from the shared `kanban_human_alert_channel_id`
-/// convention (same key the relay_signal_alert / quality_alert pipelines use).
+/// convention (same key the relay-signal alert pipeline uses).
 /// `None` ⇒ unconfigured deploy ⇒ no ops card enqueued (guaranteed silent).
 pub(super) async fn outbox_alert_target_pg(pg_pool: &PgPool) -> Option<String> {
     let value = sqlx::query_scalar::<_, String>(

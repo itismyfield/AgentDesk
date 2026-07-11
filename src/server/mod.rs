@@ -2309,9 +2309,6 @@ mod message_outbox_retry_tests {
         assert!(!is_terminal_turn_delivery_outbox_source(
             "quality_regression_alerter"
         ));
-        assert!(!is_terminal_turn_delivery_outbox_source(
-            "agent_quality_rollup"
-        ));
         assert!(!is_terminal_turn_delivery_outbox_source("system"));
     }
 

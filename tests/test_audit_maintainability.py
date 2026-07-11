@@ -786,13 +786,17 @@ class LegacySqliteCheck(unittest.TestCase):
         monitor = (REPO_ROOT / "scripts" / "auto-queue-monitor.sh").read_text(
             encoding="utf-8"
         )
-        discord_health = (
-            REPO_ROOT / "src" / "services" / "discord" / "health.rs"
+        source_registry = (
+            REPO_ROOT
+            / "src"
+            / "services"
+            / "discord"
+            / "outbound"
+            / "source_registry.rs"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('source:"auto-queue"', monitor)
-        self.assertNotIn('source:"auto-queue-monitor"', monitor)
-        self.assertIn('"auto-queue"', discord_health)
+        self.assertIn('source:"auto-queue-monitor"', monitor)
+        self.assertIn('"auto-queue-monitor"', source_registry)
 
 
 class SourceOfTruthAliasCheck(unittest.TestCase):

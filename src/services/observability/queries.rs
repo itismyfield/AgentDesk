@@ -1,6 +1,7 @@
 //! #2049: public `query_*` façade split out of `mod.rs`. Holds the
 //! orchestration logic (filter normalization and fallback chains) — actual SQL
-//! lives in `pg_io`, alert pipeline in `quality_alert`.
+//! lives in `pg_io`. This façade is aggregation-only; regression alerting is
+//! owned by `services::agent_quality::regression_alerts`.
 
 use anyhow::{Result, anyhow};
 use sqlx::PgPool;
@@ -14,7 +15,6 @@ use super::pg_io::{
     ranking_window_sample_size, synth_agent_quality_daily_from_events_pg,
     upsert_agent_quality_daily_pg,
 };
-use super::quality_alert::enqueue_quality_regression_alerts_pg;
 use super::{
     AgentQualityDailyRecord, AgentQualityRankingEntry, AgentQualityRankingResponse,
     AgentQualityRollupReport, AgentQualitySummary, QualityRankingMetric, QualityRankingWindow,
@@ -22,10 +22,12 @@ use super::{
 
 pub async fn run_agent_quality_rollup_pg(pool: &PgPool) -> Result<AgentQualityRollupReport> {
     let upserted_rows = upsert_agent_quality_daily_pg(pool).await?;
-    let alert_count = enqueue_quality_regression_alerts_pg(pool).await?;
     Ok(AgentQualityRollupReport {
         upserted_rows,
-        alert_count,
+        // Kept for API compatibility with callers compiled against the old
+        // rollup report. The rollup no longer owns an alert producer; the
+        // scheduler invokes `quality_regression_alerter` after this job.
+        alert_count: 0,
     })
 }
 
@@ -154,4 +156,67 @@ pub async fn query_agent_quality_ranking_with(
         min_sample_size,
         agents: filtered,
     })
+}
+
+#[cfg(test)]
+mod alert_authority_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rollup_is_aggregation_only_and_rule_engine_is_sole_alerter_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_quality_alert_authority",
+            "agent quality alert authority test",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agent_quality_daily
+                (agent_id, day,
+                 turn_success_rate_7d, turn_success_rate_30d,
+                 turn_sample_size_7d, turn_sample_size_30d,
+                 measurement_unavailable_7d, measurement_unavailable_30d)
+             VALUES ('agent-4448', CURRENT_DATE, 0.50, 0.90, 20, 40, FALSE, FALSE)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed regression-shaped daily quality row");
+
+        let report = run_agent_quality_rollup_pg(&pool)
+            .await
+            .expect("run aggregation-only quality rollup");
+        assert_eq!(report.alert_count, 0);
+        let after_rollup: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .expect("count outbox rows after rollup");
+        assert_eq!(after_rollup, 0, "rollup must not enqueue regression alerts");
+
+        let sent =
+            crate::services::agent_quality::regression_alerts::run_regression_alerter_pg(&pool)
+                .await
+                .expect("run canonical regression alerter");
+        assert_eq!(sent, 1);
+        let row: (String, String) = sqlx::query_as(
+            "SELECT source, reason_code
+               FROM message_outbox
+              WHERE source = 'quality_regression_alerter'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load canonical quality alert row");
+        assert_eq!(
+            row,
+            (
+                "quality_regression_alerter".to_string(),
+                "agent_quality.regression".to_string(),
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

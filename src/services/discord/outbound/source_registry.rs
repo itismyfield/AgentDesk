@@ -61,7 +61,6 @@ enum StaticSendSource {
     QueueOverflowNotice,
     OutboxDeliveryAlert,
     LongTurnWatchdog,
-    AgentQualityRollup,
     RelaySignalRollup,
     DispatchWatchdog,
     AgentdeskCli,
@@ -117,7 +116,6 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(QueueOverflowNotice, "queue_overflow_notice", LOOPBACK),
     policy!(OutboxDeliveryAlert, "outbox_delivery_alert", LOOPBACK),
     policy!(LongTurnWatchdog, "long_turn_watchdog", LOOPBACK),
-    policy!(AgentQualityRollup, "agent_quality_rollup", LOOPBACK),
     policy!(RelaySignalRollup, "relay_signal_rollup", LOOPBACK),
     policy!(DispatchWatchdog, "dispatch_watchdog", LOOPBACK),
     policy!(AgentdeskCli, "agentdesk-cli", CLI),
@@ -181,7 +179,6 @@ mod tests {
         "queue_overflow_notice",
         "outbox_delivery_alert",
         "long_turn_watchdog",
-        "agent_quality_rollup",
         "relay_signal_rollup",
         "dispatch_watchdog",
     ];

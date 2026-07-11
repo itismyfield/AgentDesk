@@ -753,7 +753,6 @@ mod postgres_source_contract_tests {
             "queue_overflow_notice",
             "outbox_delivery_alert",
             "long_turn_watchdog",
-            "agent_quality_rollup",
             "relay_signal_rollup",
             "dispatch_watchdog",
             "unregistered_policy_source",

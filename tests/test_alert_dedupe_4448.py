@@ -1,0 +1,53 @@
+"""Wiring contracts for issue #4448 alert authority and dedupe guards."""
+
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class AlertDedupeWiringTests(unittest.TestCase):
+    def test_auto_queue_failed_entry_alert_uses_stable_db_dedupe(self) -> None:
+        planning = (REPO_ROOT / "src/services/auto_queue/planning.rs").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("FAILED_ENTRY_ALERT_REASON_CODE", planning)
+        self.assertIn("failed_entry_alert_session_key", planning)
+        self.assertIn("enqueue_outbox_pg_with_ttl", planning)
+        self.assertIn("FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS", planning)
+
+    def test_auto_queue_monitor_has_restart_safe_once_reconciliation(self) -> None:
+        monitor = (REPO_ROOT / "scripts/auto-queue-monitor.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("AQ_MONITOR_STATE_FILE", monitor)
+        self.assertIn("AQ_MONITOR_ONCE", monitor)
+        self.assertIn("AQ_MONITOR_COOLDOWN_SECS", monitor)
+        self.assertIn("auto_queue_monitor_state.py", monitor)
+        self.assertIn('source:"auto-queue-monitor"', monitor)
+
+    def test_quality_regression_has_one_runtime_alert_authority(self) -> None:
+        legacy = REPO_ROOT / "src/services/observability/quality_alert.rs"
+        queries = (REPO_ROOT / "src/services/observability/queries.rs").read_text(
+            encoding="utf-8"
+        )
+        source_registry = (
+            REPO_ROOT / "src/services/discord/outbound/source_registry.rs"
+        ).read_text(encoding="utf-8")
+        quality_module = (
+            REPO_ROOT / "src/services/agent_quality/mod.rs"
+        ).read_text(encoding="utf-8")
+
+        self.assertFalse(legacy.exists(), "legacy quality alert producer must be removed")
+        self.assertNotIn("enqueue_quality_regression_alerts_pg", queries)
+        self.assertNotIn('"agent_quality_rollup"', source_registry)
+        self.assertIn("sole regression-alert authority", quality_module)
+
+
+if __name__ == "__main__":
+    unittest.main()

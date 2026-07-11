@@ -14,10 +14,10 @@
 //!     in-memory atomics — atomics reset to 0 on every process restart and are
 //!     per-provider scoped, which breaks delta bookkeeping across deploys.
 //!   * Driven by the hourly `MaintenanceJob` scheduler (PG pool in hand), the
-//!     same proven harness `agent_quality_rollup` uses — not the per-provider
+//!     same proven scheduler harness the aggregation rollup uses — not the per-provider
 //!     stall watchdog (hot path, single-provider scope).
-//!   * Anti-spam is a TOCTOU-safe kv_meta dedupe-slot claim mirroring
-//!     `quality_alert.rs`, keyed by `relay_alert:{signal}:{hour_bucket}` with a
+//!   * Anti-spam is a TOCTOU-safe kv_meta dedupe-slot claim keyed by
+//!     `relay_alert:{signal}:{hour_bucket}` with a
 //!     1-hour TTL so each signal alerts at most once per hour.
 //!   * Delivery reuses the existing `message_outbox` enqueue path (bot
 //!     "notify"). It deliberately does NOT use the announce-bot fallback, whose
@@ -107,7 +107,7 @@ pub(super) fn effective_threshold(signal: &RelaySignal, override_threshold: Opti
 
 /// #3561: atomically claim the dedupe slot for `key` iff the previous claim is
 /// older than `RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS`. Mirrors
-/// `quality_alert::claim_quality_alert_slot_pg` — single-statement TOCTOU-safe
+/// the established alert-slot pattern — single-statement TOCTOU-safe
 /// claim, defensive `^[0-9]+$` guard against legacy non-numeric kv_meta values.
 async fn claim_relay_alert_slot_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
     let dedupe_ms = RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS.saturating_mul(1000);

@@ -1,5 +1,38 @@
 use super::*;
 
+/// Stable semantic identity for the terminal auto-queue entry failure card.
+/// The rendered cause is intentionally excluded from dedupe identity because
+/// it may gain detail between retries while still describing the same stage.
+pub(super) const FAILED_ENTRY_ALERT_REASON_CODE: &str = "auto_queue.entry_dispatch_failed";
+pub(super) const FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS: i64 = 30 * 60;
+
+pub(super) fn failed_entry_alert_session_key(entry_id: &str, retry_count: i64) -> String {
+    format!("auto_queue.entry:{entry_id}:retry:{retry_count}")
+}
+
+async fn enqueue_failed_entry_alert_pg(
+    pool: &sqlx::PgPool,
+    target: &str,
+    content: &str,
+    entry_id: &str,
+    retry_count: i64,
+) -> Result<bool, crate::services::message_outbox::OutboxEnqueueError> {
+    let session_key = failed_entry_alert_session_key(entry_id, retry_count);
+    crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target,
+            content,
+            bot: "notify",
+            source: "auto-queue",
+            reason_code: Some(FAILED_ENTRY_ALERT_REASON_CODE),
+            session_key: Some(&session_key),
+        },
+        FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS,
+    )
+    .await
+}
+
 pub(super) fn effective_max_entry_retries(deps: &AutoQueueActivateDeps) -> i64 {
     let from_pg = deps.pg_pool.as_ref().and_then(|pool| {
         match load_kv_meta_value_pg(pool, "runtime-config") {
@@ -92,16 +125,12 @@ pub(super) fn queue_failed_entry_escalation(
     crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
-            crate::services::message_outbox::enqueue_outbox_pg(
+            enqueue_failed_entry_alert_pg(
                 &bridge_pool,
-                crate::services::message_outbox::OutboxMessage {
-                    target: &target_owned,
-                    content: &content_owned,
-                    bot: "notify",
-                    source: "system",
-                    reason_code: None,
-                    session_key: None,
-                },
+                &target_owned,
+                &content_owned,
+                &entry_id_text,
+                retry_count,
             )
             .await
             .map_err(|error| {
@@ -270,6 +299,107 @@ pub(super) fn normalize_generate_entries(
     }
 
     Ok(Some(normalized))
+}
+
+#[cfg(test)]
+mod failed_entry_alert_tests {
+    use super::*;
+
+    #[test]
+    fn failed_entry_alert_identity_is_stable_per_entry_retry_stage() {
+        assert_eq!(
+            failed_entry_alert_session_key("entry-1", 3),
+            failed_entry_alert_session_key("entry-1", 3)
+        );
+        assert_ne!(
+            failed_entry_alert_session_key("entry-1", 3),
+            failed_entry_alert_session_key("entry-1", 4)
+        );
+        assert_ne!(
+            failed_entry_alert_session_key("entry-1", 3),
+            failed_entry_alert_session_key("entry-2", 3)
+        );
+        assert_eq!(
+            FAILED_ENTRY_ALERT_REASON_CODE,
+            "auto_queue.entry_dispatch_failed"
+        );
+        assert!(FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS >= 30 * 60);
+    }
+
+    #[test]
+    fn failed_entry_alert_dedupe_ignores_rendered_cause() {
+        let session_key = failed_entry_alert_session_key("entry-1", 3);
+        let first = crate::services::message_outbox::dedupe_key_for_message_for_test(
+            "channel:123",
+            "timeout",
+            Some(FAILED_ENTRY_ALERT_REASON_CODE),
+            Some(&session_key),
+        );
+        let second = crate::services::message_outbox::dedupe_key_for_message_for_test(
+            "channel:123",
+            "timeout after 45 seconds with extra detail",
+            Some(FAILED_ENTRY_ALERT_REASON_CODE),
+            Some(&session_key),
+        );
+
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn failed_entry_alert_uses_atomic_db_dedupe_and_explicit_ttl_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        assert!(
+            enqueue_failed_entry_alert_pg(&pool, "channel:123", "first cause", "entry-1", 3,)
+                .await
+                .expect("enqueue first failed-entry alert")
+        );
+        assert!(
+            !enqueue_failed_entry_alert_pg(
+                &pool,
+                "channel:123",
+                "same stage with more detailed cause",
+                "entry-1",
+                3,
+            )
+            .await
+            .expect("dedupe repeated failed-entry alert")
+        );
+        assert!(
+            enqueue_failed_entry_alert_pg(&pool, "channel:123", "next retry stage", "entry-1", 4,)
+                .await
+                .expect("enqueue next-stage failed-entry alert")
+        );
+
+        let rows: Vec<(String, String, bool)> = sqlx::query_as(
+            "SELECT reason_code, session_key,
+                    dedupe_expires_at >= created_at + INTERVAL '30 minutes'
+               FROM message_outbox
+              ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load failed-entry alert rows");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    FAILED_ENTRY_ALERT_REASON_CODE.to_string(),
+                    failed_entry_alert_session_key("entry-1", 3),
+                    true,
+                ),
+                (
+                    FAILED_ENTRY_ALERT_REASON_CODE.to_string(),
+                    failed_entry_alert_session_key("entry-1", 4),
+                    true,
+                ),
+            ]
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 pub(super) fn normalize_auto_queue_review_mode(
