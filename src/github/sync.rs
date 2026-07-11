@@ -1456,15 +1456,13 @@ pub(crate) fn format_terminal_open_alert(
     )
 }
 
-/// Resolve the operator alert channel for github-sync mismatches. Falls back
-/// to the same channel as agent-quality regression alerts so all
-/// observability alerts share one operator inbox unless overridden.
-fn resolve_terminal_open_alert_channel() -> String {
-    std::env::var("ADK_GITHUB_SYNC_ALERT_CHANNEL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(crate::services::agent_quality::regression_alerts::resolve_alert_channel)
+async fn resolve_terminal_open_alert_channel_pg(pool: &PgPool) -> Result<Option<String>, String> {
+    crate::services::agent_quality::regression_alerts::resolve_alert_channel_with_env_pg(
+        pool,
+        "ADK_GITHUB_SYNC_ALERT_CHANNEL",
+    )
+    .await
+    .map_err(|error| format!("resolve github-sync alert target: {error}"))
 }
 
 async fn enqueue_terminal_open_alert_pg(
@@ -1474,11 +1472,9 @@ async fn enqueue_terminal_open_alert_pg(
     card: &PgCardRecord,
     card_status: &str,
 ) -> Result<bool, String> {
-    let target_channel = resolve_terminal_open_alert_channel();
-    if target_channel.is_empty() {
+    let Some(target) = resolve_terminal_open_alert_channel_pg(pool).await? else {
         return Ok(false);
-    }
-    let target = format!("channel:{target_channel}");
+    };
     let session_key = format!(
         "github_sync.terminal_open:{repo}:{issue_number}:{}",
         card.id
@@ -1488,7 +1484,7 @@ async fn enqueue_terminal_open_alert_pg(
     crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
         pool,
         crate::services::message_outbox::OutboxMessage {
-            target: target.as_str(),
+            target: &target,
             content: content.as_str(),
             bot: "notify",
             source: "github_sync",
@@ -1868,6 +1864,13 @@ mod terminal_open_alert_tests {
     async fn enqueue_terminal_open_alert_pg_dedupes_within_ttl() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
+        let seed_target = sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ('kanban_human_alert_channel_id', '123456')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(seed_target.is_ok(), "seed terminal-open alert target");
         let card = PgCardRecord {
             id: "card-1946-pg".into(),
             status: "done".into(),

@@ -56,6 +56,7 @@ pub struct EntryDispatchFailureResult {
     pub to_status: String,
     pub retry_count: i64,
     pub retry_limit: i64,
+    pub failure_transition_id: Option<i64>,
     pub changed: bool,
 }
 
@@ -210,6 +211,7 @@ pub async fn record_entry_dispatch_failure_on_pg(
                 to_status: current.status,
                 retry_count: current.retry_count,
                 retry_limit,
+                failure_transition_id: None,
                 changed: false,
             });
         }
@@ -224,7 +226,6 @@ pub async fn record_entry_dispatch_failure_on_pg(
         let mut tx = pool.begin().await.map_err(|error| {
             format!("begin postgres auto-queue dispatch failure transaction: {error}")
         })?;
-
         let rows_affected = sqlx::query(
             "UPDATE auto_queue_entries
              SET status = CASE
@@ -266,13 +267,13 @@ pub async fn record_entry_dispatch_failure_on_pg(
                     to_status: latest.status,
                     retry_count: latest.retry_count,
                     retry_limit,
+                    failure_transition_id: None,
                     changed: false,
                 });
             }
             continue;
         }
-
-        record_entry_transition_on_pg(
+        let failure_transition_id = record_entry_transition_on_pg(
             &mut tx,
             entry_id,
             ENTRY_STATUS_DISPATCHED,
@@ -289,18 +290,17 @@ pub async fn record_entry_dispatch_failure_on_pg(
         tx.commit().await.map_err(|error| {
             format!("commit postgres auto-queue dispatch failure {entry_id}: {error}")
         })?;
-
         return Ok(EntryDispatchFailureResult {
             run_id: current.run_id,
             from_status: ENTRY_STATUS_DISPATCHED.to_string(),
             to_status: target_status.to_string(),
             retry_count,
             retry_limit,
+            failure_transition_id: Some(failure_transition_id),
             changed: true,
         });
     }
 }
-
 fn dispatch_json_field(document: Option<&str>, field: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(document?).ok()?;
     value
@@ -1487,22 +1487,22 @@ async fn record_entry_transition_on_pg(
     from_status: &str,
     to_status: &str,
     trigger_source: &str,
-) -> Result<(), String> {
-    sqlx::query(
+) -> Result<i64, String> {
+    sqlx::query_scalar::<_, i64>(
         "INSERT INTO auto_queue_entry_transitions (
              entry_id,
              from_status,
              to_status,
              trigger_source
          )
-         VALUES ($1, $2, $3, $4)",
+         VALUES ($1, $2, $3, $4)
+         RETURNING id",
     )
     .bind(entry_id)
     .bind(from_status)
     .bind(to_status)
     .bind(trigger_source)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
-    .map_err(|error| format!("record auto-queue transition for {entry_id}: {error}"))?;
-    Ok(())
+    .map_err(|error| format!("record auto-queue transition for {entry_id}: {error}"))
 }

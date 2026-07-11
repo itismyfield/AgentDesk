@@ -6,8 +6,8 @@ use super::*;
 pub(super) const FAILED_ENTRY_ALERT_REASON_CODE: &str = "auto_queue.entry_dispatch_failed";
 pub(super) const FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS: i64 = 30 * 60;
 
-pub(super) fn failed_entry_alert_session_key(entry_id: &str, retry_count: i64) -> String {
-    format!("auto_queue.entry:{entry_id}:retry:{retry_count}")
+pub(super) fn failed_entry_alert_session_key(entry_id: &str, transition_id: i64) -> String {
+    format!("auto_queue.entry:{entry_id}:failure-transition:{transition_id}")
 }
 
 async fn enqueue_failed_entry_alert_pg(
@@ -15,9 +15,9 @@ async fn enqueue_failed_entry_alert_pg(
     target: &str,
     content: &str,
     entry_id: &str,
-    retry_count: i64,
+    failure_transition_id: i64,
 ) -> Result<bool, crate::services::message_outbox::OutboxEnqueueError> {
-    let session_key = failed_entry_alert_session_key(entry_id, retry_count);
+    let session_key = failed_entry_alert_session_key(entry_id, failure_transition_id);
     crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
         pool,
         crate::services::message_outbox::OutboxMessage {
@@ -103,6 +103,7 @@ pub(super) fn queue_failed_entry_escalation(
     agent_id: &str,
     thread_group: i64,
     retry_count: i64,
+    failure_transition_id: i64,
     retry_limit: i64,
     cause: &str,
 ) -> Result<bool, String> {
@@ -130,7 +131,7 @@ pub(super) fn queue_failed_entry_escalation(
                 &target_owned,
                 &content_owned,
                 &entry_id_text,
-                retry_count,
+                failure_transition_id,
             )
             .await
             .map_err(|error| {
@@ -219,6 +220,11 @@ pub(super) fn record_entry_dispatch_failure(
     }
 
     if result.changed && result.to_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
+        let Some(failure_transition_id) = result.failure_transition_id else {
+            return Err(format!(
+                "{entry_id}: terminal dispatch failure is missing its durable transition identity"
+            ));
+        };
         if let Err(error) = queue_failed_entry_escalation(
             deps,
             run_id,
@@ -227,6 +233,7 @@ pub(super) fn record_entry_dispatch_failure(
             agent_id,
             thread_group,
             result.retry_count,
+            failure_transition_id,
             result.retry_limit,
             cause,
         ) {
@@ -317,6 +324,20 @@ pub(super) fn normalize_auto_queue_review_mode(
 mod failed_entry_alert_tests {
     use super::*;
 
+    fn must_ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error:?}"), // agentdesk-audit: allow-unwrap — test-only helper in #[cfg(test)] module
+        }
+    }
+
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"), // agentdesk-audit: allow-unwrap — test-only helper in #[cfg(test)] module
+        }
+    }
+
     #[test]
     fn failed_entry_alert_reason_code_is_stable() {
         assert_eq!(
@@ -326,7 +347,7 @@ mod failed_entry_alert_tests {
     }
 
     #[test]
-    fn failed_entry_alert_identity_is_scoped_per_entry_retry_stage() {
+    fn failed_entry_alert_identity_is_scoped_per_durable_failure_transition() {
         assert_eq!(
             failed_entry_alert_session_key("entry-1", 3),
             failed_entry_alert_session_key("entry-1", 3)
@@ -370,24 +391,109 @@ mod failed_entry_alert_tests {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
-        let first =
-            enqueue_failed_entry_alert_pg(&pool, "channel:123", "first cause", "entry-1", 3).await;
+        must_ok(
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, status) VALUES ('run-alert-identity', 'active')",
+            )
+            .execute(&pool)
+            .await,
+            "seed alert-identity run",
+        );
+        must_ok(
+            sqlx::query(
+                "INSERT INTO auto_queue_entries (id, run_id, agent_id, status, retry_count)
+             VALUES ('entry-identity', 'run-alert-identity', 'agent-1', 'dispatched', 0)",
+            )
+            .execute(&pool)
+            .await,
+            "seed alert-identity entry",
+        );
+
+        let first_failure = must_ok(
+            crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+                &pool,
+                "entry-identity",
+                1,
+                "test_first_failure",
+            )
+            .await,
+            "record first failure",
+        );
+        must_ok(
+            crate::db::auto_queue::update_entry_status_on_pg(
+                &pool,
+                "entry-identity",
+                crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                "manual_update",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .await,
+            "reset failed entry to pending",
+        );
+        must_ok(
+            crate::db::auto_queue::update_entry_status_on_pg(
+                &pool,
+                "entry-identity",
+                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                "test_redispatch",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .await,
+            "redispatch reset entry",
+        );
+        let second_failure = must_ok(
+            crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+                &pool,
+                "entry-identity",
+                1,
+                "test_second_failure",
+            )
+            .await,
+            "record second failure",
+        );
+        assert_eq!(first_failure.retry_count, second_failure.retry_count);
+        let first_transition = must_some(
+            first_failure.failure_transition_id,
+            "first failure transition id missing",
+        );
+        let second_transition = must_some(
+            second_failure.failure_transition_id,
+            "second failure transition id missing",
+        );
+        assert_ne!(first_transition, second_transition);
+
+        let first = enqueue_failed_entry_alert_pg(
+            &pool,
+            "channel:123",
+            "first cause",
+            "entry-1",
+            first_transition,
+        )
+        .await;
         assert!(matches!(first, Ok(true)), "first enqueue failed: {first:?}");
         let duplicate = enqueue_failed_entry_alert_pg(
             &pool,
             "channel:123",
             "same stage with more detailed cause",
             "entry-1",
-            3,
+            first_transition,
         )
         .await;
         assert!(
             matches!(duplicate, Ok(false)),
             "duplicate was not suppressed: {duplicate:?}"
         );
-        let next_stage =
-            enqueue_failed_entry_alert_pg(&pool, "channel:123", "next retry stage", "entry-1", 4)
-                .await;
+        // A manual failed -> pending reset can reset retry_count to the same
+        // value. Its later terminal failure has a new transition id and must
+        // not be suppressed by the earlier incident's TTL.
+        let next_stage = enqueue_failed_entry_alert_pg(
+            &pool,
+            "channel:123",
+            "new incident at the same retry count",
+            "entry-1",
+            second_transition,
+        )
+        .await;
         assert!(
             matches!(next_stage, Ok(true)),
             "next retry stage did not enqueue: {next_stage:?}"
@@ -413,12 +519,12 @@ mod failed_entry_alert_tests {
             vec![
                 (
                     FAILED_ENTRY_ALERT_REASON_CODE.to_string(),
-                    failed_entry_alert_session_key("entry-1", 3),
+                    failed_entry_alert_session_key("entry-1", first_transition),
                     true,
                 ),
                 (
                     FAILED_ENTRY_ALERT_REASON_CODE.to_string(),
-                    failed_entry_alert_session_key("entry-1", 4),
+                    failed_entry_alert_session_key("entry-1", second_transition),
                     true,
                 ),
             ]

@@ -17,6 +17,8 @@ class AlertDedupeWiringTests(unittest.TestCase):
 
         self.assertIn("FAILED_ENTRY_ALERT_REASON_CODE", planning)
         self.assertIn("failed_entry_alert_session_key", planning)
+        self.assertIn("failure-transition", planning)
+        self.assertIn("failure_transition_id", planning)
         self.assertIn("enqueue_outbox_pg_with_ttl", planning)
         self.assertIn("FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS", planning)
 
@@ -29,6 +31,11 @@ class AlertDedupeWiringTests(unittest.TestCase):
         self.assertIn("AQ_MONITOR_ONCE", monitor)
         self.assertIn("AQ_MONITOR_COOLDOWN_SECS", monitor)
         self.assertIn("auto_queue_monitor_state.py", monitor)
+        self.assertIn("run-locked", monitor)
+        self.assertIn("review_entered_at", monitor)
+        self.assertIn("turn_active", monitor)
+        self.assertIn("awaiting_bg", monitor)
+        self.assertIn("awaiting_user", monitor)
         self.assertIn('source:"auto-queue-monitor"', monitor)
 
     def test_quality_regression_has_one_runtime_alert_authority(self) -> None:
@@ -45,6 +52,9 @@ class AlertDedupeWiringTests(unittest.TestCase):
         quality_module = (
             REPO_ROOT / "src/services/agent_quality/mod.rs"
         ).read_text(encoding="utf-8")
+        regression_alerts = (
+            REPO_ROOT / "src/services/agent_quality/regression_alerts.rs"
+        ).read_text(encoding="utf-8")
 
         self.assertFalse(legacy.exists(), "legacy quality alert producer must be removed")
         self.assertNotIn("enqueue_quality_regression_alerts_pg", queries)
@@ -54,6 +64,11 @@ class AlertDedupeWiringTests(unittest.TestCase):
         self.assertIn(
             "agent_quality::regression_alerts::run_regression_alerter_pg", maintenance
         )
+        self.assertIn("TURN_DROP_THRESHOLD: f64 = 0.15", regression_alerts)
+        self.assertIn("REVIEW_DROP_THRESHOLD: f64 = 0.20", regression_alerts)
+        self.assertIn("agent_quality_monitoring_channel_id", regression_alerts)
+        self.assertIn("kanban_human_alert_channel_id", regression_alerts)
+        self.assertNotIn("FALLBACK_ALERT_CHANNEL", regression_alerts)
 
 
 if __name__ == "__main__":

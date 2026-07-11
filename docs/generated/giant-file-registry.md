@@ -66,7 +66,7 @@
 | `src/engine/loader.rs` | 1332 |
 | `src/engine/mod.rs` | 1279 |
 | `src/engine/ops/db_ops.rs` | 1212 |
-| `src/github/sync.rs` | 1508 |
+| `src/github/sync.rs` | 1504 |
 | `src/pipeline.rs` | 1383 |
 | `src/receipt.rs` | 1842 |
 | `src/reconcile.rs` | 1902 |

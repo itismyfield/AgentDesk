@@ -33,24 +33,56 @@ done
 
 case "$url" in
   */api/queue/status)
-    if [ "$(cat "$FAKE_MODE_FILE")" = "active" ]; then
-      printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-anomaly","github_issue_number":4448,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-1"],"created_at":1},{"id":"entry-stuck","github_issue_number":4449,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-2"],"created_at":1},{"id":"entry-review","github_issue_number":4450,"status":"pending","card_status":"review","review_round":2,"dispatch_history":[],"created_at":1}]}'
-    else
-      printf '%s\n' '{"run":{"id":"run-1","status":"completed"},"entries":[]}'
-    fi
+    case "$(cat "$FAKE_MODE_FILE")" in
+      active)
+        printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-anomaly","github_issue_number":4448,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-1"],"created_at":1},{"id":"entry-stuck","github_issue_number":4449,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-2"],"created_at":1},{"id":"entry-review","github_issue_number":4450,"status":"pending","card_status":"review","review_round":2,"review_entered_at":1,"dispatch_history":[],"created_at":1}]}'
+        ;;
+      active-review-clock-missing)
+        printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-anomaly","github_issue_number":4448,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-1"],"created_at":1},{"id":"entry-stuck","github_issue_number":4449,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-2"],"created_at":1},{"id":"entry-review","github_issue_number":4450,"status":"pending","card_status":"review","review_round":2,"dispatch_history":[],"created_at":1}]}'
+        ;;
+      stuck-only)
+        printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-stuck","github_issue_number":4449,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-2"],"created_at":1}]}'
+        ;;
+      review-fresh-only)
+        printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-review-fresh","github_issue_number":4450,"status":"pending","card_status":"review","review_round":3,"review_entered_at":999000,"dispatch_history":[],"created_at":1}]}'
+        ;;
+      review-missing-only)
+        printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-review-missing","github_issue_number":4450,"status":"pending","card_status":"review","review_round":4,"dispatch_history":[],"created_at":1}]}'
+        ;;
+      *)
+        printf '%s\n' '{"run":{"id":"run-1","status":"completed"},"entries":[]}'
+        ;;
+    esac
     ;;
   */api/sessions)
-    printf '%s\n' '{"sessions":[]}'
+    if [ "${FAKE_SESSIONS_FAIL:-0}" = "1" ]; then
+      exit 22
+    fi
+    if [ -n "${FAKE_SESSION_STATUS:-}" ]; then
+      jq -n -c --arg status "$FAKE_SESSION_STATUS" \
+        '{sessions:[{active_dispatch_id:"dispatch-2",status:$status}]}'
+    else
+      printf '%s\n' '{"sessions":[]}'
+    fi
     ;;
   */api/dispatches/dispatch-1)
+    if [ "${FAKE_DISPATCH_FAIL:-0}" = "1" ]; then
+      exit 22
+    fi
     printf '%s\n' '{"dispatch":{"status":"completed"}}'
     ;;
   */api/dispatches/dispatch-2)
+    if [ "${FAKE_DISPATCH_FAIL:-0}" = "1" ]; then
+      exit 22
+    fi
     printf '%s\n' '{"dispatch":{"status":"dispatched"}}'
     ;;
   */api/discord/send)
     if [ "${FAKE_FAIL_POST:-0}" = "1" ]; then
       exit 22
+    fi
+    if [ -n "${FAKE_NOTIFY_DELAY:-}" ]; then
+      sleep "$FAKE_NOTIFY_DELAY"
     fi
     printf '%s\n' "$body" >> "$FAKE_NOTIFY_LOG"
     ;;
@@ -114,6 +146,17 @@ jq -e '
 run_once
 assert_notify_count 3
 
+# Detector outages are UNKNOWN, not RECOVERED. Existing incidents remain
+# durable until their owning API becomes observable again.
+FAKE_SESSIONS_FAIL=1 run_once
+assert_notify_count 3
+FAKE_DISPATCH_FAIL=1 run_once
+assert_notify_count 3
+echo active-review-clock-missing > "$FAKE_MODE_FILE"
+run_once
+assert_notify_count 3
+echo active > "$FAKE_MODE_FILE"
+
 echo inactive > "$FAKE_MODE_FILE"
 run_once
 assert_notify_count 6
@@ -129,5 +172,33 @@ jq -s -e '
 ' \
   "$FAKE_NOTIFY_LOG" >/dev/null
 jq -e '.version == 1 and (.conditions | length == 0)' "$STATE_FILE" >/dev/null
+
+# All production live-session states suppress STUCK classification.
+echo stuck-only > "$FAKE_MODE_FILE"
+for status in working turn_active awaiting_bg awaiting_user; do
+  FAKE_SESSION_STATUS="$status" run_once
+  assert_notify_count 6
+done
+
+# An old queue entry that entered review one second ago is not REVIEW_LONG.
+# The monitor must never fall back to created_at/dispatched_at for this rule.
+echo review-fresh-only > "$FAKE_MODE_FILE"
+run_once
+assert_notify_count 6
+echo review-missing-only > "$FAKE_MODE_FILE"
+run_once
+assert_notify_count 6
+
+# The state lock spans detection, delivery, and commit. Two processes racing
+# from an empty state still deliver one alert per condition, not two.
+rm -f "$STATE_FILE" "$STATE_FILE.lock" "$FAKE_NOTIFY_LOG"
+echo active > "$FAKE_MODE_FILE"
+FAKE_NOTIFY_DELAY=0.2 run_once &
+first_pid=$!
+FAKE_NOTIFY_DELAY=0.2 run_once &
+second_pid=$!
+wait "$first_pid"
+wait "$second_pid"
+assert_notify_count 3
 
 echo "auto-queue monitor restart/cooldown/recovery behavior passed"

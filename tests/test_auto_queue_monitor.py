@@ -97,31 +97,66 @@ class AutoQueueMonitorStateTests(unittest.TestCase):
         self.assertTrue(state_helper.commit_action(self.state_path, recovery[0]))
         self.assertEqual(state_helper.plan_actions(self.state_path, [], 2_012, 1_800), [])
 
-    def test_malformed_state_fails_closed_without_fake_recovery(self) -> None:
+    def test_malformed_state_realerts_without_consuming_incident(self) -> None:
         active = [condition(kind="REVIEW_LONG")]
         self.state_path.write_text("{not-json", encoding="utf-8")
 
-        self.assertEqual(
-            state_helper.plan_actions(self.state_path, active, 3_000, 1_800), []
-        )
+        actions = state_helper.plan_actions(self.state_path, active, 3_000, 1_800)
+        self.assertEqual([action["action"] for action in actions], ["alert"])
         quarantined = list(self.state_path.parent.glob("monitor-state.json.corrupt.*"))
         self.assertEqual(len(quarantined), 1)
-        persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
-        entry = persisted["conditions"][active[0]["key"]]
-        self.assertIsNone(entry["last_alert_at"])
-        self.assertEqual(entry["suppress_until"], 4_800)
+        self.assertFalse(self.state_path.exists())
 
-        # It was never announced, so disappearance must not claim recovery.
-        self.assertEqual(state_helper.plan_actions(self.state_path, [], 3_100, 1_800), [])
-
-        # If still active, it becomes alertable only at the fail-closed window.
-        self.state_path.write_text("{bad-again", encoding="utf-8")
-        state_helper.plan_actions(self.state_path, active, 5_000, 1_800)
+        # A failed HTTP delivery leaves no state and retries immediately.
         self.assertEqual(
-            state_helper.plan_actions(self.state_path, active, 6_799, 1_800), []
+            [
+                action["action"]
+                for action in state_helper.plan_actions(
+                    self.state_path, active, 3_001, 1_800
+                )
+            ],
+            ["alert"],
         )
-        actions = state_helper.plan_actions(self.state_path, active, 6_800, 1_800)
-        self.assertEqual([action["action"] for action in actions], ["alert"])
+
+        # Only a successful delivery commit creates cooldown/recovery state.
+        self.assertTrue(state_helper.commit_action(self.state_path, actions[0]))
+        recovery = state_helper.plan_actions(self.state_path, [], 3_100, 1_800)
+        self.assertEqual([action["action"] for action in recovery], ["recovery"])
+
+    def test_unknown_detector_state_preserves_alert_without_false_recovery(self) -> None:
+        active = [condition(kind="STUCK")]
+        alert = state_helper.plan_actions(self.state_path, active, 4_000, 1_800)[0]
+        self.assertTrue(state_helper.commit_action(self.state_path, alert))
+
+        self.assertEqual(
+            state_helper.plan_actions(
+                self.state_path,
+                [],
+                4_100,
+                1_800,
+                [active[0]["key"]],
+            ),
+            [],
+        )
+        persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertIn(active[0]["key"], persisted["conditions"])
+
+        recovery = state_helper.plan_actions(self.state_path, [], 4_101, 1_800)
+        self.assertEqual([action["action"] for action in recovery], ["recovery"])
+
+    def test_unknown_new_condition_neither_alerts_nor_creates_state(self) -> None:
+        active = [condition(kind="ANOMALY")]
+        self.assertEqual(
+            state_helper.plan_actions(
+                self.state_path,
+                active,
+                5_000,
+                1_800,
+                [active[0]["key"]],
+            ),
+            [],
+        )
+        self.assertFalse(self.state_path.exists())
 
 
 if __name__ == "__main__":

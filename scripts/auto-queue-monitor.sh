@@ -51,12 +51,22 @@ entry_age_min() {
 
 dispatch_status_for_entry() {
   local dispatch_id="$1"
+  local payload status
   if [ -z "$dispatch_id" ] || [ "$dispatch_id" = "null" ]; then
     echo ""
     return
   fi
-  api_get "/api/dispatches/$dispatch_id" \
-    | jq -r '.dispatch.status // .status // ""' 2>/dev/null || true
+  if ! payload=$(api_get "/api/dispatches/$dispatch_id" 2>/dev/null); then
+    echo "__UNKNOWN__"
+    return
+  fi
+  if ! status=$(printf '%s' "$payload" \
+    | jq -er '.dispatch.status // .status | select(type == "string" and length > 0)' \
+      2>/dev/null); then
+    echo "__UNKNOWN__"
+    return
+  fi
+  printf '%s\n' "$status"
 }
 
 session_statuses_for_dispatch() {
@@ -85,6 +95,11 @@ append_condition() {
     >> "$CONDITIONS_JSONL"
 }
 
+append_unknown_key() {
+  local key="$1"
+  printf '%s\n' "$key" | jq -R -c '.' >> "$UNKNOWN_JSONL"
+}
+
 collect_active_conditions() {
   local status_json="$1"
   local run_status="$2"
@@ -103,7 +118,8 @@ collect_active_conditions() {
     | jq -c '.entries[]? | select(.status != "done" and .status != "skipped")' \
     | while IFS= read -r entry; do
       local issue card_status q_status ref_ms age_min dispatch_id dispatch_status
-      local entry_id review_round key alert recovery session_statuses
+      local entry_id review_round alert recovery session_statuses
+      local stuck_key anomaly_key review_key review_ref_ms review_age_min
       issue=$(printf '%s' "$entry" | jq -r '.github_issue_number // "unknown"')
       entry_id=$(printf '%s' "$entry" | jq -r '.id // .entry_id // ("issue-" + ((.github_issue_number // "unknown") | tostring))')
       card_status=$(printf '%s' "$entry" | jq -r '.card_status // ""')
@@ -113,42 +129,59 @@ collect_active_conditions() {
       dispatch_id=$(printf '%s' "$entry" | jq -r '.dispatch_history[-1] // ""')
       dispatch_status=$(dispatch_status_for_entry "$dispatch_id")
 
-      if [ "$sessions_available" = "true" ] \
-        && [ "$q_status" = "dispatched" ] \
-        && [ "$dispatch_status" = "dispatched" ] \
-        && [ "${age_min:-0}" -gt "$STUCK_THRESHOLD_MIN" ]; then
-        session_statuses=$(session_statuses_for_dispatch "$dispatch_id" "$sessions_json")
-        case ",$session_statuses," in
-          *,working,*|*,running,*|*,active,*) ;;
-          *)
-            key="STUCK|${run_id}|${entry_id}|${dispatch_id}"
-            alert="[auto-queue monitor] STUCK: #${issue} dispatched ${age_min}min, no active session"
-            recovery="[auto-queue monitor] RECOVERED: STUCK #${issue} (${entry_id})"
-            append_condition "STUCK" "$key" "$alert" "$recovery"
-            ;;
-        esac
+      stuck_key="STUCK|${run_id}|${entry_id}|${dispatch_id}"
+      anomaly_key="ANOMALY|${run_id}|${entry_id}|${dispatch_id}"
+
+      if [ "$q_status" = "dispatched" ] && [ "$dispatch_status" = "__UNKNOWN__" ]; then
+        append_unknown_key "$stuck_key"
+        append_unknown_key "$anomaly_key"
+      fi
+
+      if [ "$q_status" = "dispatched" ] \
+        && [ "$dispatch_status" = "dispatched" ]; then
+        if [ "$sessions_available" != "true" ]; then
+          append_unknown_key "$stuck_key"
+        elif [ "${age_min:-0}" -gt "$STUCK_THRESHOLD_MIN" ]; then
+          session_statuses=$(session_statuses_for_dispatch "$dispatch_id" "$sessions_json")
+          case ",$session_statuses," in
+            *,working,*|*,turn_active,*|*,awaiting_bg,*|*,awaiting_user,*|*,running,*|*,active,*) ;;
+            *)
+              alert="[auto-queue monitor] STUCK: #${issue} dispatched ${age_min}min, no active session"
+              recovery="[auto-queue monitor] RECOVERED: STUCK #${issue} (${entry_id})"
+              append_condition "STUCK" "$stuck_key" "$alert" "$recovery"
+              ;;
+          esac
+        fi
       fi
 
       if [ "$dispatch_status" = "completed" ] && [ "$q_status" = "dispatched" ]; then
-        key="ANOMALY|${run_id}|${entry_id}|${dispatch_id}"
         alert="[auto-queue monitor] ANOMALY: #${issue} dispatch completed but entry not updated (card=${card_status})"
         recovery="[auto-queue monitor] RECOVERED: ANOMALY #${issue} (${entry_id})"
-        append_condition "ANOMALY" "$key" "$alert" "$recovery"
+        append_condition "ANOMALY" "$anomaly_key" "$alert" "$recovery"
       fi
 
-      if [ "$card_status" = "review" ] && [ "${age_min:-0}" -gt "$REVIEW_THRESHOLD_MIN" ]; then
+      if [ "$card_status" = "review" ]; then
         review_round=$(printf '%s' "$entry" | jq -r '.review_round // 0')
-        key="REVIEW_LONG|${run_id}|${entry_id}|round-${review_round}"
-        alert="[auto-queue monitor] REVIEW_LONG: #${issue} review ${age_min}min elapsed (round=${review_round})"
-        recovery="[auto-queue monitor] RECOVERED: REVIEW_LONG #${issue} round ${review_round} (${entry_id})"
-        append_condition "REVIEW_LONG" "$key" "$alert" "$recovery"
+        review_key="REVIEW_LONG|${run_id}|${entry_id}|round-${review_round}"
+        review_ref_ms=$(printf '%s' "$entry" | jq -r '.review_entered_at // 0')
+        if [ -z "$review_ref_ms" ] || [ "$review_ref_ms" = "null" ] \
+          || ! [[ "$review_ref_ms" =~ ^[0-9]+$ ]] || [ "$review_ref_ms" -le 0 ]; then
+          append_unknown_key "$review_key"
+        else
+          review_age_min=$(entry_age_min "$review_ref_ms" "$now_ms")
+          if [ "${review_age_min:-0}" -gt "$REVIEW_THRESHOLD_MIN" ]; then
+            alert="[auto-queue monitor] REVIEW_LONG: #${issue} review ${review_age_min}min elapsed (round=${review_round})"
+            recovery="[auto-queue monitor] RECOVERED: REVIEW_LONG #${issue} round ${review_round} (${entry_id})"
+            append_condition "REVIEW_LONG" "$review_key" "$alert" "$recovery"
+          fi
+        fi
       fi
     done
 }
 
-monitor_once() {
+monitor_once_unlocked() {
   local status_json run_status run_id sessions_json sessions_available now_epoch now_ms
-  local temp_dir active_file actions_file action_file action kind message
+  local temp_dir active_file unknown_file actions_file action_file action kind message
 
   if ! status_json=$(api_get "/api/queue/status" 2>/dev/null); then
     echo "auto-queue monitor: status API unavailable; preserving incident state" >&2
@@ -167,7 +200,14 @@ monitor_once() {
   if ! sessions_json=$(api_get "/api/sessions" 2>/dev/null); then
     sessions_json='{"sessions":[]}'
     sessions_available=false
-  elif ! printf '%s' "$sessions_json" | jq -e 'type == "object" and ((.sessions // []) | type == "array")' >/dev/null 2>&1; then
+  elif ! printf '%s' "$sessions_json" | jq -e '
+      type == "object"
+      and ((.sessions // []) | type == "array")
+      and all((.sessions // [])[];
+        type == "object"
+        and (.status | type == "string")
+        and (.active_dispatch_id == null or (.active_dispatch_id | type == "string")))
+    ' >/dev/null 2>&1; then
     sessions_json='{"sessions":[]}'
     sessions_available=false
   fi
@@ -176,20 +216,25 @@ monitor_once() {
   now_ms=$((now_epoch * 1000))
   temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-auto-queue-monitor.XXXXXX")
   active_file="$temp_dir/active.json"
+  unknown_file="$temp_dir/unknown.json"
   actions_file="$temp_dir/actions.jsonl"
   action_file="$temp_dir/action.json"
   CONDITIONS_JSONL="$temp_dir/conditions.jsonl"
-  export CONDITIONS_JSONL
+  UNKNOWN_JSONL="$temp_dir/unknown.jsonl"
+  export CONDITIONS_JSONL UNKNOWN_JSONL
   : > "$CONDITIONS_JSONL"
+  : > "$UNKNOWN_JSONL"
 
   collect_active_conditions \
     "$status_json" "$run_status" "$run_id" "$sessions_json" \
     "$sessions_available" "$now_ms"
   jq -s '.' "$CONDITIONS_JSONL" > "$active_file"
+  jq -s 'unique' "$UNKNOWN_JSONL" > "$unknown_file"
 
   if ! "$PYTHON" "$STATE_HELPER" plan \
     --state-file "$STATE_FILE" \
     --active-file "$active_file" \
+    --unknown-file "$unknown_file" \
     --now "$now_epoch" \
     --cooldown-secs "$COOLDOWN_SECS" > "$actions_file"; then
     echo "auto-queue monitor: state reconciliation failed; preserving state" >&2
@@ -220,6 +265,12 @@ monitor_once() {
   rm -rf "$temp_dir"
 }
 
+monitor_once() {
+  "$PYTHON" "$STATE_HELPER" run-locked \
+    --state-file "$STATE_FILE" -- \
+    bash "$SCRIPT_DIR/auto-queue-monitor.sh" __monitor_once_unlocked
+}
+
 main() {
   while true; do
     monitor_once
@@ -230,6 +281,8 @@ main() {
   done
 }
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = "__monitor_once_unlocked" ]; then
+  monitor_once_unlocked
+elif [ "${BASH_SOURCE[0]}" = "$0" ]; then
   main "$@"
 fi

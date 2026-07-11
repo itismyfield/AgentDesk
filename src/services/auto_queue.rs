@@ -357,8 +357,8 @@ pub struct AutoQueueStatusEntryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card_status: Option<String>,
     pub review_round: i64,
+    pub review_entered_at: Option<i64>,
 }
-
 #[derive(Debug, Serialize, Default)]
 pub struct AutoQueueStatusCounts {
     pub pending: i64,
@@ -367,7 +367,6 @@ pub struct AutoQueueStatusCounts {
     pub skipped: i64,
     pub failed: i64,
 }
-
 #[derive(Debug, Serialize, Default)]
 pub struct AutoQueueThreadGroupView {
     pub pending: i64,
@@ -766,6 +765,7 @@ impl AutoQueueStatusEntryView {
             thread_links,
             card_status: record.card_status,
             review_round: record.review_round,
+            review_entered_at: record.review_entered_at,
         }
     }
 }
@@ -1547,6 +1547,20 @@ fn normalized_optional(value: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn must_ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error:?}"),
+        }
+    }
+
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"),
+        }
+    }
+
     fn run_record(id: &str) -> AutoQueueRunRecord {
         AutoQueueRunRecord {
             id: id.to_string(),
@@ -1601,6 +1615,7 @@ mod tests {
             thread_links: Vec::new(),
             card_status: None,
             review_round: 0,
+            review_entered_at: None,
         }
     }
 
@@ -1637,12 +1652,109 @@ mod tests {
                 active_thread_id: None,
                 card_status: None,
                 review_round: 0,
+                review_entered_at: None,
             },
             Vec::new(),
             Vec::new(),
         );
 
         assert_eq!(view.github_repo.as_deref(), Some("itismyfield/AgentDesk"));
+    }
+
+    #[test]
+    fn auto_queue_status_surfaces_review_cycle_clock() {
+        let mut entry = status_entry(
+            "entry-review-clock",
+            "card-review-clock",
+            "pending",
+            None,
+            None,
+            Vec::new(),
+        );
+        entry.card_status = Some("review".to_string());
+        entry.review_round = 2;
+        entry.review_entered_at = Some(1_234_000);
+
+        let value = must_ok(
+            serde_json::to_value(entry),
+            "serialize review-clock status entry",
+        );
+        assert_eq!(value["review_entered_at"], 1_234_000);
+        assert_eq!(value["review_round"], 2);
+    }
+
+    #[tokio::test]
+    async fn auto_queue_status_query_uses_latest_review_clock_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        must_ok(
+            sqlx::query(
+                "INSERT INTO kanban_cards
+                 (id, title, status, review_round, review_entered_at)
+             VALUES
+                 ('card-review-clock-pg', 'review clock', 'review', 2,
+                  TIMESTAMPTZ '2026-01-02 03:04:05+00')",
+            )
+            .execute(&pool)
+            .await,
+            "seed review-clock card",
+        );
+        must_ok(
+            sqlx::query(
+                "INSERT INTO card_review_state
+                 (card_id, review_round, state, review_entered_at)
+             VALUES
+                 ('card-review-clock-pg', 2, 'reviewing',
+                  TIMESTAMPTZ '2026-01-02 03:05:06+00')",
+            )
+            .execute(&pool)
+            .await,
+            "seed card review state",
+        );
+        must_ok(
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, status)
+                 VALUES ('run-review-clock-pg', 'active')",
+            )
+            .execute(&pool)
+            .await,
+            "seed review-clock run",
+        );
+        must_ok(
+            sqlx::query(
+                "INSERT INTO auto_queue_entries
+                 (id, run_id, kanban_card_id, agent_id, status)
+             VALUES
+                 ('entry-review-clock-pg', 'run-review-clock-pg',
+                  'card-review-clock-pg', 'agent-1', 'pending')",
+            )
+            .execute(&pool)
+            .await,
+            "seed review-clock queue entry",
+        );
+
+        let expected = must_ok(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT EXTRACT(EPOCH FROM TIMESTAMPTZ '2026-01-02 03:05:06+00')::BIGINT * 1000",
+            )
+            .fetch_one(&pool)
+            .await,
+            "load expected review clock",
+        );
+        let record = must_some(
+            must_ok(
+                crate::db::auto_queue::get_status_entry_pg(&pool, "entry-review-clock-pg").await,
+                "load review-clock queue entry",
+            ),
+            "review-clock queue entry missing",
+        );
+        assert_eq!(record.review_entered_at, Some(expected));
+        let view = AutoQueueStatusEntryView::from_record(record, Vec::new(), Vec::new());
+        assert_eq!(view.review_entered_at, Some(expected));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]

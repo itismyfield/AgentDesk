@@ -125,8 +125,8 @@ twice.
 
 | Reason code | Metric | Window | Predicate | Suppress when |
 |-------------|--------|--------|-----------|---------------|
-| `agent_quality.regression` | `turn_success_rate` | 7d→30d | `rate_30d - rate_7d >= 0.20` | either sample window `< 5` or marked unavailable |
-| `agent_quality.regression` | `review_pass_rate` | 7d→30d | `rate_30d - rate_7d >= 0.20` | either sample window `< 5` or marked unavailable |
+| `agent_quality.regression` | `turn_success_rate` | 7d→30d | `rate_30d - rate_7d > 0.15` | either sample window `< 5` or marked unavailable |
+| `agent_quality.regression` | `review_pass_rate` | 7d→30d | `rate_30d - rate_7d > 0.20` | either sample window `< 5` or marked unavailable |
 
 Each `(agent_id, metric)` has one row in
 `quality_regression_cooldowns`; a successful outbox enqueue advances its
@@ -140,6 +140,11 @@ The coexistence wording in immutable migration
 state, not current runtime ownership. Numbered migrations are not rewritten
 after deployment; this section and the module/scheduler contracts above are
 the current authority.
+
+The target is loaded from PostgreSQL using the existing operator precedence:
+`agent_quality_monitoring_channel_id`, then `kanban_human_alert_channel_id`.
+When neither key is configured, quality regression alerting is intentionally
+silent; authority consolidation does not introduce a hard-coded channel.
 
 ---
 

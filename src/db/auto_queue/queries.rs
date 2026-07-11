@@ -79,6 +79,7 @@ pub struct StatusEntryRecord {
     pub active_thread_id: Option<String>,
     pub card_status: Option<String>,
     pub review_round: i64,
+    pub review_entered_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +207,10 @@ pub async fn get_status_entry_pg(
                 kc.channel_thread_map::text AS channel_thread_map,
                 kc.active_thread_id,
                 kc.status AS card_status,
-                GREATEST(COALESCE(crs.review_round, 0), COALESCE(kc.review_round, 0))::BIGINT AS review_round
+                GREATEST(COALESCE(crs.review_round, 0), COALESCE(kc.review_round, 0))::BIGINT AS review_round,
+                CASE WHEN GREATEST(crs.review_entered_at, kc.review_entered_at) IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM GREATEST(crs.review_entered_at, kc.review_entered_at))::BIGINT * 1000
+                END AS review_entered_at
          FROM auto_queue_entries e
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
@@ -271,7 +275,10 @@ pub async fn list_status_entries_pg(
                 kc.channel_thread_map::text AS channel_thread_map,
                 kc.active_thread_id,
                 kc.status AS card_status,
-                GREATEST(COALESCE(crs.review_round, 0), COALESCE(kc.review_round, 0))::BIGINT AS review_round
+                GREATEST(COALESCE(crs.review_round, 0), COALESCE(kc.review_round, 0))::BIGINT AS review_round,
+                CASE WHEN GREATEST(crs.review_entered_at, kc.review_entered_at) IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM GREATEST(crs.review_entered_at, kc.review_entered_at))::BIGINT * 1000
+                END AS review_entered_at
          FROM auto_queue_entries e
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
@@ -512,6 +519,7 @@ fn status_entry_record_from_pg_row(
         active_thread_id: row.try_get("active_thread_id")?,
         card_status: row.try_get("card_status")?,
         review_round: row.try_get("review_round")?,
+        review_entered_at: row.try_get("review_entered_at")?,
     })
 }
 

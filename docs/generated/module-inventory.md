@@ -93,7 +93,7 @@
 | `db::auto_queue::consultation` | `src/db/auto_queue/consultation.rs` | 112 | 112 | 0 |  |
 | `db::auto_queue::entries` | `src/db/auto_queue/entries.rs` | 1508 | 1508 | 0 | giant-file |
 | `db::auto_queue::phase_gates` | `src/db/auto_queue/phase_gates.rs` | 3116 | 1639 | 1477 | giant-file |
-| `db::auto_queue::queries` | `src/db/auto_queue/queries.rs` | 535 | 535 | 0 |  |
+| `db::auto_queue::queries` | `src/db/auto_queue/queries.rs` | 543 | 543 | 0 |  |
 | `db::auto_queue::runs` | `src/db/auto_queue/runs.rs` | 296 | 296 | 0 |  |
 | `db::auto_queue::slot_predicate` | `src/db/auto_queue/slot_predicate.rs` | 249 | 104 | 145 |  |
 | `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 204 | 204 | 0 |  |
@@ -182,7 +182,7 @@
 | `error` | `src/error.rs` | 159 | 159 | 0 |  |
 | `eventbus` | `src/eventbus.rs` | 161 | 161 | 0 |  |
 | `github` | `src/github/mod.rs` | 708 | 708 | 0 |  |
-| `github::sync` | `src/github/sync.rs` | 1914 | 1508 | 406 | giant-file |
+| `github::sync` | `src/github/sync.rs` | 1917 | 1504 | 413 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 867 | 667 | 200 |  |
 | `high_risk_recovery` | `src/high_risk_recovery.rs` | 1182 | 0 | 1182 |  |
 | `kanban` | `src/kanban/mod.rs` | 20 | 20 | 0 |  |
@@ -318,8 +318,8 @@
 | `server::ws` | `src/server/ws.rs` | 140 | 140 | 0 |  |
 | `services` | `src/services/mod.rs` | 139 | 139 | 0 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 596 | 596 | 0 |  |
-| `services::agent_quality` | `src/services/agent_quality/mod.rs` | 28 | 28 | 0 |  |
-| `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 523 | 463 | 60 |  |
+| `services::agent_quality` | `src/services/agent_quality/mod.rs` | 29 | 29 | 0 |  |
+| `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 678 | 497 | 181 |  |
 | `services::agents` | `src/services/agents/mod.rs` | 3 | 3 | 0 |  |
 | `services::agents::query` | `src/services/agents/query.rs` | 583 | 499 | 84 |  |
 | `services::agents::serialization` | `src/services/agents/serialization.rs` | 445 | 297 | 148 |  |
@@ -338,7 +338,7 @@
 | `services::api_friction::memory_sync` | `src/services/api_friction/memory_sync.rs` | 157 | 157 | 0 |  |
 | `services::api_friction::patterns` | `src/services/api_friction/patterns.rs` | 154 | 154 | 0 |  |
 | `services::api_friction::storage` | `src/services/api_friction/storage.rs` | 278 | 278 | 0 |  |
-| `services::auto_queue` | `src/services/auto_queue.rs` | 1816 | 1545 | 271 | giant-file |
+| `services::auto_queue` | `src/services/auto_queue.rs` | 1928 | 1545 | 383 | giant-file |
 | `services::auto_queue::activate_command` | `src/services/auto_queue/activate_command.rs` | 2238 | 1506 | 732 | giant-file |
 | `services::auto_queue::activate_preflight` | `src/services/auto_queue/activate_preflight.rs` | 199 | 199 | 0 |  |
 | `services::auto_queue::activate_route` | `src/services/auto_queue/activate_route.rs` | 19 | 19 | 0 |  |
@@ -353,7 +353,7 @@
 | `services::auto_queue::phase_gate` | `src/services/auto_queue/phase_gate.rs` | 607 | 573 | 34 |  |
 | `services::auto_queue::phase_gate_catalog` | `src/services/auto_queue/phase_gate_catalog.rs` | 104 | 68 | 36 |  |
 | `services::auto_queue::phase_gate_violations` | `src/services/auto_queue/phase_gate_violations.rs` | 262 | 209 | 53 |  |
-| `services::auto_queue::planning` | `src/services/auto_queue/planning.rs` | 430 | 315 | 115 |  |
+| `services::auto_queue::planning` | `src/services/auto_queue/planning.rs` | 536 | 322 | 214 |  |
 | `services::auto_queue::query` | `src/services/auto_queue/query.rs` | 270 | 250 | 20 |  |
 | `services::auto_queue::route` | `src/services/auto_queue/route.rs` | 96 | 96 | 0 |  |
 | `services::auto_queue::route_generate` | `src/services/auto_queue/route_generate.rs` | 734 | 734 | 0 |  |

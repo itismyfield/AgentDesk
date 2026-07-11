@@ -12,10 +12,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+if os.name != "nt":
+    import fcntl
 
 
 STATE_VERSION = 1
@@ -127,24 +131,6 @@ def _quarantine_corrupt_state(path: Path, now: int) -> None:
     )
 
 
-def _fail_closed_state(
-    active: list[dict[str, str]], now: int, cooldown_secs: int
-) -> dict[str, Any]:
-    """Suppress a corrupt-state restart without pretending an alert was sent."""
-
-    return {
-        "version": STATE_VERSION,
-        "conditions": {
-            condition["key"]: {
-                "condition": condition,
-                "last_alert_at": None,
-                "suppress_until": now + cooldown_secs,
-            }
-            for condition in active
-        },
-    }
-
-
 def _active_by_key(active: list[Any]) -> dict[str, dict[str, str]]:
     result: dict[str, dict[str, str]] = {}
     for raw in active:
@@ -155,24 +141,35 @@ def _active_by_key(active: list[Any]) -> dict[str, dict[str, str]]:
     return result
 
 
+def _unknown_key_set(unknown: list[Any] | None) -> set[str]:
+    result: set[str] = set()
+    for raw in unknown or []:
+        result.add(_nonempty_string(raw, "unknown condition key"))
+    return result
+
+
 def plan_actions(
     state_path: Path,
     active: list[Any],
     now: int,
     cooldown_secs: int,
+    unknown: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     cooldown_secs = clamp_cooldown(cooldown_secs)
     active_by_key = _active_by_key(active)
+    unknown_keys = _unknown_key_set(unknown)
     try:
         state = load_state(state_path)
     except StateError as error:
-        print(f"auto-queue monitor: malformed state; failing closed: {error}", file=sys.stderr)
-        _quarantine_corrupt_state(state_path, now)
-        save_state(
-            state_path,
-            _fail_closed_state(list(active_by_key.values()), now, cooldown_secs),
+        print(
+            f"auto-queue monitor: malformed state; quarantining and re-alerting active incidents: {error}",
+            file=sys.stderr,
         )
-        return []
+        _quarantine_corrupt_state(state_path, now)
+        # A corrupt file cannot prove that any alert was delivered. Starting
+        # from an empty state can duplicate a prior alert, but never consumes
+        # a brand-new incident behind a fabricated cooldown.
+        state = _empty_state()
 
     stored: dict[str, dict[str, Any]] = state["conditions"]
     actions: list[dict[str, Any]] = []
@@ -187,6 +184,8 @@ def plan_actions(
             changed = True
 
     for key in sorted(active_by_key):
+        if key in unknown_keys:
+            continue
         condition = active_by_key[key]
         entry = stored.get(key)
         if entry is None:
@@ -223,6 +222,8 @@ def plan_actions(
 
     for key in sorted(stored):
         if key in active_by_key:
+            continue
+        if key in unknown_keys:
             continue
         entry = stored[key]
         last_alert_at = entry["last_alert_at"]
@@ -289,6 +290,24 @@ def _load_json(path: Path) -> Any:
         raise StateError(f"cannot load {path}: {error}") from error
 
 
+def run_locked(state_path: Path, command: list[str]) -> int:
+    """Run one complete detect/send/commit cycle under an OS-released lock."""
+
+    if os.name == "nt":
+        raise StateError("run-locked is supported only for the Unix shell monitor")
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise StateError("run-locked requires a command")
+
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_path.with_name(f"{state_path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        return subprocess.run(command, check=False).returncode
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -296,12 +315,17 @@ def _build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan")
     plan.add_argument("--state-file", required=True, type=Path)
     plan.add_argument("--active-file", required=True, type=Path)
+    plan.add_argument("--unknown-file", type=Path)
     plan.add_argument("--now", required=True, type=int)
     plan.add_argument("--cooldown-secs", required=True, type=int)
 
     commit = subparsers.add_parser("commit")
     commit.add_argument("--state-file", required=True, type=Path)
     commit.add_argument("--action-file", required=True, type=Path)
+
+    locked = subparsers.add_parser("run-locked")
+    locked.add_argument("--state-file", required=True, type=Path)
+    locked.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -312,14 +336,22 @@ def main(argv: list[str] | None = None) -> int:
             active = _load_json(args.active_file)
             if not isinstance(active, list):
                 raise StateError("active condition file must contain a JSON array")
+            unknown: Any = []
+            if args.unknown_file is not None:
+                unknown = _load_json(args.unknown_file)
+                if not isinstance(unknown, list):
+                    raise StateError("unknown condition file must contain a JSON array")
             for action in plan_actions(
-                args.state_file, active, args.now, args.cooldown_secs
+                args.state_file, active, args.now, args.cooldown_secs, unknown
             ):
                 print(json.dumps(action, ensure_ascii=False, sort_keys=True))
             return 0
 
-        action = _load_json(args.action_file)
-        return 0 if commit_action(args.state_file, action) else 3
+        if args.command == "commit":
+            action = _load_json(args.action_file)
+            return 0 if commit_action(args.state_file, action) else 3
+
+        return run_locked(args.state_file, args.command)
     except StateError as error:
         print(f"auto-queue monitor state error: {error}", file=sys.stderr)
         return 2
