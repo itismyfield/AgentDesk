@@ -4,6 +4,12 @@
 
 > Last refreshed: 2026-07-11 (#4424 — `outbound/source_registry.rs` is now the single typed, caller-class-scoped authorization table for send and message_outbox enqueue; eight verified producers are added for LoopbackInternal only. Delivery verbs and v3 callsite migration status are unchanged.)
 
+> Last refreshed: 2026-07-11 (#4448 — the retired
+> `agent_quality_rollup` outbox producer was removed from the source registry;
+> `quality_regression_alerter` is the sole quality-alert producer. The
+> `auto-queue-monitor` label now matches its live script producer. No delivery
+> verb or v3 callsite changed.)
+
 > Last refreshed: 2026-07-11 (#4247 S0 review follow-up — removing the sole
 > destructive reaction-removal intake route also retires the unreachable
 > `AlreadyStopping` reaction-control reply reason. The live

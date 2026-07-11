@@ -210,7 +210,6 @@ impl MaintenanceJob for AgentQualityRollupJob {
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
         Box::pin(async move {
             let report = crate::services::observability::run_agent_quality_rollup_pg(pool).await?;
-            debug_assert_eq!(report.alert_count, 0);
             tracing::info!(
                 job = self.name(),
                 upserted_rows = report.upserted_rows,

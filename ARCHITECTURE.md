@@ -966,7 +966,6 @@ src/
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
 │   │   ├── pg_io.rs
-│   │   ├── quality_alert.rs
 │   │   ├── queries.rs
 │   │   ├── recovery_audit.rs
 │   │   ├── relay_signal_alert.rs
