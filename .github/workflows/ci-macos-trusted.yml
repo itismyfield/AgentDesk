@@ -92,7 +92,7 @@ jobs:
   macos_hosted:
     name: Trusted macOS check (hosted)
     needs: resolve_macos_runner
-    if: needs.resolve_macos_runner.outputs.mode == 'hosted' && !contains(github.ref_name, 'tui-relay-stabilization')
+    if: needs.resolve_macos_runner.outputs.mode == 'hosted'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

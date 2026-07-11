@@ -66,11 +66,10 @@ When you move contract code, update the `sym:` anchor here **and** its
 compiler-checked reference together.
 
 **How the two halves stay on together in CI.** The set-comparison half is an
-unconditional `ci-pr.yml` step. The compile-existence half is the `check_fast`
-job, which by itself inherits the `ci_relax_safe` skip; so a `relay_contract`
-path filter (the four anchor files, this doc, and the gate script) force-runs
-`check_fast` whenever the doc↔code binding surface changes, even on a relax
-branch. Editing an anchor or this doc therefore always runs both halves.
+explicit `ci-pr.yml` step. The compile-existence half is the required
+`check_fast` job; a `relay_contract` path filter (the four anchor files, this
+doc, and the gate script) force-runs it for doc-only binding changes as well as
+Rust changes. No branch-name escape hatch may skip either half.
 
 **There is no more "mislabeled comment" gap.** Earlier revisions carried a
 `// sym:` label next to each reference and the checker counted the label, so a

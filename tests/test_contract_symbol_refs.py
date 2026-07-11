@@ -526,18 +526,32 @@ class WiringTest(unittest.TestCase):
         )
         self.assertIn("cargo check --workspace --all-targets", workflow)
 
-    def test_defect2_relay_contract_forces_check_fast_on_relax_branch(self) -> None:
-        # The compile-existence half (check_fast) must run even when
-        # ci_relax_safe is true, if a relay-contract anchor file / doc changed.
+    def test_required_gates_have_no_branch_name_escape_hatch(self) -> None:
+        # A branch name must never bypass compile/test/lint/script gates. The
+        # old tui-relay-stabilization exception allowed test code to merge
+        # without ever being compiled (#4246).
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci-pr.yml").read_text(
             encoding="utf-8"
         )
+        macos_workflow = (
+            REPO_ROOT / ".github" / "workflows" / "ci-macos-trusted.yml"
+        ).read_text(encoding="utf-8")
+        for name, source in (("ci-pr", workflow), ("ci-macos-trusted", macos_workflow)):
+            self.assertFalse(
+                "ci_relax_safe" in source,
+                f"{name} retains the retired CI relaxation output/condition",
+            )
+            self.assertFalse(
+                "tui-relay-stabilization" in source,
+                f"{name} still grants a branch-name CI escape hatch",
+            )
+
         # A relay_contract path filter and output exist.
         self.assertIn("relay_contract:", workflow)
         self.assertIn(
             "relay_contract: ${{ steps.filter.outputs.relay_contract }}", workflow
         )
-        # check_fast's gate ORs in relay_contract so the relax skip is bypassed.
+        # check_fast also runs for a doc-only relay-contract binding change.
         self.assertIn(
             "|| needs.changes.outputs.relay_contract == 'true'", workflow
         )
@@ -550,7 +564,7 @@ class WiringTest(unittest.TestCase):
             "docs/relay-state-contract.md",
         ):
             self.assertIn(host, workflow)
-        # The required-context mirror gates the forced run (no silent relax echo).
+        # The required-context mirror gates the forced run.
         self.assertIn("Relay-contract fast check mirror (always, #4268)", workflow)
 
 
