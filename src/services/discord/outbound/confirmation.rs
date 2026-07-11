@@ -43,7 +43,8 @@ pub(crate) async fn send_command_confirmation_message(
                 "confirmation delivery skipped: {reason}"
             )));
         }
-        DeliveryResult::PermanentFailure { reason }
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
         | DeliveryResult::ConfirmedMissing { reason } => {
             return Err(confirmation_error(reason));
         }

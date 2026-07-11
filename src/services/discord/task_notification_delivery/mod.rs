@@ -23,7 +23,8 @@ pub(super) use gateway::{
 
 use self::store::{CardClaim, ClaimedCard, StoreIntent};
 pub(super) use self::store::{
-    ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
+    ExistingResponseDelivery, ResponseDeliveryClaim, ResponseDeliveryClaimOutcome,
+    ResponseDeliveryOwner,
 };
 
 /// Provider-normalized context retained beside terminal response text.
@@ -334,6 +335,14 @@ impl TaskCardEvent {
     pub(super) fn event_key(&self) -> &str {
         &self.scope.event_key
     }
+
+    pub(in crate::services::discord) fn with_persisted_event_key(
+        mut self,
+        event_key: impl Into<String>,
+    ) -> Self {
+        self.scope.event_key = event_key.into();
+        self
+    }
 }
 
 pub(in crate::services::discord) fn response_turn_key(
@@ -411,8 +420,42 @@ pub(in crate::services::discord) async fn claim_task_response_delivery(
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
+    claim_task_response_delivery_with_recovery_key(
+        pool,
+        channel_id,
+        provider,
+        session_key,
+        event_key,
+        response_turn_key,
+        None,
+        card_message_id,
+        owner,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) async fn claim_task_response_delivery_with_recovery_key(
+    pool: Option<&PgPool>,
+    channel_id: u64,
+    provider: &str,
+    session_key: &str,
+    event_key: &str,
+    response_turn_key: &str,
+    recovery_turn_key: Option<&str>,
+    card_message_id: u64,
+    owner: ResponseDeliveryOwner,
+) -> Result<ResponseDeliveryClaimOutcome, String> {
     let scope = TaskCardScope::new(channel_id, provider, session_key, event_key);
-    store::claim_response_delivery(pool, &scope, response_turn_key, card_message_id, owner).await
+    store::claim_response_delivery(
+        pool,
+        &scope,
+        response_turn_key,
+        recovery_turn_key,
+        card_message_id,
+        owner,
+    )
+    .await
 }
 
 pub(in crate::services::discord) async fn claim_existing_task_response_delivery(
@@ -422,7 +465,7 @@ pub(in crate::services::discord) async fn claim_existing_task_response_delivery(
     session_key: &str,
     response_turn_key: &str,
     owner: ResponseDeliveryOwner,
-) -> Result<Option<(ResponseDeliveryClaimOutcome, u64)>, String> {
+) -> Result<Option<ExistingResponseDelivery>, String> {
     let lookup_scope = TaskCardScope::new(channel_id, provider, session_key, "lookup-only");
     store::claim_existing_response_delivery(pool, &lookup_scope, response_turn_key, owner).await
 }

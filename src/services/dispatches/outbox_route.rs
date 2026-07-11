@@ -501,7 +501,8 @@ async fn post_dispatch_completion_summary(
         | DeliveryResult::Fallback { .. }
         | DeliveryResult::Duplicate { .. }
         | DeliveryResult::Skip { .. } => Ok(()),
-        DeliveryResult::PermanentFailure { reason }
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
         | DeliveryResult::ConfirmedMissing { reason } => Err(format!(
             "failed to post dispatch summary for {dispatch_id}: {reason}"
         )),

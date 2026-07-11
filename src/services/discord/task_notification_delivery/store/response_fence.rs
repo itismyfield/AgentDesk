@@ -38,6 +38,10 @@ impl ResponseDeliveryClaim {
     pub(in crate::services::discord) fn response_turn_key(&self) -> &str {
         &self.response_turn_key
     }
+
+    pub(in crate::services::discord) fn event_key(&self) -> &str {
+        &self.scope.event_key
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,21 +52,46 @@ pub(in crate::services::discord) enum ResponseDeliveryClaimOutcome {
     Delivered { card_message_id: u64 },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct ExistingResponseDelivery {
+    pub(in crate::services::discord) outcome: ResponseDeliveryClaimOutcome,
+    pub(in crate::services::discord) card_message_id: u64,
+    pub(in crate::services::discord) event_key: String,
+    pub(in crate::services::discord) response_turn_key: String,
+    pub(in crate::services::discord) card_bot_key: String,
+}
+
 pub(in super::super) async fn claim_response_delivery(
     pool: Option<&PgPool>,
     scope: &TaskCardScope,
     response_turn_key: &str,
+    recovery_turn_key: Option<&str>,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
     validate_turn_key(response_turn_key)?;
+    if let Some(recovery_turn_key) = recovery_turn_key {
+        validate_turn_key(recovery_turn_key)?;
+    }
     match pool {
         Some(pool) => {
-            claim_response_delivery_pg(pool, scope, response_turn_key, card_message_id, owner).await
+            claim_response_delivery_pg(
+                pool,
+                scope,
+                response_turn_key,
+                recovery_turn_key,
+                card_message_id,
+                owner,
+            )
+            .await
         }
-        None if cfg!(any(test, debug_assertions)) => {
-            claim_response_delivery_memory(scope, response_turn_key, card_message_id, owner)
-        }
+        None if cfg!(any(test, debug_assertions)) => claim_response_delivery_memory(
+            scope,
+            response_turn_key,
+            recovery_turn_key,
+            card_message_id,
+            owner,
+        ),
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -75,7 +104,7 @@ pub(in super::super) async fn claim_existing_response_delivery(
     lookup_scope: &TaskCardScope,
     response_turn_key: &str,
     owner: ResponseDeliveryOwner,
-) -> Result<Option<(ResponseDeliveryClaimOutcome, u64)>, String> {
+) -> Result<Option<ExistingResponseDelivery>, String> {
     validate_turn_key(response_turn_key)?;
     match pool {
         Some(pool) => {
@@ -143,6 +172,7 @@ async fn claim_response_delivery_pg(
     pool: &PgPool,
     scope: &TaskCardScope,
     response_turn_key: &str,
+    recovery_turn_key: Option<&str>,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
@@ -151,12 +181,12 @@ async fn claim_response_delivery_pg(
     let owner_token = uuid::Uuid::new_v4().to_string();
     let inserted = sqlx::query(
         "INSERT INTO task_notification_response_delivery
-             (channel_id, provider, session_key, event_key, response_turn_key,
+             (channel_id, provider, session_key, event_key, response_turn_key, recovery_turn_key,
               referenced_card_message_id, delivery_state, owner_kind, owner_token,
               lease_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'claimed', $7, $8,
-                 NOW() + make_interval(secs => $9))
-         ON CONFLICT (channel_id, provider, session_key, response_turn_key) DO NOTHING
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'claimed', $8, $9,
+                 NOW() + make_interval(secs => $10))
+         ON CONFLICT DO NOTHING
          RETURNING id",
     )
     .bind(channel_id)
@@ -164,6 +194,7 @@ async fn claim_response_delivery_pg(
     .bind(&scope.session_key)
     .bind(&scope.event_key)
     .bind(response_turn_key)
+    .bind(recovery_turn_key)
     .bind(card_message_id_db)
     .bind(owner.as_str())
     .bind(&owner_token)
@@ -180,24 +211,41 @@ async fn claim_response_delivery_pg(
         }));
     }
 
-    let current = sqlx::query(
-        "SELECT event_key, referenced_card_message_id, delivery_state,
+    let rows = sqlx::query(
+        "SELECT event_key, response_turn_key, recovery_turn_key,
+                referenced_card_message_id, delivery_state,
                 lease_expires_at > NOW() AS lease_active
          FROM task_notification_response_delivery
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3
-           AND response_turn_key = $4",
+           AND (response_turn_key = $4
+                OR ($5::text IS NOT NULL AND recovery_turn_key = $5))",
     )
     .bind(channel_id)
     .bind(&scope.provider)
     .bind(&scope.session_key)
     .bind(response_turn_key)
-    .fetch_one(pool)
+    .bind(recovery_turn_key)
+    .fetch_all(pool)
     .await
     .map_err(|error| format!("load task response claim after conflict: {error}"))?;
+    if rows.len() != 1 {
+        return Err(format!(
+            "task response canonical/recovery identity matched {} rows",
+            rows.len()
+        ));
+    }
+    let current = &rows[0];
     let current_event: String = current.get("event_key");
+    let canonical_turn_key: String = current.get("response_turn_key");
+    let current_recovery_key: Option<String> = current.get("recovery_turn_key");
     let current_card: i64 = current.get("referenced_card_message_id");
     if current_event != scope.event_key || current_card != card_message_id_db {
         return Err("task response turn identity conflicts with another event/card".to_string());
+    }
+    if recovery_turn_key.is_some() && current_recovery_key.as_deref() != recovery_turn_key {
+        return Err(
+            "task response recovery identity conflicts with the persisted alias".to_string(),
+        );
     }
     let state: String = current.get("delivery_state");
     if state == "delivered" {
@@ -224,7 +272,7 @@ async fn claim_response_delivery_pg(
     .bind(&scope.provider)
     .bind(&scope.session_key)
     .bind(&scope.event_key)
-    .bind(response_turn_key)
+    .bind(&canonical_turn_key)
     .bind(card_message_id_db)
     .bind(owner.as_str())
     .bind(&owner_token)
@@ -236,7 +284,7 @@ async fn claim_response_delivery_pg(
     if changed == 1 {
         Ok(ResponseDeliveryClaimOutcome::Owned(ResponseDeliveryClaim {
             scope: scope.clone(),
-            response_turn_key: response_turn_key.to_string(),
+            response_turn_key: canonical_turn_key,
             card_message_id,
             owner_token,
         }))
@@ -250,34 +298,65 @@ async fn claim_existing_response_delivery_pg(
     lookup_scope: &TaskCardScope,
     response_turn_key: &str,
     owner: ResponseDeliveryOwner,
-) -> Result<Option<(ResponseDeliveryClaimOutcome, u64)>, String> {
-    let current = sqlx::query(
-        "SELECT event_key, referenced_card_message_id
-         FROM task_notification_response_delivery
-         WHERE channel_id = $1 AND provider = $2 AND session_key = $3
-           AND response_turn_key = $4",
+) -> Result<Option<ExistingResponseDelivery>, String> {
+    let rows = sqlx::query(
+        "SELECT response.event_key, response.response_turn_key,
+                response.recovery_turn_key, response.referenced_card_message_id,
+                card.bot_key
+         FROM task_notification_response_delivery AS response
+         JOIN task_notification_card_state AS card
+           ON card.channel_id = response.channel_id
+          AND card.provider = response.provider
+          AND card.session_key = response.session_key
+          AND card.event_key = response.event_key
+         WHERE response.channel_id = $1 AND response.provider = $2
+           AND response.session_key = $3
+           AND (response.response_turn_key = $4 OR response.recovery_turn_key = $4)",
     )
     .bind(db_id(lookup_scope.channel_id, "channel_id")?)
     .bind(&lookup_scope.provider)
     .bind(&lookup_scope.session_key)
     .bind(response_turn_key)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
     .map_err(|error| format!("find existing task response claim: {error}"))?;
-    let Some(current) = current else {
+    if rows.is_empty() {
         return Ok(None);
-    };
+    }
+    if rows.len() != 1 {
+        return Err(format!(
+            "task response recovery identity matched {} rows",
+            rows.len()
+        ));
+    }
+    let current = &rows[0];
     let event_key: String = current.get("event_key");
+    let canonical_turn_key: String = current.get("response_turn_key");
+    let recovery_turn_key: Option<String> = current.get("recovery_turn_key");
+    let card_bot_key: String = current.get("bot_key");
     let card_message_id = message_id(Some(current.get("referenced_card_message_id")))?;
     let scope = TaskCardScope::new(
         lookup_scope.channel_id,
         lookup_scope.provider.clone(),
         lookup_scope.session_key.clone(),
-        event_key,
+        event_key.clone(),
     );
-    let outcome =
-        claim_response_delivery_pg(pool, &scope, response_turn_key, card_message_id, owner).await?;
-    Ok(Some((outcome, card_message_id)))
+    let outcome = claim_response_delivery_pg(
+        pool,
+        &scope,
+        &canonical_turn_key,
+        recovery_turn_key.as_deref(),
+        card_message_id,
+        owner,
+    )
+    .await?;
+    Ok(Some(ExistingResponseDelivery {
+        outcome,
+        card_message_id,
+        event_key,
+        response_turn_key: canonical_turn_key,
+        card_bot_key,
+    }))
 }
 
 async fn renew_response_delivery_pg(
@@ -397,6 +476,7 @@ enum MemoryResponseState {
 #[derive(Clone, Debug)]
 struct MemoryResponseRow {
     event_key: String,
+    recovery_turn_key: Option<String>,
     card_message_id: u64,
     state: MemoryResponseState,
     owner_token: Option<String>,
@@ -435,6 +515,7 @@ fn memory_key(scope: &TaskCardScope, response_turn_key: &str) -> MemoryResponseK
 fn claim_response_delivery_memory(
     scope: &TaskCardScope,
     response_turn_key: &str,
+    recovery_turn_key: Option<&str>,
     card_message_id: u64,
     _owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
@@ -450,6 +531,7 @@ fn claim_response_delivery_memory(
                 key,
                 MemoryResponseRow {
                     event_key: scope.event_key.clone(),
+                    recovery_turn_key: recovery_turn_key.map(str::to_string),
                     card_message_id,
                     state: MemoryResponseState::Claimed,
                     owner_token: Some(owner_token.clone()),
@@ -462,6 +544,14 @@ fn claim_response_delivery_memory(
         Some(row) if row.event_key != scope.event_key || row.card_message_id != card_message_id => {
             return Err(
                 "task response turn identity conflicts with another event/card".to_string(),
+            );
+        }
+        Some(row)
+            if recovery_turn_key.is_some()
+                && row.recovery_turn_key.as_deref() != recovery_turn_key =>
+        {
+            return Err(
+                "task response recovery identity conflicts with the persisted alias".to_string(),
             );
         }
         Some(row) if row.state == MemoryResponseState::Delivered => {
@@ -490,26 +580,56 @@ fn claim_existing_response_delivery_memory(
     lookup_scope: &TaskCardScope,
     response_turn_key: &str,
     owner: ResponseDeliveryOwner,
-) -> Result<Option<(ResponseDeliveryClaimOutcome, u64)>, String> {
+) -> Result<Option<ExistingResponseDelivery>, String> {
     let existing = {
         let rows = MEMORY_RESPONSES
             .lock()
             .map_err(|_| "task response memory store poisoned".to_string())?;
-        rows.get(&memory_key(lookup_scope, response_turn_key))
-            .map(|row| (row.event_key.clone(), row.card_message_id))
+        let mut matches =
+            rows.iter()
+                .filter(|((channel_id, provider, session_key, canonical), row)| {
+                    *channel_id == lookup_scope.channel_id
+                        && provider == &lookup_scope.provider
+                        && session_key == &lookup_scope.session_key
+                        && (canonical == response_turn_key
+                            || row.recovery_turn_key.as_deref() == Some(response_turn_key))
+                });
+        let first = matches.next().map(|((_, _, _, canonical), row)| {
+            (
+                canonical.clone(),
+                row.recovery_turn_key.clone(),
+                row.event_key.clone(),
+                row.card_message_id,
+            )
+        });
+        if matches.next().is_some() {
+            return Err("task response recovery identity matched multiple memory rows".to_string());
+        }
+        first
     };
-    let Some((event_key, card_message_id)) = existing else {
+    let Some((canonical_turn_key, recovery_turn_key, event_key, card_message_id)) = existing else {
         return Ok(None);
     };
     let scope = TaskCardScope::new(
         lookup_scope.channel_id,
         lookup_scope.provider.clone(),
         lookup_scope.session_key.clone(),
-        event_key,
+        event_key.clone(),
     );
-    let outcome =
-        claim_response_delivery_memory(&scope, response_turn_key, card_message_id, owner)?;
-    Ok(Some((outcome, card_message_id)))
+    let outcome = claim_response_delivery_memory(
+        &scope,
+        &canonical_turn_key,
+        recovery_turn_key.as_deref(),
+        card_message_id,
+        owner,
+    )?;
+    Ok(Some(ExistingResponseDelivery {
+        outcome,
+        card_message_id,
+        event_key,
+        response_turn_key: canonical_turn_key,
+        card_bot_key: format!("provider:{}", lookup_scope.provider),
+    }))
 }
 
 fn renew_response_delivery_memory(claim: &ResponseDeliveryClaim) -> Result<(), String> {

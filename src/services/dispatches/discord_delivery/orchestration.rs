@@ -1503,7 +1503,8 @@ async fn send_review_result_message_via_http(
         | DeliveryResult::Fallback { .. }
         | DeliveryResult::Duplicate { .. }
         | DeliveryResult::Skip { .. } => Ok(()),
-        DeliveryResult::PermanentFailure { reason }
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
         | DeliveryResult::ConfirmedMissing { reason } => match kind {
             ReviewFollowupKind::Pass => Err(format!(
                 "discord request failed for pass notification: {reason}"

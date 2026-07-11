@@ -14,9 +14,9 @@ use super::super::task_notification_delivery::{
     EnsureIntent, ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
     TaskCardTransport, TaskNotificationContext, TaskResponseCommitOutcome,
     claim_existing_task_response_delivery, claim_task_response_delivery,
-    commit_task_response_delivered_bounded, durable_response_turn_key, ensure_card,
-    provider_bot_key, rebind_task_response_card, record_task_response_sent_bounded,
-    replace_confirmed_missing_card,
+    claim_task_response_delivery_with_recovery_key, commit_task_response_delivered_bounded,
+    durable_response_turn_key, ensure_card, fallback_response_turn_key, provider_bot_key,
+    rebind_task_response_card, record_task_response_sent_bounded, replace_confirmed_missing_card,
 };
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
@@ -153,6 +153,13 @@ pub(super) async fn ensure_card_and_route(
             delivery.terminal_consumed_end.unwrap_or_default(),
             &delivery.response_text,
         );
+        let recovery_turn_key = fallback_response_turn_key(
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            delivery.terminal_consumed_end.unwrap_or_default(),
+            &delivery.response_text,
+        );
         let existing = claim_existing_task_response_delivery(
             shared.pg_pool.as_ref(),
             delivery.channel_id,
@@ -167,10 +174,10 @@ pub(super) async fn ensure_card_and_route(
                 "resume task-notification response turn before delivery: {error}"
             ))
         })?;
-        let outcome = if let Some((outcome, persisted_card_message_id)) = existing {
-            match outcome {
+        let outcome = if let Some(existing) = existing {
+            match existing.outcome {
                 ResponseDeliveryClaimOutcome::Owned(claim)
-                    if persisted_card_message_id != message_id.get() =>
+                    if existing.card_message_id != message_id.get() =>
                 {
                     ResponseDeliveryClaimOutcome::Owned(
                         rebind_task_response_card(
@@ -189,13 +196,14 @@ pub(super) async fn ensure_card_and_route(
                 outcome => outcome,
             }
         } else {
-            claim_task_response_delivery(
+            claim_task_response_delivery_with_recovery_key(
                 shared.pg_pool.as_ref(),
                 delivery.channel_id,
                 delivery.provider.as_str(),
                 &delivery.session_name,
                 context.event_key(),
                 &turn_key,
+                Some(&recovery_turn_key),
                 message_id.get(),
                 ResponseDeliveryOwner::Sink,
             )
@@ -694,7 +702,7 @@ mod tests {
         let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
             panic!("first response claimant must own the turn")
         };
-        let (pending, pending_card) = claim_existing_task_response_delivery(
+        let pending = claim_existing_task_response_delivery(
             None,
             delivery.channel_id,
             delivery.provider.as_str(),
@@ -705,13 +713,16 @@ mod tests {
         .await
         .expect("load pending response claim")
         .expect("response row");
-        assert_eq!(pending_card, card.message_id);
-        assert!(matches!(pending, ResponseDeliveryClaimOutcome::Wait));
+        assert_eq!(pending.card_message_id, card.message_id);
+        assert!(matches!(
+            pending.outcome,
+            ResponseDeliveryClaimOutcome::Wait
+        ));
 
         mark_task_response_delivered(None, &claim)
             .await
             .expect("mark response delivered");
-        let (delivered, delivered_card) = claim_existing_task_response_delivery(
+        let delivered = claim_existing_task_response_delivery(
             None,
             delivery.channel_id,
             delivery.provider.as_str(),
@@ -722,9 +733,9 @@ mod tests {
         .await
         .expect("load delivered response claim")
         .expect("response row");
-        assert_eq!(delivered_card, card.message_id);
+        assert_eq!(delivered.card_message_id, card.message_id);
         assert!(matches!(
-            delivered,
+            delivered.outcome,
             ResponseDeliveryClaimOutcome::Delivered { .. }
         ));
     }

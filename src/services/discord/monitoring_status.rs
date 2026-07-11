@@ -148,7 +148,8 @@ async fn deliver_monitoring_status<C: DiscordOutboundClient>(
             .map(parse_delivered_monitoring_message_id)
             .transpose(),
         DeliveryResult::Skip { .. } => Ok(rendered_msg_id),
-        DeliveryResult::PermanentFailure { reason }
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
         | DeliveryResult::ConfirmedMissing { reason } => Err(reason),
     }
 }

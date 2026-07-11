@@ -71,6 +71,9 @@ pub(in crate::services::discord) enum ClassifiedOutboundPostError {
 
 fn classify_terminal_post_result(result: &DeliveryResult) -> Option<ClassifiedOutboundPostError> {
     match result {
+        DeliveryResult::TransientFailure { reason } => {
+            Some(ClassifiedOutboundPostError::Transient(reason.clone()))
+        }
         DeliveryResult::PermanentFailure { reason }
         | DeliveryResult::ConfirmedMissing { reason } => {
             Some(ClassifiedOutboundPostError::Permanent(reason.clone()))
@@ -109,6 +112,66 @@ pub(in crate::services::discord) async fn send_outbound_message_with_nonce_class
 #[cfg(test)]
 mod classified_post_tests {
     use super::*;
+    use crate::services::discord::outbound::OutboundDeduper;
+    use crate::services::dispatches::discord_delivery::{
+        DispatchMessagePostError, DispatchMessagePostErrorKind,
+    };
+
+    struct FailingPostClient {
+        status: Option<reqwest::StatusCode>,
+    }
+
+    impl DiscordOutboundClient for FailingPostClient {
+        async fn post_message(
+            &self,
+            _target_channel: &str,
+            _content: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            Err(match self.status {
+                Some(status) => DispatchMessagePostError::http(
+                    DispatchMessagePostErrorKind::Other,
+                    status,
+                    None,
+                    format!("mock Discord POST {status}"),
+                ),
+                None => DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    "mock Discord transport failure".to_string(),
+                ),
+            })
+        }
+    }
+
+    async fn production_card_post_class(
+        status: Option<reqwest::StatusCode>,
+    ) -> ClassifiedOutboundPostError {
+        let result = deliver_outbound(
+            &FailingPostClient { status },
+            &OutboundDeduper::new(),
+            task_card_outbound_message(ChannelId::new(4055), "task card", "adktest4055"),
+            None,
+        )
+        .await;
+        classify_terminal_post_result(&result).expect("failed POST must remain classified")
+    }
+
+    #[tokio::test]
+    async fn production_card_post_preserves_transient_500_503_and_transport_vs_permanent_403() {
+        for status in [
+            Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            Some(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            None,
+        ] {
+            assert!(matches!(
+                production_card_post_class(status).await,
+                ClassifiedOutboundPostError::Transient(_)
+            ));
+        }
+        assert!(matches!(
+            production_card_post_class(Some(reqwest::StatusCode::FORBIDDEN)).await,
+            ClassifiedOutboundPostError::Permanent(_)
+        ));
+    }
 
     #[test]
     fn authoritative_card_post_rejection_stays_permanent() {
@@ -163,7 +226,9 @@ pub(in crate::services::discord) async fn edit_outbound_message_classified(
         DeliveryResult::ConfirmedMissing { reason } => {
             Err(ClassifiedOutboundEditError::ConfirmedMissing(reason))
         }
-        DeliveryResult::Skip { reason } | DeliveryResult::PermanentFailure { reason } => {
+        DeliveryResult::Skip { reason }
+        | DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason } => {
             Err(ClassifiedOutboundEditError::Other(reason))
         }
     }

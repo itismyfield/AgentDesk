@@ -18,7 +18,8 @@ pub(super) use missing_card_replacement::{
 #[cfg(test)]
 pub(super) use response_fence::force_response_deliver_failures;
 pub(in crate::services::discord) use response_fence::{
-    ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
+    ExistingResponseDelivery, ResponseDeliveryClaim, ResponseDeliveryClaimOutcome,
+    ResponseDeliveryOwner,
 };
 pub(super) use response_fence::{
     claim_existing_response_delivery, claim_response_delivery, mark_response_delivered,

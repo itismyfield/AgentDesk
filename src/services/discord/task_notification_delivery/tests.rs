@@ -720,7 +720,7 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
     let ResponseDeliveryClaimOutcome::Owned(sink_claim) = sink_claim else {
         panic!("first exact claimant must own the response")
     };
-    let (pending, persisted_card) = claim_existing_task_response_delivery(
+    let pending = claim_existing_task_response_delivery(
         Some(&pool),
         delivered_event.scope.channel_id,
         &delivered_event.scope.provider,
@@ -731,8 +731,12 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
     .await
     .expect("resume confirmed response without provider context")
     .expect("durable response row");
-    assert_eq!(persisted_card, confirmed.message_id);
-    assert!(matches!(pending, ResponseDeliveryClaimOutcome::Wait));
+    assert_eq!(pending.card_message_id, confirmed.message_id);
+    assert_eq!(pending.event_key, delivered_event.event_key());
+    assert!(matches!(
+        pending.outcome,
+        ResponseDeliveryClaimOutcome::Wait
+    ));
 
     sqlx::query(
         "UPDATE task_notification_response_delivery
@@ -748,7 +752,7 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
     .execute(&pool)
     .await
     .expect("expire the sink response claim");
-    let (watcher_claim, resumed_card) = claim_existing_task_response_delivery(
+    let watcher_existing = claim_existing_task_response_delivery(
         Some(&pool),
         delivered_event.scope.channel_id,
         &delivered_event.scope.provider,
@@ -759,8 +763,19 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
     .await
     .expect("take over response without provider context")
     .expect("durable response row");
-    assert_eq!(resumed_card, confirmed.message_id);
-    let ResponseDeliveryClaimOutcome::Owned(watcher_claim) = watcher_claim else {
+    assert_eq!(watcher_existing.card_message_id, confirmed.message_id);
+    assert_eq!(watcher_existing.event_key, delivered_event.event_key());
+    assert_eq!(watcher_existing.card_bot_key, "notify");
+    let recovered_event = TaskCardEvent::from_recovered_terminal(
+        delivered_event.scope.channel_id,
+        &delivered_event.scope.provider,
+        &delivered_event.scope.session_key,
+        TaskNotificationKind::Background,
+        &turn_key,
+    );
+    assert_ne!(recovered_event.event_key(), delivered_event.event_key());
+    let recovered_event = recovered_event.with_persisted_event_key(&watcher_existing.event_key);
+    let ResponseDeliveryClaimOutcome::Owned(watcher_claim) = watcher_existing.outcome else {
         panic!("watcher must own the expired response claim")
     };
     assert!(
@@ -769,6 +784,22 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
             .is_err(),
         "the stale sink token must not commit the watcher-owned response"
     );
+    // Model the production UnknownReference branch after restart: repair must
+    // address the rich sink event row and use its persisted notify-bot pin,
+    // never the synthetic `turn:<response>` scope.
+    let replacement = replace_confirmed_missing_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &recovered_event,
+        confirmed.message_id,
+    )
+    .await
+    .expect("watcher repairs Discord-confirmed deleted notify card");
+    let watcher_claim =
+        rebind_task_response_card(Some(&pool), &watcher_claim, replacement.message_id)
+            .await
+            .expect("watcher rebinds recovered response to repaired rich event card");
     mark_task_response_delivered(Some(&pool), &watcher_claim)
         .await
         .expect("commit exact watcher response delivery");
@@ -781,7 +812,7 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
             &delivered_event.scope.session_key,
             delivered_event.event_key(),
             &turn_key,
-            confirmed.message_id,
+            replacement.message_id,
             ResponseDeliveryOwner::Watcher,
         )
         .await
@@ -803,6 +834,99 @@ async fn durable_response_fence_is_exact_and_survives_stale_ownership_pg() {
         .expect("unrelated pending event remains fenced"),
         ResponseDeliveryClaimOutcome::Wait
     ));
+}
+
+#[tokio::test]
+async fn watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_alias_4055",
+        "sink primary to watcher fallback response identity",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let event = event("primary-fallback-alias");
+    let card = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("notify-pinned task card");
+    let primary = response_turn_key(4_446, "2026-07-11T10:37:00Z", Some(44_460));
+    let fallback = fallback_response_turn_key(
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        55_500,
+        "terminal answer after restart",
+    );
+    assert_ne!(primary, fallback);
+    let sink = claim_task_response_delivery_with_recovery_key(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &primary,
+        Some(&fallback),
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("sink persists canonical and recovery identities");
+    let ResponseDeliveryClaimOutcome::Owned(sink) = sink else {
+        panic!("sink must own new response")
+    };
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE response_turn_key = $1",
+    )
+    .bind(&primary)
+    .execute(&pool)
+    .await
+    .expect("model sink crash");
+
+    let resumed = claim_existing_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        &fallback,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("watcher resolves recovery alias")
+    .expect("persisted sink response");
+    assert_eq!(resumed.response_turn_key, primary);
+    assert_eq!(resumed.event_key, event.event_key());
+    assert_eq!(resumed.card_bot_key, "notify");
+    let ResponseDeliveryClaimOutcome::Owned(watcher) = resumed.outcome else {
+        panic!("watcher must take over expired sink response")
+    };
+    assert_eq!(watcher.response_turn_key(), primary);
+    assert!(
+        mark_task_response_sent(Some(&pool), &sink).await.is_err(),
+        "stale sink cannot commit after alias takeover"
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .fetch_one(&pool)
+    .await
+    .expect("count response rows");
+    assert_eq!(rows, 1, "primary/fallback actors must share one fence");
 }
 
 #[tokio::test]
@@ -990,7 +1114,7 @@ fn response_reply_nonce_reconciles_after_sent_cas_failure_and_lease_takeover_pg(
         .expect("expire the sink lease after its sent-state CAS failure");
         assert_eq!(expired.rows_affected(), 1);
 
-        let (takeover, persisted_card) = claim_existing_task_response_delivery(
+        let takeover = claim_existing_task_response_delivery(
             Some(&pool),
             event.scope.channel_id,
             &event.scope.provider,
@@ -1001,8 +1125,8 @@ fn response_reply_nonce_reconciles_after_sent_cas_failure_and_lease_takeover_pg(
         .await
         .expect("watcher inspects expired sink claim")
         .expect("response row survives the failed sent CAS");
-        assert_eq!(persisted_card, card_message_id);
-        let ResponseDeliveryClaimOutcome::Owned(takeover) = takeover else {
+        assert_eq!(takeover.card_message_id, card_message_id);
+        let ResponseDeliveryClaimOutcome::Owned(takeover) = takeover.outcome else {
             panic!("watcher must take over the expired claimed reply")
         };
         let replay = crate::services::discord::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(

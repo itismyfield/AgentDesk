@@ -80,7 +80,7 @@ async fn prepare_watcher_task_response(
     context: Option<&task_delivery::TaskNotificationContext>,
     response_turn_key: &str,
 ) -> Result<PreparedWatcherTaskResponse, PrepareWatcherTaskResponseError> {
-    let event = context.map_or_else(
+    let mut event = context.map_or_else(
         || {
             task_delivery::TaskCardEvent::from_recovered_terminal(
                 channel_id.get(),
@@ -92,11 +92,7 @@ async fn prepare_watcher_task_response(
         },
         |context| context.to_event(channel_id.get(), provider.as_str(), tmux_session_name),
     );
-    let clients = task_delivery::CardDeliveryClients::new([task_delivery::CardBot::new(
-        task_delivery::provider_bot_key(provider.as_str()),
-        http.clone(),
-    )]);
-    if let Some((claim, card_message_id)) = task_delivery::claim_existing_task_response_delivery(
+    if let Some(existing) = task_delivery::claim_existing_task_response_delivery(
         shared.pg_pool.as_ref(),
         channel_id.get(),
         provider.as_str(),
@@ -108,6 +104,10 @@ async fn prepare_watcher_task_response(
     .map_err(|error| {
         PrepareWatcherTaskResponseError::Transient(format!("resume watcher task response: {error}"))
     })? {
+        event = event.with_persisted_event_key(existing.event_key);
+        let clients =
+            watcher_card_clients(http, shared, provider, Some(existing.card_bot_key.as_str()))
+                .await?;
         if let Some(context) = context {
             let event = context.to_event(channel_id.get(), provider.as_str(), tmux_session_name);
             shared
@@ -116,12 +116,19 @@ async fn prepare_watcher_task_response(
                 .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
         }
         return Ok(PreparedWatcherTaskResponse {
-            claim,
-            card_message_id: MessageId::new(card_message_id),
+            claim: existing.outcome,
+            card_message_id: MessageId::new(existing.card_message_id),
             event,
             clients,
         });
     }
+    if context.is_none() {
+        return Err(PrepareWatcherTaskResponseError::Transient(
+            "recovered watcher turn has no durable response identity; refusing to create a second response fence"
+                .to_string(),
+        ));
+    }
+    let clients = watcher_card_clients(http, shared, provider, None).await?;
     let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
     let card = task_delivery::ensure_card(
         shared.pg_pool.as_ref(),
@@ -165,6 +172,50 @@ async fn prepare_watcher_task_response(
         event,
         clients,
     })
+}
+
+async fn watcher_card_clients(
+    provider_http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    persisted_bot_key: Option<&str>,
+) -> Result<task_delivery::CardDeliveryClients, PrepareWatcherTaskResponseError> {
+    let provider_key = task_delivery::provider_bot_key(provider.as_str());
+    let mut bots = Vec::new();
+    let needs_notify = persisted_bot_key.is_none() || persisted_bot_key == Some("notify");
+    if needs_notify && let Some(registry) = shared.health_registry() {
+        match crate::services::discord::health::resolve_bot_http(registry.as_ref(), "notify").await
+        {
+            Ok(http) => bots.push(task_delivery::CardBot::new("notify", http)),
+            Err((_status, error)) if persisted_bot_key == Some("notify") => {
+                return Err(PrepareWatcherTaskResponseError::Transient(format!(
+                    "persisted notify task-card bot is unavailable during watcher recovery: {error}"
+                )));
+            }
+            Err(_) => {}
+        }
+    } else if needs_notify && persisted_bot_key == Some("notify") {
+        return Err(PrepareWatcherTaskResponseError::Transient(
+            "persisted notify task-card bot cannot be resolved without a health registry"
+                .to_string(),
+        ));
+    }
+    if persisted_bot_key.is_none() || persisted_bot_key == Some(provider_key.as_str()) {
+        bots.push(task_delivery::CardBot::new(
+            provider_key.clone(),
+            provider_http.clone(),
+        ));
+    }
+    if let Some(persisted) = persisted_bot_key
+        && persisted != "notify"
+        && persisted != provider_key
+    {
+        return Err(PrepareWatcherTaskResponseError::Permanent(format!(
+            "persisted task-card bot identity {persisted} is not valid for provider {}",
+            provider.as_str()
+        )));
+    }
+    Ok(task_delivery::CardDeliveryClients::new(bots))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -827,7 +827,8 @@ fn meeting_delivery_result(result: DeliveryResult) -> Result<Option<serenity::Me
             tracing::info!(?reason, "[meeting] outbound delivery skipped");
             Ok(None)
         }
-        DeliveryResult::PermanentFailure { reason }
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
         | DeliveryResult::ConfirmedMissing { reason } => Err(reason),
     }
 }

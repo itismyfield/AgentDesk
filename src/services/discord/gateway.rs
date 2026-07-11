@@ -275,7 +275,8 @@ fn outbound_delivery_error(result: DeliveryResult) -> Result<Option<MessageId>, 
             );
             Ok(None)
         }
-        DeliveryResult::ConfirmedMissing { reason }
+        DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason }
         | DeliveryResult::PermanentFailure { reason } => Err(reason),
     }
 }

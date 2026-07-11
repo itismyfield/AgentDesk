@@ -336,17 +336,13 @@ where
                             return result;
                         }
                         release_reservation(reservation.as_mut());
-                        return DeliveryResult::PermanentFailure {
-                            reason: parent_error.to_string(),
-                        };
+                        return post_failure_result(parent_error);
                     }
                 }
             }
 
             release_reservation(reservation.as_mut());
-            DeliveryResult::PermanentFailure {
-                reason: error.to_string(),
-            }
+            post_failure_result(error)
         }
     }
 }
@@ -409,9 +405,7 @@ where
                     return Some(result);
                 }
                 release_reservation(reservation.as_deref_mut());
-                DeliveryResult::PermanentFailure {
-                    reason: error.to_string(),
-                }
+                post_failure_result(error)
             }
         },
     )
@@ -461,9 +455,7 @@ where
                     return result;
                 }
                 release_reservation(reservation.as_mut());
-                return DeliveryResult::PermanentFailure {
-                    reason: error.to_string(),
-                };
+                return post_failure_result(error);
             }
         };
         messages.push(DeliveredMessage::chunk_raw(
@@ -567,6 +559,15 @@ fn cancelled_delivery_result(cancel_token: Option<&CancelToken>) -> Option<Deliv
     cancel_requested(cancel_token).then(|| DeliveryResult::Skip {
         reason: "cancelled".into(),
     })
+}
+
+fn post_failure_result(error: DispatchMessagePostError) -> DeliveryResult {
+    let reason = error.to_string();
+    if error.is_transient() {
+        DeliveryResult::TransientFailure { reason }
+    } else {
+        DeliveryResult::PermanentFailure { reason }
+    }
 }
 
 fn resolve_reference(
@@ -923,7 +924,7 @@ mod tests {
         ));
         assert!(matches!(
             classified_edit_result(reqwest::StatusCode::INTERNAL_SERVER_ERROR, Some(10_008)).await,
-            DeliveryResult::PermanentFailure { .. }
+            DeliveryResult::TransientFailure { .. }
         ));
     }
 
@@ -1354,7 +1355,7 @@ mod tests {
             .count();
         let failure_count = [&first, &second]
             .iter()
-            .filter(|result| matches!(result, DeliveryResult::PermanentFailure { .. }))
+            .filter(|result| matches!(result, DeliveryResult::TransientFailure { .. }))
             .count();
         assert_eq!(sent_count, 1);
         assert_eq!(failure_count, 1);
@@ -1362,7 +1363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v3_dedup_reservation_releases_after_terminal_failure_for_retry() {
+    async fn v3_dedup_reservation_releases_after_transient_failure_for_retry() {
         let client = MockClient::default();
         client.fail_next_send();
         let dedup = OutboundDeduper::new();
@@ -1379,7 +1380,7 @@ mod tests {
         let first = deliver_outbound(&client, &dedup, make(), None).await;
         let second = deliver_outbound(&client, &dedup, make(), None).await;
 
-        assert!(matches!(first, DeliveryResult::PermanentFailure { .. }));
+        assert!(matches!(first, DeliveryResult::TransientFailure { .. }));
         assert!(matches!(second, DeliveryResult::Sent { .. }));
         assert_eq!(client.posts().len(), 2);
     }

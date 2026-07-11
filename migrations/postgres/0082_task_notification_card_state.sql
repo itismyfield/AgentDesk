@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
     event_key TEXT NOT NULL CHECK (btrim(event_key) <> ''),
     response_turn_key VARCHAR(64) NOT NULL
         CHECK (char_length(response_turn_key) = 64),
+    -- Actor-independent recovery alias. The live sink may know the frame key
+    -- while a restarted watcher only knows terminal offset/body identity.
+    recovery_turn_key VARCHAR(64)
+        CHECK (recovery_turn_key IS NULL OR char_length(recovery_turn_key) = 64),
     referenced_card_message_id BIGINT NOT NULL
         CHECK (referenced_card_message_id > 0),
     delivery_state TEXT NOT NULL
@@ -83,6 +87,11 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
 CREATE INDEX IF NOT EXISTS idx_task_notification_response_claim_lease
     ON task_notification_response_delivery (lease_expires_at)
     WHERE delivery_state IN ('claimed', 'sent');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_notification_response_recovery_key
+    ON task_notification_response_delivery
+        (channel_id, provider, session_key, recovery_turn_key)
+    WHERE recovery_turn_key IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_task_notification_response_retention
     ON task_notification_response_delivery (updated_at);
