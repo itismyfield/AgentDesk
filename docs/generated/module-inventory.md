@@ -677,7 +677,7 @@
 | `services::discord::session_relay_sink::idle_jsonl` | `src/services/discord/session_relay_sink/idle_jsonl.rs` | 565 | 393 | 172 |  |
 | `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 432 | 128 | 304 |  |
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 64 | 64 | 0 |  |
-| `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 779 | 486 | 293 |  |
+| `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 803 | 503 | 300 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1027 | 501 | 526 |  |
 | `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 235 | 235 | 0 |  |
 | `services::discord::session_runtime::restore_cwd` | `src/services/discord/session_runtime/restore_cwd.rs` | 353 | 353 | 0 |  |
@@ -706,8 +706,8 @@
 | `services::discord::task_notification_delivery::store` | `src/services/discord/task_notification_delivery/store.rs` | 999 | 999 | 0 |  |
 | `services::discord::task_notification_delivery::store::missing_card_replacement` | `src/services/discord/task_notification_delivery/store/missing_card_replacement.rs` | 189 | 189 | 0 |  |
 | `services::discord::task_notification_delivery::store::response_chunks` | `src/services/discord/task_notification_delivery/store/response_chunks.rs` | 569 | 569 | 0 |  |
-| `services::discord::task_notification_delivery::store::response_fence` | `src/services/discord/task_notification_delivery/store/response_fence.rs` | 996 | 996 | 0 |  |
-| `services::discord::task_notification_delivery::store::response_identity` | `src/services/discord/task_notification_delivery/store/response_identity.rs` | 111 | 93 | 18 |  |
+| `services::discord::task_notification_delivery::store::response_fence` | `src/services/discord/task_notification_delivery/store/response_fence.rs` | 999 | 999 | 0 |  |
+| `services::discord::task_notification_delivery::store::response_identity` | `src/services/discord/task_notification_delivery/store/response_identity.rs` | 121 | 96 | 25 |  |
 | `services::discord::task_supervisor` | `src/services/discord/task_supervisor.rs` | 105 | 83 | 22 |  |
 | `services::discord::terminal_ui_obligation` | `src/services/discord/terminal_ui_obligation.rs` | 570 | 507 | 63 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 2515 | 1624 | 891 | giant-file |

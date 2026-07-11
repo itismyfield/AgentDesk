@@ -41,15 +41,18 @@ impl ResponseTurnCoordinates {
                 .map(|offset| i64::try_from(offset).map_err(|_| format!("{name} exceeds BIGINT")))
                 .transpose()
         }
-        let coordinates = Self {
+        let mut coordinates = Self {
             start_offset: db_offset(start_offset, "turn_start_offset")?,
             end_offset: db_offset(end_offset, "turn_end_offset")?,
         };
+        // Normal head rotation rewrites the JSONL into a smaller coordinate
+        // space without changing the pinned logical-turn start. The start is
+        // still authoritative; the rebased end is no longer comparable.
         if matches!(
             (coordinates.start_offset, coordinates.end_offset),
             (Some(start), Some(end)) if end < start
         ) {
-            return Err("turn_end_offset precedes turn_start_offset".to_string());
+            coordinates.end_offset = None;
         }
         Ok(coordinates)
     }
@@ -104,8 +107,15 @@ mod tests {
 
     #[test]
     fn invalid_or_unrepresentable_coordinates_fail_before_claiming() {
-        assert!(ResponseTurnCoordinates::try_new(Some(101), Some(100)).is_err());
         assert!(ResponseTurnCoordinates::try_new(Some(i64::MAX as u64 + 1), None).is_err());
         assert!(ResponseTurnCoordinates::try_new(None, Some(i64::MAX as u64 + 1)).is_err());
+    }
+
+    #[test]
+    fn head_rotation_keeps_the_pinned_start_and_drops_the_rebased_end() {
+        let coordinates = ResponseTurnCoordinates::try_new(Some(20_000_000), Some(15_100_000))
+            .expect("normal JSONL head rotation remains claimable");
+        assert_eq!(coordinates.start_offset, Some(20_000_000));
+        assert_eq!(coordinates.end_offset, None);
     }
 }

@@ -9,7 +9,6 @@ use sqlx::{PgPool, Row};
 use super::super::TaskCardScope;
 use super::response_identity::{ResponseTurnCoordinates, TurnRelation, parse_turn_started_at};
 use super::{db_id, memory_fallback_unavailable, message_id};
-
 const RESPONSE_LEASE_SECONDS: i64 = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,15 +39,9 @@ impl ResponseDeliveryClaim {
     pub(in crate::services::discord) fn response_turn_key(&self) -> &str {
         &self.response_turn_key
     }
-
-    pub(in crate::services::discord) fn event_key(&self) -> &str {
-        &self.scope.event_key
-    }
-
     pub(in crate::services::discord) fn response_generation(&self) -> i32 {
         self.response_generation
     }
-
     pub(in crate::services::discord) fn card_message_id(&self) -> u64 {
         self.card_message_id
     }
@@ -277,7 +270,6 @@ async fn claim_response_delivery_pg(
             owner_token,
         }));
     }
-
     let mut rows = sqlx::query(
         "SELECT event_key, response_turn_key, recovery_turn_key,
                 turn_start_offset, turn_end_offset, response_generation,
@@ -331,7 +323,6 @@ async fn claim_response_delivery_pg(
         end_offset: current.get("turn_end_offset"),
     };
     let current_card: i64 = current.get("referenced_card_message_id");
-    let response_generation: i32 = current.get("response_generation");
     if current_event != scope.event_key || (!matched_by_event && current_card != card_message_id_db)
     {
         return Err("task response turn identity conflicts with another event/card".to_string());
@@ -344,12 +335,9 @@ async fn claim_response_delivery_pg(
             "task response recovery identity conflicts with the persisted alias".to_string(),
         );
     }
-    let blocked_active_turn = if matched_by_event {
-        coordinates.relation(current_coordinates) != TurnRelation::Same
-            || current_card != card_message_id_db
-    } else {
-        false
-    };
+    let same_event_turn =
+        !matched_by_event || coordinates.relation(current_coordinates) == TurnRelation::Same;
+    let blocked_active_turn = !same_event_turn || current_card != card_message_id_db;
     let state: String = current.get("delivery_state");
     if state == "delivered" {
         return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
@@ -396,21 +384,23 @@ async fn claim_response_delivery_pg(
             ResponseDeliveryClaimOutcome::SentUncommitted { card_message_id }
         });
     }
-    if blocked_active_turn {
+    if !same_event_turn {
         return Ok(ResponseDeliveryClaimOutcome::Wait);
     }
     if lease_active {
         return Ok(ResponseDeliveryClaimOutcome::Wait);
     }
-
-    let changed = sqlx::query(
+    let takeover = sqlx::query(
         "UPDATE task_notification_response_delivery
-         SET owner_kind = $7, owner_token = $8,
+         SET response_generation = response_generation
+                 + CASE WHEN referenced_card_message_id = $6 THEN 0 ELSE 1 END,
+             referenced_card_message_id = $6, owner_kind = $7, owner_token = $8,
              lease_expires_at = NOW() + make_interval(secs => $9), updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3
            AND event_key = $4 AND response_turn_key = $5
-           AND referenced_card_message_id = $6 AND delivery_state = 'claimed'
-           AND lease_expires_at <= NOW()",
+           AND referenced_card_message_id = $10 AND delivery_state = 'claimed'
+           AND lease_expires_at <= NOW()
+         RETURNING response_generation",
     )
     .bind(channel_id)
     .bind(&scope.provider)
@@ -421,16 +411,16 @@ async fn claim_response_delivery_pg(
     .bind(owner.as_str())
     .bind(&owner_token)
     .bind(RESPONSE_LEASE_SECONDS)
-    .execute(pool)
+    .bind(current_card)
+    .fetch_optional(pool)
     .await
-    .map_err(|error| format!("take over expired task response claim: {error}"))?
-    .rows_affected();
-    if changed == 1 {
+    .map_err(|error| format!("take over expired task response claim: {error}"))?;
+    if let Some(takeover) = takeover {
         Ok(ResponseDeliveryClaimOutcome::Owned(ResponseDeliveryClaim {
             scope: scope.clone(),
             response_turn_key: canonical_turn_key,
             card_message_id,
-            response_generation,
+            response_generation: takeover.get("response_generation"),
             owner_token,
         }))
     } else {
@@ -624,7 +614,6 @@ enum MemoryResponseState {
     Sent,
     Delivered,
 }
-
 #[derive(Clone, Debug)]
 struct MemoryResponseRow {
     event_key: String,
@@ -738,14 +727,21 @@ fn claim_response_delivery_memory(
             return Ok(ResponseDeliveryClaimOutcome::Wait);
         }
     }
-    let blocked_active_turn = matched_by_event
-        && rows.get(&key).is_some_and(|row| {
-            coordinates.relation(row.coordinates) != TurnRelation::Same
-                || row.card_message_id != card_message_id
-        });
-    if blocked_active_turn {
+    let same_event_turn = !matched_by_event
+        || !rows.contains_key(&key)
+        || rows
+            .get(&key)
+            .is_some_and(|row| coordinates.relation(row.coordinates) == TurnRelation::Same);
+    let blocked_sent = !same_event_turn
+        || rows
+            .get(&key)
+            .is_some_and(|row| row.card_message_id != card_message_id);
+    if blocked_sent
+        && rows
+            .get(&key)
+            .is_some_and(|row| row.state == MemoryResponseState::Sent)
+    {
         if let Some(row) = rows.get_mut(&key)
-            && row.state == MemoryResponseState::Sent
             && row.lease_expires_at.is_some_and(|expiry| expiry <= now)
         {
             row.state = MemoryResponseState::Delivered;
@@ -753,6 +749,9 @@ fn claim_response_delivery_memory(
             row.lease_expires_at = None;
             row.delivered_at = Some(chrono::Utc::now());
         }
+        return Ok(ResponseDeliveryClaimOutcome::Wait);
+    }
+    if !same_event_turn {
         return Ok(ResponseDeliveryClaimOutcome::Wait);
     }
     match rows.get_mut(&key) {
@@ -811,6 +810,10 @@ fn claim_response_delivery_memory(
             return Ok(ResponseDeliveryClaimOutcome::Wait);
         }
         Some(row) => {
+            if row.card_message_id != card_message_id {
+                row.response_generation += 1;
+            }
+            row.card_message_id = card_message_id;
             row.owner_token = Some(owner_token.clone());
             row.lease_expires_at = Some(now + Duration::from_secs(RESPONSE_LEASE_SECONDS as u64));
         }

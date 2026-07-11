@@ -865,7 +865,7 @@ impl SessionBoundDiscordRelaySink {
                     provider = provider.as_str(),
                     channel_id,
                     tmux_session = %delivery.session_name,
-                    "task response is owned by another live delivery claimant"
+                    "task response is deferred to the watcher or owned by another live claimant"
                 );
                 return Ok(SessionRelayDeliveryOutcome::NotDelivered);
             }

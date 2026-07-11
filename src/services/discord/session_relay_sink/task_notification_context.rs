@@ -25,6 +25,13 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
 use crate::services::provider::ProviderKind;
 
+fn defer_task_response_to_watcher(
+    turn_start_offset: Option<u64>,
+    terminal_consumed_end: Option<u64>,
+) -> bool {
+    turn_start_offset.is_none() && terminal_consumed_end.is_none()
+}
+
 /// Shared priority rule for the legacy kind marker and its richer context.
 /// Keeping it with task-context orchestration avoids growing the giant sink
 /// root with another task-specific policy implementation.
@@ -143,7 +150,17 @@ pub(super) async fn ensure_card_and_route(
         delivery.task_notification_context.as_ref(),
     )
     .await?;
-    let response_claim = if let (Some(message_id), Some(context)) =
+    let response_claim = if card.is_some()
+        && delivery.task_notification_context.is_some()
+        && defer_task_response_to_watcher(
+            delivery.frame_turn_start_offset,
+            delivery.terminal_consumed_end,
+        ) {
+        // A frame with no monotonic coordinate cannot be reconciled against
+        // delivered tombstones without risking either suppression or replay.
+        // The watcher owns the real consumed end and will retry this response.
+        Some(ResponseDeliveryClaimOutcome::Wait)
+    } else if let (Some(message_id), Some(context)) =
         (card, delivery.task_notification_context.as_ref())
     {
         let turn_key = durable_response_turn_key(
@@ -496,6 +513,13 @@ mod tests {
         TaskCardTransportError, mark_task_response_delivered,
     };
     use crate::services::session_backend::StreamLineState;
+
+    #[test]
+    fn coordinate_less_task_response_defers_until_watcher_has_a_consumed_end() {
+        assert!(defer_task_response_to_watcher(None, None));
+        assert!(!defer_task_response_to_watcher(Some(10), None));
+        assert!(!defer_task_response_to_watcher(None, Some(20)));
+    }
 
     struct OrderedTransport {
         fail: AtomicBool,

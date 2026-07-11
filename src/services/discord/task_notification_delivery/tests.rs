@@ -2761,6 +2761,91 @@ async fn replacement_card_cannot_partition_active_response_authority_pg() {
 }
 
 #[tokio::test]
+async fn expired_claim_rebinds_during_same_turn_event_fallback_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_expired_replacement_4446",
+        "expired same-turn claim moves to the confirmed replacement card",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("expired-replacement-card-response");
+    let first_key = response_turn_key(44_460, "2026-07-12 06:00:00", Some(120_000));
+    let first = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &first_key,
+        Some(&first_key),
+        Some("2026-07-12 06:00:00"),
+        Some(120_000),
+        Some(120_050),
+        90_060,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim response on deleted card");
+    let ResponseDeliveryClaimOutcome::Owned(first) = first else {
+        panic!("first owner must claim the deleted card")
+    };
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE response_turn_key = $1",
+    )
+    .bind(&first_key)
+    .execute(&pool)
+    .await
+    .expect("expire crashed original owner");
+
+    let fallback_key = response_turn_key(44_461, "2026-07-12 06:00:01", Some(120_001));
+    let replacement = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &fallback_key,
+        Some(&fallback_key),
+        Some("2026-07-12 06:00:01"),
+        Some(120_000),
+        Some(120_050),
+        90_061,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("take over expired same-turn authority on replacement card");
+    let ResponseDeliveryClaimOutcome::Owned(replacement) = replacement else {
+        panic!("same turn must recover instead of waiting forever")
+    };
+    assert_eq!(replacement.card_message_id, 90_061);
+    assert_eq!(replacement.response_generation(), 2);
+    assert!(
+        mark_task_response_sent(Some(&pool), &first).await.is_err(),
+        "crashed owner's stale card/token cannot commit after takeover"
+    );
+    mark_task_response_sent(Some(&pool), &replacement)
+        .await
+        .expect("replacement-card owner records the accepted response");
+    mark_task_response_delivered(Some(&pool), &replacement)
+        .await
+        .expect("replacement-card owner finalizes the exact response");
+    let persisted_card: i64 = sqlx::query_scalar(
+        "SELECT referenced_card_message_id
+         FROM task_notification_response_delivery WHERE response_turn_key = $1",
+    )
+    .bind(&first_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load recovered response authority");
+    assert_eq!(persisted_card, 90_061);
+}
+
+#[tokio::test]
 async fn missing_required_reference_replaces_once_and_exactly_rebinds_response() {
     let transport = FakeTransport::new();
     let clients = clients();
