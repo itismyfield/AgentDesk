@@ -3324,6 +3324,82 @@ async fn active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg() {
 }
 
 #[tokio::test]
+async fn rotated_turn_cannot_consume_a_later_reused_numeric_start_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_response_rotation_epoch_4446",
+        "rotated tombstone cannot alias a later numeric start",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("rotation-reused-start-response-cycle");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("confirm card");
+    let rotated_key = response_turn_key(4_446, "2026-07-12 04:25:00", Some(20_000_000));
+    let rotated = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &rotated_key,
+        Some(&rotated_key),
+        Some("2026-07-12 04:25:00"),
+        Some(20_000_000),
+        Some(15_100_000),
+        card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("claim the turn that crossed a head rotation");
+    let ResponseDeliveryClaimOutcome::Owned(rotated) = rotated else {
+        panic!("rotated turn owns its response fence")
+    };
+    mark_task_response_delivered(Some(&pool), &rotated)
+        .await
+        .expect("deliver rotated turn");
+
+    let later_key = response_turn_key(4_447, "2026-07-12 04:25:01", Some(20_000_000));
+    let later = claim_task_response_delivery_with_recovery_key_and_started_at(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &later_key,
+        Some(&later_key),
+        Some("2026-07-12 04:25:01"),
+        Some(20_000_000),
+        Some(20_100_000),
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("later turn compares in the current coordinate space");
+    assert!(
+        matches!(later, ResponseDeliveryClaimOutcome::Owned(_)),
+        "a later turn reusing the old numeric start must retain POST authority"
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE event_key = $1",
+    )
+    .bind(event.event_key())
+    .fetch_one(&pool)
+    .await
+    .expect("count rotation-separated response rows");
+    assert_eq!(rows, 2);
+}
+
+#[tokio::test]
 async fn offset_null_turns_use_exact_consumed_end_instead_of_delivery_time_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_task_response_legacy_sequential_4446",

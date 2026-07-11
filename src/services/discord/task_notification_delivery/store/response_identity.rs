@@ -46,13 +46,15 @@ impl ResponseTurnCoordinates {
             end_offset: db_offset(end_offset, "turn_end_offset")?,
         };
         // Normal head rotation rewrites the JSONL into a smaller coordinate
-        // space without changing the pinned logical-turn start. The start is
-        // still authoritative; the rebased end is no longer comparable.
+        // space. A pre-rotation start must not survive as an ordinary numeric
+        // coordinate: the new file can later grow back to that same number and
+        // make a distinct turn look identical. Keep only the post-rotation end,
+        // which cannot collide with a later range that starts above it.
         if matches!(
             (coordinates.start_offset, coordinates.end_offset),
             (Some(start), Some(end)) if end < start
         ) {
-            coordinates.end_offset = None;
+            coordinates.start_offset = None;
         }
         Ok(coordinates)
     }
@@ -112,10 +114,19 @@ mod tests {
     }
 
     #[test]
-    fn head_rotation_keeps_the_pinned_start_and_drops_the_rebased_end() {
+    fn head_rotation_drops_the_stale_start_and_keeps_the_rebased_end() {
         let coordinates = ResponseTurnCoordinates::try_new(Some(20_000_000), Some(15_100_000))
             .expect("normal JSONL head rotation remains claimable");
-        assert_eq!(coordinates.start_offset, Some(20_000_000));
-        assert_eq!(coordinates.end_offset, None);
+        assert_eq!(coordinates.start_offset, None);
+        assert_eq!(coordinates.end_offset, Some(15_100_000));
+    }
+
+    #[test]
+    fn rotated_turn_cannot_alias_a_later_turn_at_the_old_numeric_start() {
+        let rotated = ResponseTurnCoordinates::try_new(Some(20_000_000), Some(15_100_000))
+            .expect("rotated range");
+        let later = ResponseTurnCoordinates::try_new(Some(20_000_000), Some(20_100_000))
+            .expect("later range in the new coordinate space");
+        assert_eq!(later.relation(rotated), TurnRelation::Distinct);
     }
 }
