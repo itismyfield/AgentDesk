@@ -377,6 +377,7 @@ class PrAnalyzerScratchPathTests(unittest.TestCase):
         self.assertTrue(is_scratch_file_path("scratchpad.sh"))
         self.assertTrue(is_scratch_file_path("scratch-check.sql"))
         self.assertTrue(is_scratch_file_path("test_cli.rs"))
+        self.assertTrue(is_scratch_file_path("verify.sh"))
 
     def test_checked_in_scripts_and_migrations_are_not_scratch(self):
         self.assertFalse(is_scratch_file_path("scripts/deploy-release.sh"))
@@ -394,6 +395,7 @@ class CiScriptScratchGuardTests(unittest.TestCase):
         script = Path("scripts/ci-script-checks.sh").read_text()
 
         self.assertIn("scratch.sh", script)
+        self.assertIn("verify.sh", script)
         self.assertIn("scratchpad.sh", script)
         self.assertIn("scratch[._-]*.sh", script)
         self.assertIn("scratchpad[._-]*.sh", script)

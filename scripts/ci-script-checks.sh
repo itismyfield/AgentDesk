@@ -95,7 +95,7 @@ echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
 
 echo "=== Scratch file guard ==="
 FAIL=0
-for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql; do
+for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql verify.sh; do
   if [ -f "$scratch_file" ]; then
     echo "ERROR: Scratch file detected in repository root: $scratch_file"
     FAIL=1
