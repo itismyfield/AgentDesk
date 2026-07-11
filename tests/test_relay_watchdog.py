@@ -361,6 +361,32 @@ class TranscriptRecheckTests(unittest.TestCase):
                     self.fail(f"malformed persisted path escaped recheck: {exc!r}")
                 self.assertIsNone(candidate)
 
+    def test_directory_fstat_errors_fail_closed_as_unsafe_paths(self):
+        real_fstat = relay_watchdog.os.fstat
+        for failing_directory_index in (1, 2):
+            with self.subTest(failing_directory_index=failing_directory_index):
+                directory_calls = 0
+
+                def fail_selected_directory_fstat(descriptor):
+                    nonlocal directory_calls
+                    opened = real_fstat(descriptor)
+                    if stat.S_ISDIR(opened.st_mode):
+                        directory_calls += 1
+                        if directory_calls == failing_directory_index:
+                            raise OSError("injected directory fstat failure")
+                    return opened
+
+                with mock.patch.object(
+                    relay_watchdog.os,
+                    "fstat",
+                    side_effect=fail_selected_directory_fstat,
+                ):
+                    result = relay_watchdog.assistant_blocks(self.transcript)
+
+                self.assertEqual(directory_calls, failing_directory_index)
+                self.assertEqual(result.blocks, [])
+                self.assertEqual(result.error, "UnsafePath")
+
     def test_symlink_escape_is_rejected_across_recheck_discovery_and_read(self):
         other_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(other_tmp.cleanup)
@@ -4368,6 +4394,70 @@ class TickChannelTests(unittest.TestCase):
         self.assertFalse(
             any("recovered-gap-guard-reclaimed" in line for line in rt.log_lines)
         )
+
+    def test_invariant_4435_guard_directory_fstat_errors_keep_floor_and_tick_running(self):
+        selected = self.proj_dir / "fstat-selected.jsonl"
+        selected.write_text("{}\n", encoding="utf-8")
+        hidden_project = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260709-150500"
+        )
+        hidden_project.mkdir()
+        target = hidden_project / "fstat-hidden-recovered.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        path = str(target)
+        real_fstat = relay_watchdog.os.fstat
+
+        for failing_directory_index in (1, 2):
+            with self.subTest(failing_directory_index=failing_directory_index):
+                state = {
+                    "999": {
+                        relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                            path: {
+                                "size": target.stat().st_size,
+                                "confirmed_at": self.now,
+                                "last_seen_at": self.now,
+                                "absent_since": None,
+                            }
+                        },
+                        DELIVERED_WATERMARKS_KEY: {
+                            path: {
+                                "delivered_ts": self.now - 2000,
+                                "updated_at": self.now,
+                            }
+                        },
+                    }
+                }
+                directory_calls = 0
+
+                def fail_selected_directory_fstat(descriptor):
+                    nonlocal directory_calls
+                    opened = real_fstat(descriptor)
+                    if stat.S_ISDIR(opened.st_mode):
+                        directory_calls += 1
+                        if directory_calls == failing_directory_index:
+                            raise OSError("injected recovered-guard directory fstat failure")
+                    return opened
+
+                with (
+                    mock.patch.object(
+                        relay_watchdog,
+                        "channel_project_dirs",
+                        return_value=[self.proj_dir],
+                    ),
+                    mock.patch.object(
+                        relay_watchdog.os,
+                        "fstat",
+                        side_effect=fail_selected_directory_fstat,
+                    ),
+                ):
+                    tick_channel(self.make_rt(), TICK_CHANNEL, state, self.now + 1)
+
+                chs = state["999"]
+                guard = relay_watchdog._validated_recovered_gap_guards(chs)[path]
+                self.assertGreaterEqual(directory_calls, failing_directory_index)
+                self.assertIsNone(guard[3])
+                self.assertGreater(delivered_watermark_for_path(chs, target), 0.0)
+                self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(selected))
 
     def test_invariant_4435_unchanged_guards_are_not_parsed_and_metadata_settles(self):
         selected = self.proj_dir / "guard-perf-selected.jsonl"

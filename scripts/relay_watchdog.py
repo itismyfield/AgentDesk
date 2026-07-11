@@ -483,7 +483,7 @@ def _open_regular_file_beneath_parent(
         try:
             opened_root = os.fstat(root_descriptor)
         except OSError:
-            return RECOVERED_GAP_PATH_AMBIGUOUS
+            return None
         if not stat_mode.S_ISDIR(opened_root.st_mode) or not _same_file_identity(
             expected_root, opened_root
         ):
@@ -503,7 +503,7 @@ def _open_regular_file_beneath_parent(
             try:
                 opened_directory = os.fstat(child_descriptor)
             except OSError:
-                return RECOVERED_GAP_PATH_AMBIGUOUS
+                return None
             if not stat_mode.S_ISDIR(
                 opened_directory.st_mode
             ) or not _same_file_identity(expected_directory, opened_directory):
@@ -858,7 +858,10 @@ def _recovered_gap_path_presence_beneath_root(
         except (OSError, NotImplementedError, TypeError, ValueError, UnicodeError):
             return RECOVERED_GAP_PATH_AMBIGUOUS
         descriptors.append(root_descriptor)
-        opened_root = os.fstat(root_descriptor)
+        try:
+            opened_root = os.fstat(root_descriptor)
+        except OSError:
+            return RECOVERED_GAP_PATH_AMBIGUOUS
         if not stat_mode.S_ISDIR(opened_root.st_mode) or not _same_file_identity(
             expected_root, opened_root
         ):
@@ -885,7 +888,10 @@ def _recovered_gap_path_presence_beneath_root(
             except (OSError, NotImplementedError, TypeError, ValueError):
                 return RECOVERED_GAP_PATH_AMBIGUOUS
             descriptors.append(child_descriptor)
-            opened_directory = os.fstat(child_descriptor)
+            try:
+                opened_directory = os.fstat(child_descriptor)
+            except OSError:
+                return RECOVERED_GAP_PATH_AMBIGUOUS
             if not stat_mode.S_ISDIR(
                 opened_directory.st_mode
             ) or not _same_file_identity(expected_directory, opened_directory):
