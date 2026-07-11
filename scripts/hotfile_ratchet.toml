@@ -125,7 +125,7 @@
 # #3833: 4007 -> 999 by moving external-input ownership, synthetic-start, and
 # Claude idle-tail/runtime/bridge glue into `tui_prompt_relay/` child modules;
 # behavior-preserving decomposition.
-"src/services/discord/tui_prompt_relay.rs" = 992 # 2026-07-05 lock-in: 999 -> 992, file shrank independently; ratchet down per gate NOTE.
+"src/services/discord/tui_prompt_relay.rs" = 907 # 2026-07-11 #4055: 992 -> 907, task-notification prompt handling moved to tui_prompt_relay/task_notification_prompt.rs; lock in the smaller hotfile.
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
 # turn_bridge/status_panel.rs; this is the minimal call-site cost.
