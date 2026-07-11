@@ -184,6 +184,13 @@ mod alert_authority_tests {
         .execute(&pool)
         .await
         .expect("seed regression-shaped daily quality row");
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ('agent_quality_monitoring_channel_id', 'quality-alerts')",
+        )
+        .execute(&pool)
+        .await
+        .expect("configure the canonical alerter target");
 
         let report = run_agent_quality_rollup_pg(&pool)
             .await
