@@ -4086,10 +4086,13 @@ class TickChannelTests(unittest.TestCase):
                     for path in [selected, *pending]
                 }
                 | {
-                    "/unrelated-newer.jsonl": {
+                    f"/unrelated-newer-{index:03d}.jsonl": {
                         "delivered_ts": anchor - 1,
                         "updated_at": self.now + 100,
                     }
+                    for index in range(
+                        relay_watchdog.MAX_RECOVERED_GAP_GUARDS
+                    )
                 },
                 "alerting": True,
                 "gap_since": self.now - 2000,
@@ -4116,8 +4119,7 @@ class TickChannelTests(unittest.TestCase):
             "a recovered GAP owner must retain its delivery authority at full cap",
         )
         self.assertEqual(
-            len(delivered_watermarks(chs)),
-            len({str(path) for path in [selected, *pending, *gap_owners]}) + 1,
+            len(delivered_watermarks(chs)), MAX_DELIVERED_WATERMARKS
         )
 
         growth_text = "delivered growth after GAP recovery"
@@ -4140,7 +4142,7 @@ class TickChannelTests(unittest.TestCase):
         pressure_paths: list[Path] = []
         for wave in range(2):
             wave_texts: list[str] = []
-            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS):
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1):
                 path = self.proj_dir / f"wave-{wave}-{index:02d}.jsonl"
                 text = f"delivered pressure wave {wave} item {index:02d}"
                 path.write_text(record(text) + "\n", encoding="utf-8")
