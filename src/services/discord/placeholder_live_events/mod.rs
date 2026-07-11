@@ -130,7 +130,14 @@ impl PlaceholderLiveEvents {
                 // entry alive when it carries one even with no footer residuals,
                 // otherwise the whole entry (and the anchor) would be dropped here
                 // before the turn renders its request link.
-                has_residuals || guard.request_user_msg_id.is_some()
+                // #4451: the one-shot session-banner claim is likewise scoped to
+                // the live session, not the turn. A 30s recovery redrive performs
+                // this cleanup while the same session is still alive, so retain
+                // the entry until a full channel clear or a new identity replaces
+                // the claim.
+                has_residuals
+                    || guard.request_user_msg_id.is_some()
+                    || guard.has_session_banner_claim()
             });
         if !keep_entry {
             self.status_by_channel.remove(&channel_id);

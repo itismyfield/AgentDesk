@@ -1580,6 +1580,76 @@ fn session_banner_reemits_once_on_new_session_boundary() {
     );
 }
 
+/// #4451 — stall-watchdog recovery can perform the normal turn cleanup every
+/// 30 seconds while the tmux/provider session remains alive. That cleanup must
+/// not discard the session-scoped banner claim and re-post the same banner on
+/// every lifecycle refresh.
+#[test]
+fn session_banner_claim_survives_repeated_turn_cleanup_redrive() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(44_510);
+    let instance_key = "AgentDesk-codex-ch4451#stable-spawn";
+    let details = json!({
+        "provider_session_id": "session-stable",
+        "tmux_reused": true
+    });
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &details,
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+            .is_some(),
+        "the live session gets its initial one-shot banner"
+    );
+
+    // Match the incident's repeated 30-second cleanup/redrive cadence. Each
+    // refresh restores the same lifecycle snapshot after turn-local state was
+    // cleared; none may re-arm the already-claimed session banner.
+    for redrive in 1..=12 {
+        events.clear_channel_preserving_footer_residuals(channel_id);
+        let _ = events.set_session_panel_lifecycle_event(
+            channel_id,
+            Some(instance_key),
+            "session_resumed",
+            &details,
+        );
+        assert!(
+            events
+                .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+                .is_none(),
+            "same-session redrive #{redrive} must not re-post the banner"
+        );
+    }
+
+    // The retained claim must not suppress a genuine new session identity.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-codex-ch4451#new-spawn"),
+        "session_fresh",
+        &json!({
+            "provider_session_id": "session-new",
+            "tmux_reused": false
+        }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+            .is_some(),
+        "a genuine new session identity still re-arms the banner"
+    );
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+            .is_none(),
+        "the new session remains one-shot"
+    );
+}
+
 /// #3983 item4 — with no live tmux marker (`session_instance_key == None`) the
 /// dedup falls back to the provider session id, so a headless session still
 /// banners exactly once and a genuinely different provider session re-arms it.

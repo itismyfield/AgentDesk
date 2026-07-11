@@ -218,9 +218,22 @@ impl StatusPanelState {
             // #3391: carry the counter so a residual ordinal is never reissued.
             next_slot_ordinal: self.next_slot_ordinal,
             request_user_msg_id: self.request_user_msg_id, // #3811: survive turn reset
+            // #4451: this claim is session-scoped, not turn-scoped. The health
+            // redrive path can run ordinary turn cleanup every 30 seconds while
+            // the same tmux/provider session remains alive. Dropping the claim
+            // here re-posted the same one-shot banner on every redrive.
+            session_banner_emitted_key: self.session_banner_emitted_key.clone(),
             ..StatusPanelState::default()
         };
         has_residuals
+    }
+
+    /// #4451: a claimed session banner is durable turn bookkeeping. Keep the
+    /// channel state entry across ordinary turn cleanup even when it carries no
+    /// footer residuals or request anchor, otherwise removing the entry would
+    /// discard the preserved claim immediately.
+    pub(super) fn has_session_banner_claim(&self) -> bool {
+        self.session_banner_emitted_key.is_some()
     }
 
     pub(super) fn apply(&mut self, event: StatusEvent) {
