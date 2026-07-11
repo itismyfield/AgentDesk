@@ -175,6 +175,7 @@ class TranscriptResolutionTests(unittest.TestCase):
         selected = select_watch_transcript(
             [growing, newer_stagnant],
             {str(growing.path): 100, str(newer_stagnant.path): 200},
+            semantic_growth_paths={str(growing.path)},
         )
         self.assertEqual(selected, growing.path)
 
@@ -1137,6 +1138,32 @@ class StateTests(unittest.TestCase):
         self.assertEqual(len(delivered_watermarks(state)), MAX_DELIVERED_WATERMARKS)
         self.assertEqual(delivered_watermark_for_path(state, selected), 50.0)
 
+    def test_invariant_4435_all_active_pending_watermarks_are_pinned(self):
+        selected = "/selected.jsonl"
+        pending = [
+            f"/pending-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        state: dict = {
+            SELECTED_TRANSCRIPT_KEY: selected,
+            "pending_transcripts": pending,
+        }
+        for index, path in enumerate([selected, *pending]):
+            self.assertTrue(
+                advance_delivered_watermark(state, path, 10.0 + index, 20.0)
+            )
+        for index in range(MAX_DELIVERED_WATERMARKS + 5):
+            advance_delivered_watermark(
+                state,
+                f"/unrelated-{index:02d}.jsonl",
+                100.0 + index,
+                1000.0 + index,
+            )
+
+        retained = delivered_watermarks(state)
+        self.assertEqual(len(retained), MAX_DELIVERED_WATERMARKS)
+        self.assertTrue(set([selected, *pending]) <= set(retained))
+
 
 class RuntimePgProbeTests(unittest.TestCase):
     def test_health_detail_db_false_is_classified_by_nc_closed(self):
@@ -1546,13 +1573,13 @@ class TickChannelTests(unittest.TestCase):
         rt.live_sessions = {expected_tmux_session_name(TICK_CHANNEL)}
         rt.watcher_probe = probe
 
-    def test_growth_aware_selector_is_wired_into_tick(self):
-        growing = self.proj_dir / "growing.jsonl"
+    def test_metadata_only_growth_cannot_steal_live_selection(self):
+        stale_compact = self.proj_dir / "stale-compact.jsonl"
         stagnant_dir = self.projects / (
             "-Users-alice--adk-release-worktrees-claude-adk-cc-20260710-140500"
         )
         stagnant_dir.mkdir()
-        stagnant = stagnant_dir / "stagnant.jsonl"
+        current = stagnant_dir / "current.jsonl"
 
         def record(epoch: float, text: str) -> str:
             return json.dumps(
@@ -1565,34 +1592,77 @@ class TickChannelTests(unittest.TestCase):
                 }
             )
 
-        growing.write_text(
-            record(self.now - 2000, "missing from older growing transcript") + "\n",
+        stale_compact.write_text(
+            "".join(
+                record(self.now - 3000 - index, f"old missing block {index}") + "\n"
+                for index in range(490)
+            ),
             encoding="utf-8",
         )
-        stagnant.write_text(
-            record(self.now - 2000, "newer stagnant block landed") + "\n",
+        current.write_text(
+            record(self.now - 30, "current live block landed") + "\n",
             encoding="utf-8",
         )
-        os.utime(growing, (self.now - 100, self.now - 100))
-        os.utime(stagnant, (self.now, self.now))
+        os.utime(stale_compact, (self.now - 100, self.now - 100))
+        os.utime(current, (self.now, self.now))
         rt = self.make_rt()
-        rt.haystack = norm("newer stagnant block landed")
+        rt.haystack = norm("current live block landed")
         state: dict = {}
 
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.alerts, [], "first tick must use mtime fallback")
-        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(stagnant))
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
 
-        with growing.open("a", encoding="utf-8") as f:
-            f.write("\n")
-        # Keep the growing file's mtime older than the stagnant candidate: only
-        # size growth can make it win on the second tick.
-        os.utime(growing, (self.now - 50, self.now - 50))
-        os.utime(stagnant, (self.now, self.now))
+        with stale_compact.open("a", encoding="utf-8") as f:
+            f.write("\n" + json.dumps({"type": "queue-operation"}) + "\n")
+        # This is the live #4435 recurrence: compact/dead transcript metadata
+        # grows and gets a fresh mtime, but no deliverable assistant row exists.
+        os.utime(stale_compact, (self.now + 1, self.now + 1))
         tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
-        self.assertEqual(len(rt.alerts), 1)
-        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
-        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(growing))
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertTrue(
+            any(
+                f"transcript-growth-ignored reason=non-semantic path={stale_compact}"
+                in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_timestamped_assistant_growth_can_switch_selection(self):
+        prior = self.proj_dir / "prior.jsonl"
+        current_dir = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260710-140500"
+        )
+        current_dir.mkdir()
+        current = current_dir / "current.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        prior.write_text(record(self.now - 60, "prior delivered") + "\n", encoding="utf-8")
+        current.write_text(record(self.now - 30, "current delivered") + "\n", encoding="utf-8")
+        os.utime(prior, (self.now - 100, self.now - 100))
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("prior delivered current delivered semantic growth delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        with prior.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now + 1, "semantic growth delivered") + "\n")
+        os.utime(prior, (self.now - 50, self.now - 50))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(prior))
         self.assertTrue(
             any("transcript-select reason=growth" in line for line in rt.log_lines)
         )
@@ -1600,7 +1670,20 @@ class TickChannelTests(unittest.TestCase):
     def _grow_selected_transcript(self) -> None:
         tr = self.proj_dir / "s.jsonl"
         with tr.open("a", encoding="utf-8") as f:
-            f.write("\n")
+            f.write(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now)
+                        ),
+                        "message": {
+                            "content": [{"type": "text", "text": "selector growth"}]
+                        },
+                    }
+                )
+                + "\n"
+            )
         os.utime(tr, (self.now, self.now))
 
     def test_selector_divergence_alerts_only_after_swap_confirm(self):
@@ -2794,6 +2877,17 @@ class TickChannelTests(unittest.TestCase):
             )
         )
 
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[]
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        self.assertIn(
+            str(final),
+            state["999"]["pending_transcripts"],
+            "a torn debut must retain authority across a discovery miss",
+        )
+        self.assertNotIn(str(final), state["999"]["transcript_sizes"])
+
         final.write_text(final_record + "\n", encoding="utf-8")
         with current.open("a", encoding="utf-8") as stream:
             stream.write(record(anchor + 2, "current second growth delivered") + "\n")
@@ -2842,6 +2936,7 @@ class TickChannelTests(unittest.TestCase):
         os.utime(malformed, (self.now + 1, self.now + 1))
         state["999"]["alerting"] = True
         state["999"]["gap_since"] = self.now - 60
+        state["999"][relay_watchdog.GAP_TRANSCRIPT_KEY] = str(malformed)
 
         for offset in range(2, 5):
             tick_channel(rt, TICK_CHANNEL, state, self.now + offset)
@@ -2854,12 +2949,57 @@ class TickChannelTests(unittest.TestCase):
         self.assertFalse(state["999"].get("alerting", False))
         self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
 
-        tick_channel(rt, TICK_CHANNEL, state, self.now + 5)
+        for offset in range(5, 9):
+            with malformed.open("ab") as stream:
+                stream.write(b"\xff")
+            os.utime(malformed, (self.now + offset, self.now + offset))
+            tick_channel(rt, TICK_CHANNEL, state, self.now + offset)
         self.assertEqual(
             len([body for body, _ in rt.alerts if "평가 불능 에스컬레이션" in body]),
             1,
         )
+        self.assertIn(
+            str(malformed), state["999"]["retired_transcripts"]
+        )
         self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_selected_read_failure_escalates_and_quarantines(self):
+        selected = self.proj_dir / "selected.jsonl"
+        anchor = float(int(self.now - 30))
+        selected.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "selected delivered"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt(read_fail_alert_after=3)
+        rt.haystack = norm("selected delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        with selected.open("ab") as stream:
+            stream.write(b"\xff\n")
+        for offset in range(1, 4):
+            os.utime(selected, (self.now + offset, self.now + offset))
+            tick_channel(rt, TICK_CHANNEL, state, self.now + offset)
+
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 불능 에스컬레이션" in body]),
+            1,
+        )
+        self.assertIn(str(selected), state["999"]["retired_transcripts"])
+        self.assertNotEqual(
+            state["999"].get(SELECTED_TRANSCRIPT_KEY), str(selected)
+        )
 
     def test_invariant_4435_stale_pending_gap_expires_without_realert_loop(self):
         current = self.proj_dir / "current.jsonl"
@@ -2911,6 +3051,44 @@ class TickChannelTests(unittest.TestCase):
             len([body for body, _ in rt.alerts if "평가 권한 만료" in body]), 1
         )
         self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_unrelated_pending_retirement_preserves_live_gap(self):
+        rt = self.gap_rt()
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+        selected = chs[SELECTED_TRANSCRIPT_KEY]
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], selected)
+        chs["issue_url"] = "https://example.test/issues/existing"
+        original_gap_since = chs["gap_since"]
+
+        unrelated = self.proj_dir / "unrelated-pending.jsonl"
+        unrelated.write_text("{}\n", encoding="utf-8")
+        os.utime(unrelated, (self.now, self.now))
+        chs["transcript_sizes"][str(unrelated)] = unrelated.stat().st_size
+        chs["transcript_seen_at"][str(unrelated)] = self.now
+        chs["pending_transcripts"] = [str(unrelated)]
+        chs["pending_transcript_since"] = {
+            str(unrelated): self.now - rt.cfg.idle_quiet_secs - 1
+        }
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertEqual(
+            chs["issue_url"], "https://example.test/issues/existing"
+        )
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], selected)
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+        self.assertTrue(
+            any(
+                "unrelated transcript retirement preserved live gap authority"
+                in line
+                for line in rt.log_lines
+            )
+        )
 
     def test_invariant_4435_deleted_anchor_uses_watermark_over_touched_dead_path(self):
         deleted_anchor = self.proj_dir / "deleted-current.jsonl"
