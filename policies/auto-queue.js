@@ -523,16 +523,19 @@ var autoQueue = {
     // #815: `user_cancelled` entries are deliberately excluded here — they
     // represent an explicit operator stop and must never be resurrected by
     // the tick. Only `pending` entries are re-dispatchable.
+    // The lateral LIMIT 1 lets (run_id, status, updated_at) serve one oldest-row
+    // lookup per run instead of aggregating every pending entry.
     var activeRuns = agentdesk.db.query(
       "SELECT r.id " +
       "FROM auto_queue_runs r " +
-      "WHERE r.status = 'active' AND EXISTS (" +
-      "  SELECT 1 FROM auto_queue_entries e " +
-      "  WHERE e.run_id = r.id AND e.status = 'pending'" +
-      ") ORDER BY (" +
-      "  SELECT MIN(e.updated_at) FROM auto_queue_entries e " +
-      "  WHERE e.run_id = r.id AND e.status = 'pending'" +
-      ") ASC LIMIT 50",
+      "JOIN LATERAL (" +
+      "  SELECT e.updated_at " +
+      "  FROM auto_queue_entries e " +
+      "  WHERE e.run_id = r.id AND e.status = 'pending' " +
+      "  ORDER BY e.updated_at ASC LIMIT 1" +
+      ") oldest_pending ON TRUE " +
+      "WHERE r.status = 'active' " +
+      "ORDER BY oldest_pending.updated_at ASC LIMIT 50",
       []
     );
 

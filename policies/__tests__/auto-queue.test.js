@@ -133,9 +133,10 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("WHERE r.status = 'active' AND EXISTS (") &&
-            sql.includes("SELECT MIN(e.updated_at) FROM auto_queue_entries e") &&
-            sql.includes(") ASC LIMIT 50");
+            sql.includes("JOIN LATERAL (") &&
+            sql.includes("WHERE e.run_id = r.id AND e.status = 'pending'") &&
+            sql.includes("ORDER BY e.updated_at ASC LIMIT 1") &&
+            sql.includes("ORDER BY oldest_pending.updated_at ASC LIMIT 50");
         },
         result: []
       },
@@ -237,9 +238,10 @@ test("auto-queue terminal cleanup uses pipeline terminal states", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("WHERE r.status = 'active' AND EXISTS (") &&
-            sql.includes("SELECT MIN(e.updated_at) FROM auto_queue_entries e") &&
-            sql.includes(") ASC LIMIT 50");
+            sql.includes("JOIN LATERAL (") &&
+            sql.includes("WHERE e.run_id = r.id AND e.status = 'pending'") &&
+            sql.includes("ORDER BY e.updated_at ASC LIMIT 1") &&
+            sql.includes("ORDER BY oldest_pending.updated_at ASC LIMIT 50");
         },
         result: []
       },
@@ -298,8 +300,10 @@ test("auto-queue finalization sweep filters blocked runs before LIMIT", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("WHERE r.status = 'active' AND EXISTS (") &&
-            sql.includes("SELECT MIN(e.updated_at) FROM auto_queue_entries e");
+            sql.includes("JOIN LATERAL (") &&
+            sql.includes("WHERE e.run_id = r.id AND e.status = 'pending'") &&
+            sql.includes("ORDER BY e.updated_at ASC LIMIT 1") &&
+            sql.includes("ORDER BY oldest_pending.updated_at ASC LIMIT 50");
         },
         result: []
       },
@@ -340,9 +344,10 @@ test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("WHERE r.status = 'active' AND EXISTS (") &&
-            sql.includes("SELECT MIN(e.updated_at) FROM auto_queue_entries e") &&
-            sql.includes(") ASC LIMIT 50");
+            sql.includes("JOIN LATERAL (") &&
+            sql.includes("WHERE e.run_id = r.id AND e.status = 'pending'") &&
+            sql.includes("ORDER BY e.updated_at ASC LIMIT 1") &&
+            sql.includes("ORDER BY oldest_pending.updated_at ASC LIMIT 50");
         },
         result: [{ id: "run-saturated" }]
       },
@@ -382,9 +387,10 @@ test("auto-queue does not rotate deferred active run activations", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("WHERE r.status = 'active' AND EXISTS (") &&
-            sql.includes("SELECT MIN(e.updated_at) FROM auto_queue_entries e") &&
-            sql.includes(") ASC LIMIT 50");
+            sql.includes("JOIN LATERAL (") &&
+            sql.includes("WHERE e.run_id = r.id AND e.status = 'pending'") &&
+            sql.includes("ORDER BY e.updated_at ASC LIMIT 1") &&
+            sql.includes("ORDER BY oldest_pending.updated_at ASC LIMIT 50");
         },
         result: [{ id: "run-deferred" }]
       },
