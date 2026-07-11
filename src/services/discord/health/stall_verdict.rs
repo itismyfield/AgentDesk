@@ -244,8 +244,8 @@ pub(super) fn restart_grace_active(
 ) -> bool {
     inflight_state_present
         && now_unix_secs >= boot_unix_secs
-        && now_unix_secs.saturating_sub(boot_unix_secs) as u64
-            <= super::recovery::STALL_WATCHDOG_THRESHOLD_SECS
+        && (now_unix_secs.saturating_sub(boot_unix_secs) as u64)
+            < super::recovery::STALL_WATCHDOG_THRESHOLD_SECS
 }
 
 pub(super) fn classify_health_snapshot_lossy(
@@ -275,7 +275,7 @@ fn classify_health_snapshot_at_lossy(
     boot_unix_secs: i64,
 ) -> Option<StallVerdictAssessment> {
     let provider = provider?;
-    let desynced = session.desynced(relay.tmux_alive == Some(true), session.attached);
+    let desynced = relay.desynced;
     if !classification_is_applicable(
         relay,
         session.attached,
@@ -365,17 +365,22 @@ fn classify_runtime_signals_lossy(
         return None;
     }
 
-    let idle =
-        !relay.mailbox_has_cancel_token && matches!(relay.active_turn, RelayActiveTurn::None);
+    let active_turn = if inflight_state_present {
+        relay.active_turn
+    } else {
+        RelayActiveTurn::None
+    };
+    let idle = !relay.mailbox_has_cancel_token && matches!(active_turn, RelayActiveTurn::None);
+    let watcher_owns_live_relay = inflight_state_present.then_some(relay.watcher_owns_live_relay);
 
     Some(classify_stall(StallSignalSnapshot {
         producer_activity_recent,
         frontier_advanced_recently,
         desynced,
         mailbox_cancel_token_present: relay.mailbox_has_cancel_token,
-        active_turn: relay.active_turn,
+        active_turn,
         watcher_attached: relay.watcher_attached,
-        watcher_owns_live_relay: Some(relay.watcher_owns_live_relay),
+        watcher_owns_live_relay,
         producer_known_dead: relay.tmux_alive == Some(false),
         delivery_committed,
         idle,
@@ -829,12 +834,136 @@ mod tests {
     }
 
     #[test]
+    fn raw_health_preserves_relay_desynced_for_restored_owner_without_watcher() {
+        let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
+        let now = fixture_updated_at_unix() + freshness as i64 + 10;
+        let mut session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
+        session.watcher_attached = false;
+        session.capture_lagged = false;
+        let mut relay = relay_fixture();
+        relay.desynced = true;
+        relay.watcher_attached = false;
+        relay.watcher_owner_channel_id = None;
+        relay.watcher_owns_live_relay = true;
+        relay.last_relay_ts_ms = None;
+        assert!(relay.desynced);
+        assert!(!session.desynced(relay.tmux_alive == Some(true), session.attached));
+
+        let assessment = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now - super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1,
+        )
+        .expect("restored-owner relay desync remains applicable");
+
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
+        assert_eq!(assessment.reasons, vec![StallVerdictReason::Desynced]);
+    }
+
+    #[test]
+    fn raw_health_attached_watcher_without_inflight_preserves_unknown_ownership() {
+        let now = fixture_updated_at_unix();
+        let session = session_fixture(None, true);
+        let mut relay = relay_fixture();
+        relay.active_turn = RelayActiveTurn::None;
+        relay.bridge_inflight_present = false;
+        relay.bridge_current_msg_id = None;
+        relay.mailbox_has_cancel_token = false;
+        relay.mailbox_active_user_msg_id = None;
+        relay.pending_discord_callback_msg_id = None;
+        relay.watcher_owns_live_relay = false;
+        relay.desynced = false;
+        relay.last_relay_ts_ms = None;
+        assert!(!session.inflight_state_present);
+        assert!(relay.watcher_attached);
+
+        let idle = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now,
+        )
+        .expect("attached idle watcher remains observable");
+        assert_eq!(idle.verdict, StallVerdict::ProducerDead);
+        assert_eq!(
+            idle.reasons,
+            vec![
+                StallVerdictReason::NoPositiveLiveness,
+                StallVerdictReason::WatcherLiveRelayOwnershipUnknown,
+            ]
+        );
+
+        relay.last_relay_ts_ms = Some(now.saturating_mul(1000));
+        let just_completed = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now,
+        )
+        .expect("attached just-completed watcher remains observable");
+        assert_eq!(just_completed.verdict, StallVerdict::ProducerLive);
+        assert_eq!(
+            just_completed.reasons,
+            vec![
+                StallVerdictReason::FrontierAdvancedRecently,
+                StallVerdictReason::WatcherLiveRelayOwnershipUnknown,
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_health_orphan_cancel_token_without_inflight_is_pretripped_desync() {
+        let now = fixture_updated_at_unix();
+        let session = session_fixture(None, false);
+        let mut relay = relay_fixture();
+        relay.active_turn = RelayActiveTurn::Foreground;
+        relay.tmux_session = None;
+        relay.tmux_alive = None;
+        relay.watcher_attached = false;
+        relay.watcher_owner_channel_id = None;
+        relay.watcher_owns_live_relay = false;
+        relay.bridge_inflight_present = false;
+        relay.bridge_current_msg_id = None;
+        relay.mailbox_has_cancel_token = true;
+        relay.mailbox_active_user_msg_id = None;
+        relay.pending_discord_callback_msg_id = None;
+        relay.desynced = false;
+        relay.last_relay_ts_ms = None;
+        assert!(!session.inflight_state_present);
+        assert_eq!(relay.active_turn, RelayActiveTurn::Foreground);
+
+        let assessment = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now,
+        )
+        .expect("orphan cancel token remains applicable");
+
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
+        assert_eq!(
+            assessment.reasons,
+            vec![StallVerdictReason::MailboxCancelTokenPresent]
+        );
+    }
+
+    #[test]
     fn raw_health_fresh_inflight_or_relay_frontier_without_contradiction_is_producer_live() {
         let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
         let timestamp = fixture_updated_at_unix();
         let fresh_now = timestamp + 1;
         let session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
-        let relay = relay_fixture();
+        let mut relay = relay_fixture();
+        relay.desynced = false;
         let fresh_inflight = classify_health_snapshot_at_lossy(
             Some(&ProviderKind::Codex),
             ChannelId::new(42),
@@ -852,6 +981,7 @@ mod tests {
 
         let stale_now = timestamp + freshness as i64 + 10;
         let mut relay = relay_fixture();
+        relay.desynced = false;
         relay.last_relay_ts_ms = Some(stale_now.saturating_mul(1000));
         let fresh_frontier = classify_health_snapshot_at_lossy(
             Some(&ProviderKind::Codex),
@@ -948,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_health_restart_grace_boundary_comes_from_boot_timestamp() {
+    fn raw_health_restart_grace_stops_before_cleanup_boundary() {
         let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
         let threshold = super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS;
         let now = fixture_updated_at_unix() + freshness as i64 + 10;
@@ -962,24 +1092,24 @@ mod tests {
             &session,
             &relay,
             now,
-            now - threshold as i64,
+            now - threshold as i64 + 1,
         )
         .expect("inside restart grace");
         assert_eq!(inside.verdict, StallVerdict::ProducerLive);
         assert_eq!(inside.reasons, vec![StallVerdictReason::RestartGraceActive]);
 
-        let outside = classify_health_snapshot_at_lossy(
+        let cleanup_boundary = classify_health_snapshot_at_lossy(
             Some(&ProviderKind::Codex),
             ChannelId::new(42),
             &session,
             &relay,
             now,
-            now - threshold as i64 - 1,
+            now - threshold as i64,
         )
-        .expect("outside restart grace remains applicable");
-        assert_eq!(outside.verdict, StallVerdict::ControlPlaneDesync);
+        .expect("cleanup boundary remains applicable");
+        assert_eq!(cleanup_boundary.verdict, StallVerdict::ControlPlaneDesync);
         assert!(
-            !outside
+            !cleanup_boundary
                 .reasons
                 .contains(&StallVerdictReason::RestartGraceActive)
         );
