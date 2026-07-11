@@ -13,6 +13,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::HealthRegistry;
 use super::rebind_request::{ParsedRebindRequest, parse_rebind_body};
+use super::snapshot::WatcherStateSnapshot;
 use super::{relay_auto_heal, relay_dead_reattach, stall_liveness, watcher_respawn};
 
 mod leak_recovery_ledger;
@@ -28,9 +29,8 @@ use leak_recovery_ledger::{
 pub(crate) use watchdog_decisions::{
     STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
     STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
-    completed_stale_no_answer_orphan_should_clean, force_clean_should_preserve_resume_selector,
-    inflight_completed_stale_leak_detected, stale_idle_foreground_queue_detected,
-    stall_watchdog_should_force_clean,
+    completed_stale_no_answer_orphan_should_clean, inflight_completed_stale_leak_detected,
+    stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
     stall_watchdog_should_force_clean_orphan_explicit_background_work,
 };
 
@@ -112,10 +112,6 @@ type IdleTmuxStaleTurnPostClearHook =
     Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 #[cfg(test)]
-type StallWatchdogForceCleanPostCleanupHook =
-    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
-
-#[cfg(test)]
 fn idle_tmux_stale_turn_inflight_candidate_hook()
 -> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnInflightCandidateHook>> {
     static HOOK: std::sync::OnceLock<
@@ -129,15 +125,6 @@ fn idle_tmux_stale_turn_post_clear_hook()
 -> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnPostClearHook>> {
     static HOOK: std::sync::OnceLock<std::sync::Mutex<Option<IdleTmuxStaleTurnPostClearHook>>> =
         std::sync::OnceLock::new();
-    HOOK.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-#[cfg(test)]
-fn stall_watchdog_force_clean_post_cleanup_hook()
--> &'static std::sync::Mutex<Option<StallWatchdogForceCleanPostCleanupHook>> {
-    static HOOK: std::sync::OnceLock<
-        std::sync::Mutex<Option<StallWatchdogForceCleanPostCleanupHook>>,
-    > = std::sync::OnceLock::new();
     HOOK.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -1601,69 +1588,88 @@ pub fn spawn_watchdog(port: u16) {
         .expect("Failed to spawn watchdog thread");
 }
 
-/// #3041 B side-effecting wrapper: classify via
-/// `force_clean_should_preserve_resume_selector` and, on the preserve branch,
-/// persist the selector to DB so the next turn restores it
-/// (`db_provider_session_restored`) instead of falling to
-/// `no_cached_provider_session`. The discard branch is a no-op (the next turn
-/// cold-starts) but is logged so the distinction is observable.
-async fn preserve_resume_selector_on_force_clean(
+/// #4460: reason_code for the "suspected stall" mention that REPLACED the
+/// branch-4 force-clean. A stable reason_code lets the `message_outbox`
+/// dedupe key coalesce repeated pages inside the cooldown window.
+const STALL_WATCHDOG_MENTION_REASON_CODE: &str = "stall_watchdog_suspected_stall";
+
+/// #4460: per-channel page cooldown (seconds). Modeled on
+/// `long_turn_watchdog`'s 1800s alert cooldown so a persistently-suspect turn
+/// pages AT MOST once per this window per channel instead of on every pass.
+const STALL_WATCHDOG_MENTION_COOLDOWN_SECS: i64 = 1800;
+
+/// #4460: replacement for the removed branch-4 force-clean execution. Posts a
+/// rate-limited Discord alert to the channel via the deduped `message_outbox`
+/// path and NEVER terminates, cancels, or deletes anything. Modeled on
+/// `long_turn_watchdog::enqueue_alert`: a stable reason_code + per-channel
+/// session key collapse repeated pages into one row per cooldown window.
+async fn notify_suspected_stall_without_cleanup(
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    shared: &Arc<SharedData>,
+    // Reserved for future detection tightening (verdict-specific copy); the
+    // turn is intentionally left untouched, so it is not read today. (#4460)
+    _snapshot: &WatcherStateSnapshot,
     inflight: Option<&discord::inflight::InflightTurnState>,
-    tmux_session_alive: Option<bool>,
 ) {
-    let Some(inflight) = inflight else {
-        return;
-    };
-    let preserve = force_clean_should_preserve_resume_selector(
-        inflight.session_id.as_deref(),
-        inflight.session_key.as_deref(),
-        inflight.terminal_delivery_committed,
-        tmux_session_alive,
-    );
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    let (Some(session_id), Some(session_key)) = (
-        inflight
-            .session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty()),
-        inflight
-            .session_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty()),
-    ) else {
-        // No selector to preserve — next turn cold-starts regardless.
-        return;
-    };
-    if !preserve {
-        tracing::info!(
-            "  [{ts}] 🧹 STALL-WATCHDOG: discarding resume selector for channel {} (provider={}, committed={}, pane_alive={:?}) — next turn cold-starts",
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        tracing::warn!(
+            "  [stall-watchdog] #4460 suspected stall on channel {} (provider={}) but no pg_pool — skipping mention (never terminating)",
             channel_id,
             provider.as_str(),
-            inflight.terminal_delivery_committed,
-            tmux_session_alive,
         );
         return;
-    }
-    discord::adk_session::save_provider_session_id(
-        session_key,
-        session_id,
-        Some(session_id),
-        provider,
-        channel_id,
-        shared.api_port,
-    )
-    .await;
-    tracing::info!(
-        "  [{ts}] ♻ STALL-WATCHDOG: preserved resume selector for channel {} (provider={}, session_key={}) — next turn will --resume",
-        channel_id,
-        provider.as_str(),
-        session_key,
+    };
+    // Resolve the turn owner for a `<@id>` mention when available. The inflight
+    // state carries the requesting user's id (`request_owner_user_id`); a zero
+    // means "unknown", in which case we omit the mention but still post.
+    let mention = inflight
+        .map(|state| state.request_owner_user_id)
+        .filter(|id| *id != 0)
+        .map(|id| format!(" <@{id}>"))
+        .unwrap_or_default();
+    let content = format!(
+        "⚠️ 스톨 의심: 이 세션이 오래 응답이 없어 보입니다{mention}. 워치독은 더 이상 자동 종료하지 않습니다 — 실제로 멈췄다면 취소해 주시고, 정상 작업 중이면 무시하세요. (채널 {channel_id})"
     );
+    let target = channel_id.get().to_string();
+    // Per-channel dedupe key: a persistently-suspect turn pages at most once
+    // per cooldown per channel.
+    let session_key = format!("stall-watchdog-mention:{channel_id}");
+    match crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target: &target,
+            content: &content,
+            bot: "notify",
+            source: "stall_watchdog",
+            reason_code: Some(STALL_WATCHDOG_MENTION_REASON_CODE),
+            session_key: Some(&session_key),
+        },
+        STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
+    )
+    .await
+    {
+        Ok(true) => {
+            tracing::warn!(
+                "  [stall-watchdog] #4460 suspected stall — mentioned owner on channel {} (provider={}) WITHOUT force-clean",
+                channel_id,
+                provider.as_str(),
+            );
+        }
+        Ok(false) => {
+            tracing::debug!(
+                "  [stall-watchdog] #4460 suspected stall mention suppressed by cooldown ({}s) on channel {}",
+                STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
+                channel_id,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                "  [stall-watchdog] #4460 suspected stall mention enqueue failed on channel {}: {error}",
+                channel_id,
+            );
+        }
+    }
 }
 
 /// Run a single stall-watchdog pass against one provider+SharedData.
@@ -1708,7 +1714,6 @@ pub(crate) async fn run_stall_watchdog_pass(
     for (channel_id, shared) in candidate_channels {
         // Use the selected runtime so same-provider multi-bot snapshots target
         // the bot that owns this watcher.
-        let repair_started_at = Instant::now();
         let snapshot = match registry
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
             .await
@@ -2093,100 +2098,42 @@ pub(crate) async fn run_stall_watchdog_pass(
             stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_THRESHOLD_SECS,
         );
-        // Force cleanup releases the durable inflight lock first, then asks
-        // relay_recovery to clear the mailbox only if its fresh safety
-        // predicate still sees no bridge, watcher, or live tmux evidence.
-        // That keeps token cleanup on the same audited path as the
-        // operator-facing orphan_pending_token recovery and avoids a second
-        // local interpretation of "safe to release".
-        // #1914: capture user_msg_id BEFORE deleting the inflight state file
-        // so we can scrub the ⏳ reaction the bridge added at turn start. The
-        // normal cleanup paths (`turn_bridge::mod.rs:3047-3048` and the four
-        // `tmux_watcher` finalize sites) all skip this code path because the
-        // turn never reached a watcher-side completion event.
-        let force_clean_inflight = force_clean_inflight
-            .or_else(|| discord::inflight::load_inflight_state(provider, channel_id.get()));
-        let pending_hourglass_user_msg_id = force_clean_inflight
-            .as_ref()
-            .filter(|state| state.user_msg_id != 0)
-            .map(|state| state.user_msg_id);
-        let pending_hourglass_generation = force_clean_inflight
-            .as_ref()
-            .map(|state| state.born_generation)
-            .unwrap_or(shared.restart.current_generation);
-        // #3041 B: before we tear the turn down, decide whether the next turn
-        // should `--resume` this provider session or cold-start. A force-clean
-        // that fires on a still-healthy session (watcher desync, post-restart
-        // re-sync lag) must NOT silently drop the user's work, while a genuine
-        // hang / abnormal-exit must NOT graft a possibly-truncated transcript
-        // onto the next turn. `preserve_resume_selector_on_force_clean`
-        // persists the selector to DB only on the safe branch.
-        preserve_resume_selector_on_force_clean(
-            provider,
-            channel_id,
-            &shared,
-            force_clean_inflight.as_ref(),
-            snapshot.tmux_session_alive,
-        )
-        .await;
-        discord::inflight::delete_inflight_state_file(provider, channel_id.get());
-        let _ = relay_auto_heal::apply_watchdog_orphan_token_cleanup(
-            registry,
-            provider,
-            shared.clone(),
-            channel_id,
-        )
-        .await;
-        #[cfg(test)]
-        {
-            // Bind the cloned hook first so the mutex guard does not cross the
-            // await. This hook models a retry claiming the mailbox in the gap
-            // after force-clean committed and before stale ownership release.
-            let hook = stall_watchdog_force_clean_post_cleanup_hook()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .clone();
-            if let Some(hook) = hook {
-                hook().await;
-            }
+        // #4460: DO NOT force-terminate the active turn here. The old branch-4
+        // "desynced force-clean" deleted the inflight state, released the
+        // mailbox cancel token, cancelled the watcher and cleared the turn
+        // view — which force-killed a *live* codex session on a false positive
+        // (watcher desync / post-restart re-sync lag while the producer was
+        // still working). Per operator directive we now MENTION the owner and
+        // leave the turn completely untouched.
+        //
+        // Detection tightening: reuse the exact shadow verdict that
+        // `log_stall_watchdog_force_cleanup_judgment` just recorded. If it
+        // classifies the producer as live, this is a false positive — skip
+        // silently (no page, no cleanup, turn untouched).
+        let (shadow_verdict, _shadow_reasons) = super::stall_verdict::judgment_log_fields(
+            &snapshot,
+            liveness_decision.as_ref(),
+            stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            judgment_basis.restart_grace_active,
+        );
+        if shadow_verdict == super::stall_verdict::StallVerdict::ProducerLive.as_str() {
+            // #4460: producer is live — the desync detection fired a false
+            // positive. Never terminate, never page.
+            continue;
         }
-        // #3410: the cleanup above cancelled the watcher and (on the
-        // tmux_alive_relay_dead branch) skipped relay recovery — release the
-        // stale mailbox ownership it left and respawn the watcher on the still-
-        // live tmux session. Whoever kills the watcher owns the respawn.
-        watcher_respawn::complete_force_clean_watcher_recovery(
-            registry,
-            provider,
+        // #4460: not classified live — surface a rate-limited mention so the
+        // owner can decide, but NEVER terminate/cancel/delete anything. The
+        // turn (inflight state, mailbox token, watcher, turn view) is left
+        // fully intact.
+        notify_suspected_stall_without_cleanup(
             &shared,
+            provider,
             channel_id,
             &snapshot,
-            now_unix_secs,
-            repair_started_at,
+            force_clean_inflight.as_ref(),
         )
         .await;
-        let thread_parent_kickoffs =
-            discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(&shared, channel_id);
-        discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
-            &shared,
-            provider,
-            thread_parent_kickoffs,
-        );
-        if let Some(user_msg_id) = pending_hourglass_user_msg_id {
-            tv_clear(
-                &shared,
-                channel_id,
-                user_msg_id.into(),
-                pending_hourglass_generation,
-                "health_force_clean",
-            )
-            .await;
-        }
-        stall_liveness::clear_stall_watchdog_liveness_state(
-            provider,
-            channel_id,
-            snapshot.tmux_session.as_deref(),
-        );
-        cleaned += 1;
+        continue;
     }
     // #3410 cross-tick retry: channels whose force-clean respawn failed dropped
     // out of the watcher-derived candidate loop (no watcher = not a candidate),
@@ -4259,21 +4206,9 @@ mod stall_watchdog_auto_heal_tests {
         previous: Option<super::IdleTmuxStaleTurnPostClearHook>,
     }
 
-    struct ForceCleanPostCleanupHookGuard {
-        previous: Option<super::StallWatchdogForceCleanPostCleanupHook>,
-    }
-
     impl Drop for IdleTmuxPostClearHookGuard {
         fn drop(&mut self) {
             *super::idle_tmux_stale_turn_post_clear_hook()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
-        }
-    }
-
-    impl Drop for ForceCleanPostCleanupHookGuard {
-        fn drop(&mut self) {
-            *super::stall_watchdog_force_clean_post_cleanup_hook()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
         }
@@ -4297,17 +4232,6 @@ mod stall_watchdog_auto_heal_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         IdleTmuxCandidateHookGuard {
-            previous: slot.replace(hook),
-        }
-    }
-
-    fn set_force_clean_post_cleanup_hook(
-        hook: super::StallWatchdogForceCleanPostCleanupHook,
-    ) -> ForceCleanPostCleanupHookGuard {
-        let mut slot = super::stall_watchdog_force_clean_post_cleanup_hook()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        ForceCleanPostCleanupHookGuard {
             previous: slot.replace(hook),
         }
     }
@@ -4706,8 +4630,16 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
+    /// #4460: the branch-4 "desynced force-clean" must NEVER terminate a live
+    /// turn anymore. This fixture previously drove force-clean (delete inflight,
+    /// release the mailbox cancel token, cancel the watcher, clear the turn
+    /// view) — the exact path that force-killed a live codex session on a false
+    /// positive. It must now leave the turn FULLY intact: the mailbox token and
+    /// the inflight row both survive and nothing is counted as cleaned. (In
+    /// tests there is no pg_pool, so the mention no-ops; the invariant we assert
+    /// is that the turn is never destroyed.)
     #[tokio::test(flavor = "current_thread")]
-    async fn force_clean_guarded_finish_preserves_new_same_id_mailbox_claim() {
+    async fn branch4_suspected_stall_preserves_turn_without_force_clean() {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -4725,13 +4657,10 @@ mod stall_watchdog_auto_heal_tests {
         let channel = ChannelId::new(4_111_405);
         let user_msg = MessageId::new(4_111_505);
         let stale_tmux = "AgentDesk-codex-4111-force-clean-stale";
-        let fresh_tmux = "AgentDesk-codex-4111-force-clean-fresh";
         let stale_output = tempdir.path().join("force-clean-stale.jsonl");
-        let fresh_output = tempdir.path().join("force-clean-fresh.jsonl");
         std::fs::write(&stale_output, "partial stale output\n")
             .expect("write stale output fixture");
-        std::fs::write(&fresh_output, "fresh retry output\n").expect("write fresh output fixture");
-        let _stale_token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+        let stale_token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
         let mut stale_state = seed_idle_inflight(
             &provider,
             channel,
@@ -4753,64 +4682,21 @@ mod stall_watchdog_auto_heal_tests {
             watcher_handle(stale_tmux, &stale_output, Arc::new(AtomicBool::new(false))),
         );
 
-        let fresh_token = Arc::new(std::sync::Mutex::new(None::<Arc<CancelToken>>));
-        let hook_token = fresh_token.clone();
-        let hook_shared = shared.clone();
-        let hook_provider = provider.clone();
-        let hook_fresh_output = fresh_output.clone();
-        let _hook = set_force_clean_post_cleanup_hook(Arc::new(move || {
-            let shared = hook_shared.clone();
-            let provider = hook_provider.clone();
-            let fresh_output = hook_fresh_output.clone();
-            let token_slot = hook_token.clone();
-            Box::pin(async move {
-                let finish = super::super::super::mailbox_finish_turn_if_matches_started_before(
-                    &shared,
-                    &provider,
-                    channel,
-                    user_msg,
-                    std::time::Instant::now(),
-                )
-                .await;
-                if let Some(token) = finish.removed_token {
-                    token.cancelled.store(true, Ordering::Relaxed);
-                    super::super::super::saturating_decrement_global_active(&shared);
-                }
-                let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
-                seed_idle_inflight(
-                    &provider,
-                    channel,
-                    user_msg.get(),
-                    fresh_tmux,
-                    &fresh_output,
-                    0,
-                    "fresh-session",
-                );
-                shared.tmux_watchers.insert(
-                    channel,
-                    watcher_handle(fresh_tmux, &fresh_output, Arc::new(AtomicBool::new(false))),
-                );
-                *token_slot
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) = Some(token);
-            })
-        }));
-
         let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
 
-        assert_eq!(cleaned, 1);
-        let fresh_token = fresh_token
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
-            .expect("fresh same-id turn token should be seeded in the force-clean gap");
-        assert_mailbox_and_session_preserved(&shared, channel, user_msg, &fresh_token).await;
+        // #4460: branch 4 no longer force-cleans — nothing is cleaned and the
+        // live turn (mailbox token + inflight row) is fully preserved.
+        assert_eq!(
+            cleaned, 0,
+            "suspected stall must NOT be force-cleaned; the turn stays live (#4460)"
+        );
+        assert_mailbox_and_session_preserved(&shared, channel, user_msg, &stale_token).await;
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
         let persisted =
             crate::services::discord::inflight::load_inflight_state(&provider, channel.get())
-                .expect("fresh same-id row must survive force-clean release");
+                .expect("inflight row must survive — branch 4 no longer deletes it (#4460)");
         assert_eq!(persisted.user_msg_id, user_msg.get());
-        assert_eq!(persisted.session_id.as_deref(), Some("fresh-session"));
+        assert_eq!(persisted.session_id.as_deref(), Some("stale-session"));
     }
 
     #[tokio::test]

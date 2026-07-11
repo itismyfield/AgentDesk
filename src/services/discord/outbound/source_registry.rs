@@ -63,6 +63,7 @@ enum StaticSendSource {
     LongTurnWatchdog,
     RelaySignalRollup,
     DispatchWatchdog,
+    StallWatchdog,
     AgentdeskCli,
     Operator,
     Dashboard,
@@ -118,6 +119,9 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(LongTurnWatchdog, "long_turn_watchdog", LOOPBACK),
     policy!(RelaySignalRollup, "relay_signal_rollup", LOOPBACK),
     policy!(DispatchWatchdog, "dispatch_watchdog", LOOPBACK),
+    // #4460: stall watchdog now MENTIONS the owner instead of force-terminating
+    // a suspected-stall turn — it posts a rate-limited outbox alert.
+    policy!(StallWatchdog, "stall_watchdog", LOOPBACK),
     policy!(AgentdeskCli, "agentdesk-cli", CLI),
     policy!(Operator, "operator", CLI),
     policy!(Dashboard, "dashboard", DASHBOARD),
@@ -181,6 +185,7 @@ mod tests {
         "long_turn_watchdog",
         "relay_signal_rollup",
         "dispatch_watchdog",
+        "stall_watchdog",
     ];
 
     #[test]
