@@ -35,7 +35,7 @@ pub(super) struct ClaimedCard {
     pub(super) bot_key: String,
     pub(super) discord_nonce: String,
     pub(super) revision: i32,
-    pub(super) update_count: u32,
+    pub(super) update_count: u64,
     pub(super) rendered_content: String,
     pub(super) action: ClaimAction,
 }
@@ -366,7 +366,7 @@ fn claimed_from_row(
         bot_key: row.get("bot_key"),
         discord_nonce: row.get("discord_nonce"),
         revision: row.get("revision"),
-        update_count: u32::try_from(update_count)
+        update_count: u64::try_from(update_count)
             .map_err(|_| format!("invalid task card update_count {update_count}"))?,
         rendered_content: row.get("rendered_content"),
         action,
@@ -561,7 +561,7 @@ struct MemoryRow {
     nonce: String,
     message_id: Option<u64>,
     revision: i32,
-    update_count: u32,
+    update_count: u64,
     rendered_content: String,
     content_hash: String,
     lease_owner: Option<String>,

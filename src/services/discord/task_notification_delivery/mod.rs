@@ -242,7 +242,7 @@ enum TaskCardPayload {
 }
 
 impl TaskCardPayload {
-    fn render(&self, update_count: u32) -> String {
+    fn render(&self, update_count: u64) -> String {
         match self {
             Self::Task(note) => {
                 super::tui_task_card::format_task_notification_card(note, update_count)

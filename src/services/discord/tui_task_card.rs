@@ -225,7 +225,7 @@ fn extract_one_tag(haystack: &str, name: &str) -> Option<String> {
 /// LATEST result preview. A JSON `result` is summarized by top-level shape
 /// (`results`/`reviews`/`plans`) rather than dumped raw; a free-form Markdown
 /// `result` is truncated to a short preview with any PR URLs surfaced.
-pub(super) fn format_task_notification_card(note: &TaskNotification, update_count: u32) -> String {
+pub(super) fn format_task_notification_card(note: &TaskNotification, update_count: u64) -> String {
     let status = note.status.as_deref().unwrap_or("");
     let icon = status_icon(status);
     let status_label = if status.is_empty() {

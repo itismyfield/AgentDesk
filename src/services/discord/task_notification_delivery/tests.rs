@@ -529,6 +529,71 @@ async fn concurrent_ensure_card_unique_winner_pg() {
 }
 
 #[tokio::test]
+async fn bigint_update_count_above_u32_max_remains_claimable_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_card_bigint_4055",
+        "task notification card bigint update count",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let event = event("postgres-bigint-update-count");
+    ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &event,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("first card");
+
+    let u32_boundary = i64::from(u32::MAX);
+    sqlx::query(
+        "UPDATE task_notification_card_state
+         SET update_count = $5, lease_owner = NULL, lease_expires_at = NULL
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(&event.scope.event_key)
+    .bind(u32_boundary)
+    .execute(&pool)
+    .await
+    .expect("seed BIGINT update count at the u32 boundary");
+
+    let edited = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &event,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("BIGINT count above u32::MAX remains claimable");
+    assert_eq!(edited.disposition, CardDisposition::Edited);
+    assert_eq!(transport.edit_calls.load(Ordering::Acquire), 1);
+
+    let stored_count: i64 = sqlx::query_scalar(
+        "SELECT update_count FROM task_notification_card_state
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(&event.scope.event_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load BIGINT update count after edit");
+    assert_eq!(stored_count, u32_boundary + 1);
+}
+
+#[tokio::test]
 async fn restart_after_discord_post_before_db_commit_recovers_by_nonce_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_task_card_restart_4055",
