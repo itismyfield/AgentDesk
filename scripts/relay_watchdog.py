@@ -60,6 +60,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback; regular files ignore it
+    fcntl = None  # type: ignore[assignment]
+
 # ── Verdict states (pure judgment output, see evaluate()) ─────────────────────
 STATE_OK = "ok"
 STATE_LAGGING = "lagging"  # lost blocks exist, but last good delivery is recent
@@ -102,6 +107,9 @@ TRANSCRIPT_SIZES_KEY = "transcript_sizes"
 TRANSCRIPT_SEEN_AT_KEY = "transcript_seen_at"
 TRANSCRIPT_KNOWN_AT_KEY = "transcript_known_at"
 PENDING_TRANSCRIPTS_KEY = "pending_transcripts"
+PENDING_TRANSCRIPT_FAILURES_KEY = "pending_transcript_failures"
+PENDING_TRANSCRIPT_SINCE_KEY = "pending_transcript_since"
+RETIRED_TRANSCRIPTS_KEY = "retired_transcripts"
 PENDING_TRANSCRIPT_OVERFLOW_KEY = "pending_transcript_overflow"
 LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY = (
     "last_pending_transcript_overflow_alert"
@@ -109,6 +117,7 @@ LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY = (
 MAX_TRANSCRIPT_HISTORY = 64
 MAX_KNOWN_TRANSCRIPTS = 256
 MAX_PENDING_TRANSCRIPTS = 32
+MAX_RETIRED_TRANSCRIPTS = 32
 TRANSCRIPT_HISTORY_TTL_SECS = 7 * 24 * 60 * 60
 
 PG_TOPOLOGY_TUNNEL = "tunnel"
@@ -392,6 +401,7 @@ class TranscriptCandidate:
 class TranscriptReadResult:
     blocks: list[tuple[float, str]]
     error: str | None = None
+    incomplete_tail: bool = False
 
 
 def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
@@ -497,6 +507,84 @@ def _validated_pending_transcripts(channel_state: Mapping[str, Any]) -> list[str
         if isinstance(path, str) and path and path not in pending:
             pending.append(path)
     return pending[:MAX_PENDING_TRANSCRIPTS]
+
+
+def _validated_pending_failures(
+    channel_state: Mapping[str, Any], pending_paths: list[str]
+) -> dict[str, int]:
+    raw = channel_state.get(PENDING_TRANSCRIPT_FAILURES_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    pending = set(pending_paths)
+    return {
+        path: failures
+        for path, failures in raw.items()
+        if path in pending
+        and isinstance(failures, int)
+        and not isinstance(failures, bool)
+        and failures > 0
+    }
+
+
+def _validated_pending_since(
+    channel_state: Mapping[str, Any], pending_paths: list[str], now: float
+) -> dict[str, float]:
+    raw = channel_state.get(PENDING_TRANSCRIPT_SINCE_KEY, {})
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        path: (
+            float(raw[path])
+            if path in raw
+            and _is_finite_nonnegative_number(raw[path])
+            and float(raw[path]) <= now
+            else now
+        )
+        for path in pending_paths
+    }
+
+
+def _bounded_retired_transcripts(
+    entries: Mapping[str, tuple[int, float]],
+) -> dict[str, tuple[int, float]]:
+    ordered = sorted(
+        entries.items(), key=lambda item: (-item[1][1], item[0])
+    )[:MAX_RETIRED_TRANSCRIPTS]
+    return dict(ordered)
+
+
+def _validated_retired_transcripts(
+    channel_state: Mapping[str, Any],
+) -> dict[str, tuple[int, float]]:
+    raw = channel_state.get(RETIRED_TRANSCRIPTS_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    valid: dict[str, tuple[int, float]] = {}
+    for path, entry in raw.items():
+        if not isinstance(path, str) or not path or not isinstance(entry, dict):
+            continue
+        size = entry.get("size")
+        retired_at = entry.get("retired_at")
+        if (
+            isinstance(size, int)
+            and not isinstance(size, bool)
+            and size >= 0
+            and _is_finite_nonnegative_number(retired_at)
+        ):
+            valid[path] = (size, float(retired_at))
+    return _bounded_retired_transcripts(valid)
+
+
+def _store_retired_transcripts(
+    channel_state: dict[str, Any], entries: Mapping[str, tuple[int, float]]
+) -> None:
+    bounded = _bounded_retired_transcripts(entries)
+    if bounded:
+        channel_state[RETIRED_TRANSCRIPTS_KEY] = {
+            path: {"size": size, "retired_at": retired_at}
+            for path, (size, retired_at) in bounded.items()
+        }
+    else:
+        channel_state.pop(RETIRED_TRANSCRIPTS_KEY, None)
 
 
 def _bounded_transcript_history(
@@ -710,16 +798,38 @@ def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
 def assistant_blocks(transcript: Path) -> TranscriptReadResult:
     if _regular_file_stat_without_symlink(transcript) is None:
         return TranscriptReadResult([], "UnsafePath")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     descriptor = -1
     try:
         descriptor = os.open(transcript, flags)
         if not stat_mode.S_ISREG(os.fstat(descriptor).st_mode):
             return TranscriptReadResult([], "UnsafePath")
+        if fcntl is not None and getattr(os, "O_NONBLOCK", 0):
+            current_flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+            fcntl.fcntl(
+                descriptor,
+                fcntl.F_SETFL,
+                current_flags & ~getattr(os, "O_NONBLOCK", 0),
+            )
         stream = os.fdopen(descriptor, "r", encoding="utf-8")
         descriptor = -1
         with stream as f:
-            return TranscriptReadResult(assistant_blocks_from_lines(f))
+            lines = f.readlines()
+            incomplete_tail = False
+            if lines and not lines[-1].endswith("\n"):
+                try:
+                    json.loads(lines[-1])
+                except (json.JSONDecodeError, TypeError):
+                    incomplete_tail = True
+            return TranscriptReadResult(
+                assistant_blocks_from_lines(lines),
+                incomplete_tail=incomplete_tail,
+            )
     except (OSError, UnicodeError, ValueError) as exc:
         return TranscriptReadResult([], type(exc).__name__)
     finally:
@@ -974,11 +1084,14 @@ def _is_finite_nonnegative_number(value: object) -> bool:
 
 
 def _bounded_delivered_watermarks(
-    entries: Mapping[str, tuple[float, float]], preferred_path: str | None = None
+    entries: Mapping[str, tuple[float, float]],
+    preferred_path: str | None = None,
+    pinned_path: str | None = None,
 ) -> dict[str, tuple[float, float]]:
     ordered = sorted(
         entries.items(),
         key=lambda item: (
+            0 if item[0] == pinned_path else 1,
             -item[1][1],
             0 if item[0] == preferred_path else 1,
             item[0],
@@ -1010,7 +1123,9 @@ def delivered_watermarks(
         ):
             continue
         valid[path] = (float(delivered_ts), float(updated_at))
-    return _bounded_delivered_watermarks(valid)
+    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+    pinned = selected if isinstance(selected, str) and selected else None
+    return _bounded_delivered_watermarks(valid, pinned_path=pinned)
 
 
 def delivered_watermark_for_path(
@@ -1041,7 +1156,11 @@ def advance_delivered_watermark(
     if candidate <= prior:
         return False
     entries[path] = (candidate, float(now))
-    bounded = _bounded_delivered_watermarks(entries, preferred_path=path)
+    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+    pinned = selected if isinstance(selected, str) and selected else None
+    bounded = _bounded_delivered_watermarks(
+        entries, preferred_path=path, pinned_path=pinned
+    )
     channel_state[DELIVERED_WATERMARKS_KEY] = {
         key: {"delivered_ts": watermark, "updated_at": updated_at}
         for key, (watermark, updated_at) in bounded.items()
@@ -1802,6 +1921,50 @@ def tick_selector_sync(
     )
 
 
+def _alert_pending_retirement(
+    rt: Runtime,
+    ch: ChannelConfig,
+    paths: list[str],
+    *,
+    reason: str,
+) -> None:
+    if not paths:
+        return
+    if reason == "idle":
+        title = "릴레이 트랜스크립트 평가 권한 만료"
+        detail = (
+            "세션 활동이 idle 한계를 넘겨 더 이상 live GAP으로 반복 평가하지 "
+            "않습니다. 미도달 여부가 해결됐다고 주장하는 복구 알림은 보내지 않습니다."
+        )
+    else:
+        title = "릴레이 트랜스크립트 평가 불능 에스컬레이션"
+        detail = (
+            "연속 읽기 실패 한계를 넘어 해당 pending 권한을 격리했습니다. 정상으로 "
+            "판정한 것이 아니며 원본 트랜스크립트 점검이 필요합니다."
+        )
+    sample = "\n".join(f"- `{path}`" for path in paths[:3])
+    if len(paths) > 3:
+        sample += f"\n- 외 {len(paths) - 3}개"
+    rt.alert(
+        ch,
+        f"🚨 **{title}**\n\n{detail}\n\n{sample}\n\n"
+        f"런타임: {rt.dcserver_snapshot()}",
+    )
+
+
+def _clear_gap_alert_without_recovery(
+    rt: Runtime, channel_state: dict[str, Any], channel_id: str
+) -> None:
+    if channel_state.get("alerting"):
+        rt.log(
+            f"[{channel_id}] alert state transitioned to unresolved transcript "
+            "escalation — no clean recovery claimed"
+        )
+    channel_state.pop("alerting", None)
+    channel_state.pop("gap_since", None)
+    channel_state.pop("issue_url", None)
+
+
 def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: float) -> None:
     cfg = rt.cfg
     cid = ch.channel_id
@@ -1824,9 +1987,30 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     known_state_initialized = isinstance(chs.get(TRANSCRIPT_KNOWN_AT_KEY), dict)
     known_at = _validated_transcript_known_at(chs, now)
     pending_paths = _validated_pending_transcripts(chs)
+    pending_failures = _validated_pending_failures(chs, pending_paths)
+    pending_since = _validated_pending_since(chs, pending_paths, now)
+    retired_transcripts = _validated_retired_transcripts(chs)
+    reactivated_paths: list[str] = []
+    for candidate in candidates:
+        path = str(candidate.path)
+        retired = retired_transcripts.get(path)
+        if retired is not None and candidate.size != retired[0]:
+            retired_transcripts.pop(path, None)
+            reactivated_paths.append(path)
+            rt.log(f"[{cid}] transcript-retired-reactivated path={path}")
+    _store_retired_transcripts(chs, retired_transcripts)
+    retired_paths = set(retired_transcripts)
+    selectable_candidates = [
+        candidate
+        for candidate in candidates
+        if str(candidate.path) not in retired_paths
+    ]
     previous_selected = chs.get(SELECTED_TRANSCRIPT_KEY)
+    persisted_selected = previous_selected
     watermarks = delivered_watermarks(chs)
-    known_before = set(known_at) | set(previous_sizes) | set(watermarks)
+    known_before = (
+        set(known_at) | set(previous_sizes) | set(watermarks) | retired_paths
+    )
     read_cache: dict[str, TranscriptReadResult] = {}
 
     def read_candidate(candidate: TranscriptCandidate) -> TranscriptReadResult:
@@ -1839,23 +2023,34 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         previous_sizes
         or pending_paths
         or watermarks
+        or retired_transcripts
         or (isinstance(previous_selected, str) and previous_selected)
     )
     bootstrapped_from_watermark = False
     candidate_paths = {str(candidate.path) for candidate in candidates}
+    selectable_candidate_paths = {
+        str(candidate.path) for candidate in selectable_candidates
+    }
     if (
         not isinstance(previous_selected, str)
-        or previous_selected not in candidate_paths
+        or previous_selected not in selectable_candidate_paths
     ):
-        rechecked = recheck_selected_transcript(
-            previous_selected,
-            project_root,
-            pattern,
-            set(previous_sizes) | set(watermarks),
+        rechecked = (
+            None
+            if isinstance(previous_selected, str)
+            and previous_selected in retired_paths
+            else recheck_selected_transcript(
+                previous_selected,
+                project_root,
+                pattern,
+                set(previous_sizes) | set(watermarks),
+            )
         )
         if rechecked is not None:
             candidates.append(rechecked)
+            selectable_candidates.append(rechecked)
             candidate_paths.add(str(rechecked.path))
+            selectable_candidate_paths.add(str(rechecked.path))
             rt.log(f"[{cid}] transcript-recheck recovered path={rechecked.path}")
     pending_paths = [
         path
@@ -1863,31 +2058,32 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         if path in candidate_paths
         or now - previous_seen_at.get(path, 0.0) <= TRANSCRIPT_HISTORY_TTL_SECS
     ]
+    tracked_anchor_missing = (
+        isinstance(persisted_selected, str)
+        and persisted_selected in known_before
+        and persisted_selected not in selectable_candidate_paths
+    )
     if (
         not isinstance(previous_selected, str)
         or not previous_selected
-        or (candidate_paths and previous_selected not in candidate_paths)
+        or previous_selected in retired_paths
+        or (
+            selectable_candidate_paths
+            and previous_selected not in selectable_candidate_paths
+        )
     ):
         previous_selected = None
-        watermarked_candidates = [
-            (watermarks[str(candidate.path)][1], str(candidate.path))
-            for candidate in candidates
-            if str(candidate.path) in watermarks
-        ]
-        if watermarked_candidates and len(watermarked_candidates) == len(candidates):
-            previous_selected = max(watermarked_candidates)[1]
-            bootstrapped_from_watermark = True
     selection_sizes = dict(previous_sizes)
+    live_debut_paths: list[str] = []
     if tracking_initialized:
         debut_candidates = sorted(
             (
                 candidate
-                for candidate in candidates
+                for candidate in selectable_candidates
                 if str(candidate.path) not in previous_sizes
             ),
             key=lambda candidate: (-candidate.mtime, str(candidate.path)),
         )
-        live_debut_paths: list[str] = []
         for candidate in debut_candidates:
             path = str(candidate.path)
             idle = now - candidate.mtime
@@ -1923,16 +2119,42 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         pending_paths = live_debut_paths + [
             path for path in pending_paths if path not in live_debut_set
         ]
+        for path in live_debut_paths:
+            pending_since.setdefault(path, now)
+    if reactivated_paths:
+        reactivated_set = set(reactivated_paths)
+        pending_paths = reactivated_paths + [
+            path for path in pending_paths if path not in reactivated_set
+        ]
+        for path in reactivated_paths:
+            pending_failures.pop(path, None)
+            pending_since[path] = now
+    watermarked_candidates = [
+        (watermarks[str(candidate.path)][1], str(candidate.path))
+        for candidate in selectable_candidates
+        if str(candidate.path) in watermarks
+    ]
+    if previous_selected is None and watermarked_candidates:
+        all_candidates_watermarked = len(watermarked_candidates) == len(
+            selectable_candidates
+        )
+        if all_candidates_watermarked or tracked_anchor_missing:
+            previous_selected = max(watermarked_candidates)[1]
+            bootstrapped_from_watermark = True
     if bootstrapped_from_watermark:
-        for candidate in candidates:
+        for candidate in selectable_candidates:
             path = str(candidate.path)
             if path in watermarks:
                 selection_sizes.setdefault(path, candidate.size)
     tr, selection_reason = select_watch_transcript_with_reason(
-        candidates, selection_sizes, previous_selected
+        selectable_candidates, selection_sizes, previous_selected
     )
     if bootstrapped_from_watermark and selection_reason == "sticky":
-        selection_reason = "watermark_bootstrap"
+        selection_reason = (
+            "watermark_anchor_recovery"
+            if tracked_anchor_missing
+            else "watermark_bootstrap"
+        )
     if tr is not None:
         chs[SELECTED_TRANSCRIPT_KEY] = str(tr)
     rt.log(f"[{cid}] transcript-select reason={selection_reason} path={tr}")
@@ -1940,6 +2162,14 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     merged_seen_at = dict(previous_seen_at)
     for candidate in candidates:
         path = str(candidate.path)
+        read_result = read_cache.get(path)
+        if path not in previous_sizes and read_result is not None and (
+            read_result.error is not None or read_result.incomplete_tail
+        ):
+            # A torn/unreadable debut has not established a trustworthy growth
+            # baseline.  Its pending authority, not a committed size, carries
+            # it into the next tick for a complete read.
+            continue
         merged_sizes[path] = candidate.size
         merged_seen_at[path] = now
     priority_paths = (
@@ -1974,7 +2204,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         merged_sizes, merged_seen_at, now, priority_paths
     )
     bounded_pending_paths = _bounded_pending_transcripts(
-        pending_paths, set(merged_sizes)
+        pending_paths, set(merged_sizes) | candidate_paths
     )
     bounded_pending_set = set(bounded_pending_paths)
     dropped_pending_paths = [
@@ -2011,10 +2241,91 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     else:
         chs.pop(PENDING_TRANSCRIPT_OVERFLOW_KEY, None)
     pending_paths = bounded_pending_paths
+    pending_failures = {
+        path: failures
+        for path, failures in pending_failures.items()
+        if path in set(pending_paths)
+    }
+    pending_since = {
+        path: pending_since.get(path, now) for path in pending_paths
+    }
+    for path in pending_paths:
+        candidate = next(
+            (candidate for candidate in candidates if str(candidate.path) == path),
+            None,
+        )
+        if (
+            candidate is not None
+            and path in previous_sizes
+            and candidate.size > previous_sizes[path]
+        ):
+            pending_since[path] = now
     chs[TRANSCRIPT_SIZES_KEY] = merged_sizes
     chs[TRANSCRIPT_SEEN_AT_KEY] = merged_seen_at
     chs[TRANSCRIPT_KNOWN_AT_KEY] = merged_known_at
     chs[PENDING_TRANSCRIPTS_KEY] = pending_paths
+    if pending_failures:
+        chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+    else:
+        chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+    if pending_since:
+        chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+    else:
+        chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+    candidate_by_path = {str(candidate.path): candidate for candidate in candidates}
+    expired_pending_paths: list[str] = []
+    for path in pending_paths:
+        candidate = candidate_by_path.get(path)
+        last_activity = (
+            candidate.mtime
+            if candidate is not None
+            else previous_seen_at.get(path, 0.0)
+        )
+        pending_age = now - pending_since.get(path, now)
+        if (
+            now - last_activity >= cfg.idle_quiet_secs
+            or pending_age >= cfg.idle_quiet_secs
+        ):
+            expired_pending_paths.append(path)
+    if expired_pending_paths:
+        expired = set(expired_pending_paths)
+        for path in expired_pending_paths:
+            candidate = candidate_by_path.get(path)
+            size = candidate.size if candidate is not None else merged_sizes.get(path)
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                retired_transcripts[path] = (size, now)
+        _store_retired_transcripts(chs, retired_transcripts)
+        pending_paths = [path for path in pending_paths if path not in expired]
+        pending_failures = {
+            path: failures
+            for path, failures in pending_failures.items()
+            if path not in expired
+        }
+        pending_since = {
+            path: since
+            for path, since in pending_since.items()
+            if path not in expired
+        }
+        chs[PENDING_TRANSCRIPTS_KEY] = pending_paths
+        if pending_failures:
+            chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+        else:
+            chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+        if pending_since:
+            chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+        else:
+            chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+        rt.log(
+            f"[{cid}] transcript-pending-expired count={len(expired_pending_paths)}"
+        )
+        _alert_pending_retirement(
+            rt, ch, expired_pending_paths, reason="idle"
+        )
+        _clear_gap_alert_without_recovery(rt, chs, cid)
+        if tr is not None and str(tr) in expired:
+            chs.pop(SELECTED_TRANSCRIPT_KEY, None)
+            tr = None
+    retired_pending_paths = list(expired_pending_paths)
     selected = next((candidate for candidate in candidates if candidate.path == tr), None)
     # I1 selector sync (#4408 phase 2): compare the dcserver's asserted relay
     # bind (B) against F. Parallel to gap/coverage — its own cooldown key, wrapped
@@ -2052,6 +2363,8 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             continue
         active_candidates.append(candidate)
     if not active_candidates:
+        if retired_pending_paths:
+            _clear_gap_alert_without_recovery(rt, chs, cid)
         return
 
     hay = rt.discord_haystack(cid)
@@ -2076,18 +2389,35 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     chs["read_failures"] = 0
 
     evaluated: list[tuple[TranscriptCandidate, Verdict]] = []
-    read_error_paths: list[str] = []
+    unreadable_paths: list[str] = []
+    escalated_pending_paths: list[str] = []
     remaining_pending = list(pending_paths)
     for candidate in active_candidates:
         path = str(candidate.path)
         read_result = read_candidate(candidate)
-        if read_result.error is not None:
-            rt.log(
-                f"[{cid}] transcript-read-error path={path} "
-                f"error={read_result.error}"
-            )
-            read_error_paths.append(path)
+        if read_result.error is not None or read_result.incomplete_tail:
+            if read_result.error is not None:
+                rt.log(
+                    f"[{cid}] transcript-read-error path={path} "
+                    f"error={read_result.error}"
+                )
+            else:
+                rt.log(f"[{cid}] transcript-read-incomplete path={path}")
+            if path in pending_set:
+                failures = pending_failures.get(path, 0) + 1
+                pending_failures[path] = failures
+                if failures >= cfg.read_fail_alert_after:
+                    remaining_pending = [
+                        pending
+                        for pending in remaining_pending
+                        if pending != path
+                    ]
+                    pending_failures.pop(path, None)
+                    escalated_pending_paths.append(path)
+                    continue
+            unreadable_paths.append(path)
             continue
+        pending_failures.pop(path, None)
         prior_delivered_ts = delivered_watermark_for_path(chs, candidate.path)
         verdict = evaluate(
             read_result.blocks,
@@ -2119,10 +2449,49 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                     pending for pending in remaining_pending if pending != path
                 ]
         evaluated.append((candidate, verdict))
-    chs[PENDING_TRANSCRIPTS_KEY] = _bounded_pending_transcripts(
-        remaining_pending, set(merged_sizes)
+    remaining_pending = _bounded_pending_transcripts(
+        remaining_pending, set(merged_sizes) | candidate_paths
     )
+    chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
+    pending_failures = {
+        path: failures
+        for path, failures in pending_failures.items()
+        if path in set(remaining_pending)
+    }
+    pending_since = {
+        path: pending_since.get(path, now) for path in remaining_pending
+    }
+    if pending_failures:
+        chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+    else:
+        chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+    if pending_since:
+        chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+    else:
+        chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+    if escalated_pending_paths:
+        retired_pending_paths.extend(escalated_pending_paths)
+        escalated = set(escalated_pending_paths)
+        for path in escalated_pending_paths:
+            candidate = candidate_by_path.get(path)
+            size = candidate.size if candidate is not None else merged_sizes.get(path)
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                retired_transcripts[path] = (size, now)
+        _store_retired_transcripts(chs, retired_transcripts)
+        rt.log(
+            f"[{cid}] transcript-pending-escalated "
+            f"count={len(escalated_pending_paths)}"
+        )
+        _alert_pending_retirement(
+            rt, ch, escalated_pending_paths, reason="read_failure"
+        )
+        _clear_gap_alert_without_recovery(rt, chs, cid)
+        if tr is not None and str(tr) in escalated:
+            chs.pop(SELECTED_TRANSCRIPT_KEY, None)
+            tr = None
     if not evaluated:
+        if retired_pending_paths:
+            _clear_gap_alert_without_recovery(rt, chs, cid)
         return
     state_rank = {STATE_OK: 0, STATE_LAGGING: 1, STATE_GAP: 2}
     verdict_candidate, v = max(
@@ -2136,10 +2505,17 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         ),
     )
     verdict_path = str(verdict_candidate.path)
-    if read_error_paths and v.state == STATE_OK:
+    if unreadable_paths and v.state == STATE_OK:
         rt.log(
             f"[{cid}] transcript-verdict-incomplete "
-            f"read_errors={len(read_error_paths)}"
+            f"read_errors={len(unreadable_paths)}"
+        )
+        return
+    if retired_pending_paths and v.state == STATE_OK:
+        _clear_gap_alert_without_recovery(rt, chs, cid)
+        rt.log(
+            f"[{cid}] transcript-verdict-unresolved-retirement "
+            f"retired={len(retired_pending_paths)}"
         )
         return
 
