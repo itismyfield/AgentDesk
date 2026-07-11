@@ -100,6 +100,10 @@ SELECTED_TRANSCRIPT_KEY = "selected_transcript"
 TRANSCRIPT_SIZES_KEY = "transcript_sizes"
 TRANSCRIPT_SEEN_AT_KEY = "transcript_seen_at"
 PENDING_TRANSCRIPTS_KEY = "pending_transcripts"
+PENDING_TRANSCRIPT_OVERFLOW_KEY = "pending_transcript_overflow"
+LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY = (
+    "last_pending_transcript_overflow_alert"
+)
 MAX_TRANSCRIPT_HISTORY = 64
 MAX_PENDING_TRANSCRIPTS = 32
 TRANSCRIPT_HISTORY_TTL_SECS = 7 * 24 * 60 * 60
@@ -628,7 +632,7 @@ def assistant_blocks(transcript: Path) -> list[tuple[float, str]]:
     try:
         with transcript.open(encoding="utf-8") as f:
             return assistant_blocks_from_lines(f)
-    except OSError:
+    except (OSError, UnicodeError):
         return []
 
 
@@ -1775,12 +1779,23 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 for candidate in candidates
                 if str(candidate.path) not in previous_sizes
             ),
-            key=lambda candidate: (candidate.mtime, str(candidate.path)),
+            key=lambda candidate: (-candidate.mtime, str(candidate.path)),
         )
+        live_debut_paths: list[str] = []
         for candidate in debut_candidates:
             path = str(candidate.path)
-            if path not in pending_paths:
-                pending_paths.append(path)
+            idle = now - candidate.mtime
+            if idle >= cfg.idle_quiet_secs:
+                rt.log(
+                    f"[{cid}] transcript-debut-skip reason=idle "
+                    f"idle_min={int(min(idle, 86400 * 365) // 60)} path={path}"
+                )
+                continue
+            live_debut_paths.append(path)
+        live_debut_set = set(live_debut_paths)
+        pending_paths = live_debut_paths + [
+            path for path in pending_paths if path not in live_debut_set
+        ]
     tr, selection_reason = select_watch_transcript_with_reason(
         candidates, previous_sizes, previous_selected
     )
@@ -1820,7 +1835,44 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     merged_sizes, merged_seen_at = _bounded_transcript_history(
         merged_sizes, merged_seen_at, now, priority_paths
     )
-    pending_paths = _bounded_pending_transcripts(pending_paths, set(merged_sizes))
+    bounded_pending_paths = _bounded_pending_transcripts(
+        pending_paths, set(merged_sizes)
+    )
+    bounded_pending_set = set(bounded_pending_paths)
+    dropped_pending_paths = [
+        path for path in pending_paths if path not in bounded_pending_set
+    ]
+    if dropped_pending_paths:
+        chs[PENDING_TRANSCRIPT_OVERFLOW_KEY] = {
+            "at": now,
+            "dropped": len(dropped_pending_paths),
+            "kept": len(bounded_pending_paths),
+        }
+        rt.log(
+            f"[{cid}] transcript-debut-overflow "
+            f"kept={len(bounded_pending_paths)} "
+            f"dropped={len(dropped_pending_paths)}"
+        )
+        last_overflow_alert = chs.get(
+            LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY, 0.0
+        )
+        if not _is_finite_nonnegative_number(last_overflow_alert):
+            last_overflow_alert = 0.0
+        if now - float(last_overflow_alert) >= cfg.realert_secs:
+            rt.alert(
+                ch,
+                "🚨 **릴레이 트랜스크립트 평가 큐 포화**\n\n"
+                f"한 번의 감시 틱에서 보존 가능한 신규 트랜스크립트 "
+                f"**{len(bounded_pending_paths)}개**를 초과해 "
+                f"**{len(dropped_pending_paths)}개**의 평가 권한을 유지하지 "
+                "못했습니다. 최신 후보를 우선 보존했지만 평가 커버리지가 "
+                "불완전하므로 정상 상태로 간주할 수 없습니다.\n\n"
+                f"런타임: {rt.dcserver_snapshot()}",
+            )
+            chs[LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY] = now
+    else:
+        chs.pop(PENDING_TRANSCRIPT_OVERFLOW_KEY, None)
+    pending_paths = bounded_pending_paths
     chs[TRANSCRIPT_SIZES_KEY] = merged_sizes
     chs[TRANSCRIPT_SEEN_AT_KEY] = merged_seen_at
     chs[PENDING_TRANSCRIPTS_KEY] = pending_paths

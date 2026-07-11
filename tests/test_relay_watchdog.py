@@ -2202,6 +2202,210 @@ class TickChannelTests(unittest.TestCase):
             )
         )
 
+    def test_invariant_4435_history_cap_evictees_do_not_redebut_when_idle(self):
+        current = self.proj_dir / "current.jsonl"
+        current_ts = float(int(self.now - 1000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        idle_at = self.now - rt.cfg.idle_quiet_secs - 60
+        dead_paths: list[Path] = []
+        for index in range(relay_watchdog.MAX_TRANSCRIPT_HISTORY + 8):
+            dead = self.proj_dir / f"dead-{index:03d}.jsonl"
+            dead.write_text(
+                record(self.now - 3000 - index, f"historic missing {index}") + "\n",
+                encoding="utf-8",
+            )
+            os.utime(dead, (idle_at - index, idle_at - index))
+            dead_paths.append(dead)
+
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        retained = set(state["999"]["transcript_sizes"])
+        evicted = [path for path in dead_paths if str(path) not in retained]
+        self.assertGreater(len(evicted), 0)
+
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(current_ts + 1, "current growth delivered") + "\n")
+        live_debut = self.proj_dir / "live-final.jsonl"
+        live_debut.write_text(
+            record(self.now - 2000, "live final missing") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(live_debut, (self.now + 1, self.now + 1))
+        os.utime(current, (self.now + 2, self.now + 2))
+        rt.haystack = norm("current delivered current growth delivered")
+        log_start = len(rt.log_lines)
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        second_tick_logs = rt.log_lines[log_start:]
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={live_debut}" in line
+                for line in second_tick_logs
+            )
+        )
+        for path in evicted:
+            self.assertFalse(
+                any(
+                    f"transcript-debut-eval path={path}" in line
+                    for line in second_tick_logs
+                ),
+                f"idle history evictee regained debut authority: {path}",
+            )
+
+    def test_invariant_4435_malformed_pending_does_not_abort_healthy_selected(self):
+        current = self.proj_dir / "current.jsonl"
+        malformed = self.proj_dir / "malformed.jsonl"
+        current_ts = float(int(self.now - 1000))
+        grown_ts = current_ts + 1
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(grown_ts, "healthy selected growth") + "\n")
+        malformed.write_bytes(b"\xff\n")
+        os.utime(malformed, (self.now + 1, self.now + 1))
+        os.utime(current, (self.now + 2, self.now + 2))
+        rt.haystack = norm("current delivered healthy selected growth")
+
+        try:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        except UnicodeError as exc:
+            self.fail(f"malformed pending transcript aborted channel tick: {exc!r}")
+
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], current), grown_ts
+        )
+        self.assertNotIn(str(malformed), state["999"]["pending_transcripts"])
+        self.assertEqual(rt.alerts, [])
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={malformed} state=ok" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_pending_overflow_keeps_newest_and_alerts(self):
+        current = self.proj_dir / "current.jsonl"
+        current_ts = float(int(self.now - 1000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(current_ts, "current delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        debuts: list[Path] = []
+        delivered_texts: list[str] = []
+        for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 5):
+            path = self.proj_dir / f"overflow-{index:02d}.jsonl"
+            text = f"overflow debut {index}"
+            path.write_text(
+                record(self.now - 2000 - index, text) + "\n", encoding="utf-8"
+            )
+            os.utime(
+                path,
+                (self.now + 1 + index / 100, self.now + 1 + index / 100),
+            )
+            debuts.append(path)
+            delivered_texts.append(text)
+        newest = debuts[-1]
+        oldest = debuts[0]
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(current_ts + 1, "current growth delivered") + "\n")
+        os.utime(current, (self.now + 2, self.now + 2))
+        rt.haystack = None
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        pending = state["999"]["pending_transcripts"]
+        self.assertEqual(len(pending), relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        self.assertIn(str(newest), pending)
+        self.assertNotIn(str(oldest), pending)
+        self.assertEqual(
+            state["999"]["pending_transcript_overflow"]["dropped"], 5
+        )
+        self.assertTrue(
+            any(
+                "transcript-debut-overflow kept=32 dropped=5" in line
+                for line in rt.log_lines
+            )
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 큐 포화" in body]), 1
+        )
+
+        rt.haystack = norm(
+            "current delivered current growth delivered "
+            + " ".join(delivered_texts[:-1])
+        )
+        log_start = len(rt.log_lines)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={newest}" in line
+                for line in rt.log_lines[log_start:]
+            )
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+
     def test_invariant_4435_invalid_persisted_selection_is_ignored_before_fallback(
         self,
     ):
