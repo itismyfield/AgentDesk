@@ -916,9 +916,13 @@ class HarnessCli(unittest.TestCase):
         self.assertEqual(json_payload["baseline_gate_count"], 3)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
-        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
+        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}) as root:
+            allowlist = root / "empty.toml"
+            allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()):
-                rc = HARNESS.main(["--check", "--format", "json"])
+                rc = HARNESS.main(
+                    ["--check", "--format", "json", "--allowlist", str(allowlist)]
+                )
         self.assertEqual(rc, 0)
 
     def test_check_mode_fails_on_direct_discord_send_regression(self) -> None:
