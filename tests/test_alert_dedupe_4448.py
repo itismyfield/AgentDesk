@@ -39,14 +39,21 @@ class AlertDedupeWiringTests(unittest.TestCase):
         source_registry = (
             REPO_ROOT / "src/services/discord/outbound/source_registry.rs"
         ).read_text(encoding="utf-8")
+        maintenance = (REPO_ROOT / "src/server/maintenance.rs").read_text(
+            encoding="utf-8"
+        )
         quality_module = (
             REPO_ROOT / "src/services/agent_quality/mod.rs"
         ).read_text(encoding="utf-8")
 
         self.assertFalse(legacy.exists(), "legacy quality alert producer must be removed")
         self.assertNotIn("enqueue_quality_regression_alerts_pg", queries)
+        self.assertIn("alert_count: 0", queries)
         self.assertNotIn('"agent_quality_rollup"', source_registry)
         self.assertIn("sole regression-alert authority", quality_module)
+        self.assertIn(
+            "agent_quality::regression_alerts::run_regression_alerter_pg", maintenance
+        )
 
 
 if __name__ == "__main__":

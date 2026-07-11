@@ -306,7 +306,15 @@ mod failed_entry_alert_tests {
     use super::*;
 
     #[test]
-    fn failed_entry_alert_identity_is_stable_per_entry_retry_stage() {
+    fn failed_entry_alert_reason_code_is_stable() {
+        assert_eq!(
+            FAILED_ENTRY_ALERT_REASON_CODE,
+            "auto_queue.entry_dispatch_failed"
+        );
+    }
+
+    #[test]
+    fn failed_entry_alert_identity_is_scoped_per_entry_retry_stage() {
         assert_eq!(
             failed_entry_alert_session_key("entry-1", 3),
             failed_entry_alert_session_key("entry-1", 3)
@@ -319,10 +327,10 @@ mod failed_entry_alert_tests {
             failed_entry_alert_session_key("entry-1", 3),
             failed_entry_alert_session_key("entry-2", 3)
         );
-        assert_eq!(
-            FAILED_ENTRY_ALERT_REASON_CODE,
-            "auto_queue.entry_dispatch_failed"
-        );
+    }
+
+    #[test]
+    fn failed_entry_alert_ttl_is_at_least_thirty_minutes() {
         assert!(FAILED_ENTRY_ALERT_DEDUPE_TTL_SECS >= 30 * 60);
     }
 

@@ -81,28 +81,44 @@ line_count() {
   fi
 }
 
+assert_notify_count() {
+  local expected="$1"
+  local actual
+  actual=$(line_count)
+  if [ "$actual" -ne "$expected" ]; then
+    echo "expected $expected notification(s), got $actual" >&2
+    exit 1
+  fi
+}
+
 echo active > "$FAKE_MODE_FILE"
 FAKE_FAIL_POST=1 run_once
-[ "$(line_count)" -eq 0 ]
-[ ! -f "$STATE_FILE" ]
+assert_notify_count 0
+if [ -f "$STATE_FILE" ]; then
+  echo "failed notification must not advance persistent state" >&2
+  exit 1
+fi
 
 run_once
-[ "$(line_count)" -eq 3 ]
+assert_notify_count 3
 jq -e '
   (.conditions | keys | sort) == [
     "ANOMALY|run-1|entry-anomaly|dispatch-1",
     "REVIEW_LONG|run-1|entry-review|round-2",
     "STUCK|run-1|entry-stuck|dispatch-2"
   ]
-' "$STATE_FILE" >/dev/null
+' "$STATE_FILE" >/dev/null || {
+  echo "condition identity must include kind, run, entry, and retry stage" >&2
+  exit 1
+}
 run_once
-[ "$(line_count)" -eq 3 ]
+assert_notify_count 3
 
 echo inactive > "$FAKE_MODE_FILE"
 run_once
-[ "$(line_count)" -eq 6 ]
+assert_notify_count 6
 run_once
-[ "$(line_count)" -eq 6 ]
+assert_notify_count 6
 
 jq -s -e '
   all(.[]; .source == "auto-queue-monitor") and
