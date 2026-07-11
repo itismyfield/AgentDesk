@@ -959,12 +959,18 @@ def _refresh_recovered_gap_guards(
             reclaimed.append(path)
             continue
         if presence == RECOVERED_GAP_PATH_PRESENT:
-            refreshed[path] = (size, confirmed_at, now, None)
+            refreshed[path] = (size, confirmed_at, max(last_seen_at, now), None)
             continue
         if presence == RECOVERED_GAP_PATH_AMBIGUOUS:
             # Ambiguity breaks proof of continuous absence. Never expire a
             # replay floor because a directory read, stat, or file type was
             # unsafe to interpret.
+            refreshed[path] = (size, confirmed_at, last_seen_at, None)
+            continue
+        if last_seen_at > now:
+            # A wall-clock rollback cannot establish elapsed absence. Keep the
+            # floor armed until time catches up and a fresh absence interval
+            # can be observed.
             refreshed[path] = (size, confirmed_at, last_seen_at, None)
             continue
         missing_since = absent_since
@@ -3295,7 +3301,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         recovered_gap_guards, admitted = _upsert_recovered_gap_guard(
             recovered_gap_guards,
             path,
-            candidate.size,
+            read_cache[path].observed_size,
             now,
         )
         if not admitted and recovering_gap_owner:
