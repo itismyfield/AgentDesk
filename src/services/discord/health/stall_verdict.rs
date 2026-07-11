@@ -365,13 +365,23 @@ fn classify_runtime_signals_lossy(
         return None;
     }
 
-    let active_turn = if inflight_state_present {
+    // An inflight row is storage evidence, not by itself a live relay. The
+    // production snapshot deliberately reports `active_turn = None` for idle
+    // rebind-origin and ownerless external-input rows, and a terminal-committed
+    // row is completed even if its lingering snapshot still says Foreground.
+    // Only a genuinely active, uncommitted turn makes the ownership bool
+    // authoritative; otherwise preserve unknown instead of inventing a
+    // phantom-attached contradiction from an idle row.
+    let live_relay_present = inflight_state_present
+        && !delivery_committed
+        && !matches!(relay.active_turn, RelayActiveTurn::None);
+    let active_turn = if live_relay_present {
         relay.active_turn
     } else {
         RelayActiveTurn::None
     };
     let idle = !relay.mailbox_has_cancel_token && matches!(active_turn, RelayActiveTurn::None);
-    let watcher_owns_live_relay = inflight_state_present.then_some(relay.watcher_owns_live_relay);
+    let watcher_owns_live_relay = live_relay_present.then_some(relay.watcher_owns_live_relay);
 
     Some(classify_stall(StallSignalSnapshot {
         producer_activity_recent,
@@ -418,7 +428,7 @@ mod tests {
         StallWatchdogLivenessAction, StallWatchdogLivenessDecision, StallWatchdogLivenessEvidence,
     };
     use super::*;
-    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
     use crate::services::discord::relay_health::RelayStallState;
 
     const FIXTURE_UPDATED_AT: &str = "2026-07-11 12:00:00";
@@ -914,6 +924,135 @@ mod tests {
             vec![
                 StallVerdictReason::FrontierAdvancedRecently,
                 StallVerdictReason::WatcherLiveRelayOwnershipUnknown,
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_health_idle_rebind_inflight_preserves_unknown_watcher_ownership() {
+        let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
+        let now = fixture_updated_at_unix() + freshness as i64 + 10;
+        let mut session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
+        let inflight = session.inflight.as_mut().expect("inflight fixture");
+        inflight.rebind_origin = true;
+        inflight.watcher_owns_live_relay = false;
+
+        // Production `relay_active_turn_from_inflight` maps an idle rebind
+        // origin to None even though its persisted inflight row remains.
+        let mut relay = relay_fixture();
+        relay.active_turn = RelayActiveTurn::None;
+        relay.mailbox_has_cancel_token = false;
+        relay.mailbox_active_user_msg_id = None;
+        relay.pending_discord_callback_msg_id = None;
+        relay.watcher_owns_live_relay = false;
+        relay.desynced = false;
+        relay.last_relay_ts_ms = None;
+
+        let assessment = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now - super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1,
+        )
+        .expect("idle rebind-origin row remains observable");
+
+        assert_eq!(assessment.verdict, StallVerdict::ProducerDead);
+        assert_eq!(
+            assessment.reasons,
+            vec![
+                StallVerdictReason::NoPositiveLiveness,
+                StallVerdictReason::WatcherLiveRelayOwnershipUnknown,
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_health_idle_ownerless_external_inflight_preserves_unknown_watcher_ownership() {
+        let now = fixture_updated_at_unix()
+            + crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64
+            + 1;
+        let mut session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
+        let inflight = session.inflight.as_mut().expect("inflight fixture");
+        inflight.turn_source = TurnSource::ExternalInput;
+        inflight.set_relay_owner_kind(RelayOwnerKind::None);
+        inflight.injected_prompt_message_id = Some(9001);
+        inflight.current_msg_id = 0;
+        inflight.response_sent_offset = 0;
+        inflight.full_response.clear();
+        inflight.last_watcher_relayed_offset = None;
+
+        // Production `relay_active_turn_from_inflight` maps the stale,
+        // ownerless external-input shape to None because its bridge tail is
+        // gone, while the persisted row itself still exists.
+        let mut relay = relay_fixture();
+        relay.active_turn = RelayActiveTurn::None;
+        relay.bridge_current_msg_id = None;
+        relay.mailbox_has_cancel_token = false;
+        relay.mailbox_active_user_msg_id = None;
+        relay.pending_discord_callback_msg_id = None;
+        relay.watcher_owns_live_relay = false;
+        relay.desynced = false;
+        relay.last_relay_ts_ms = None;
+
+        let assessment = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now - super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1,
+        )
+        .expect("idle ownerless external-input row remains observable");
+
+        assert_eq!(assessment.verdict, StallVerdict::ProducerDead);
+        assert_eq!(
+            assessment.reasons,
+            vec![
+                StallVerdictReason::NoPositiveLiveness,
+                StallVerdictReason::WatcherLiveRelayOwnershipUnknown,
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_health_terminal_committed_lingering_inflight_is_delivered_idle() {
+        let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
+        let now = fixture_updated_at_unix() + freshness as i64 + 10;
+        let mut session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
+        let inflight = session.inflight.as_mut().expect("inflight fixture");
+        inflight.terminal_delivery_committed = true;
+        inflight.watcher_owns_live_relay = false;
+
+        // Today the production snapshot can still carry Foreground for a
+        // lingering committed row. The W0 adapter must honor the terminal
+        // fence instead of treating that stale shape as a live relay.
+        let mut relay = relay_fixture();
+        relay.active_turn = RelayActiveTurn::Foreground;
+        relay.mailbox_has_cancel_token = false;
+        relay.mailbox_active_user_msg_id = None;
+        relay.pending_discord_callback_msg_id = None;
+        relay.watcher_owns_live_relay = false;
+        relay.desynced = false;
+        relay.last_relay_ts_ms = None;
+
+        let assessment = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            now,
+            now - super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1,
+        )
+        .expect("terminal-committed row remains observable");
+
+        assert_eq!(assessment.verdict, StallVerdict::DeliveredIdle);
+        assert_eq!(
+            assessment.reasons,
+            vec![
+                StallVerdictReason::DeliveryCommitted,
+                StallVerdictReason::Idle,
             ]
         );
     }
