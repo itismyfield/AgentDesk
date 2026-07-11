@@ -587,6 +587,24 @@ class TranscriptRecheckTests(unittest.TestCase):
         self.assertEqual(relative.error, "UnsafePath")
         self.assertEqual(escaped.error, "UnsafePath")
 
+    def test_component_open_not_implemented_fails_closed(self):
+        real_open = relay_watchdog.os.open
+
+        def unsupported_openat(path, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") is not None:
+                raise NotImplementedError("dir_fd is unavailable")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(
+            relay_watchdog.os, "open", side_effect=unsupported_openat
+        ):
+            result = relay_watchdog.assistant_blocks(
+                self.transcript, trusted_root=self.root
+            )
+
+        self.assertEqual(result.error, "UnsafePath")
+        self.assertEqual(result.blocks, [])
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO unavailable on this platform")
     def test_fifo_swap_before_open_is_rejected_without_blocking(self):
         """A non-regular swap must not block before the descriptor fstat."""
@@ -610,6 +628,43 @@ class TranscriptRecheckTests(unittest.TestCase):
             )
         except subprocess.TimeoutExpired:
             self.fail("assistant_blocks blocked opening a FIFO swapped after precheck")
+        self.assertEqual(completed.returncode, 0)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO unavailable on this platform")
+    def test_regular_to_fifo_race_between_stat_and_open_is_nonblocking(self):
+        """Swap after the final lstat; O_NONBLOCK must make fstat rejection bounded."""
+        raced = self.project / "raced-after-stat.jsonl"
+        raced.write_text("{}\n", encoding="utf-8")
+        probe = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "from unittest import mock\n"
+            "import scripts.relay_watchdog as rw\n"
+            f"target = Path({str(raced)!r})\n"
+            f"trusted = Path({str(self.root)!r})\n"
+            "real_open = rw.os.open\n"
+            "swapped = False\n"
+            "def swap_then_open(path, flags, *args, **kwargs):\n"
+            "    global swapped\n"
+            "    if (not swapped and kwargs.get('dir_fd') is not None "
+            "and os.fspath(path) == target.name):\n"
+            "        target.unlink()\n"
+            "        os.mkfifo(target)\n"
+            "        swapped = True\n"
+            "    return real_open(path, flags, *args, **kwargs)\n"
+            "with mock.patch.object(rw.os, 'open', side_effect=swap_then_open):\n"
+            "    result = rw.assistant_blocks(target, trusted_root=trusted)\n"
+            "raise SystemExit(0 if swapped and result.error == 'UnsafePath' else 1)\n"
+        )
+        try:
+            completed = subprocess.run(
+                [os.environ.get("PYTHON", "python3"), "-c", probe],
+                cwd=REPO_ROOT,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("regular-to-FIFO race blocked at final open without O_NONBLOCK")
         self.assertEqual(completed.returncode, 0)
 
 
@@ -1347,6 +1402,71 @@ class StateTests(unittest.TestCase):
         retained = delivered_watermarks(state)
         self.assertEqual(len(retained), MAX_DELIVERED_WATERMARKS)
         self.assertTrue(set([selected, *pending]) <= set(retained))
+
+    def test_invariant_4435_watermark_cap_fits_full_authority_union(self):
+        selected = "/selected.jsonl"
+        pending = [
+            f"/pending-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        gap_owners = [
+            f"/gap-owner-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1)
+        ]
+        authorities = [selected, *pending, *gap_owners]
+        unrelated = "/unrelated-newer.jsonl"
+        state = {
+            SELECTED_TRANSCRIPT_KEY: selected,
+            relay_watchdog.PENDING_TRANSCRIPTS_KEY: pending,
+            relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: gap_owners,
+            DELIVERED_WATERMARKS_KEY: {
+                path: {"delivered_ts": 10.0 + index, "updated_at": 100.0}
+                for index, path in enumerate(authorities)
+            }
+            | {
+                unrelated: {
+                    "delivered_ts": 999.0,
+                    "updated_at": 999.0,
+                }
+            },
+        }
+
+        retained = delivered_watermarks(state)
+
+        self.assertEqual(
+            MAX_DELIVERED_WATERMARKS,
+            1
+            + relay_watchdog.MAX_PENDING_TRANSCRIPTS
+            + (relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1),
+        )
+        self.assertEqual(len(retained), MAX_DELIVERED_WATERMARKS)
+        self.assertTrue(set(authorities) <= set(retained))
+        self.assertNotIn(unrelated, retained)
+
+    def test_invariant_4435_gap_owner_validation_stays_deduped_and_bounded(self):
+        valid = [
+            f"/owner-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 5)
+        ]
+        state = {
+            relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [
+                valid[0],
+                "",
+                None,
+                True,
+                valid[0],
+                *valid[1:],
+            ],
+            relay_watchdog.GAP_TRANSCRIPT_KEY: valid[-1],
+        }
+
+        owners = relay_watchdog._validated_gap_owner_transcripts(state)
+
+        self.assertEqual(
+            owners,
+            valid[: relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1],
+        )
+        self.assertEqual(len(owners), len(set(owners)))
 
 
 class RuntimePgProbeTests(unittest.TestCase):
@@ -3795,7 +3915,7 @@ class TickChannelTests(unittest.TestCase):
         delivered_texts = ["selected delivered", "selected growth delivered"]
         with current.open("a", encoding="utf-8") as stream:
             stream.write(record(anchor + 1, "selected growth delivered") + "\n")
-        for index in range(MAX_DELIVERED_WATERMARKS):
+        for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS):
             path = self.proj_dir / f"a-{index:02d}.jsonl"
             text = f"delivered debut {index}"
             path.write_text(
@@ -3812,13 +3932,128 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(
             delivered_watermark_for_path(state["999"], current), anchor + 1
         )
-        self.assertEqual(len(delivered_watermarks(state["999"])), MAX_DELIVERED_WATERMARKS)
+        self.assertEqual(
+            len(delivered_watermarks(state["999"])),
+            relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1,
+        )
 
         rt.haystack = ""
         tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
         self.assertEqual(
             len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 0
         )
+
+    def test_invariant_4435_full_cap_gap_owner_recovery_survives_haystack_rolloff(self):
+        anchor = float(int(self.now - 2000))
+        selected = self.proj_dir / "selected-empty.jsonl"
+        pending = [
+            self.proj_dir / f"pending-empty-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        target = self.proj_dir / "zz-recovered-gap-owner.jsonl"
+        other_owners = [
+            self.proj_dir / f"gap-owner-{index:02d}.jsonl"
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS)
+        ]
+        gap_owners = [target, *other_owners]
+
+        def record(text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        selected.write_text("{}\n", encoding="utf-8")
+        for path in pending:
+            path.write_text("{}\n", encoding="utf-8")
+        owner_texts: dict[str, str] = {}
+        for index, path in enumerate(gap_owners):
+            text = f"delivered full-cap gap owner {index:02d}"
+            owner_texts[str(path)] = text
+            path.write_text(record(text) + "\n", encoding="utf-8")
+        for path in [selected, *pending, *other_owners]:
+            os.utime(path, (self.now, self.now))
+        # Keep the target in bounded transcript history while the 66 authority
+        # paths are present; it is the sole file left for the rolloff tick.
+        os.utime(target, (self.now + 1, self.now + 1))
+
+        paths = [selected, *pending, *gap_owners]
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(path): path.stat().st_size for path in paths
+                },
+                relay_watchdog.TRANSCRIPT_SEEN_AT_KEY: {
+                    str(path): self.now for path in paths
+                },
+                relay_watchdog.TRANSCRIPT_KNOWN_AT_KEY: {
+                    str(path): self.now for path in paths
+                },
+                relay_watchdog.PENDING_TRANSCRIPTS_KEY: [
+                    str(path) for path in pending
+                ],
+                relay_watchdog.PENDING_TRANSCRIPT_SINCE_KEY: {
+                    str(path): self.now for path in pending
+                },
+                relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [
+                    str(path) for path in gap_owners
+                ],
+                relay_watchdog.GAP_TRANSCRIPT_KEY: str(target),
+                DELIVERED_WATERMARKS_KEY: {
+                    str(path): {
+                        "delivered_ts": anchor - 1,
+                        "updated_at": self.now,
+                    }
+                    for path in [selected, *pending]
+                }
+                | {
+                    "/unrelated-newer.jsonl": {
+                        "delivered_ts": anchor - 1,
+                        "updated_at": self.now + 100,
+                    }
+                },
+                "alerting": True,
+                "gap_since": self.now - 2000,
+                "last_alert": self.now - 10_000,
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = norm(" ".join(owner_texts.values()))
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        chs = state["999"]
+
+        self.assertFalse(chs.get("alerting", False))
+        self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
+        self.assertEqual(
+            delivered_watermark_for_path(chs, target),
+            anchor,
+            "a recovered GAP owner must retain its delivery authority at full cap",
+        )
+        self.assertEqual(len(delivered_watermarks(chs)), MAX_DELIVERED_WATERMARKS)
+
+        for path in [selected, *pending, *other_owners]:
+            path.unlink()
+        rt.haystack = ""  # bounded Discord history has rolled off the delivery
+        prior_gap_alerts = len(
+            [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(target))
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]),
+            prior_gap_alerts,
+            "haystack rolloff must not re-alert a delivery already confirmed",
+        )
+        self.assertFalse(chs.get("alerting", False))
 
     def test_invariant_4435_invalid_persisted_selection_is_ignored_before_fallback(
         self,

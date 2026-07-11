@@ -122,12 +122,15 @@ GAP_OWNER_TRANSCRIPTS_KEY = "gap_owner_transcripts"
 MAX_TRANSCRIPT_HISTORY = 64
 MAX_KNOWN_TRANSCRIPTS = 256
 MAX_PENDING_TRANSCRIPTS = 32
+MAX_GAP_OWNER_TRANSCRIPTS = MAX_PENDING_TRANSCRIPTS + 1
 MAX_RETIRED_TRANSCRIPTS = 32
-# Every pending transcript can hold independent delivery authority in addition
-# to the selected non-pending transcript.  The watermark cap must fit and pin
-# that whole active set; otherwise an old-but-live pending path can be replayed
-# after unrelated paths refresh their watermarks.
-MAX_DELIVERED_WATERMARKS = MAX_PENDING_TRANSCRIPTS + 1
+# Selected, pending, and unresolved GAP-owner transcripts each retain
+# independent delivery authority.  The watermark cap must fit their full
+# deduplicated worst-case union; otherwise a recovered GAP owner's newly
+# advanced watermark can be evicted before bounded Discord history rolls off.
+MAX_DELIVERED_WATERMARKS = (
+    1 + MAX_PENDING_TRANSCRIPTS + MAX_GAP_OWNER_TRANSCRIPTS
+)
 TRANSCRIPT_HISTORY_TTL_SECS = 7 * 24 * 60 * 60
 
 PG_TOPOLOGY_TUNNEL = "tunnel"
@@ -506,7 +509,7 @@ def _open_regular_file_beneath_parent(
         opened = descriptor
         descriptor = -1
         return opened
-    except (OSError, TypeError, ValueError, UnicodeError):
+    except (OSError, NotImplementedError, TypeError, ValueError, UnicodeError):
         return None
     finally:
         if descriptor >= 0:
@@ -707,7 +710,7 @@ def _validated_gap_owner_transcripts(
     legacy = channel_state.get(GAP_TRANSCRIPT_KEY)
     if isinstance(legacy, str) and legacy and legacy not in owners:
         owners.append(legacy)
-    return owners[: MAX_PENDING_TRANSCRIPTS + 1]
+    return owners[:MAX_GAP_OWNER_TRANSCRIPTS]
 
 
 def _store_gap_owner_transcripts(
@@ -717,7 +720,7 @@ def _store_gap_owner_transcripts(
     for path in owners:
         if isinstance(path, str) and path and path not in bounded:
             bounded.append(path)
-    bounded = bounded[: MAX_PENDING_TRANSCRIPTS + 1]
+    bounded = bounded[:MAX_GAP_OWNER_TRANSCRIPTS]
     if bounded:
         channel_state[GAP_OWNER_TRANSCRIPTS_KEY] = bounded
     else:
@@ -1313,6 +1316,17 @@ def _bounded_delivered_watermarks(
     return dict(ordered)
 
 
+def _delivered_watermark_authority_paths(
+    channel_state: Mapping[str, Any],
+) -> list[str]:
+    """Return every bounded path that still owns delivery authority."""
+    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+    authorities = [selected] if isinstance(selected, str) and selected else []
+    authorities.extend(_validated_pending_transcripts(channel_state))
+    authorities.extend(_validated_gap_owner_transcripts(channel_state))
+    return list(dict.fromkeys(authorities))
+
+
 def delivered_watermarks(
     channel_state: Mapping[str, Any],
 ) -> dict[str, tuple[float, float]]:
@@ -1336,10 +1350,10 @@ def delivered_watermarks(
         ):
             continue
         valid[path] = (float(delivered_ts), float(updated_at))
-    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
-    pinned = [selected] if isinstance(selected, str) and selected else []
-    pinned.extend(_validated_pending_transcripts(channel_state))
-    return _bounded_delivered_watermarks(valid, pinned_paths=pinned)
+    return _bounded_delivered_watermarks(
+        valid,
+        pinned_paths=_delivered_watermark_authority_paths(channel_state),
+    )
 
 
 def delivered_watermark_for_path(
@@ -1370,11 +1384,10 @@ def advance_delivered_watermark(
     if candidate <= prior:
         return False
     entries[path] = (candidate, float(now))
-    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
-    pinned = [selected] if isinstance(selected, str) and selected else []
-    pinned.extend(_validated_pending_transcripts(channel_state))
     bounded = _bounded_delivered_watermarks(
-        entries, preferred_path=path, pinned_paths=pinned
+        entries,
+        preferred_path=path,
+        pinned_paths=_delivered_watermark_authority_paths(channel_state),
     )
     channel_state[DELIVERED_WATERMARKS_KEY] = {
         key: {"delivered_ts": watermark, "updated_at": updated_at}
