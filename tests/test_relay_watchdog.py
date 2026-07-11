@@ -1839,6 +1839,13 @@ class TickChannelTests(unittest.TestCase):
         os.utime(new_transcript, (self.now + 1, self.now + 1))
         rt.haystack = ""
         tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(old_transcript))
+
+        with new_transcript.open("a", encoding="utf-8") as stream:
+            stream.write("\n")
+        os.utime(new_transcript, (self.now + 2, self.now + 2))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
 
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
