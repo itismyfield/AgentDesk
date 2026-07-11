@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS task_notification_response_delivery (
         CHECK (recovery_turn_key IS NULL OR char_length(recovery_turn_key) = 64),
     referenced_card_message_id BIGINT NOT NULL
         CHECK (referenced_card_message_id > 0),
+    response_generation INTEGER NOT NULL DEFAULT 1
+        CHECK (response_generation >= 1),
     delivery_state TEXT NOT NULL
         CHECK (delivery_state IN ('claimed', 'sent', 'delivered')),
     owner_kind TEXT CHECK (owner_kind IN ('sink', 'watcher')),
@@ -95,6 +97,55 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_task_notification_response_recovery_key
 
 CREATE INDEX IF NOT EXISTS idx_task_notification_response_retention
     ON task_notification_response_delivery (updated_at);
+
+-- A durable pre-POST journal closes the unbounded gap between Discord accept
+-- and the response-row sent CAS. Generations prevent a nonce that belonged to
+-- an old/deleted required-reference card from being reused after repair.
+CREATE TABLE IF NOT EXISTS task_notification_response_chunk (
+    response_delivery_id BIGINT NOT NULL
+        REFERENCES task_notification_response_delivery(id) ON DELETE CASCADE,
+    response_generation INTEGER NOT NULL CHECK (response_generation >= 1),
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    chunk_count BIGINT NOT NULL CHECK (chunk_count > 0 AND chunk_index < chunk_count),
+    content_hash VARCHAR(64) NOT NULL CHECK (char_length(content_hash) = 64),
+    discord_nonce VARCHAR(25) NOT NULL CHECK (char_length(discord_nonce) BETWEEN 1 AND 25),
+    bot_user_id BIGINT NOT NULL CHECK (bot_user_id > 0),
+    referenced_message_id BIGINT CHECK (referenced_message_id > 0),
+    -- `prepared` is durable intent that has not crossed the network boundary;
+    -- `posting` means an HTTP attempt may have reached Discord and therefore
+    -- requires nonce/history reconciliation after a crash.
+    delivery_state TEXT NOT NULL
+        CHECK (delivery_state IN ('prepared', 'posting', 'confirmed')),
+    discord_message_id BIGINT CHECK (discord_message_id > 0),
+    attempt_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    post_started_at TIMESTAMPTZ,
+    confirmed_at TIMESTAMPTZ,
+    last_reconcile_error TEXT,
+    next_reconcile_at TIMESTAMPTZ,
+    alert_count BIGINT NOT NULL DEFAULT 0 CHECK (alert_count >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (response_delivery_id, response_generation, chunk_index),
+    CHECK (
+        (delivery_state = 'prepared'
+            AND post_started_at IS NULL
+            AND discord_message_id IS NULL
+            AND confirmed_at IS NULL)
+        OR
+        (delivery_state = 'posting'
+            AND post_started_at IS NOT NULL
+            AND discord_message_id IS NULL
+            AND confirmed_at IS NULL)
+        OR
+        (delivery_state = 'confirmed'
+            AND post_started_at IS NOT NULL
+            AND discord_message_id IS NOT NULL
+            AND confirmed_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_notification_response_chunk_reconcile
+    ON task_notification_response_chunk (next_reconcile_at)
+    WHERE delivery_state = 'posting';
 
 CREATE INDEX IF NOT EXISTS idx_task_notification_card_state_lease
     ON task_notification_card_state (lease_expires_at)

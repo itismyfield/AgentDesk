@@ -45,9 +45,9 @@ fn watcher_task_response_wiring_prepares_reference_before_send_and_marks_after_f
         .find("prepare_watcher_task_response")
         .expect("watcher task fallback must prepare a durable card/reference");
     let send = helper[prepare..]
-        .find("send_long_message_raw_with_required_reference_rollback")
+        .find("send_task_response_chunks_with_card_repair")
         .map(|offset| prepare + offset)
-        .expect("watcher task fallback must use a referenced response send");
+        .expect("watcher task fallback must use the durable referenced response sender");
     assert!(prepare < send, "card/bind preparation must precede response send");
 
     let fallback = include_str!("terminal_direct_fallback.rs");

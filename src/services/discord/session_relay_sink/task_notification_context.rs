@@ -9,14 +9,16 @@ use sqlx::PgPool;
 use super::super::SharedData;
 use super::super::health::HealthRegistry;
 use super::super::placeholder_live_events::PlaceholderLiveEvents;
+#[cfg(test)]
+use super::super::task_notification_delivery::claim_task_response_delivery;
 use super::super::task_notification_delivery::{
     CardBot, CardDeliveryClients, CardEnsureError, CardEnsureOutcome, DiscordTaskCardTransport,
     EnsureIntent, ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
     TaskCardTransport, TaskNotificationContext, TaskResponseCommitOutcome,
-    claim_existing_task_response_delivery, claim_task_response_delivery,
-    claim_task_response_delivery_with_recovery_key, commit_task_response_delivered_bounded,
-    durable_response_turn_key, ensure_card, fallback_response_turn_key, provider_bot_key,
-    rebind_task_response_card, record_task_response_sent_bounded, replace_confirmed_missing_card,
+    claim_existing_task_response_delivery, claim_task_response_delivery_with_recovery_key,
+    commit_task_response_delivered_bounded, durable_response_turn_key, ensure_card,
+    fallback_response_turn_key, provider_bot_key, rebind_task_response_card,
+    record_task_response_sent_bounded,
 };
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
@@ -287,7 +289,7 @@ impl super::SessionBoundDiscordRelaySink {
         let mut response_heartbeat = None;
         let mut prompt_anchor_reference =
             answer_reference(channel, task_card_message_id, prompt_anchor);
-        if let Some(current_card_message_id) = task_card_message_id {
+        if task_card_message_id.is_some() {
             if let Some(claim) = task_response_claim.as_ref() {
                 super::super::task_notification_delivery::renew_task_response_delivery(
                     shared.pg_pool.as_ref(),
@@ -305,98 +307,59 @@ impl super::SessionBoundDiscordRelaySink {
                     shared.pg_pool.as_ref(),
                     task_response_claim.as_ref(),
                 );
-            let response_turn_key = task_response_claim
-                .as_ref()
-                .map(ResponseDeliveryClaim::response_turn_key)
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    RelaySinkError::Transient(
-                        "task-card response omitted its exact delivery claim".to_string(),
-                    )
-                })?;
-            let send_result = super::super::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
-                http,
-                channel,
-                current_card_message_id,
-                relay_text,
-                shared,
-                (channel, current_card_message_id),
-                &response_turn_key,
-            )
-            .await;
-            let send_result = match send_result {
-                Err(super::super::formatting::long_send_rollback::RequiredReferenceRollbackError::UnknownReference { .. }) => {
-                    let context = delivery.task_notification_context.as_ref().ok_or_else(|| {
-                        RelaySinkError::Permanent(
-                            "missing task context prevents exact missing-card repair".to_string(),
-                        )
-                    })?;
-                    let event = context.to_event(
-                        delivery.channel_id,
-                        provider.as_str(),
-                        &delivery.session_name,
-                    );
-                    let provider_http = shared.serenity_http_or_token_fallback();
-                    let notify_http = super::super::health::resolve_bot_http(
-                        self.health_registry.as_ref(),
-                        "notify",
-                    )
+            if task_response_claim.is_none() {
+                return Err(RelaySinkError::Transient(
+                    "task-card response omitted its exact delivery claim".to_string(),
+                ));
+            }
+            let response_transport =
+                super::super::task_notification_delivery::DiscordResponseChunkTransport::new(
+                    http.as_ref(),
+                    shared,
+                );
+            let context = delivery.task_notification_context.as_ref().ok_or_else(|| {
+                RelaySinkError::Permanent(
+                    "missing task context prevents exact missing-card repair".to_string(),
+                )
+            })?;
+            let event = context.to_event(
+                delivery.channel_id,
+                provider.as_str(),
+                &delivery.session_name,
+            );
+            let provider_http = shared.serenity_http_or_token_fallback();
+            let notify_http =
+                super::super::health::resolve_bot_http(self.health_registry.as_ref(), "notify")
                     .await
                     .ok();
-                    let clients = CardDeliveryClients::new(
-                        notify_http
-                            .map(|http| CardBot::new("notify", http))
-                            .into_iter()
-                            .chain(provider_http.map(|http| {
-                                CardBot::new(provider_bot_key(provider.as_str()), http)
-                            })),
-                    );
-                    let transport = DiscordTaskCardTransport::new(shared.clone());
-                    let replacement = replace_confirmed_missing_card(
-                        shared.pg_pool.as_ref(),
-                        &clients,
-                        &transport,
-                        &event,
-                        current_card_message_id.get(),
-                    )
-                    .await
-                    .map_err(|error| match error {
-                        CardEnsureError::Permanent(error) => RelaySinkError::Permanent(error),
-                        error => RelaySinkError::Transient(error.to_string()),
-                    })?;
-                    let rebound = rebind_task_response_card(
-                        shared.pg_pool.as_ref(),
-                        task_response_claim.as_ref().expect("claim checked above"),
-                        replacement.message_id,
-                    )
-                    .await
-                    .map_err(|error| {
-                        RelaySinkError::Transient(format!(
-                            "rebind response to replacement task card: {error}"
-                        ))
-                    })?;
-                    let replacement_id = MessageId::new(replacement.message_id);
-                    task_response_claim = Some(rebound);
-                    task_card_message_id = Some(replacement_id);
-                    super::super::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
-                        http,
-                        channel,
-                        replacement_id,
-                        relay_text,
-                        shared,
-                        (channel, replacement_id),
-                        &response_turn_key,
-                    )
-                    .await
-                }
-                result => result,
-            };
-            send_result.map_err(|error| match error {
-                super::super::formatting::long_send_rollback::RequiredReferenceRollbackError::UnknownReference { .. } => {
+            let clients = CardDeliveryClients::new(
+                notify_http
+                    .map(|http| CardBot::new("notify", http))
+                    .into_iter()
+                    .chain(
+                        provider_http
+                            .map(|http| CardBot::new(provider_bot_key(provider.as_str()), http)),
+                    ),
+            );
+            let card_transport = DiscordTaskCardTransport::new(shared.clone());
+            let (_messages, rebound) = super::super::task_notification_delivery::send_task_response_chunks_with_card_repair(
+                shared.pg_pool.as_ref(),
+                &clients,
+                &card_transport,
+                &response_transport,
+                &event,
+                task_response_claim.as_ref().expect("claim checked above").clone(),
+                relay_text,
+            )
+            .await
+            .map_err(|error| match error {
+                super::super::task_notification_delivery::ResponseChunkDeliveryError::Permanent(_) => {
                     RelaySinkError::Permanent(error.to_string())
                 }
                 _ => RelaySinkError::Transient(error.to_string()),
             })?;
+            task_card_message_id = Some(MessageId::new(rebound.card_message_id()));
+            task_response_claim = Some(rebound);
             record_task_response_sent_bounded(
                 shared.pg_pool.as_ref(),
                 task_response_claim.as_ref().expect("claim checked above"),

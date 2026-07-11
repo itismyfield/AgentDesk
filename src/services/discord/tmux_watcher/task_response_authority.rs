@@ -6,7 +6,6 @@ use super::*;
 
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::discord::SharedData;
-use crate::services::discord::formatting::long_send_rollback;
 use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::provider::ProviderKind;
 
@@ -331,72 +330,30 @@ pub(super) async fn apply_watcher_task_response(
                             shared.pg_pool.as_ref(),
                             Some(&claim),
                         );
-                        let send_result = long_send_rollback::send_long_message_raw_with_required_reference_rollback(
-                            http,
-                            channel_id,
-                            prepared.card_message_id,
-                            relay_text,
+                        let response_transport = task_delivery::DiscordResponseChunkTransport::new(
+                            http.as_ref(),
                             shared,
-                            (channel_id, prepared.card_message_id),
-                            response_turn_key,
-                        )
-                        .await;
+                        );
+                        let card_transport =
+                            task_delivery::DiscordTaskCardTransport::new(shared.clone());
+                        let send_result =
+                            task_delivery::send_task_response_chunks_with_card_repair(
+                                shared.pg_pool.as_ref(),
+                                &prepared.clients,
+                                &card_transport,
+                                &response_transport,
+                                &prepared.event,
+                                claim.clone(),
+                                relay_text,
+                            )
+                            .await;
                         let send_result = match send_result {
-                            Err(long_send_rollback::RequiredReferenceRollbackError::UnknownReference { .. }) => {
-                                let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
-                                match task_delivery::replace_confirmed_missing_card(
-                                    shared.pg_pool.as_ref(),
-                                    &prepared.clients,
-                                    &transport,
-                                    &prepared.event,
-                                    prepared.card_message_id.get(),
-                                )
-                                .await
-                                {
-                                    Ok(replacement) => {
-                                        match task_delivery::rebind_task_response_card(
-                                            shared.pg_pool.as_ref(),
-                                            &claim,
-                                            replacement.message_id,
-                                        )
-                                        .await
-                                        {
-                                            Ok(rebound) => {
-                                                claim = rebound;
-                                                prepared.card_message_id =
-                                                    MessageId::new(replacement.message_id);
-                                                long_send_rollback::send_long_message_raw_with_required_reference_rollback(
-                                                    http,
-                                                    channel_id,
-                                                    prepared.card_message_id,
-                                                    relay_text,
-                                                    shared,
-                                                    (channel_id, prepared.card_message_id),
-                                                    response_turn_key,
-                                                )
-                                                .await
-                                            }
-                                            Err(error) => Err(
-                                                long_send_rollback::RequiredReferenceRollbackError::Other(
-                                                    std::io::Error::other(format!(
-                                                        "rebind response to replacement task card: {error}"
-                                                    ))
-                                                    .into(),
-                                                ),
-                                            ),
-                                        }
-                                    }
-                                    Err(error) => Err(
-                                        long_send_rollback::RequiredReferenceRollbackError::Other(
-                                            std::io::Error::other(format!(
-                                                "replace missing task response card: {error}"
-                                            ))
-                                            .into(),
-                                        ),
-                                    ),
-                                }
+                            Ok((messages, rebound)) => {
+                                claim = rebound;
+                                prepared.card_message_id = MessageId::new(claim.card_message_id());
+                                Ok(messages)
                             }
-                            result => result,
+                            Err(error) => Err(error),
                         };
                         match send_result {
                             Ok(_) => {
@@ -430,14 +387,24 @@ pub(super) async fn apply_watcher_task_response(
                             }
                             Err(error) => {
                                 heartbeat.stop();
-                                info_watcher_failed_relay(error.as_error());
+                                info_watcher_failed_relay(&error);
+                                let failure_class = match &error {
+                                    task_delivery::ResponseChunkDeliveryError::Permanent(_) => {
+                                        crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::Permanent
+                                    }
+                                    task_delivery::ResponseChunkDeliveryError::Transient(_)
+                                    | task_delivery::ResponseChunkDeliveryError::Ambiguous { .. }
+                                    | task_delivery::ResponseChunkDeliveryError::UnknownReference { .. } => {
+                                        crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::Transient
+                                    }
+                                };
                                 let plan = watcher_send_failure_plan_warned(
-                                    classify_watcher_send_failure(error.as_error()),
+                                    failure_class,
                                     WatcherNoRewindWarnSite::PlaceholderlessFull,
                                     provider,
                                     channel_id,
                                     tmux_session_name,
-                                    error.as_error(),
+                                    &error,
                                 );
                                 relay_ok = plan.relay_ok;
                                 *retry_terminal_delivery_from_offset = plan.retry_offset;

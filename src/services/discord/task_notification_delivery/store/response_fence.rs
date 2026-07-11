@@ -31,6 +31,7 @@ pub(in crate::services::discord) struct ResponseDeliveryClaim {
     pub(in super::super) scope: TaskCardScope,
     pub(in super::super) response_turn_key: String,
     pub(in super::super) card_message_id: u64,
+    pub(in super::super) response_generation: i32,
     pub(in super::super) owner_token: String,
 }
 
@@ -41,6 +42,14 @@ impl ResponseDeliveryClaim {
 
     pub(in crate::services::discord) fn event_key(&self) -> &str {
         &self.scope.event_key
+    }
+
+    pub(in crate::services::discord) fn response_generation(&self) -> i32 {
+        self.response_generation
+    }
+
+    pub(in crate::services::discord) fn card_message_id(&self) -> u64 {
+        self.card_message_id
     }
 }
 
@@ -207,12 +216,13 @@ async fn claim_response_delivery_pg(
             scope: scope.clone(),
             response_turn_key: response_turn_key.to_string(),
             card_message_id,
+            response_generation: 1,
             owner_token,
         }));
     }
 
     let rows = sqlx::query(
-        "SELECT event_key, response_turn_key, recovery_turn_key,
+        "SELECT event_key, response_turn_key, recovery_turn_key, response_generation,
                 referenced_card_message_id, delivery_state,
                 lease_expires_at > NOW() AS lease_active
          FROM task_notification_response_delivery
@@ -239,6 +249,7 @@ async fn claim_response_delivery_pg(
     let canonical_turn_key: String = current.get("response_turn_key");
     let current_recovery_key: Option<String> = current.get("recovery_turn_key");
     let current_card: i64 = current.get("referenced_card_message_id");
+    let response_generation: i32 = current.get("response_generation");
     if current_event != scope.event_key || current_card != card_message_id_db {
         return Err("task response turn identity conflicts with another event/card".to_string());
     }
@@ -286,6 +297,7 @@ async fn claim_response_delivery_pg(
             scope: scope.clone(),
             response_turn_key: canonical_turn_key,
             card_message_id,
+            response_generation,
             owner_token,
         }))
     } else {
@@ -440,13 +452,16 @@ async fn rebind_response_card_pg(
     claim: &ResponseDeliveryClaim,
     replacement_card_message_id: u64,
 ) -> Result<ResponseDeliveryClaim, String> {
-    let changed = sqlx::query(
+    let row = sqlx::query(
         "UPDATE task_notification_response_delivery
-         SET referenced_card_message_id = $8, updated_at = NOW()
+         SET referenced_card_message_id = $8,
+             response_generation = response_generation + 1,
+             updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3
            AND event_key = $4 AND response_turn_key = $5
            AND referenced_card_message_id = $6 AND owner_token = $7
-           AND delivery_state = 'claimed'",
+           AND delivery_state = 'claimed'
+         RETURNING response_generation",
     )
     .bind(db_id(claim.scope.channel_id, "channel_id")?)
     .bind(&claim.scope.provider)
@@ -456,13 +471,13 @@ async fn rebind_response_card_pg(
     .bind(db_id(claim.card_message_id, "message_id")?)
     .bind(&claim.owner_token)
     .bind(db_id(replacement_card_message_id, "message_id")?)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
     .map_err(|error| format!("rebind exact task response card: {error}"))?
-    .rows_affected();
-    exact_claim_change(changed, "rebind exact task response card")?;
+    .ok_or_else(|| "rebind exact task response card lost exact claim ownership".to_string())?;
     let mut rebound = claim.clone();
     rebound.card_message_id = replacement_card_message_id;
+    rebound.response_generation = row.get("response_generation");
     Ok(rebound)
 }
 
@@ -478,6 +493,7 @@ struct MemoryResponseRow {
     event_key: String,
     recovery_turn_key: Option<String>,
     card_message_id: u64,
+    response_generation: i32,
     state: MemoryResponseState,
     owner_token: Option<String>,
     lease_expires_at: Option<Instant>,
@@ -533,6 +549,7 @@ fn claim_response_delivery_memory(
                     event_key: scope.event_key.clone(),
                     recovery_turn_key: recovery_turn_key.map(str::to_string),
                     card_message_id,
+                    response_generation: 1,
                     state: MemoryResponseState::Claimed,
                     owner_token: Some(owner_token.clone()),
                     lease_expires_at: Some(
@@ -572,6 +589,10 @@ fn claim_response_delivery_memory(
         scope: scope.clone(),
         response_turn_key: response_turn_key.to_string(),
         card_message_id,
+        response_generation: rows
+            .get(&memory_key(scope, response_turn_key))
+            .map(|row| row.response_generation)
+            .unwrap_or(1),
         owner_token,
     }))
 }
@@ -685,8 +706,10 @@ fn rebind_response_card_memory(
         return Err("task response memory claim ownership changed".to_string());
     }
     row.card_message_id = replacement_card_message_id;
+    row.response_generation += 1;
     let mut rebound = claim.clone();
     rebound.card_message_id = replacement_card_message_id;
+    rebound.response_generation = row.response_generation;
     Ok(rebound)
 }
 

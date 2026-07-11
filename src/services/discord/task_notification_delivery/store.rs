@@ -1,6 +1,7 @@
 //! PostgreSQL-backed task-card state and lease authority (#4055).
 
 mod missing_card_replacement;
+mod response_chunks;
 mod response_fence;
 
 use std::collections::HashMap;
@@ -15,6 +16,10 @@ pub(super) use missing_card_replacement::{
     MissingCardReplacementClaim, claim_missing_card_replacement,
 };
 
+pub(super) use response_chunks::{
+    PreparedResponseChunk, ResponseChunkJournal, ResponseChunkPrepareError, confirm_response_chunk,
+    mark_response_chunk_ambiguous, mark_response_chunk_posting, prepare_response_chunk,
+};
 #[cfg(test)]
 pub(super) use response_fence::force_response_deliver_failures;
 pub(in crate::services::discord) use response_fence::{
@@ -531,12 +536,23 @@ async fn prepare_replacement_pg(
 }
 
 async fn cleanup_old_rows_pg(pool: &PgPool) {
-    if let Err(error) = sqlx::query(
+    if let Err(error) = cleanup_old_rows_pg_impl(pool).await {
+        tracing::debug!(error = %error, "task notification bounded retention cleanup failed");
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn cleanup_old_rows_pg_checked(pool: &PgPool) -> Result<(), String> {
+    cleanup_old_rows_pg_impl(pool).await
+}
+
+async fn cleanup_old_rows_pg_impl(pool: &PgPool) -> Result<(), String> {
+    sqlx::query(
         "DELETE FROM task_notification_response_delivery
          WHERE id IN (
              SELECT id FROM task_notification_response_delivery
-             WHERE updated_at < NOW() - make_interval(days => $1)
-               AND (delivery_state = 'delivered' OR lease_expires_at <= NOW())
+             WHERE updated_at < NOW() - make_interval(days => $1::int)
+               AND delivery_state = 'delivered'
              ORDER BY updated_at ASC
              LIMIT $2
          )",
@@ -545,16 +561,22 @@ async fn cleanup_old_rows_pg(pool: &PgPool) {
     .bind(RETENTION_DELETE_LIMIT)
     .execute(pool)
     .await
-    {
-        tracing::debug!(error = %error, "task response bounded retention cleanup failed");
-    }
-    if let Err(error) = sqlx::query(
+    .map_err(|error| format!("task response bounded retention cleanup failed: {error}"))?;
+    sqlx::query(
         "DELETE FROM task_notification_card_state
          WHERE id IN (
-             SELECT id FROM task_notification_card_state
-             WHERE updated_at < NOW() - make_interval(days => $1)
-               AND lease_owner IS NULL
-             ORDER BY updated_at ASC
+             SELECT card.id FROM task_notification_card_state AS card
+             WHERE card.updated_at < NOW() - make_interval(days => $1::int)
+               AND card.lease_owner IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM task_notification_response_delivery AS response
+                   WHERE response.channel_id = card.channel_id
+                     AND response.provider = card.provider
+                     AND response.session_key = card.session_key
+                     AND response.event_key = card.event_key
+                     AND response.delivery_state <> 'delivered'
+               )
+             ORDER BY card.updated_at ASC
              LIMIT $2
          )",
     )
@@ -562,9 +584,8 @@ async fn cleanup_old_rows_pg(pool: &PgPool) {
     .bind(RETENTION_DELETE_LIMIT)
     .execute(pool)
     .await
-    {
-        tracing::debug!(error = %error, "task card bounded retention cleanup failed");
-    }
+    .map_err(|error| format!("task card bounded retention cleanup failed: {error}"))?;
+    Ok(())
 }
 
 fn db_id(id: u64, field: &str) -> Result<i64, String> {

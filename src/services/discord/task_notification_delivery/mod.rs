@@ -5,6 +5,7 @@
 //! module may create, edit, or replace its completion card.
 
 mod gateway;
+mod response_chunks;
 mod store;
 
 #[cfg(test)]
@@ -19,6 +20,12 @@ use crate::services::session_backend::{StreamLineState, classify_task_notificati
 pub(super) use gateway::{
     CardBot, CardDeliveryClients, DiscordTaskCardTransport, TaskCardTransport,
     TaskCardTransportError,
+};
+#[cfg(test)]
+pub(in crate::services::discord) use response_chunks::send_task_response_chunks;
+pub(in crate::services::discord) use response_chunks::{
+    DiscordResponseChunkTransport, ResponseChunkDeliveryError,
+    send_task_response_chunks_with_card_repair,
 };
 
 use self::store::{CardClaim, ClaimedCard, StoreIntent};
@@ -402,9 +409,18 @@ pub(in crate::services::discord) fn response_chunk_nonce(
     response_turn_key: &str,
     chunk_index: usize,
 ) -> String {
+    response_chunk_nonce_for_generation(response_turn_key, 1, chunk_index)
+}
+
+pub(in crate::services::discord) fn response_chunk_nonce_for_generation(
+    response_turn_key: &str,
+    response_generation: i32,
+    chunk_index: usize,
+) -> String {
     let digest = full_fingerprint(&[
-        "task-response-chunk-nonce-v1",
+        "task-response-chunk-nonce-v2",
         response_turn_key,
+        &response_generation.to_string(),
         &chunk_index.to_string(),
     ]);
     format!("adktr{}", &digest[..20])

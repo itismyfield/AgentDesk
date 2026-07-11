@@ -1,31 +1,14 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use poise::serenity_prelude as serenity;
 
+use super::response_chunks::{
+    ResponseChunkHistoryError, ResponseChunkHistoryMessage, ResponseChunkPostError,
+    ResponseChunkTransport,
+};
 use super::*;
-
-struct TestRuntimeRootGuard {
-    previous: Option<std::ffi::OsString>,
-}
-
-impl TestRuntimeRootGuard {
-    fn set(path: &std::path::Path) -> Self {
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
-        Self { previous }
-    }
-}
-
-impl Drop for TestRuntimeRootGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
-    }
-}
 
 #[test]
 fn response_turn_key_is_stable_and_separates_offsets() {
@@ -177,6 +160,189 @@ impl TaskCardTransport for FakeTransport {
             return Err(TaskCardTransportError::Transient("429".to_string()));
         }
         Ok(())
+    }
+}
+
+struct FakeResponseChunkTransport {
+    bot_user_id: u64,
+    clock: Mutex<chrono::DateTime<chrono::Utc>>,
+    messages: Mutex<Vec<ResponseChunkHistoryMessage>>,
+    next_message_id: AtomicU64,
+    post_calls: AtomicUsize,
+    physical_posts: AtomicUsize,
+    nonce_window_seconds: AtomicI64,
+    fail_after_commit_once: AtomicBool,
+    unknown_reference_once: AtomicBool,
+    unknown_reference_failures: AtomicUsize,
+    fail_before_post_call: Mutex<Option<usize>>,
+    delay_after_post_call: Mutex<Option<(usize, u64)>>,
+    history_authoritative: AtomicBool,
+    history_error: AtomicBool,
+    history_permanent_error: AtomicBool,
+}
+
+impl FakeResponseChunkTransport {
+    fn new() -> Self {
+        Self {
+            bot_user_id: 77_4055,
+            clock: Mutex::new(chrono::Utc::now()),
+            messages: Mutex::new(Vec::new()),
+            next_message_id: AtomicU64::new(200_000),
+            post_calls: AtomicUsize::new(0),
+            physical_posts: AtomicUsize::new(0),
+            nonce_window_seconds: AtomicI64::new(120),
+            fail_after_commit_once: AtomicBool::new(false),
+            unknown_reference_once: AtomicBool::new(false),
+            unknown_reference_failures: AtomicUsize::new(0),
+            fail_before_post_call: Mutex::new(None),
+            delay_after_post_call: Mutex::new(None),
+            history_authoritative: AtomicBool::new(false),
+            history_error: AtomicBool::new(false),
+            history_permanent_error: AtomicBool::new(false),
+        }
+    }
+
+    fn advance(&self, seconds: i64) {
+        *self.clock.lock().expect("fake response clock") += chrono::Duration::seconds(seconds);
+    }
+
+    fn expire_nonce_cache(&self) {
+        self.nonce_window_seconds.store(0, Ordering::Release);
+    }
+
+    fn fail_before_post_call(&self, call: usize) {
+        *self.fail_before_post_call.lock().expect("fake fail call") = Some(call);
+    }
+
+    fn delay_after_post_call(&self, call: usize, millis: u64) {
+        *self.delay_after_post_call.lock().expect("fake delay call") = Some((call, millis));
+    }
+
+    fn fail_unknown_references(&self, attempts: usize) {
+        self.unknown_reference_failures
+            .store(attempts, Ordering::Release);
+    }
+}
+
+impl ResponseChunkTransport for FakeResponseChunkTransport {
+    async fn bot_user_id(&self) -> Result<u64, String> {
+        Ok(self.bot_user_id)
+    }
+
+    async fn post_chunk(
+        &self,
+        channel_id: u64,
+        content: &str,
+        reference_message_id: Option<u64>,
+        nonce: &str,
+    ) -> Result<u64, ResponseChunkPostError> {
+        let call = self.post_calls.fetch_add(1, Ordering::AcqRel) + 1;
+        let counted_unknown = reference_message_id.is_some()
+            && self
+                .unknown_reference_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+        if reference_message_id.is_some()
+            && (self.unknown_reference_once.swap(false, Ordering::AcqRel) || counted_unknown)
+        {
+            return Err(ResponseChunkPostError::UnknownReference(
+                "injected Discord unknown required reference".to_string(),
+            ));
+        }
+        if self
+            .fail_before_post_call
+            .lock()
+            .expect("fake fail call")
+            .take_if(|expected| *expected == call)
+            .is_some()
+        {
+            return Err(ResponseChunkPostError::Transient(format!(
+                "injected pre-commit failure on call {call}"
+            )));
+        }
+        let now = *self.clock.lock().expect("fake response clock");
+        let window = self.nonce_window_seconds.load(Ordering::Acquire);
+        if let Some(existing) = self
+            .messages
+            .lock()
+            .expect("fake response history")
+            .iter()
+            .find(|message| {
+                message.nonce.as_deref() == Some(nonce)
+                    && now.signed_duration_since(message.created_at)
+                        < chrono::Duration::seconds(window)
+            })
+            .map(|message| message.message_id)
+        {
+            return Ok(existing);
+        }
+        let message_id = self.next_message_id.fetch_add(1, Ordering::AcqRel);
+        self.physical_posts.fetch_add(1, Ordering::AcqRel);
+        self.messages
+            .lock()
+            .expect("fake response history")
+            .push(ResponseChunkHistoryMessage {
+                channel_id,
+                message_id,
+                author_id: self.bot_user_id,
+                nonce: Some(nonce.to_string()),
+                content_hash: content_hash(content),
+                referenced_message_id: reference_message_id,
+                created_at: now,
+            });
+        if self.fail_after_commit_once.swap(false, Ordering::AcqRel) {
+            return Err(ResponseChunkPostError::Transient(
+                "injected POST commit followed by lost response".to_string(),
+            ));
+        }
+        let delay = self
+            .delay_after_post_call
+            .lock()
+            .expect("fake delay call")
+            .take_if(|(expected, _)| *expected == call)
+            .map(|(_, millis)| millis);
+        if let Some(millis) = delay {
+            tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+        }
+        Ok(message_id)
+    }
+
+    async fn history_page(
+        &self,
+        channel_id: u64,
+        before_message_id: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<ResponseChunkHistoryMessage>, ResponseChunkHistoryError> {
+        if self.history_permanent_error.load(Ordering::Acquire) {
+            return Err(ResponseChunkHistoryError::Permanent(
+                "injected Discord history 403".to_string(),
+            ));
+        }
+        if self.history_error.load(Ordering::Acquire) {
+            return Err(ResponseChunkHistoryError::Transient(
+                "injected Discord history transport failure".to_string(),
+            ));
+        }
+        let mut messages = self
+            .messages
+            .lock()
+            .expect("fake response history")
+            .iter()
+            .filter(|message| {
+                message.channel_id == channel_id
+                    && before_message_id.is_none_or(|before| message.message_id < before)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        messages.sort_by_key(|message| std::cmp::Reverse(message.message_id));
+        messages.truncate(limit);
+        Ok(messages)
+    }
+
+    fn history_proves_deletions(&self) -> bool {
+        self.history_authoritative.load(Ordering::Acquire)
     }
 }
 
@@ -930,6 +1096,1110 @@ async fn watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_p
 }
 
 #[tokio::test]
+async fn response_chunk_journal_preserves_confirmed_prefix_and_rejects_payload_drift_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_prefix_4446",
+        "durable response chunk confirmed prefix",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let card_transport = FakeTransport::new();
+    let event = event("chunk-confirmed-prefix");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &card_transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_461, "2026-07-11T11:01:00Z", Some(1));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let response_transport = FakeResponseChunkTransport::new();
+    response_transport.fail_before_post_call(2);
+    let text = "x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 32);
+    let first = send_task_response_chunks(Some(&pool), &response_transport, &claim, &text).await;
+    assert!(
+        matches!(first, Err(ResponseChunkDeliveryError::Transient(_))),
+        "unexpected first partial result: {first:?}"
+    );
+    assert_eq!(response_transport.physical_posts.load(Ordering::Acquire), 1);
+
+    let resumed = send_task_response_chunks(Some(&pool), &response_transport, &claim, &text)
+        .await
+        .expect("resume at first unconfirmed chunk");
+    assert_eq!(resumed.len(), 2);
+    assert_eq!(
+        response_transport.physical_posts.load(Ordering::Acquire),
+        2,
+        "confirmed prefix must not be deleted or replayed"
+    );
+    let calls_before_drift = response_transport.post_calls.load(Ordering::Acquire);
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &response_transport,
+            &claim,
+            &format!("{text}different tail"),
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Permanent(_))
+    ));
+    assert_eq!(
+        response_transport.post_calls.load(Ordering::Acquire),
+        calls_before_drift,
+        "immutable chunk count/hash must reject actor text drift before POST"
+    );
+}
+
+#[tokio::test]
+async fn recent_post_ack_loss_retries_same_nonce_without_second_physical_message() {
+    let event = event("recent-expiring-nonce");
+    let turn_key = response_turn_key(44_467, "2026-07-11T11:07:00Z", Some(7));
+    let claim = claim_task_response_delivery(
+        None,
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        90_467,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let transport = FakeResponseChunkTransport::new();
+    transport
+        .fail_after_commit_once
+        .store(true, Ordering::Release);
+    assert!(matches!(
+        send_task_response_chunks(None, &transport, &claim, "answer").await,
+        Err(ResponseChunkDeliveryError::Transient(_))
+    ));
+    let reconciled = send_task_response_chunks(None, &transport, &claim, "answer")
+        .await
+        .expect("same recent nonce reconciles Discord message id");
+    assert_eq!(reconciled.len(), 1);
+    assert_eq!(transport.post_calls.load(Ordering::Acquire), 2);
+    assert_eq!(transport.physical_posts.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn delayed_first_chunk_does_not_age_a_later_unattempted_chunk_outside_nonce_authority_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_delayed_prefix_4446",
+        "delayed response prefix must not age later chunks",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("delayed-prefix-clock");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_467, "2026-07-11T11:07:00Z", Some(7));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let transport = FakeResponseChunkTransport::new();
+    transport.delay_after_post_call(1, 6_100);
+    let text = "d".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 32);
+    let delivered = send_task_response_chunks(Some(&pool), &transport, &claim, &text)
+        .await
+        .expect("later unattempted chunk keeps fresh POST authority");
+    assert_eq!(delivered.len(), 2);
+    assert_eq!(transport.physical_posts.load(Ordering::Acquire), 2);
+}
+
+#[tokio::test]
+async fn expiring_nonce_takeover_reconciles_history_instead_of_reposting_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_expiring_nonce_4446",
+        "expiring nonce response takeover",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let card_transport = FakeTransport::new();
+    let event = event("expiring-nonce-takeover");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &card_transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_462, "2026-07-11T11:02:00Z", Some(2));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(_claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let response_transport = FakeResponseChunkTransport::new();
+    response_transport
+        .fail_after_commit_once
+        .store(true, Ordering::Release);
+    assert!(matches!(
+        send_task_response_chunks(Some(&pool), &response_transport, &_claim, "answer").await,
+        Err(ResponseChunkDeliveryError::Transient(_))
+    ));
+    assert_eq!(response_transport.physical_posts.load(Ordering::Acquire), 1);
+    sqlx::query(
+        "UPDATE task_notification_response_chunk
+         SET attempt_started_at = NOW() - INTERVAL '10 minutes',
+             post_started_at = NOW() - INTERVAL '10 minutes'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("age attempt beyond nonce window");
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE response_turn_key = $1",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("model sink crash and watcher takeover");
+    response_transport.advance(600);
+    response_transport.expire_nonce_cache();
+    let existing = claim_existing_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        &turn_key,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("watcher lookup")
+    .expect("persisted response");
+    let ResponseDeliveryClaimOutcome::Owned(watcher) = existing.outcome else {
+        panic!("watcher owns expired response")
+    };
+    let reconciled =
+        send_task_response_chunks(Some(&pool), &response_transport, &watcher, "answer")
+            .await
+            .expect("history nonce/message reconciles after cache expiry");
+    assert_eq!(reconciled.len(), 1);
+    assert_eq!(response_transport.post_calls.load(Ordering::Acquire), 1);
+    assert_eq!(response_transport.physical_posts.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn old_never_attempted_prepared_chunk_resumes_without_history_proof_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_old_unattempted_4446",
+        "old prepared response chunk has not crossed the network boundary",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("old-unattempted-response");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_468, "2026-07-11T11:08:00Z", Some(8));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let transport = FakeResponseChunkTransport::new();
+    store::prepare_response_chunk(
+        Some(&pool),
+        &claim,
+        0,
+        1,
+        &content_hash("never attempted"),
+        &response_chunk_nonce_for_generation(&turn_key, 1, 0),
+        transport.bot_user_id,
+        Some(card.message_id),
+    )
+    .await
+    .expect("durable pre-network intent");
+    sqlx::query(
+        "UPDATE task_notification_response_chunk
+         SET attempt_started_at = NOW() - INTERVAL '10 minutes'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("age durable intent without attempting POST");
+
+    let delivered = send_task_response_chunks(Some(&pool), &transport, &claim, "never attempted")
+        .await
+        .expect("pre-network intent remains safe to POST at any age");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(transport.physical_posts.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn equal_second_history_page_boundary_reconciles_by_snowflake_order_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_equal_second_page_4446",
+        "equal-second Discord response history pagination",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("equal-second-history-page");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_469, "2026-07-11T11:09:00Z", Some(9));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let transport = FakeResponseChunkTransport::new();
+    let nonce = response_chunk_nonce_for_generation(&turn_key, 1, 0);
+    store::prepare_response_chunk(
+        Some(&pool),
+        &claim,
+        0,
+        1,
+        &content_hash("reconcile equal second"),
+        &nonce,
+        transport.bot_user_id,
+        Some(card.message_id),
+    )
+    .await
+    .expect("prepare response journal");
+    sqlx::query(
+        "UPDATE task_notification_response_chunk
+         SET delivery_state = 'posting',
+             attempt_started_at = NOW() - INTERVAL '10 minutes',
+             post_started_at = NOW() - INTERVAL '10 minutes'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("age prepared response");
+    let same_second = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+        .expect("whole-second Discord timestamp");
+    let mut history = transport.messages.lock().expect("fake response history");
+    for offset in 0..=100_u64 {
+        let is_target = offset == 0;
+        history.push(ResponseChunkHistoryMessage {
+            channel_id: event.scope.channel_id,
+            message_id: 400_000 + offset,
+            author_id: transport.bot_user_id,
+            nonce: Some(if is_target {
+                nonce.clone()
+            } else {
+                format!("unrelated-{offset}")
+            }),
+            content_hash: content_hash(if is_target {
+                "reconcile equal second"
+            } else {
+                "unrelated"
+            }),
+            referenced_message_id: is_target.then_some(card.message_id),
+            created_at: same_second,
+        });
+    }
+    drop(history);
+    let reconciled =
+        send_task_response_chunks(Some(&pool), &transport, &claim, "reconcile equal second")
+            .await
+            .expect("exclusive snowflake cursor permits equal-second next page");
+    assert_eq!(reconciled, vec![serenity::MessageId::new(400_000)]);
+    assert_eq!(transport.physical_posts.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn unknown_reference_repair_advances_generation_and_never_reuses_old_nonce_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_generation_4446",
+        "response chunk generation after card repair",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let card_transport = FakeTransport::new();
+    let card_clients = clients();
+    let event = event("unknown-reference-generation");
+    let card = ensure_card(
+        Some(&pool),
+        &card_clients,
+        &card_transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_465, "2026-07-11T11:05:00Z", Some(5));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let response_transport = FakeResponseChunkTransport::new();
+    response_transport
+        .unknown_reference_once
+        .store(true, Ordering::Release);
+    assert!(matches!(
+        send_task_response_chunks(Some(&pool), &response_transport, &claim, "answer").await,
+        Err(ResponseChunkDeliveryError::UnknownReference { .. })
+    ));
+    assert_eq!(response_transport.physical_posts.load(Ordering::Acquire), 0);
+
+    let replacement = replace_confirmed_missing_card(
+        Some(&pool),
+        &card_clients,
+        &card_transport,
+        &event,
+        card.message_id,
+    )
+    .await
+    .expect("repair missing card");
+    let rebound = rebind_task_response_card(Some(&pool), &claim, replacement.message_id)
+        .await
+        .expect("advance response generation during exact card rebind");
+    assert_eq!(claim.response_generation(), 1);
+    assert_eq!(rebound.response_generation(), 2);
+    assert_ne!(
+        response_chunk_nonce_for_generation(&turn_key, 1, 0),
+        response_chunk_nonce_for_generation(&turn_key, 2, 0),
+        "a nonce tied to a rejected/deleted reference must never be reused"
+    );
+    send_task_response_chunks(Some(&pool), &response_transport, &rebound, "answer")
+        .await
+        .expect("new generation posts against replacement card");
+    assert_eq!(response_transport.physical_posts.load(Ordering::Acquire), 1);
+    let generations: Vec<i32> = sqlx::query_scalar(
+        "SELECT response_generation FROM task_notification_response_chunk
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         ) ORDER BY response_generation",
+    )
+    .bind(&turn_key)
+    .fetch_all(&pool)
+    .await
+    .expect("load response chunk generations");
+    assert_eq!(generations, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn repeated_replacement_deletion_reaches_generation_three_with_bounded_repair_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_repeated_card_delete_4446",
+        "bounded repeated task card replacement",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let card_transport = FakeTransport::new();
+    let card_clients = clients();
+    let event = event("repeated-card-delete");
+    let card = ensure_card(
+        Some(&pool),
+        &card_clients,
+        &card_transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_471, "2026-07-11T11:11:00Z", Some(11));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let response_transport = FakeResponseChunkTransport::new();
+    response_transport.fail_unknown_references(2);
+    let (messages, rebound) = send_task_response_chunks_with_card_repair(
+        Some(&pool),
+        &card_clients,
+        &card_transport,
+        &response_transport,
+        &event,
+        claim,
+        "generation-three answer",
+    )
+    .await
+    .expect("two consecutive missing-card races remain recoverable");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(rebound.response_generation(), 3);
+    assert_eq!(response_transport.post_calls.load(Ordering::Acquire), 3);
+    assert_eq!(response_transport.physical_posts.load(Ordering::Acquire), 1);
+    let generations: Vec<i32> = sqlx::query_scalar(
+        "SELECT response_generation FROM task_notification_response_chunk
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         ) ORDER BY response_generation",
+    )
+    .bind(&turn_key)
+    .fetch_all(&pool)
+    .await
+    .expect("load response chunk generations");
+    assert_eq!(generations, vec![1, 2, 3]);
+
+    mark_task_response_sent(Some(&pool), &rebound)
+        .await
+        .expect("mark first repaired response sent");
+    mark_task_response_delivered(Some(&pool), &rebound)
+        .await
+        .expect("finish first repaired response");
+    let capped_turn_key = response_turn_key(44_472, "2026-07-11T11:12:00Z", Some(12));
+    let capped_claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &capped_turn_key,
+        rebound.card_message_id(),
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("bounded response claim");
+    let ResponseDeliveryClaimOutcome::Owned(capped_claim) = capped_claim else {
+        panic!("bounded response must be owned")
+    };
+    let capped_transport = FakeResponseChunkTransport::new();
+    capped_transport.fail_unknown_references(3);
+    let capped = send_task_response_chunks_with_card_repair(
+        Some(&pool),
+        &card_clients,
+        &card_transport,
+        &capped_transport,
+        &event,
+        capped_claim,
+        "preserve after repair cap",
+    )
+    .await;
+    assert!(
+        matches!(capped, Err(ResponseChunkDeliveryError::Transient(ref reason)) if reason.contains("bounded repairs")),
+        "repair-budget exhaustion must preserve terminal retry authority: {capped:?}"
+    );
+    assert_eq!(capped_transport.post_calls.load(Ordering::Acquire), 3);
+    assert_eq!(capped_transport.physical_posts.load(Ordering::Acquire), 0);
+    let capped_generation: i32 = sqlx::query_scalar(
+        "SELECT response_generation FROM task_notification_response_delivery
+         WHERE response_turn_key = $1",
+    )
+    .bind(&capped_turn_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load capped response generation");
+    assert_eq!(capped_generation, 3);
+}
+
+#[tokio::test]
+async fn old_posting_chunk_with_bounded_history_ambiguity_fails_closed_and_backs_off_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_ambiguous_4446",
+        "bounded ambiguous response history",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let card_transport = FakeTransport::new();
+    let event = event("old-posting-ambiguity");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &card_transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_463, "2026-07-11T11:03:00Z", Some(3));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    let response_transport = FakeResponseChunkTransport::new();
+    let nonce = response_chunk_nonce_for_generation(&turn_key, 1, 0);
+    store::prepare_response_chunk(
+        Some(&pool),
+        &claim,
+        0,
+        1,
+        &content_hash("ambiguous POST boundary"),
+        &nonce,
+        response_transport.bot_user_id,
+        Some(card.message_id),
+    )
+    .await
+    .expect("durable intent exists before network POST");
+    sqlx::query(
+        "UPDATE task_notification_response_chunk
+         SET delivery_state = 'posting',
+             attempt_started_at = NOW() - INTERVAL '10 minutes',
+             post_started_at = NOW() - INTERVAL '10 minutes'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("age ambiguous POST-boundary phase");
+
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &response_transport,
+            &claim,
+            "ambiguous POST boundary",
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Ambiguous { .. })
+    ));
+    assert_eq!(response_transport.post_calls.load(Ordering::Acquire), 0);
+    let first_alerts: i64 = sqlx::query_scalar(
+        "SELECT alert_count FROM task_notification_response_chunk
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         ) AND response_generation = 1 AND chunk_index = 0",
+    )
+    .bind(&turn_key)
+    .fetch_one(&pool)
+    .await
+    .expect("ambiguous alert count");
+    assert_eq!(first_alerts, 1);
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &response_transport,
+            &claim,
+            "ambiguous POST boundary",
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Ambiguous { .. })
+    ));
+    let second_alerts: i64 = sqlx::query_scalar(
+        "SELECT alert_count FROM task_notification_response_chunk
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         ) AND response_generation = 1 AND chunk_index = 0",
+    )
+    .bind(&turn_key)
+    .fetch_one(&pool)
+    .await
+    .expect("backoff alert count");
+    assert_eq!(
+        second_alerts, 1,
+        "quarantine prevents a hot alert/retry loop"
+    );
+
+    sqlx::query(
+        "UPDATE task_notification_response_chunk SET next_reconcile_at = NOW() - INTERVAL '1 second'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("release quarantine for history-error case");
+    response_transport
+        .history_error
+        .store(true, Ordering::Release);
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &response_transport,
+            &claim,
+            "ambiguous POST boundary",
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Transient(ref reason))
+            if reason.contains("transport failure")
+    ));
+    response_transport
+        .history_error
+        .store(false, Ordering::Release);
+    response_transport
+        .history_permanent_error
+        .store(true, Ordering::Release);
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &response_transport,
+            &claim,
+            "ambiguous POST boundary",
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Permanent(ref reason))
+            if reason.contains("403")
+    ));
+    assert_eq!(
+        response_transport.post_calls.load(Ordering::Acquire),
+        0,
+        "permanent history authorization failure never opens POST authority"
+    );
+    response_transport
+        .history_permanent_error
+        .store(false, Ordering::Release);
+
+    sqlx::query(
+        "UPDATE task_notification_response_chunk SET next_reconcile_at = NOW() - INTERVAL '1 second'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("release quarantine for missing-nonce case");
+    response_transport
+        .messages
+        .lock()
+        .expect("fake response history")
+        .push(ResponseChunkHistoryMessage {
+            channel_id: event.scope.channel_id,
+            message_id: 299_999,
+            author_id: response_transport.bot_user_id,
+            nonce: None,
+            content_hash: content_hash("ambiguous POST boundary"),
+            referenced_message_id: Some(card.message_id),
+            created_at: chrono::Utc::now(),
+        });
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &response_transport,
+            &claim,
+            "ambiguous POST boundary",
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Ambiguous { .. })
+    ));
+
+    sqlx::query(
+        "UPDATE task_notification_response_chunk SET next_reconcile_at = NOW() - INTERVAL '1 second'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("release quarantine for history page-cap case");
+    let base = chrono::Utc::now();
+    let mut history = response_transport
+        .messages
+        .lock()
+        .expect("fake response history");
+    history.clear();
+    for index in 0..1_000_u64 {
+        history.push(ResponseChunkHistoryMessage {
+            channel_id: event.scope.channel_id,
+            message_id: 300_000 + index,
+            author_id: response_transport.bot_user_id,
+            nonce: Some(format!("unrelated-{index}")),
+            content_hash: content_hash("unrelated"),
+            referenced_message_id: None,
+            created_at: base
+                - chrono::Duration::milliseconds(i64::try_from(999 - index).expect("millis") * 50),
+        });
+    }
+    drop(history);
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &response_transport,
+            &claim,
+            "ambiguous POST boundary",
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Ambiguous { ref reason })
+            if reason.contains("page cap")
+    ));
+
+    sqlx::query(
+        "UPDATE task_notification_response_chunk SET next_reconcile_at = NOW() - INTERVAL '1 second'
+         WHERE response_delivery_id = (
+             SELECT id FROM task_notification_response_delivery WHERE response_turn_key = $1
+         )",
+    )
+    .bind(&turn_key)
+    .execute(&pool)
+    .await
+    .expect("release test quarantine");
+    response_transport
+        .messages
+        .lock()
+        .expect("fake response history")
+        .clear();
+    response_transport
+        .history_authoritative
+        .store(true, Ordering::Release);
+    let delivered = send_task_response_chunks(
+        Some(&pool),
+        &response_transport,
+        &claim,
+        "ambiguous POST boundary",
+    )
+    .await
+    .expect("complete no-deletion history proves crash happened before POST");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(response_transport.physical_posts.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn response_chunk_store_outage_remains_transient_and_never_posts_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_store_outage_4446",
+        "response chunk store outage classification",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let card_transport = FakeTransport::new();
+    let event = event("chunk-store-outage");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &card_transport,
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_464, "2026-07-11T11:04:00Z", Some(4));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    pool.close().await;
+    let response_transport = FakeResponseChunkTransport::new();
+    let result = send_task_response_chunks(
+        Some(&pool),
+        &response_transport,
+        &claim,
+        "must wait for PostgreSQL",
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ResponseChunkDeliveryError::Transient(_))),
+        "store unavailability must preserve retry authority: {result:?}"
+    );
+    assert_eq!(response_transport.post_calls.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn response_chunk_journal_is_cascade_pruned_with_bounded_response_retention_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_response_chunk_retention_4446",
+        "bounded response chunk retention",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let event = event("chunk-retention");
+    let card = ensure_card(
+        Some(&pool),
+        &clients(),
+        &FakeTransport::new(),
+        &event,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("response card");
+    let turn_key = response_turn_key(44_466, "2026-07-11T11:06:00Z", Some(6));
+    let claim = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Sink,
+    )
+    .await
+    .expect("response claim");
+    let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
+        panic!("new response must be owned")
+    };
+    send_task_response_chunks(
+        Some(&pool),
+        &FakeResponseChunkTransport::new(),
+        &claim,
+        "retained answer",
+    )
+    .await
+    .expect("confirm response chunk");
+    mark_task_response_sent(Some(&pool), &claim)
+        .await
+        .expect("mark sent");
+    mark_task_response_delivered(Some(&pool), &claim)
+        .await
+        .expect("mark delivered");
+    let incomplete_turn_key = response_turn_key(44_470, "2026-07-11T11:10:00Z", Some(10));
+    let incomplete = claim_task_response_delivery(
+        Some(&pool),
+        event.scope.channel_id,
+        &event.scope.provider,
+        &event.scope.session_key,
+        event.event_key(),
+        &incomplete_turn_key,
+        card.message_id,
+        ResponseDeliveryOwner::Watcher,
+    )
+    .await
+    .expect("incomplete response claim");
+    let ResponseDeliveryClaimOutcome::Owned(incomplete) = incomplete else {
+        panic!("incomplete response must be owned")
+    };
+    let incomplete_transport = FakeResponseChunkTransport::new();
+    incomplete_transport.fail_before_post_call(2);
+    let incomplete_text = "p".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 32);
+    assert!(matches!(
+        send_task_response_chunks(
+            Some(&pool),
+            &incomplete_transport,
+            &incomplete,
+            &incomplete_text,
+        )
+        .await,
+        Err(ResponseChunkDeliveryError::Transient(_))
+    ));
+    assert_eq!(
+        incomplete_transport.physical_posts.load(Ordering::Acquire),
+        1,
+        "fixture keeps one confirmed prefix plus one unconfirmed tail"
+    );
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET updated_at = NOW() - INTERVAL '8 days'
+         WHERE response_turn_key IN ($1, $2)",
+    )
+    .bind(&turn_key)
+    .bind(&incomplete_turn_key)
+    .execute(&pool)
+    .await
+    .expect("age delivered and incomplete responses");
+    sqlx::query(
+        "UPDATE task_notification_response_delivery
+         SET lease_expires_at = NOW() - INTERVAL '1 day'
+         WHERE response_turn_key = $1",
+    )
+    .bind(&incomplete_turn_key)
+    .execute(&pool)
+    .await
+    .expect("expire incomplete response lease");
+    sqlx::query(
+        "UPDATE task_notification_card_state
+         SET updated_at = NOW() - INTERVAL '8 days'
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(event.event_key())
+    .execute(&pool)
+    .await
+    .expect("age card state beside incomplete response");
+    store::cleanup_old_rows_pg_checked(&pool)
+        .await
+        .expect("bounded response/chunk cleanup");
+    let responses: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE response_turn_key = $1",
+    )
+    .bind(&turn_key)
+    .fetch_one(&pool)
+    .await
+    .expect("count retained response rows");
+    let chunks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_notification_response_chunk")
+        .fetch_one(&pool)
+        .await
+        .expect("count retained chunk rows");
+    assert_eq!(responses, 0);
+    let incomplete_responses: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_response_delivery WHERE response_turn_key = $1",
+    )
+    .bind(&incomplete_turn_key)
+    .fetch_one(&pool)
+    .await
+    .expect("count incomplete response rows");
+    assert_eq!(
+        incomplete_responses, 1,
+        "incomplete parent is not a tombstone"
+    );
+    assert_eq!(
+        chunks, 2,
+        "confirmed prefix and prepared tail survive expired-lease retention cleanup"
+    );
+    let cards: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_notification_card_state
+         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+    )
+    .bind(i64::try_from(event.scope.channel_id).expect("channel id"))
+    .bind(&event.scope.provider)
+    .bind(&event.scope.session_key)
+    .bind(event.event_key())
+    .fetch_one(&pool)
+    .await
+    .expect("count card state protected by incomplete response");
+    assert_eq!(
+        cards, 1,
+        "recovery metadata stays joined to incomplete response"
+    );
+}
+
+#[tokio::test]
 async fn sent_response_claim_never_reopens_post_authority_after_lease_expiry_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_task_response_sent_4055",
@@ -993,192 +2263,6 @@ async fn sent_response_claim_never_reopens_post_authority_after_lease_expiry_pg(
             card_message_id: 90_057
         }
     ));
-}
-
-#[test]
-fn response_reply_nonce_reconciles_after_sent_cas_failure_and_lease_takeover_pg() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let tempdir = tempfile::tempdir().expect("temp runtime root");
-    let _root = TestRuntimeRootGuard::set(tempdir.path());
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("current-thread runtime");
-    runtime.block_on(async {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_task_response_nonce_takeover_4055",
-            "task response nonce takeover reconciliation",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        let event = event("postgres-response-reply-nonce-takeover");
-        let turn_key = response_turn_key(4062, "2026-07-11T03:42:00Z", Some(4062));
-        let card_message_id = 90_062;
-        let claim = claim_task_response_delivery(
-            Some(&pool),
-            event.scope.channel_id,
-            &event.scope.provider,
-            &event.scope.session_key,
-            event.event_key(),
-            &turn_key,
-            card_message_id,
-            ResponseDeliveryOwner::Sink,
-        )
-        .await
-        .expect("sink claims response before reply POST");
-        let ResponseDeliveryClaimOutcome::Owned(claim) = claim else {
-            panic!("first response claimant must own the reply POST")
-        };
-
-        let channel = serenity::ChannelId::new(event.scope.channel_id);
-        let card = serenity::MessageId::new(card_message_id);
-        let by_nonce = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
-        let physical_posts = Arc::new(AtomicUsize::new(0));
-        let next_message_id = Arc::new(AtomicU64::new(100_000));
-        let observations = Arc::new(Mutex::new(Vec::<(
-            Option<String>,
-            bool,
-            Option<(serenity::ChannelId, serenity::MessageId)>,
-        )>::new()));
-        let hook_by_nonce = Arc::clone(&by_nonce);
-        let hook_physical_posts = Arc::clone(&physical_posts);
-        let hook_next_message_id = Arc::clone(&next_message_id);
-        let hook_observations = Arc::clone(&observations);
-        let _hook =
-            crate::services::discord::formatting::rollback_transport_test_hook::install(
-                Box::new(move |seen_channel, _content, reference, nonce, enforce_nonce| {
-                    if seen_channel != channel {
-                        return None;
-                    }
-                    hook_observations
-                        .lock()
-                        .expect("reply observations")
-                        .push((nonce.map(str::to_string), enforce_nonce, reference));
-                    let message_id = match nonce {
-                        Some(nonce) if enforce_nonce => {
-                            let mut messages = hook_by_nonce.lock().expect("reply nonce map");
-                            *messages.entry(nonce.to_string()).or_insert_with(|| {
-                                hook_physical_posts.fetch_add(1, Ordering::AcqRel);
-                                hook_next_message_id.fetch_add(1, Ordering::AcqRel)
-                            })
-                        }
-                        _ => {
-                            hook_physical_posts.fetch_add(1, Ordering::AcqRel);
-                            hook_next_message_id.fetch_add(1, Ordering::AcqRel)
-                        }
-                    };
-                    Some(Ok(serenity::MessageId::new(message_id)))
-                }),
-                Box::new(|_, _| Some(Ok(()))),
-            );
-        let http = serenity::Http::new("test-token");
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let reply_text = "x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 32);
-        let first = crate::services::discord::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
-            &http,
-            channel,
-            card,
-            &reply_text,
-            &shared,
-            (channel, card),
-            &turn_key,
-        )
-        .await
-        .expect("Discord accepts the first required-reference reply POST");
-        assert_eq!(first.len(), 2, "test reply must include a continuation");
-
-        let mut lost_sent_cas = claim.clone();
-        lost_sent_cas.owner_token = "lost-owner-token".to_string();
-        record_task_response_sent_bounded(Some(&pool), &lost_sent_cas)
-            .await
-            .expect_err("model POST success followed by sent-state CAS failure");
-        let expired = sqlx::query(
-            "UPDATE task_notification_response_delivery
-             SET lease_expires_at = NOW() - INTERVAL '1 second'
-             WHERE channel_id = $1 AND provider = $2 AND session_key = $3
-               AND event_key = $4 AND response_turn_key = $5
-               AND delivery_state = 'claimed'",
-        )
-        .bind(i64::try_from(event.scope.channel_id).expect("test channel id"))
-        .bind(&event.scope.provider)
-        .bind(&event.scope.session_key)
-        .bind(event.event_key())
-        .bind(&turn_key)
-        .execute(&pool)
-        .await
-        .expect("expire the sink lease after its sent-state CAS failure");
-        assert_eq!(expired.rows_affected(), 1);
-
-        let takeover = claim_existing_task_response_delivery(
-            Some(&pool),
-            event.scope.channel_id,
-            &event.scope.provider,
-            &event.scope.session_key,
-            &turn_key,
-            ResponseDeliveryOwner::Watcher,
-        )
-        .await
-        .expect("watcher inspects expired sink claim")
-        .expect("response row survives the failed sent CAS");
-        assert_eq!(takeover.card_message_id, card_message_id);
-        let ResponseDeliveryClaimOutcome::Owned(takeover) = takeover.outcome else {
-            panic!("watcher must take over the expired claimed reply")
-        };
-        let replay = crate::services::discord::formatting::long_send_rollback::send_long_message_raw_with_required_reference_rollback(
-            &http,
-            channel,
-            card,
-            &reply_text,
-            &shared,
-            (channel, card),
-            &turn_key,
-        )
-        .await
-        .expect("watcher reconciles the first reply by its enforced nonce");
-        assert_eq!(replay, first, "takeover must reconcile the same message id");
-        assert_eq!(
-            physical_posts.load(Ordering::Acquire),
-            first.len(),
-            "POST-Ok followed by sent-CAS failure must not duplicate reply chunks"
-        );
-        let observed = observations.lock().expect("reply observations");
-        assert_eq!(observed.len(), 4);
-        assert_ne!(observed[0].0, observed[1].0, "chunks need distinct nonces");
-        assert_eq!(observed[0].0, observed[2].0);
-        assert_eq!(observed[1].0, observed[3].0);
-        assert!(observed.iter().all(|(_, enforced, _)| *enforced));
-        assert_eq!(observed[0].2, Some((channel, card)));
-        assert_eq!(observed[1].2, None);
-        assert_eq!(observed[2].2, Some((channel, card)));
-        assert_eq!(observed[3].2, None);
-        drop(observed);
-
-        record_task_response_sent_bounded(Some(&pool), &takeover)
-            .await
-            .expect("takeover records the reconciled reply as sent");
-        assert!(matches!(
-            claim_task_response_delivery(
-                Some(&pool),
-                event.scope.channel_id,
-                &event.scope.provider,
-                &event.scope.session_key,
-                event.event_key(),
-                &turn_key,
-                card_message_id,
-                ResponseDeliveryOwner::Sink,
-            )
-            .await
-            .expect("inspect reconciled sent response"),
-            ResponseDeliveryClaimOutcome::SentUncommitted {
-                card_message_id: 90_062
-            }
-        ));
-    });
 }
 
 #[tokio::test]
