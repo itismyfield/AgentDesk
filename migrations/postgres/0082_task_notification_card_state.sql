@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS task_notification_card_state (
         CHECK (char_length(discord_nonce) BETWEEN 1 AND 25),
     discord_message_id BIGINT CHECK (discord_message_id > 0),
     revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-    update_count INTEGER NOT NULL DEFAULT 1 CHECK (update_count >= 1),
+    update_count BIGINT NOT NULL DEFAULT 1 CHECK (update_count >= 1),
     rendered_content TEXT NOT NULL DEFAULT '',
     content_hash VARCHAR(64) NOT NULL CHECK (char_length(content_hash) = 64),
     lease_owner TEXT,

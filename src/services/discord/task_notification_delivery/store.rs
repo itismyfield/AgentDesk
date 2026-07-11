@@ -359,7 +359,7 @@ fn claimed_from_row(
     row: &sqlx::postgres::PgRow,
     action: ClaimAction,
 ) -> Result<ClaimedCard, String> {
-    let update_count: i32 = row.get("update_count");
+    let update_count: i64 = row.get("update_count");
     Ok(ClaimedCard {
         scope: scope.clone(),
         lease_owner,
