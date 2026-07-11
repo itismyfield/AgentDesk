@@ -912,7 +912,7 @@
 | `services::message_outbox_recovery_support` | `src/services/message_outbox_recovery_support.rs` | 138 | 138 | 0 |  |
 | `services::monitoring_store` | `src/services/monitoring_store.rs` | 141 | 141 | 0 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 614 | 563 | 51 |  |
-| `services::observability::emit` | `src/services/observability/emit.rs` | 1068 | 741 | 327 |  |
+| `services::observability::emit` | `src/services/observability/emit.rs` | 1225 | 772 | 453 |  |
 | `services::observability::events` | `src/services/observability/events.rs` | 310 | 310 | 0 |  |
 | `services::observability::helpers` | `src/services/observability/helpers.rs` | 127 | 127 | 0 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 358 | 358 | 0 |  |
