@@ -482,8 +482,8 @@
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 226 | 226 | 0 |  |
 | `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1240 | 972 | 268 |  |
-| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2369 | 975 | 1394 |  |
-| `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 886 | 365 | 521 |  |
+| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2383 | 989 | 1394 |  |
+| `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1289 | 423 | 866 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1384 | 627 | 757 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |

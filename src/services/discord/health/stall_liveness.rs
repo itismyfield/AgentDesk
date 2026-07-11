@@ -266,6 +266,7 @@ pub(super) struct StallWatchdogJudgmentBasis {
     pub(super) turn_age_secs: Option<u64>,
     pub(super) last_relay_age_secs: Option<u64>,
     pub(super) last_outbound_activity_age_secs: Option<u64>,
+    pub(super) restart_grace_active: bool,
 }
 
 impl StallWatchdogJudgmentBasis {
@@ -293,6 +294,11 @@ impl StallWatchdogJudgmentBasis {
             last_outbound_activity_age_secs: unix_millis_age_secs(
                 snapshot.relay_health.last_outbound_activity_ms,
                 now_unix_secs,
+            ),
+            restart_grace_active: super::stall_verdict::restart_grace_active(
+                snapshot.inflight_state_present,
+                now_unix_secs,
+                boot_unix_secs,
             ),
         }
     }
@@ -503,8 +509,12 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
     threshold_secs: u64,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
-    let (shadow_verdict, shadow_reasons) =
-        stall_verdict::judgment_log_fields(snapshot, Some(decision), freshness_secs);
+    let (shadow_verdict, shadow_reasons) = stall_verdict::judgment_log_fields(
+        snapshot,
+        Some(decision),
+        freshness_secs,
+        basis.restart_grace_active,
+    );
     tracing::warn!(
         event = "stall_watchdog_force_cleanup_deferred",
         reason_code = "1446_stall_watchdog",
@@ -580,8 +590,12 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
     let liveness_reasons = decision
         .map(|decision| decision.evidence.reason_codes_csv(freshness_secs))
         .unwrap_or_else(|| "not_evaluated".to_string());
-    let (shadow_verdict, shadow_reasons) =
-        stall_verdict::judgment_log_fields(snapshot, decision, freshness_secs);
+    let (shadow_verdict, shadow_reasons) = stall_verdict::judgment_log_fields(
+        snapshot,
+        decision,
+        freshness_secs,
+        basis.restart_grace_active,
+    );
     tracing::warn!(
         event = "stall_watchdog_force_cleanup_judgment",
         reason_code = "1446_stall_watchdog",
