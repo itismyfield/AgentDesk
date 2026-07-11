@@ -301,6 +301,18 @@ pub(super) fn normalize_generate_entries(
     Ok(Some(normalized))
 }
 
+pub(super) fn normalize_auto_queue_review_mode(
+    review_mode: Option<&str>,
+) -> Result<&'static str, String> {
+    match review_mode.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some(AUTO_QUEUE_REVIEW_MODE_ENABLED) => Ok(AUTO_QUEUE_REVIEW_MODE_ENABLED),
+        Some(AUTO_QUEUE_REVIEW_MODE_DISABLED) => Ok(AUTO_QUEUE_REVIEW_MODE_DISABLED),
+        Some(other) => Err(format!(
+            "review_mode must be '{AUTO_QUEUE_REVIEW_MODE_ENABLED}' or '{AUTO_QUEUE_REVIEW_MODE_DISABLED}', got '{other}'"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod failed_entry_alert_tests {
     use super::*;
@@ -358,37 +370,44 @@ mod failed_entry_alert_tests {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
+        let first =
+            enqueue_failed_entry_alert_pg(&pool, "channel:123", "first cause", "entry-1", 3).await;
+        assert!(matches!(first, Ok(true)), "first enqueue failed: {first:?}");
+        let duplicate = enqueue_failed_entry_alert_pg(
+            &pool,
+            "channel:123",
+            "same stage with more detailed cause",
+            "entry-1",
+            3,
+        )
+        .await;
         assert!(
-            enqueue_failed_entry_alert_pg(&pool, "channel:123", "first cause", "entry-1", 3,)
-                .await
-                .expect("enqueue first failed-entry alert")
+            matches!(duplicate, Ok(false)),
+            "duplicate was not suppressed: {duplicate:?}"
         );
+        let next_stage =
+            enqueue_failed_entry_alert_pg(&pool, "channel:123", "next retry stage", "entry-1", 4)
+                .await;
         assert!(
-            !enqueue_failed_entry_alert_pg(
-                &pool,
-                "channel:123",
-                "same stage with more detailed cause",
-                "entry-1",
-                3,
-            )
-            .await
-            .expect("dedupe repeated failed-entry alert")
-        );
-        assert!(
-            enqueue_failed_entry_alert_pg(&pool, "channel:123", "next retry stage", "entry-1", 4,)
-                .await
-                .expect("enqueue next-stage failed-entry alert")
+            matches!(next_stage, Ok(true)),
+            "next retry stage did not enqueue: {next_stage:?}"
         );
 
-        let rows: Vec<(String, String, bool)> = sqlx::query_as(
+        let rows_result = sqlx::query_as::<_, (String, String, bool)>(
             "SELECT reason_code, session_key,
                     dedupe_expires_at >= created_at + INTERVAL '30 minutes'
                FROM message_outbox
               ORDER BY id",
         )
         .fetch_all(&pool)
-        .await
-        .expect("load failed-entry alert rows");
+        .await;
+        let rows = match rows_result {
+            Ok(rows) => rows,
+            Err(error) => {
+                assert!(false, "load failed-entry alert rows: {error}");
+                Vec::new()
+            }
+        };
         assert_eq!(
             rows,
             vec![
@@ -407,17 +426,5 @@ mod failed_entry_alert_tests {
 
         pool.close().await;
         pg_db.drop().await;
-    }
-}
-
-pub(super) fn normalize_auto_queue_review_mode(
-    review_mode: Option<&str>,
-) -> Result<&'static str, String> {
-    match review_mode.map(str::trim).filter(|value| !value.is_empty()) {
-        None | Some(AUTO_QUEUE_REVIEW_MODE_ENABLED) => Ok(AUTO_QUEUE_REVIEW_MODE_ENABLED),
-        Some(AUTO_QUEUE_REVIEW_MODE_DISABLED) => Ok(AUTO_QUEUE_REVIEW_MODE_DISABLED),
-        Some(other) => Err(format!(
-            "review_mode must be '{AUTO_QUEUE_REVIEW_MODE_ENABLED}' or '{AUTO_QUEUE_REVIEW_MODE_DISABLED}', got '{other}'"
-        )),
     }
 }
