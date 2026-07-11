@@ -17,6 +17,7 @@ use super::snapshot::WatcherStateSnapshot;
 use super::{relay_auto_heal, relay_dead_reattach, stall_liveness, watcher_respawn};
 
 mod leak_recovery_ledger;
+mod stall_alert;
 mod watchdog_decisions;
 
 use leak_recovery_ledger::{
@@ -1588,90 +1589,6 @@ pub fn spawn_watchdog(port: u16) {
         .expect("Failed to spawn watchdog thread");
 }
 
-/// #4460: reason_code for the "suspected stall" mention that REPLACED the
-/// branch-4 force-clean. A stable reason_code lets the `message_outbox`
-/// dedupe key coalesce repeated pages inside the cooldown window.
-const STALL_WATCHDOG_MENTION_REASON_CODE: &str = "stall_watchdog_suspected_stall";
-
-/// #4460: per-channel page cooldown (seconds). Modeled on
-/// `long_turn_watchdog`'s 1800s alert cooldown so a persistently-suspect turn
-/// pages AT MOST once per this window per channel instead of on every pass.
-const STALL_WATCHDOG_MENTION_COOLDOWN_SECS: i64 = 1800;
-
-/// #4460: replacement for the removed branch-4 force-clean execution. Posts a
-/// rate-limited Discord alert to the channel via the deduped `message_outbox`
-/// path and NEVER terminates, cancels, or deletes anything. Modeled on
-/// `long_turn_watchdog::enqueue_alert`: a stable reason_code + per-channel
-/// session key collapse repeated pages into one row per cooldown window.
-async fn notify_suspected_stall_without_cleanup(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    // Reserved for future detection tightening (verdict-specific copy); the
-    // turn is intentionally left untouched, so it is not read today. (#4460)
-    _snapshot: &WatcherStateSnapshot,
-    inflight: Option<&discord::inflight::InflightTurnState>,
-) {
-    let Some(pool) = shared.pg_pool.as_ref() else {
-        tracing::warn!(
-            "  [stall-watchdog] #4460 suspected stall on channel {} (provider={}) but no pg_pool — skipping mention (never terminating)",
-            channel_id,
-            provider.as_str(),
-        );
-        return;
-    };
-    // Resolve the turn owner for a `<@id>` mention when available. The inflight
-    // state carries the requesting user's id (`request_owner_user_id`); a zero
-    // means "unknown", in which case we omit the mention but still post.
-    let mention = inflight
-        .map(|state| state.request_owner_user_id)
-        .filter(|id| *id != 0)
-        .map(|id| format!(" <@{id}>"))
-        .unwrap_or_default();
-    let content = format!(
-        "⚠️ 스톨 의심: 이 세션이 오래 응답이 없어 보입니다{mention}. 워치독은 더 이상 자동 종료하지 않습니다 — 실제로 멈췄다면 취소해 주시고, 정상 작업 중이면 무시하세요. (채널 {channel_id})"
-    );
-    let target = channel_id.get().to_string();
-    // Per-channel dedupe key: a persistently-suspect turn pages at most once
-    // per cooldown per channel.
-    let session_key = format!("stall-watchdog-mention:{channel_id}");
-    match crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
-        pool,
-        crate::services::message_outbox::OutboxMessage {
-            target: &target,
-            content: &content,
-            bot: "notify",
-            source: "stall_watchdog",
-            reason_code: Some(STALL_WATCHDOG_MENTION_REASON_CODE),
-            session_key: Some(&session_key),
-        },
-        STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
-    )
-    .await
-    {
-        Ok(true) => {
-            tracing::warn!(
-                "  [stall-watchdog] #4460 suspected stall — mentioned owner on channel {} (provider={}) WITHOUT force-clean",
-                channel_id,
-                provider.as_str(),
-            );
-        }
-        Ok(false) => {
-            tracing::debug!(
-                "  [stall-watchdog] #4460 suspected stall mention suppressed by cooldown ({}s) on channel {}",
-                STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
-                channel_id,
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                "  [stall-watchdog] #4460 suspected stall mention enqueue failed on channel {}: {error}",
-                channel_id,
-            );
-        }
-    }
-}
-
 /// Run a single stall-watchdog pass against one provider+SharedData.
 ///
 /// Iterates every attached watcher and cleans channels whose snapshot satisfies
@@ -1948,7 +1865,6 @@ pub(crate) async fn run_stall_watchdog_pass(
                     stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                     STALL_WATCHDOG_THRESHOLD_SECS,
                 );
-                continue;
             }
             liveness_decision = Some(decision);
         } else {
@@ -2106,30 +2022,23 @@ pub(crate) async fn run_stall_watchdog_pass(
         // still working). Per operator directive we now MENTION the owner and
         // leave the turn completely untouched.
         //
-        // Detection tightening: reuse the exact shadow verdict that
-        // `log_stall_watchdog_force_cleanup_judgment` just recorded. If it
-        // classifies the producer as live, this is a false positive — skip
-        // silently (no page, no cleanup, turn untouched).
-        let (shadow_verdict, _shadow_reasons) = super::stall_verdict::judgment_log_fields(
-            &snapshot,
-            liveness_decision.as_ref(),
-            stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
-            judgment_basis.restart_grace_active,
-        );
-        if shadow_verdict == super::stall_verdict::StallVerdict::ProducerLive.as_str() {
-            // #4460: producer is live — the desync detection fired a false
-            // positive. Never terminate, never page.
+        // #4460 follow-up: the W0 shadow classifier deliberately labels a
+        // desynced control plane as `control_plane_desync` even when producer
+        // bytes are fresh, so `shadow_verdict == producer_live` was unreachable
+        // in this branch. Use the authoritative production liveness decision
+        // instead: fresh producer evidence suppresses the page, while no
+        // evidence and the finite absolute backstop still page. No case cleans.
+        if !stall_alert::should_page_suspected_stall(liveness_decision.as_ref()) {
             continue;
         }
         // #4460: not classified live — surface a rate-limited mention so the
         // owner can decide, but NEVER terminate/cancel/delete anything. The
         // turn (inflight state, mailbox token, watcher, turn view) is left
         // fully intact.
-        notify_suspected_stall_without_cleanup(
+        stall_alert::notify_suspected_stall_without_cleanup(
             &shared,
             provider,
             channel_id,
-            &snapshot,
             force_clean_inflight.as_ref(),
         )
         .await;
@@ -4630,16 +4539,22 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
-    /// #4460: the branch-4 "desynced force-clean" must NEVER terminate a live
-    /// turn anymore. This fixture previously drove force-clean (delete inflight,
-    /// release the mailbox cancel token, cancel the watcher, clear the turn
-    /// view) — the exact path that force-killed a live codex session on a false
-    /// positive. It must now leave the turn FULLY intact: the mailbox token and
-    /// the inflight row both survive and nothing is counted as cleaned. (In
-    /// tests there is no pg_pool, so the mention no-ops; the invariant we assert
-    /// is that the turn is never destroyed.)
+    /// #4460: fresh producer activity must be authoritative even while the
+    /// control plane is desynced. This is the production shape that the W0
+    /// shadow verdict mislabeled `control_plane_desync`: the transcript is
+    /// fresh, but the turn itself is old enough to enter branch 4. It must not
+    /// page and must never clean the turn.
     #[tokio::test(flavor = "current_thread")]
-    async fn branch4_suspected_stall_preserves_turn_without_force_clean() {
+    async fn branch4_producer_liveness_suppresses_page_and_preserves_turn_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_stall_watchdog_producer_live",
+            "stall watchdog producer-live suppression tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -4650,7 +4565,8 @@ mod stall_watchdog_auto_heal_tests {
         let mut registry = HealthRegistry::new();
         registry.started_at_unix =
             chrono::Utc::now().timestamp() - super::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 60;
-        let shared = super::super::super::make_shared_data_for_tests();
+        let shared =
+            super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         registry
             .register(provider.as_str().to_string(), shared.clone())
             .await;
@@ -4670,7 +4586,9 @@ mod stall_watchdog_auto_heal_tests {
             0,
             "stale-session",
         );
-        let stale_at = (chrono::Local::now() - chrono::Duration::hours(5))
+        // Old enough for branch 4, but below the existing 4h absolute
+        // backstop so fresh transcript evidence remains authoritative.
+        let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
         stale_state.started_at = stale_at.clone();
@@ -4697,6 +4615,117 @@ mod stall_watchdog_auto_heal_tests {
                 .expect("inflight row must survive — branch 4 no longer deletes it (#4460)");
         assert_eq!(persisted.user_msg_id, user_msg.get());
         assert_eq!(persisted.session_id.as_deref(), Some("stale-session"));
+        let alert_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_outbox WHERE source = 'stall_watchdog'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count producer-live alert rows");
+        assert_eq!(
+            alert_rows, 0,
+            "fresh producer evidence must suppress paging"
+        );
+    }
+
+    /// A genuinely stalled/desynced turn has no fresh producer evidence. It
+    /// must page once through the provider-owned DM bot, while the branch-4
+    /// no-cleanup invariant preserves every turn authority on repeated passes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn branch4_genuine_stall_pages_once_and_preserves_turn_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_stall_watchdog_genuine_stall",
+            "stall watchdog genuine-stall paging tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
+        let provider = ProviderKind::Codex;
+        let mut registry = HealthRegistry::new();
+        registry.started_at_unix =
+            chrono::Utc::now().timestamp() - super::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 60;
+        let shared =
+            super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let channel = ChannelId::new(1_479_662_682_909_966_492);
+        let user_msg = MessageId::new(1_504_813_049_431_724_053);
+        let tmux = "AgentDesk-codex-dm-343742347365974026";
+        let output = tempdir.path().join("genuinely-stalled.jsonl");
+        std::fs::write(&output, "partial stale output\n").expect("write stale output fixture");
+        let stale_unix = chrono::Utc::now().timestamp() - 5 * 60 * 60;
+        filetime::set_file_mtime(&output, filetime::FileTime::from_unix_time(stale_unix, 0))
+            .expect("age transcript beyond every liveness window");
+        let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+        let mut state = seed_idle_inflight(
+            &provider,
+            channel,
+            user_msg.get(),
+            tmux,
+            &output,
+            0,
+            "genuinely-stalled-session",
+        );
+        let stale_at = (chrono::Local::now() - chrono::Duration::hours(5))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        state.started_at = stale_at.clone();
+        state.updated_at = stale_at;
+        state.request_owner_user_id = 343_742_347_365_974_026;
+        state.session_key = Some(
+            crate::services::discord::adk_session::build_namespaced_session_key(
+                "test-token-hash",
+                &provider,
+                tmux,
+            ),
+        );
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("save genuinely stalled inflight");
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux, &output, Arc::new(AtomicBool::new(false))),
+        );
+
+        for pass in 1..=2 {
+            let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
+            assert_eq!(cleaned, 0, "pass {pass} must never force-clean branch 4");
+            assert_mailbox_and_session_preserved(&shared, channel, user_msg, &token).await;
+            assert!(
+                crate::services::discord::inflight::load_inflight_state(&provider, channel.get(),)
+                    .is_some(),
+                "pass {pass} must preserve inflight"
+            );
+        }
+
+        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT target, bot, source, reason_code, session_key, content
+               FROM message_outbox
+              WHERE source = 'stall_watchdog'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load genuine-stall alert row");
+        assert_eq!(rows.len(), 1, "cooldown must suppress the second page");
+        let row = &rows[0];
+        assert_eq!(row.0, format!("channel:{}", channel.get()));
+        assert_eq!(row.1, "notify");
+        assert_eq!(row.2, "stall_watchdog");
+        assert_eq!(row.3, "stall_watchdog_suspected_stall");
+        assert!(row.5.contains("<@343742347365974026>"));
+        let delivery_bot = crate::services::message_outbox::delivery_bot_for_target_session(
+            &row.0,
+            &row.1,
+            Some(&row.4),
+        );
+        assert_eq!(delivery_bot.as_ref(), "codex");
     }
 
     #[tokio::test]
