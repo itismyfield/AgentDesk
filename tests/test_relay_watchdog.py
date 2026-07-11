@@ -403,6 +403,52 @@ class TranscriptRecheckTests(unittest.TestCase):
             [],
         )
 
+    def test_parent_symlink_swap_before_open_cannot_escape_dirfd(self):
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside_project = Path(outside_tmp.name) / self.project.name
+        outside_project.mkdir()
+        outside = outside_project / self.transcript.name
+        outside.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-11T07:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "escaped-parent-read"}
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        moved_project = self.root / "original-project-after-swap"
+        real_open = relay_watchdog.os.open
+        swapped = False
+
+        def swap_parent_then_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and Path(path) in (self.project, self.transcript):
+                swapped = True
+                self.project.rename(moved_project)
+                self.project.symlink_to(outside_project, target_is_directory=True)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(
+            relay_watchdog.os, "open", side_effect=swap_parent_then_open
+        ):
+            result = relay_watchdog.assistant_blocks(self.transcript)
+
+        self.assertTrue(swapped, "test must swap after nofollow prechecks")
+        self.assertEqual(result.error, "UnsafePath")
+        self.assertEqual(
+            result.blocks,
+            [],
+            "a path-string reopen must never read through the swapped parent",
+        )
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO unavailable on this platform")
     def test_fifo_swap_before_open_is_rejected_without_blocking(self):
         """A non-regular swap must not block before the descriptor fstat."""
@@ -1734,6 +1780,39 @@ class TickChannelTests(unittest.TestCase):
             "(send-to-agent handoff), not bot-direct delivery",
         )
 
+    def test_selector_quiet_tool_tick_preserves_divergence_window(self):
+        self.write_transcript([(self.now - 30, "delivered selector anchor")])
+        rt = self.make_rt(swap_confirm_secs=300)
+        rt.haystack = norm("delivered selector anchor")
+        stale_bind = str(self.projects / "other-provider" / "stale-bind.jsonl")
+        rt.watcher_probe = WatcherStateProbe(200, True, False, stale_bind)
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self._grow_selected_transcript()
+        first_divergence = self.now + 1
+        tick_channel(rt, TICK_CHANNEL, state, first_divergence)
+        self.assertEqual(
+            state["999"].get("selector_diverged_since"), first_divergence
+        )
+
+        # A normal long tool phase has no new assistant text.  It pauses F
+        # evidence but must not erase the already-proven stuck-bind window.
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 200)
+        self.assertEqual(
+            state["999"].get("selector_diverged_since"), first_divergence
+        )
+        self.assertTrue(
+            any("retained divergence window" in line for line in rt.log_lines)
+        )
+
+        self._grow_selected_transcript()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 301)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "셀렉터 동기화" in body]),
+            1,
+        )
+
     def test_invariant_4435_runtime_mirror_never_starts_swap_timer_or_alerts(self):
         self.write_transcript([(self.now - 30, "delivered mirror case")])
         rt = self.make_rt(swap_confirm_secs=300)
@@ -3051,6 +3130,169 @@ class TickChannelTests(unittest.TestCase):
             state["999"].get(SELECTED_TRANSCRIPT_KEY), str(selected)
         )
 
+    def test_invariant_4435_full_pending_cap_keeps_selected_failure_authority(self):
+        selected = self.proj_dir / "selected-cap-anchor.jsonl"
+        anchor = float(int(self.now - 30))
+        selected.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "cap anchor landed"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt(read_fail_alert_after=4)
+        rt.haystack = norm("cap anchor landed")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(selected))
+
+        pending: list[str] = []
+        for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS):
+            path = self.proj_dir / f"pending-corrupt-{index:02d}.jsonl"
+            path.write_bytes(b"\xff\n")
+            os.utime(path, (self.now + 1, self.now + 1))
+            pending.append(str(path))
+        with selected.open("ab") as stream:
+            stream.write(b"\xff\n")
+        os.utime(selected, (self.now + 1, self.now + 1))
+        state["999"]["pending_transcripts"] = pending
+        state["999"]["pending_transcript_since"] = {
+            path: self.now + 1 for path in pending
+        }
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        chs = state["999"]
+        self.assertEqual(
+            len(chs["pending_transcripts"]),
+            relay_watchdog.MAX_PENDING_TRANSCRIPTS,
+        )
+        self.assertNotIn(
+            str(selected),
+            chs["pending_transcripts"],
+            "selected owns a separate failure slot, not pending capacity",
+        )
+        self.assertEqual(
+            chs.get("pending_transcript_failures", {}).get(str(selected)), 1
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertEqual(
+            state["999"].get("pending_transcript_failures", {}).get(str(selected)),
+            2,
+            "a full cap must not reset the established selection each tick",
+        )
+
+    def test_invariant_4435_legacy_without_known_at_tracks_torn_debut(self):
+        selected = self.proj_dir / "legacy-selected.jsonl"
+        torn = self.proj_dir / "legacy-new-torn.jsonl"
+        anchor = float(int(self.now - 30))
+        selected.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "legacy landed"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        torn.write_text('{"type":"assistant"', encoding="utf-8")
+        os.utime(selected, (self.now - 1, self.now - 1))
+        os.utime(torn, (self.now, self.now))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                "transcript_sizes": {str(selected): selected.stat().st_size},
+            }
+        }
+        rt = self.make_rt(read_fail_alert_after=3)
+        rt.haystack = norm("legacy landed")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        chs = state["999"]
+        self.assertIn(str(torn), chs["pending_transcripts"])
+        self.assertEqual(chs["pending_transcript_failures"][str(torn)], 1)
+        self.assertIn("transcript_known_at", chs)
+        self.assertFalse(
+            any("unproven_stale_content" in line for line in rt.log_lines)
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(
+            state["999"]["pending_transcript_failures"][str(torn)], 2
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertIn(str(torn), state["999"]["retired_transcripts"])
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 불능" in body]), 1
+        )
+
+    def test_invariant_4435_zero_assistant_debut_keeps_pending_authority(self):
+        current = self.proj_dir / "zero-block-current.jsonl"
+        debut = self.proj_dir / "zero-block-debut.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(self.now - 30, "zero block anchor landed") + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("zero block anchor landed")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        debut.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now + 1)
+                    ),
+                    "message": {"content": "prompt only"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(debut, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertIn(
+            str(debut),
+            state["999"]["pending_transcripts"],
+            "vacuous OK without one assistant block cannot consume debut authority",
+        )
+
+        with debut.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now - 2000, "later semantic block missing") + "\n")
+        os.utime(debut, (self.now + 3, self.now + 3))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+
     def test_invariant_4435_stale_pending_gap_expires_without_realert_loop(self):
         current = self.proj_dir / "current.jsonl"
         missed = self.proj_dir / "missed-final.jsonl"
@@ -3102,6 +3344,68 @@ class TickChannelTests(unittest.TestCase):
         )
         self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
 
+    def test_invariant_4435_retirement_alerts_share_realert_cooldown(self):
+        current = self.proj_dir / "retirement-current.jsonl"
+        current.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 30)
+                    ),
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "retirement anchor landed"}
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("retirement anchor landed")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+
+        def arm_expired(name: str, tick_at: float) -> None:
+            path = self.proj_dir / name
+            path.write_text("{}\n", encoding="utf-8")
+            os.utime(path, (tick_at, tick_at))
+            chs["transcript_sizes"][str(path)] = path.stat().st_size
+            chs["transcript_seen_at"][str(path)] = tick_at
+            chs["transcript_known_at"][str(path)] = tick_at
+            chs["pending_transcripts"] = [str(path)]
+            chs["pending_transcript_since"] = {
+                str(path): tick_at - rt.cfg.idle_quiet_secs - 1
+            }
+
+        first_tick = self.now + 1
+        arm_expired("retire-one.jsonl", first_tick)
+        tick_channel(rt, TICK_CHANNEL, state, first_tick)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 권한 만료" in body]), 1
+        )
+
+        arm_expired("retire-two.jsonl", first_tick + 1)
+        tick_channel(rt, TICK_CHANNEL, state, first_tick + 1)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 권한 만료" in body]),
+            1,
+            "a new crash-loop transcript inside cooldown must not spam",
+        )
+        self.assertTrue(
+            any("retirement-alert suppressed" in line for line in rt.log_lines)
+        )
+
+        boundary = first_tick + rt.cfg.realert_secs
+        arm_expired("retire-three.jsonl", boundary)
+        tick_channel(rt, TICK_CHANNEL, state, boundary)
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "평가 권한 만료" in body]), 2
+        )
+
     def test_invariant_4435_unrelated_pending_retirement_preserves_live_gap(self):
         rt = self.gap_rt()
         state: dict = {}
@@ -3139,6 +3443,128 @@ class TickChannelTests(unittest.TestCase):
                 for line in rt.log_lines
             )
         )
+
+    def test_invariant_4435_young_debut_cannot_false_recover_prior_gap_owner(self):
+        owner = self.proj_dir / "gap-owner-a.jsonl"
+        debut = self.proj_dir / "young-debut-b.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner.write_text(
+            record(self.now - 2000, "owner A remains missing") + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        rt.haystack = ""
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+        self.assertTrue(chs.get("alerting"))
+        self.assertIn(
+            str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        original_gap_since = chs["gap_since"]
+        chs["issue_url"] = "https://example.test/issues/owner-a"
+
+        debut.write_text(
+            record(self.now + 1, "young B not delivered yet") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(debut, (self.now + 1, self.now + 1))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertEqual(
+            chs["issue_url"], "https://example.test/issues/owner-a"
+        )
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], str(owner))
+        self.assertIn(
+            str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_invariant_4435_retiring_one_of_two_gap_owners_keeps_incident_clock(self):
+        owner_a = self.proj_dir / "multi-gap-a.jsonl"
+        owner_b = self.proj_dir / "multi-gap-b.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner_a.write_text(
+            record(self.now - 2000, "multi gap A missing") + "\n",
+            encoding="utf-8",
+        )
+        owner_b.write_text(
+            record(self.now - 3000, "multi gap B missing") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(owner_a, (self.now, self.now))
+        os.utime(owner_b, (self.now + 1, self.now + 1))
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(owner_a),
+                "transcript_sizes": {
+                    str(owner_a): owner_a.stat().st_size,
+                    str(owner_b): owner_b.stat().st_size,
+                },
+                "transcript_seen_at": {
+                    str(owner_a): self.now,
+                    str(owner_b): self.now,
+                },
+                "transcript_known_at": {
+                    str(owner_a): self.now,
+                    str(owner_b): self.now,
+                },
+                "pending_transcripts": [str(owner_b)],
+                "pending_transcript_since": {str(owner_b): self.now},
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        chs = state["999"]
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], str(owner_b))
+        self.assertEqual(
+            set(chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]),
+            {str(owner_a), str(owner_b)},
+        )
+        original_gap_since = chs["gap_since"]
+        chs["issue_url"] = "https://example.test/issues/multi-gap"
+        chs["pending_transcript_since"][str(owner_b)] = (
+            self.now - rt.cfg.idle_quiet_secs - 1
+        )
+
+        os.utime(owner_a, (self.now + 3, self.now + 3))
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertEqual(
+            chs["issue_url"], "https://example.test/issues/multi-gap"
+        )
+        self.assertEqual(chs[relay_watchdog.GAP_TRANSCRIPT_KEY], str(owner_a))
+        self.assertEqual(
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY], [str(owner_a)]
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
 
     def test_invariant_4435_deleted_anchor_uses_watermark_over_touched_dead_path(self):
         deleted_anchor = self.proj_dir / "deleted-current.jsonl"

@@ -99,6 +99,7 @@ SELECTOR_UNKNOWN = "unknown"
 SELECTOR_PATH_PROVIDER_PROJECT = "provider_project"
 SELECTOR_PATH_RUNTIME_MIRROR = "runtime_session_mirror"
 SELECTOR_PATH_UNCOMPARABLE = "uncomparable"
+SELECTOR_DIVERGED_TRANSCRIPT_KEY = "selector_diverged_transcript"
 
 DELIVERED_WATERMARKS_KEY = "delivered_watermarks"
 SELECTED_TRANSCRIPT_KEY = "selected_transcript"
@@ -113,7 +114,11 @@ PENDING_TRANSCRIPT_OVERFLOW_KEY = "pending_transcript_overflow"
 LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY = (
     "last_pending_transcript_overflow_alert"
 )
+LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY = (
+    "last_pending_transcript_retirement_alert"
+)
 GAP_TRANSCRIPT_KEY = "gap_transcript"
+GAP_OWNER_TRANSCRIPTS_KEY = "gap_owner_transcripts"
 MAX_TRANSCRIPT_HISTORY = 64
 MAX_KNOWN_TRANSCRIPTS = 256
 MAX_PENDING_TRANSCRIPTS = 32
@@ -395,6 +400,68 @@ def _regular_file_stat_without_symlink(path: Path) -> os.stat_result | None:
     return path_stat
 
 
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _open_regular_file_beneath_parent(
+    path: Path, flags: int
+) -> int | None:
+    """Open one pinned regular file without re-resolving a swapped parent.
+
+    ``O_NOFOLLOW`` on a path string protects only its final component.  Open
+    and identity-pin the parent directory first, then use openat(dirfd,
+    basename) and verify both descriptors against their nofollow prechecks.
+    Any unsupported platform or race fails closed.
+    """
+    if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+        return None
+    try:
+        expected_parent = path.parent.stat(follow_symlinks=False)
+        expected_file = path.stat(follow_symlinks=False)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not stat_mode.S_ISDIR(expected_parent.st_mode) or not stat_mode.S_ISREG(
+        expected_file.st_mode
+    ):
+        return None
+
+    parent_descriptor = -1
+    descriptor = -1
+    try:
+        parent_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        parent_descriptor = os.open(path.parent, parent_flags)
+        opened_parent = os.fstat(parent_descriptor)
+        if not stat_mode.S_ISDIR(opened_parent.st_mode) or not _same_file_identity(
+            expected_parent, opened_parent
+        ):
+            return None
+        descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+        opened_file = os.fstat(descriptor)
+        if not stat_mode.S_ISREG(opened_file.st_mode) or not _same_file_identity(
+            expected_file, opened_file
+        ):
+            return None
+        opened = descriptor
+        descriptor = -1
+        return opened
+    except (OSError, TypeError, ValueError, UnicodeError):
+        return None
+    finally:
+        for opened in (descriptor, parent_descriptor):
+            if opened >= 0:
+                try:
+                    os.close(opened)
+                except OSError:
+                    pass
+
+
 @dataclass(frozen=True)
 class TranscriptCandidate:
     path: Path
@@ -516,13 +583,31 @@ def _validated_pending_transcripts(channel_state: Mapping[str, Any]) -> list[str
     return pending[:MAX_PENDING_TRANSCRIPTS]
 
 
+def _read_failure_authority_paths(
+    channel_state: Mapping[str, Any], pending_paths: list[str]
+) -> set[str]:
+    """Paths whose consecutive read-failure counter must survive this tick.
+
+    Selected and unresolved GAP-owner transcripts have independent evaluation
+    authority in addition to the bounded pending queue.  Folding either into a
+    full 32-path queue would evict an existing authority, so pin their counters
+    separately while leaving the pending cap unchanged.
+    """
+    authorities = set(pending_paths)
+    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+    if isinstance(selected, str) and selected:
+        authorities.add(selected)
+    authorities.update(_validated_gap_owner_transcripts(channel_state))
+    return authorities
+
+
 def _validated_pending_failures(
     channel_state: Mapping[str, Any], pending_paths: list[str]
 ) -> dict[str, int]:
     raw = channel_state.get(PENDING_TRANSCRIPT_FAILURES_KEY, {})
     if not isinstance(raw, dict):
         return {}
-    pending = set(pending_paths)
+    pending = _read_failure_authority_paths(channel_state, pending_paths)
     return {
         path: failures
         for path, failures in raw.items()
@@ -548,6 +633,37 @@ def _validated_pending_since(
         )
         for path in pending_paths
     }
+
+
+def _validated_gap_owner_transcripts(
+    channel_state: Mapping[str, Any],
+) -> list[str]:
+    """Return bounded unresolved GAP owners, including the legacy singleton."""
+    owners: list[str] = []
+    raw = channel_state.get(GAP_OWNER_TRANSCRIPTS_KEY, [])
+    if isinstance(raw, list):
+        for path in raw:
+            if isinstance(path, str) and path and path not in owners:
+                owners.append(path)
+    legacy = channel_state.get(GAP_TRANSCRIPT_KEY)
+    if isinstance(legacy, str) and legacy and legacy not in owners:
+        owners.append(legacy)
+    return owners[: MAX_PENDING_TRANSCRIPTS + 1]
+
+
+def _store_gap_owner_transcripts(
+    channel_state: dict[str, Any], owners: list[str]
+) -> list[str]:
+    bounded: list[str] = []
+    for path in owners:
+        if isinstance(path, str) and path and path not in bounded:
+            bounded.append(path)
+    bounded = bounded[: MAX_PENDING_TRANSCRIPTS + 1]
+    if bounded:
+        channel_state[GAP_OWNER_TRANSCRIPTS_KEY] = bounded
+    else:
+        channel_state.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
+    return bounded
 
 
 def _bounded_retired_transcripts(
@@ -808,8 +924,6 @@ def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
 
 
 def assistant_blocks(transcript: Path) -> TranscriptReadResult:
-    if _regular_file_stat_without_symlink(transcript) is None:
-        return TranscriptReadResult([], "UnsafePath")
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -818,7 +932,10 @@ def assistant_blocks(transcript: Path) -> TranscriptReadResult:
     )
     descriptor = -1
     try:
-        descriptor = os.open(transcript, flags)
+        opened = _open_regular_file_beneath_parent(transcript, flags)
+        if opened is None:
+            return TranscriptReadResult([], "UnsafePath")
+        descriptor = opened
         if not stat_mode.S_ISREG(os.fstat(descriptor).st_mode):
             return TranscriptReadResult([], "UnsafePath")
         if fcntl is not None and getattr(os, "O_NONBLOCK", 0):
@@ -1878,19 +1995,38 @@ def tick_selector_sync(
     gap or coverage state machines.
     """
     cid = ch.channel_id
-    if not f_growing or not selected_transcript:
-        # No growing live transcript to compare against — a mismatch is not
-        # actionable, and any pending divergence window is stale.  Skip the HTTP
-        # probe entirely (matches tick_coverage's probe-only-when-needed shape).
+    if not selected_transcript:
         chs.pop("selector_diverged_since", None)
+        chs.pop(SELECTOR_DIVERGED_TRANSCRIPT_KEY, None)
+        return
+    selected_path = str(selected_transcript)
+    window_path = chs.get(SELECTOR_DIVERGED_TRANSCRIPT_KEY)
+    if not f_growing:
+        # A quiet/tool-only tick supplies no new F evidence.  It must not erase
+        # a previously proven divergence for the same selection; otherwise one
+        # normal long tool call resets the 300s confirmation forever.  A changed
+        # selection does invalidate the old window.
+        if (
+            isinstance(chs.get("selector_diverged_since"), (int, float))
+            and not isinstance(chs.get("selector_diverged_since"), bool)
+            and window_path == selected_path
+        ):
+            rt.log(
+                f"[{cid}] selector-sync quiet; retained divergence window "
+                f"F={selected_path}"
+            )
+            return
+        chs.pop("selector_diverged_since", None)
+        chs.pop(SELECTOR_DIVERGED_TRANSCRIPT_KEY, None)
         return
 
     probe = rt.watcher_state(cid)
     bound = probe.bound_output_path if probe.status == 200 else None
-    verdict = evaluate_selector_sync(bound, str(selected_transcript), f_growing)
+    verdict = evaluate_selector_sync(bound, selected_path, f_growing)
 
     if not verdict.diverged:
         chs.pop("selector_diverged_since", None)
+        chs.pop(SELECTOR_DIVERGED_TRANSCRIPT_KEY, None)
         if verdict.state == SELECTOR_UNKNOWN:
             # Fail-closed: old server without the field, JSON null, or dcserver
             # unreachable → never alarm on an unknown bind.
@@ -1900,11 +2036,16 @@ def tick_selector_sync(
         return
 
     raw_since = chs.get("selector_diverged_since")
-    if isinstance(raw_since, (int, float)) and not isinstance(raw_since, bool):
+    if (
+        window_path == selected_path
+        and isinstance(raw_since, (int, float))
+        and not isinstance(raw_since, bool)
+    ):
         since = float(raw_since)
     else:
         since = now
     chs["selector_diverged_since"] = since
+    chs[SELECTOR_DIVERGED_TRANSCRIPT_KEY] = selected_path
     age = now - since
     if not selector_divergence_confirmed(verdict.diverged, age, rt.cfg.swap_confirm_secs):
         rt.log(
@@ -1955,12 +2096,28 @@ def tick_selector_sync(
 def _alert_pending_retirement(
     rt: Runtime,
     ch: ChannelConfig,
+    channel_state: dict[str, Any],
     paths: list[str],
+    now: float,
     *,
     reason: str,
-) -> None:
+) -> bool:
     if not paths:
-        return
+        return False
+    raw_last_alert = channel_state.get(
+        LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY, 0.0
+    )
+    last_alert = (
+        float(raw_last_alert)
+        if _is_finite_nonnegative_number(raw_last_alert)
+        else 0.0
+    )
+    if now - last_alert < rt.cfg.realert_secs:
+        rt.log(
+            f"[{ch.channel_id}] transcript-retirement-alert suppressed "
+            f"reason={reason} count={len(paths)} cooldown"
+        )
+        return False
     if reason == "idle":
         title = "릴레이 트랜스크립트 평가 권한 만료"
         detail = (
@@ -1981,6 +2138,8 @@ def _alert_pending_retirement(
         f"🚨 **{title}**\n\n{detail}\n\n{sample}\n\n"
         f"런타임: {rt.dcserver_snapshot()}",
     )
+    channel_state[LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = now
+    return True
 
 
 def _clear_gap_alert_without_recovery(
@@ -1991,20 +2150,35 @@ def _clear_gap_alert_without_recovery(
 ) -> bool:
     retired = set(authority_paths)
     gap_path = channel_state.get(GAP_TRANSCRIPT_KEY)
-    selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
-    if (
-        isinstance(gap_path, str)
-        and gap_path
-        and gap_path not in retired
-    ) or (
-        not isinstance(gap_path, str)
-        and isinstance(selected, str)
-        and selected
-        and selected not in retired
-    ):
+    previous_owners = _validated_gap_owner_transcripts(channel_state)
+    retained_owners = [path for path in previous_owners if path not in retired]
+    gap_state_open = bool(
+        previous_owners
+        or channel_state.get("alerting")
+        or channel_state.get("gap_since")
+        or channel_state.get("issue_url")
+    )
+    if not retained_owners and gap_state_open:
+        # Legacy singleton state may not yet have the owner set.  Preserve any
+        # still-live selected/pending authority until this tick evaluates it;
+        # only an explicit OK verdict may claim recovery.
+        selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+        fallback = (
+            [selected] if isinstance(selected, str) and selected else []
+        ) + _validated_pending_transcripts(channel_state)
+        retained_owners = [path for path in fallback if path not in retired]
+    retained_owners = _store_gap_owner_transcripts(
+        channel_state, retained_owners
+    )
+    if retained_owners:
+        if gap_path not in retained_owners:
+            selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
+            channel_state[GAP_TRANSCRIPT_KEY] = (
+                selected if selected in retained_owners else retained_owners[0]
+            )
         rt.log(
             f"[{channel_id}] unrelated transcript retirement preserved live "
-            "gap authority"
+            f"gap authority owners={len(retained_owners)}"
         )
         return False
     if channel_state.get("alerting"):
@@ -2016,6 +2190,7 @@ def _clear_gap_alert_without_recovery(
     channel_state.pop("gap_since", None)
     channel_state.pop("issue_url", None)
     channel_state.pop(GAP_TRANSCRIPT_KEY, None)
+    channel_state.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
     return True
 
 
@@ -2038,7 +2213,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     candidates = transcript_candidates(dirs)
     previous_sizes = _validated_transcript_sizes(chs)
     previous_seen_at = _validated_transcript_seen_at(chs, previous_sizes, now)
-    known_state_initialized = isinstance(chs.get(TRANSCRIPT_KNOWN_AT_KEY), dict)
+    known_state_persisted = isinstance(chs.get(TRANSCRIPT_KNOWN_AT_KEY), dict)
     known_at = _validated_transcript_known_at(chs, now)
     pending_paths = _validated_pending_transcripts(chs)
     pending_failures = _validated_pending_failures(chs, pending_paths)
@@ -2088,6 +2263,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         or retired_transcripts
         or (isinstance(previous_selected, str) and previous_selected)
     )
+    # Upgrade boundary: pre-known_at state already has a selected/size/
+    # watermark authority.  Its first post-upgrade unseen path is still a true
+    # first observation; otherwise an unreadable debut is labelled
+    # unproven_stale once, persisted as known, then skipped forever.
+    known_state_initialized = known_state_persisted or tracking_initialized
     bootstrapped_from_watermark = False
     candidate_paths = {str(candidate.path) for candidate in candidates}
     selectable_candidate_paths = {
@@ -2335,10 +2515,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     else:
         chs.pop(PENDING_TRANSCRIPT_OVERFLOW_KEY, None)
     pending_paths = bounded_pending_paths
+    failure_authorities = _read_failure_authority_paths(chs, pending_paths)
     pending_failures = {
         path: failures
         for path, failures in pending_failures.items()
-        if path in set(pending_paths)
+        if path in failure_authorities
     }
     pending_since = {
         path: pending_since.get(path, now) for path in pending_paths
@@ -2408,7 +2589,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             f"[{cid}] transcript-pending-expired count={len(expired_pending_paths)}"
         )
         _alert_pending_retirement(
-            rt, ch, expired_pending_paths, reason="idle"
+            rt, ch, chs, expired_pending_paths, now, reason="idle"
         )
         _clear_gap_alert_without_recovery(
             rt, chs, cid, expired_pending_paths
@@ -2431,21 +2612,24 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         rt.log(f"[{cid}] selector-sync tick error: {type(e).__name__}: {e}")
 
     pending_set = set(pending_paths)
+    gap_owner_paths = _validated_gap_owner_transcripts(chs)
+    gap_owner_set = set(gap_owner_paths)
     evaluation_candidates: list[TranscriptCandidate] = []
     if selected is not None:
         evaluation_candidates.append(selected)
-    for path in pending_paths:
-        candidate = next(
-            (candidate for candidate in candidates if str(candidate.path) == path),
-            None,
-        )
+    for path in [*pending_paths, *gap_owner_paths]:
+        candidate = candidate_by_path.get(path)
         if candidate is not None and candidate not in evaluation_candidates:
             evaluation_candidates.append(candidate)
     active_candidates: list[TranscriptCandidate] = []
     for candidate in evaluation_candidates:
         path = str(candidate.path)
         idle = now - candidate.mtime
-        if path not in pending_set and idle >= cfg.idle_quiet_secs:
+        if (
+            path not in pending_set
+            and path not in gap_owner_set
+            and idle >= cfg.idle_quiet_secs
+        ):
             rt.log(
                 f"[{cid}] idle {int(min(idle, 86400 * 365) // 60)}m "
                 f"path={path} — no live session, skipping"
@@ -2495,13 +2679,13 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 )
             else:
                 rt.log(f"[{cid}] transcript-read-incomplete path={path}")
-            owns_read_authority = path in pending_set or (
-                selected is not None and candidate.path == selected.path
+            owns_read_authority = (
+                path in pending_set
+                or path in gap_owner_set
+                or (selected is not None and candidate.path == selected.path)
             )
             if owns_read_authority:
-                if path not in remaining_pending:
-                    remaining_pending.append(path)
-                    pending_since.setdefault(path, now)
+                if path not in pending_set and path not in pending_failures:
                     rt.log(
                         f"[{cid}] transcript-selected-read-failure-tracked "
                         f"path={path}"
@@ -2546,7 +2730,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 f"state={verdict.state} lost={verdict.lost} "
                 f"fresh_undelivered={fresh_undelivered}"
             )
-            if verdict.state == STATE_OK and fresh_undelivered == 0:
+            if (
+                verdict.state == STATE_OK
+                and fresh_undelivered == 0
+                and read_result.blocks
+            ):
                 remaining_pending = [
                     pending for pending in remaining_pending if pending != path
                 ]
@@ -2556,10 +2744,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         set(merged_sizes) | candidate_paths | set(pending_since),
     )
     chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
+    failure_authorities = _read_failure_authority_paths(chs, remaining_pending)
     pending_failures = {
         path: failures
         for path, failures in pending_failures.items()
-        if path in set(remaining_pending)
+        if path in failure_authorities
     }
     pending_since = {
         path: pending_since.get(path, now) for path in remaining_pending
@@ -2586,7 +2775,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             f"count={len(escalated_pending_paths)}"
         )
         _alert_pending_retirement(
-            rt, ch, escalated_pending_paths, reason="read_failure"
+            rt,
+            ch,
+            chs,
+            escalated_pending_paths,
+            now,
+            reason="read_failure",
         )
         _clear_gap_alert_without_recovery(
             rt, chs, cid, escalated_pending_paths
@@ -2612,6 +2806,29 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         ),
     )
     verdict_path = str(verdict_candidate.path)
+    previous_gap_owners = _validated_gap_owner_transcripts(chs)
+    evaluated_paths = {str(candidate.path) for candidate, _ in evaluated}
+    incident_open = bool(
+        previous_gap_owners
+        or chs.get("alerting")
+        or chs.get("gap_since")
+        or chs.get("issue_url")
+    )
+    next_gap_owners = [
+        path for path in previous_gap_owners if path not in evaluated_paths
+    ]
+    for candidate, verdict in evaluated:
+        path = str(candidate.path)
+        unresolved = verdict.state == STATE_GAP or (
+            incident_open and verdict.state == STATE_LAGGING
+        )
+        if unresolved and path not in next_gap_owners:
+            next_gap_owners.append(path)
+    next_gap_owners = _store_gap_owner_transcripts(chs, next_gap_owners)
+    if next_gap_owners and chs.get(GAP_TRANSCRIPT_KEY) not in next_gap_owners:
+        chs[GAP_TRANSCRIPT_KEY] = (
+            verdict_path if verdict_path in next_gap_owners else next_gap_owners[0]
+        )
     if unreadable_paths and v.state == STATE_OK:
         rt.log(
             f"[{cid}] transcript-verdict-incomplete "
@@ -2619,14 +2836,28 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         )
         return
     if retired_pending_paths and v.state == STATE_OK:
-        if _clear_gap_alert_without_recovery(
-            rt, chs, cid, retired_pending_paths
-        ):
-            rt.log(
-                f"[{cid}] transcript-verdict-unresolved-retirement "
-                f"retired={len(retired_pending_paths)}"
-            )
-            return
+        if not next_gap_owners:
+            if chs.get("alerting"):
+                rt.log(
+                    f"[{cid}] alert state transitioned to unresolved transcript "
+                    "escalation — no clean recovery claimed"
+                )
+            chs.pop("alerting", None)
+            chs.pop("gap_since", None)
+            chs.pop("issue_url", None)
+            chs.pop(GAP_TRANSCRIPT_KEY, None)
+            chs.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
+        rt.log(
+            f"[{cid}] transcript-verdict-unresolved-retirement "
+            f"retired={len(retired_pending_paths)}"
+        )
+        return
+    if next_gap_owners and v.state == STATE_OK:
+        rt.log(
+            f"[{cid}] transcript-verdict-incomplete "
+            f"unresolved_gap_owners={len(next_gap_owners)}"
+        )
+        return
 
     if v.state == STATE_GAP:
         chs[GAP_TRANSCRIPT_KEY] = verdict_path
@@ -2697,6 +2928,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         chs.pop("gap_since", None)
         chs.pop("issue_url", None)
         chs.pop(GAP_TRANSCRIPT_KEY, None)
+        chs.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
         rt.log(
             f"[{cid}] ok path={verdict_path} blocks={v.blocks} "
             f"stale={v.stale} lost=0"
