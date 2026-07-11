@@ -360,8 +360,16 @@ async fn claim_card_pg(
                  delivery_state = 'posting',
                  bot_key = CASE WHEN bot_key = '' THEN $5 ELSE bot_key END,
                  discord_nonce = CASE WHEN bot_key = '' THEN $6 ELSE discord_nonce END,
-                 rendered_content = CASE WHEN $9 THEN rendered_content ELSE $7 END,
-                 content_hash = CASE WHEN $9 THEN content_hash ELSE $8 END,
+                 rendered_content = CASE
+                     WHEN delivery_state = 'posting' AND post_started_at IS NOT NULL
+                         THEN rendered_content
+                     WHEN $9 THEN rendered_content ELSE $7
+                 END,
+                 content_hash = CASE
+                     WHEN delivery_state = 'posting' AND post_started_at IS NOT NULL
+                         THEN content_hash
+                     WHEN $9 THEN content_hash ELSE $8
+                 END,
                  post_started_at = CASE
                      WHEN delivery_state = 'footer_only' THEN NULL
                      ELSE post_started_at
@@ -652,6 +660,7 @@ async fn cleanup_old_rows_pg_impl(pool: &PgPool) -> Result<(), String> {
              SELECT card.id FROM task_notification_card_state AS card
              WHERE card.updated_at < NOW() - make_interval(days => $1::int)
                AND card.lease_owner IS NULL
+               AND NOT (card.delivery_state = 'posting' AND card.post_started_at IS NOT NULL)
                AND NOT EXISTS (
                    SELECT 1 FROM task_notification_response_delivery AS response
                    WHERE response.channel_id = card.channel_id
@@ -822,7 +831,7 @@ fn claim_card_memory(
             row.bot_key = preferred_bot_key.to_string();
             row.nonce = stable_nonce(scope, row.revision);
         }
-        if intent == StoreIntent::Observation {
+        if intent == StoreIntent::Observation && row.post_started_at.is_none() {
             row.rendered_content = seed_content.to_string();
             row.content_hash = seed_hash.to_string();
         }

@@ -99,6 +99,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_task_notification_response_recovery_key
         (channel_id, provider, session_key, recovery_turn_key)
     WHERE recovery_turn_key IS NOT NULL;
 
+-- Divergent sink/watcher fallback bytes must still converge while one logical
+-- response is active. Sequential delivered responses remain permitted.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_notification_response_active_event
+    ON task_notification_response_delivery
+        (channel_id, provider, session_key, event_key, referenced_card_message_id)
+    WHERE delivery_state IN ('claimed', 'sent');
+
 CREATE INDEX IF NOT EXISTS idx_task_notification_response_retention
     ON task_notification_response_delivery (updated_at);
 

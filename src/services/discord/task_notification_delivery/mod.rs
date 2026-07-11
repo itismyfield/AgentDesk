@@ -468,12 +468,47 @@ pub(in crate::services::discord) async fn claim_task_response_delivery_with_reco
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
+    claim_task_response_delivery_with_recovery_key_and_started_at(
+        pool,
+        channel_id,
+        provider,
+        session_key,
+        event_key,
+        response_turn_key,
+        recovery_turn_key,
+        None,
+        card_message_id,
+        owner,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) async fn claim_task_response_delivery_with_recovery_key_and_started_at(
+    pool: Option<&PgPool>,
+    channel_id: u64,
+    provider: &str,
+    session_key: &str,
+    event_key: &str,
+    response_turn_key: &str,
+    recovery_turn_key: Option<&str>,
+    turn_started_at: Option<&str>,
+    card_message_id: u64,
+    owner: ResponseDeliveryOwner,
+) -> Result<ResponseDeliveryClaimOutcome, String> {
     let scope = TaskCardScope::new(channel_id, provider, session_key, event_key);
+    let turn_started_at = turn_started_at
+        .filter(|value| !value.trim().is_empty())
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .map_err(|error| format!("parse task response turn start timestamp: {error}"))?
+        .map(|value| value.with_timezone(&chrono::Utc));
     store::claim_response_delivery(
         pool,
         &scope,
         response_turn_key,
         recovery_turn_key,
+        turn_started_at,
         card_message_id,
         owner,
     )
@@ -781,7 +816,7 @@ async fn deliver_claim<T: TaskCardTransport>(
     clients: &CardDeliveryClients,
     transport: &T,
     event: &TaskCardEvent,
-    intent: EnsureIntent,
+    _intent: EnsureIntent,
     claimed: ClaimedCard,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
     let Some(bot) = clients.by_key(&claimed.bot_key) else {
@@ -795,10 +830,8 @@ async fn deliver_claim<T: TaskCardTransport>(
         .map_err(CardEnsureError::Store)?;
         return Err(CardEnsureError::Permanent(error));
     };
-    let content = match (&claimed.action, intent) {
-        (store::ClaimAction::Post, EnsureIntent::Promotion)
-            if !claimed.rendered_content.is_empty() =>
-        {
+    let content = match &claimed.action {
+        store::ClaimAction::Post if !claimed.rendered_content.is_empty() => {
             claimed.rendered_content.clone()
         }
         _ => event.payload.render(claimed.update_count),

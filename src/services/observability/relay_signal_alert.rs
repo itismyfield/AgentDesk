@@ -347,6 +347,7 @@ mod tests {
             "relay_owner_unknown",
             "offset_invariant_violation",
             "task_response_chunk_ambiguous",
+            "task_card_post_ambiguous",
         ] {
             assert!(
                 keys.contains(&expected),

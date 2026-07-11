@@ -75,6 +75,7 @@ pub(in super::super) async fn claim_response_delivery(
     scope: &TaskCardScope,
     response_turn_key: &str,
     recovery_turn_key: Option<&str>,
+    turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
@@ -89,6 +90,7 @@ pub(in super::super) async fn claim_response_delivery(
                 scope,
                 response_turn_key,
                 recovery_turn_key,
+                turn_started_at,
                 card_message_id,
                 owner,
             )
@@ -98,6 +100,7 @@ pub(in super::super) async fn claim_response_delivery(
             scope,
             response_turn_key,
             recovery_turn_key,
+            turn_started_at,
             card_message_id,
             owner,
         ),
@@ -182,13 +185,14 @@ async fn claim_response_delivery_pg(
     scope: &TaskCardScope,
     response_turn_key: &str,
     recovery_turn_key: Option<&str>,
+    turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
     card_message_id: u64,
     owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
     let channel_id = db_id(scope.channel_id, "channel_id")?;
     let card_message_id_db = db_id(card_message_id, "message_id")?;
     let owner_token = uuid::Uuid::new_v4().to_string();
-    let inserted = sqlx::query(
+    let inserted: Option<i64> = sqlx::query_scalar(
         "INSERT INTO task_notification_response_delivery
              (channel_id, provider, session_key, event_key, response_turn_key, recovery_turn_key,
               referenced_card_message_id, delivery_state, owner_kind, owner_token,
@@ -211,7 +215,46 @@ async fn claim_response_delivery_pg(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("claim task response delivery: {error}"))?;
-    if inserted.is_some() {
+    if let Some(inserted_id) = inserted {
+        let prior_card: Option<i64> = match turn_started_at {
+            Some(turn_started_at) => sqlx::query_scalar(
+                "SELECT referenced_card_message_id
+             FROM task_notification_response_delivery
+             WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+               AND event_key = $4 AND referenced_card_message_id = $5
+               AND id <> $6 AND delivery_state = 'delivered'
+               AND delivered_at >= $7
+             ORDER BY delivered_at DESC
+             LIMIT 1",
+            )
+            .bind(channel_id)
+            .bind(&scope.provider)
+            .bind(&scope.session_key)
+            .bind(&scope.event_key)
+            .bind(card_message_id_db)
+            .bind(inserted_id)
+            .bind(turn_started_at)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("check delayed task response frame: {error}"))?,
+            None => None,
+        };
+        if prior_card.is_some() {
+            let deleted = sqlx::query(
+                "DELETE FROM task_notification_response_delivery
+                 WHERE id = $1 AND owner_token = $2 AND delivery_state = 'claimed'",
+            )
+            .bind(inserted_id)
+            .bind(&owner_token)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("discard delayed cross-actor task response: {error}"))?
+            .rows_affected();
+            if deleted != 1 {
+                return Err("delayed task response frame lost its provisional claim".to_string());
+            }
+            return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+        }
         return Ok(ResponseDeliveryClaimOutcome::Owned(ResponseDeliveryClaim {
             scope: scope.clone(),
             response_turn_key: response_turn_key.to_string(),
@@ -221,7 +264,7 @@ async fn claim_response_delivery_pg(
         }));
     }
 
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         "SELECT event_key, response_turn_key, recovery_turn_key, response_generation,
                 referenced_card_message_id, delivery_state,
                 lease_expires_at > NOW() AS lease_active
@@ -238,6 +281,26 @@ async fn claim_response_delivery_pg(
     .fetch_all(pool)
     .await
     .map_err(|error| format!("load task response claim after conflict: {error}"))?;
+    let matched_by_event = rows.is_empty();
+    if matched_by_event {
+        rows = sqlx::query(
+            "SELECT event_key, response_turn_key, recovery_turn_key, response_generation,
+                    referenced_card_message_id, delivery_state,
+                    lease_expires_at > NOW() AS lease_active
+             FROM task_notification_response_delivery
+             WHERE channel_id = $1 AND provider = $2 AND session_key = $3
+               AND event_key = $4 AND referenced_card_message_id = $5
+               AND delivery_state IN ('claimed', 'sent')",
+        )
+        .bind(channel_id)
+        .bind(&scope.provider)
+        .bind(&scope.session_key)
+        .bind(&scope.event_key)
+        .bind(card_message_id_db)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load active task response by event/card: {error}"))?;
+    }
     if rows.len() != 1 {
         return Err(format!(
             "task response canonical/recovery identity matched {} rows",
@@ -253,7 +316,10 @@ async fn claim_response_delivery_pg(
     if current_event != scope.event_key || current_card != card_message_id_db {
         return Err("task response turn identity conflicts with another event/card".to_string());
     }
-    if recovery_turn_key.is_some() && current_recovery_key.as_deref() != recovery_turn_key {
+    if !matched_by_event
+        && recovery_turn_key.is_some()
+        && current_recovery_key.as_deref() != recovery_turn_key
+    {
         return Err(
             "task response recovery identity conflicts with the persisted alias".to_string(),
         );
@@ -384,6 +450,7 @@ async fn claim_existing_response_delivery_pg(
         &scope,
         &canonical_turn_key,
         recovery_turn_key.as_deref(),
+        None,
         card_message_id,
         owner,
     )
@@ -523,6 +590,7 @@ struct MemoryResponseRow {
     state: MemoryResponseState,
     owner_token: Option<String>,
     lease_expires_at: Option<Instant>,
+    delivered_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 type MemoryResponseKey = (u64, String, String, String);
@@ -558,13 +626,14 @@ fn claim_response_delivery_memory(
     scope: &TaskCardScope,
     response_turn_key: &str,
     recovery_turn_key: Option<&str>,
+    turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
     card_message_id: u64,
     _owner: ResponseDeliveryOwner,
 ) -> Result<ResponseDeliveryClaimOutcome, String> {
     let mut rows = MEMORY_RESPONSES
         .lock()
         .map_err(|_| "task response memory store poisoned".to_string())?;
-    let matching_keys: Vec<MemoryResponseKey> = rows
+    let mut matching_keys: Vec<MemoryResponseKey> = rows
         .iter()
         .filter(|((channel_id, provider, session_key, canonical), row)| {
             *channel_id == scope.channel_id
@@ -578,6 +647,21 @@ fn claim_response_delivery_memory(
         })
         .map(|(key, _)| key.clone())
         .collect();
+    let matched_by_event = matching_keys.is_empty();
+    if matched_by_event {
+        matching_keys = rows
+            .iter()
+            .filter(|((channel_id, provider, session_key, _), row)| {
+                *channel_id == scope.channel_id
+                    && provider == &scope.provider
+                    && session_key == &scope.session_key
+                    && row.event_key == scope.event_key
+                    && row.card_message_id == card_message_id
+                    && row.state != MemoryResponseState::Delivered
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+    }
     if matching_keys.len() > 1 {
         return Err(
             "task response canonical/recovery identity matched multiple memory rows".into(),
@@ -590,6 +674,20 @@ fn claim_response_delivery_memory(
     let canonical_turn_key = key.3.clone();
     let owner_token = uuid::Uuid::new_v4().to_string();
     let now = Instant::now();
+    if !rows.contains_key(&key)
+        && turn_started_at.is_some_and(|turn_started_at| {
+            rows.values().any(|row| {
+                row.event_key == scope.event_key
+                    && row.card_message_id == card_message_id
+                    && row.state == MemoryResponseState::Delivered
+                    && row
+                        .delivered_at
+                        .is_some_and(|delivered_at| delivered_at >= turn_started_at)
+            })
+        })
+    {
+        return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
+    }
     match rows.get_mut(&key) {
         None => {
             rows.insert(
@@ -604,6 +702,7 @@ fn claim_response_delivery_memory(
                     lease_expires_at: Some(
                         now + Duration::from_secs(RESPONSE_LEASE_SECONDS as u64),
                     ),
+                    delivered_at: None,
                 },
             );
         }
@@ -613,7 +712,8 @@ fn claim_response_delivery_memory(
             );
         }
         Some(row)
-            if recovery_turn_key.is_some()
+            if !matched_by_event
+                && recovery_turn_key.is_some()
                 && row.recovery_turn_key.as_deref() != recovery_turn_key =>
         {
             return Err(
@@ -633,6 +733,7 @@ fn claim_response_delivery_memory(
             row.state = MemoryResponseState::Delivered;
             row.owner_token = None;
             row.lease_expires_at = None;
+            row.delivered_at = Some(chrono::Utc::now());
             return Ok(ResponseDeliveryClaimOutcome::Delivered { card_message_id });
         }
         Some(row) if row.lease_expires_at.is_some_and(|expiry| expiry > now) => {
@@ -699,6 +800,7 @@ fn claim_existing_response_delivery_memory(
         &scope,
         &canonical_turn_key,
         recovery_turn_key.as_deref(),
+        None,
         card_message_id,
         owner,
     )?;
@@ -803,6 +905,7 @@ fn mark_response_delivered_memory(claim: &ResponseDeliveryClaim) -> Result<(), S
     row.state = MemoryResponseState::Delivered;
     row.owner_token = None;
     row.lease_expires_at = None;
+    row.delivered_at = Some(chrono::Utc::now());
     Ok(())
 }
 

@@ -15,7 +15,8 @@ use super::super::task_notification_delivery::{
     CardBot, CardDeliveryClients, CardEnsureError, CardEnsureOutcome, DiscordTaskCardTransport,
     EnsureIntent, ResponseDeliveryClaim, ResponseDeliveryClaimOutcome, ResponseDeliveryOwner,
     TaskCardTransport, TaskNotificationContext, TaskResponseCommitOutcome,
-    claim_existing_task_response_delivery, claim_task_response_delivery_with_recovery_key,
+    claim_existing_task_response_delivery,
+    claim_task_response_delivery_with_recovery_key_and_started_at,
     commit_task_response_delivered_bounded, durable_response_turn_key, ensure_card,
     fallback_response_turn_key, provider_bot_key, rebind_task_response_card,
     record_task_response_sent_bounded,
@@ -214,7 +215,7 @@ pub(super) async fn ensure_card_and_route(
                 outcome => outcome,
             }
         } else {
-            claim_task_response_delivery_with_recovery_key(
+            claim_task_response_delivery_with_recovery_key_and_started_at(
                 shared.pg_pool.as_ref(),
                 delivery.channel_id,
                 delivery.provider.as_str(),
@@ -222,6 +223,7 @@ pub(super) async fn ensure_card_and_route(
                 context.event_key(),
                 &turn_key,
                 Some(&recovery_turn_key),
+                Some(&delivery.frame_turn_started_at),
                 message_id.get(),
                 ResponseDeliveryOwner::Sink,
             )

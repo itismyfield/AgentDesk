@@ -151,6 +151,13 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
         default_threshold: 1,
         label: "태스크 응답 청크 전송 결과 불명(중복 위험 격리)",
     },
+    RelaySignal {
+        key: "task_card_post_ambiguous",
+        event_type: "invariant_violation",
+        statuses: &["task_card_post_delivery_ambiguous"],
+        default_threshold: 1,
+        label: "태스크 카드 전송 결과 불명(중복 위험 격리)",
+    },
 ];
 pub(super) const AGENT_QUALITY_EVENT_TYPES: &[&str] = &[
     "turn_start",

@@ -677,7 +677,7 @@
 | `services::discord::session_relay_sink::idle_jsonl` | `src/services/discord/session_relay_sink/idle_jsonl.rs` | 565 | 393 | 172 |  |
 | `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 432 | 128 | 304 |  |
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 64 | 64 | 0 |  |
-| `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 775 | 482 | 293 |  |
+| `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 777 | 484 | 293 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1027 | 501 | 526 |  |
 | `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 235 | 235 | 0 |  |
 | `services::discord::session_runtime::restore_cwd` | `src/services/discord/session_runtime/restore_cwd.rs` | 353 | 353 | 0 |  |
@@ -699,14 +699,14 @@
 | `services::discord::steering` | `src/services/discord/steering.rs` | 446 | 330 | 116 |  |
 | `services::discord::streaming_finalizer` | `src/services/discord/streaming_finalizer.rs` | 250 | 186 | 64 |  |
 | `services::discord::subagent_notification_card` | `src/services/discord/subagent_notification_card.rs` | 429 | 330 | 99 |  |
-| `services::discord::task_notification_delivery` | `src/services/discord/task_notification_delivery/mod.rs` | 946 | 946 | 0 |  |
+| `services::discord::task_notification_delivery` | `src/services/discord/task_notification_delivery/mod.rs` | 979 | 979 | 0 |  |
 | `services::discord::task_notification_delivery::card_post` | `src/services/discord/task_notification_delivery/card_post.rs` | 109 | 109 | 0 |  |
 | `services::discord::task_notification_delivery::gateway` | `src/services/discord/task_notification_delivery/gateway.rs` | 278 | 264 | 14 |  |
 | `services::discord::task_notification_delivery::response_chunks` | `src/services/discord/task_notification_delivery/response_chunks.rs` | 635 | 598 | 37 |  |
-| `services::discord::task_notification_delivery::store` | `src/services/discord/task_notification_delivery/store.rs` | 989 | 989 | 0 |  |
+| `services::discord::task_notification_delivery::store` | `src/services/discord/task_notification_delivery/store.rs` | 998 | 998 | 0 |  |
 | `services::discord::task_notification_delivery::store::missing_card_replacement` | `src/services/discord/task_notification_delivery/store/missing_card_replacement.rs` | 189 | 189 | 0 |  |
 | `services::discord::task_notification_delivery::store::response_chunks` | `src/services/discord/task_notification_delivery/store/response_chunks.rs` | 569 | 569 | 0 |  |
-| `services::discord::task_notification_delivery::store::response_fence` | `src/services/discord/task_notification_delivery/store/response_fence.rs` | 819 | 819 | 0 |  |
+| `services::discord::task_notification_delivery::store::response_fence` | `src/services/discord/task_notification_delivery/store/response_fence.rs` | 922 | 922 | 0 |  |
 | `services::discord::task_supervisor` | `src/services/discord/task_supervisor.rs` | 105 | 83 | 22 |  |
 | `services::discord::terminal_ui_obligation` | `src/services/discord/terminal_ui_obligation.rs` | 570 | 507 | 63 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 2515 | 1624 | 891 | giant-file |
@@ -924,7 +924,7 @@
 | `services::message_outbox_recovery` | `src/services/message_outbox_recovery.rs` | 166 | 166 | 0 |  |
 | `services::message_outbox_recovery_support` | `src/services/message_outbox_recovery_support.rs` | 138 | 138 | 0 |  |
 | `services::monitoring_store` | `src/services/monitoring_store.rs` | 141 | 141 | 0 |  |
-| `services::observability` | `src/services/observability/mod.rs` | 623 | 572 | 51 |  |
+| `services::observability` | `src/services/observability/mod.rs` | 630 | 579 | 51 |  |
 | `services::observability::emit` | `src/services/observability/emit.rs` | 1225 | 772 | 453 |  |
 | `services::observability::events` | `src/services/observability/events.rs` | 310 | 310 | 0 |  |
 | `services::observability::helpers` | `src/services/observability/helpers.rs` | 127 | 127 | 0 |  |
@@ -932,7 +932,7 @@
 | `services::observability::pg_io` | `src/services/observability/pg_io.rs` | 970 | 970 | 0 |  |
 | `services::observability::queries` | `src/services/observability/queries.rs` | 229 | 160 | 69 |  |
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 537 | 352 | 185 |  |
-| `services::observability::relay_signal_alert` | `src/services/observability/relay_signal_alert.rs` | 414 | 247 | 167 |  |
+| `services::observability::relay_signal_alert` | `src/services/observability/relay_signal_alert.rs` | 415 | 247 | 168 |  |
 | `services::observability::retention` | `src/services/observability/retention.rs` | 99 | 99 | 0 |  |
 | `services::observability::session_inventory` | `src/services/observability/session_inventory.rs` | 236 | 236 | 0 |  |
 | `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 949 | 484 | 465 |  |
