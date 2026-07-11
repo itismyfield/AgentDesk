@@ -1413,12 +1413,25 @@ class StateTests(unittest.TestCase):
             f"/gap-owner-{index:02d}.jsonl"
             for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1)
         ]
-        authorities = [selected, *pending, *gap_owners]
+        recovered = [
+            f"/recovered-{index:03d}.jsonl"
+            for index in range(relay_watchdog.MAX_RECOVERED_GAP_GUARDS)
+        ]
+        authorities = [selected, *pending, *gap_owners, *recovered]
         unrelated = "/unrelated-newer.jsonl"
         state = {
             SELECTED_TRANSCRIPT_KEY: selected,
             relay_watchdog.PENDING_TRANSCRIPTS_KEY: pending,
             relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: gap_owners,
+            relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                path: {
+                    "size": index,
+                    "confirmed_at": 100.0,
+                    "last_seen_at": 100.0,
+                    "absent_since": None,
+                }
+                for index, path in enumerate(recovered)
+            },
             DELIVERED_WATERMARKS_KEY: {
                 path: {"delivered_ts": 10.0 + index, "updated_at": 100.0}
                 for index, path in enumerate(authorities)
@@ -1437,7 +1450,8 @@ class StateTests(unittest.TestCase):
             MAX_DELIVERED_WATERMARKS,
             1
             + relay_watchdog.MAX_PENDING_TRANSCRIPTS
-            + (relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1),
+            + (relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1)
+            + relay_watchdog.MAX_RECOVERED_GAP_GUARDS,
         )
         self.assertEqual(len(retained), MAX_DELIVERED_WATERMARKS)
         self.assertTrue(set(authorities) <= set(retained))
@@ -1467,6 +1481,65 @@ class StateTests(unittest.TestCase):
             valid[: relay_watchdog.MAX_PENDING_TRANSCRIPTS + 1],
         )
         self.assertEqual(len(owners), len(set(owners)))
+
+    def test_invariant_4435_recovered_guard_validation_is_strict_and_bounded(self):
+        valid = {
+            f"/guard-{index:03d}.jsonl": {
+                "size": index,
+                "confirmed_at": 10.0,
+                "last_seen_at": 11.0,
+                "absent_since": None,
+            }
+            for index in range(relay_watchdog.MAX_RECOVERED_GAP_GUARDS + 5)
+        }
+        state = {
+            relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                "/bad-bool.jsonl": {
+                    "size": True,
+                    "confirmed_at": 10.0,
+                    "last_seen_at": 11.0,
+                    "absent_since": None,
+                },
+                "/bad-clock.jsonl": {
+                    "size": 1,
+                    "confirmed_at": 10.0,
+                    "last_seen_at": 20.0,
+                    "absent_since": 19.0,
+                },
+                **valid,
+            }
+        }
+
+        guards = relay_watchdog._validated_recovered_gap_guards(state)
+
+        self.assertEqual(len(guards), relay_watchdog.MAX_RECOVERED_GAP_GUARDS)
+        self.assertNotIn("/bad-bool.jsonl", guards)
+        self.assertNotIn("/bad-clock.jsonl", guards)
+
+    def test_invariant_4435_recovered_guard_capacity_outlives_one_gap_wave(self):
+        guards: dict = {}
+        for index in range(relay_watchdog.MAX_GAP_OWNER_TRANSCRIPTS + 1):
+            guards, admitted = relay_watchdog._upsert_recovered_gap_guard(
+                guards, f"/guard-{index:03d}.jsonl", index, 100.0 + index
+            )
+            self.assertTrue(admitted)
+        self.assertGreater(
+            len(guards), relay_watchdog.MAX_GAP_OWNER_TRANSCRIPTS
+        )
+
+        for index in range(
+            len(guards), relay_watchdog.MAX_RECOVERED_GAP_GUARDS
+        ):
+            guards, admitted = relay_watchdog._upsert_recovered_gap_guard(
+                guards, f"/guard-{index:03d}.jsonl", index, 100.0 + index
+            )
+            self.assertTrue(admitted)
+        before = dict(guards)
+        guards, admitted = relay_watchdog._upsert_recovered_gap_guard(
+            guards, "/overflow.jsonl", 1, 999.0
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(guards, before)
 
 
 class RuntimePgProbeTests(unittest.TestCase):
@@ -3957,12 +4030,12 @@ class TickChannelTests(unittest.TestCase):
         ]
         gap_owners = [target, *other_owners]
 
-        def record(text: str) -> str:
+        def record(text: str, epoch: float = anchor) -> str:
             return json.dumps(
                 {
                     "type": "assistant",
                     "timestamp": time.strftime(
-                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
                     ),
                     "message": {"content": [{"type": "text", "text": text}]},
                 }
@@ -4025,8 +4098,14 @@ class TickChannelTests(unittest.TestCase):
         }
         rt = self.make_rt()
         rt.haystack = norm(" ".join(owner_texts.values()))
+        state_path = self.root / "post-recovery-state.json"
+
+        def restart(current_state: dict) -> dict:
+            save_state(state_path, current_state)
+            return load_state(state_path)
 
         tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        state = restart(state)
         chs = state["999"]
 
         self.assertFalse(chs.get("alerting", False))
@@ -4036,16 +4115,56 @@ class TickChannelTests(unittest.TestCase):
             anchor,
             "a recovered GAP owner must retain its delivery authority at full cap",
         )
-        self.assertEqual(len(delivered_watermarks(chs)), MAX_DELIVERED_WATERMARKS)
+        self.assertEqual(
+            len(delivered_watermarks(chs)),
+            len({str(path) for path in [selected, *pending, *gap_owners]}) + 1,
+        )
 
-        for path in [selected, *pending, *other_owners]:
+        growth_text = "delivered growth after GAP recovery"
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write(record(growth_text, anchor + 1) + "\n")
+        os.utime(target, (self.now + 3, self.now + 3))
+        rt.haystack = norm(growth_text)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        state = restart(state)
+        chs = state["999"]
+        self.assertEqual(delivered_watermark_for_path(chs, target), anchor + 1)
+        self.assertEqual(
+            relay_watchdog._validated_recovered_gap_guards(chs)[str(target)][0],
+            target.stat().st_size,
+        )
+
+        # Recovery clears GAP-owner state. Exercise the actual review finding:
+        # two later full debut waves create enough newer watermarks to evict an
+        # ex-owner unless recovery transferred it to durable replay authority.
+        pressure_paths: list[Path] = []
+        for wave in range(2):
+            wave_texts: list[str] = []
+            for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS):
+                path = self.proj_dir / f"wave-{wave}-{index:02d}.jsonl"
+                text = f"delivered pressure wave {wave} item {index:02d}"
+                path.write_text(record(text) + "\n", encoding="utf-8")
+                os.utime(path, (self.now + 4 + wave, self.now + 4 + wave))
+                pressure_paths.append(path)
+                wave_texts.append(text)
+            rt.haystack = norm(" ".join(wave_texts))
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 4 + wave)
+            state = restart(state)
+            chs = state["999"]
+            self.assertEqual(
+                delivered_watermark_for_path(chs, target),
+                anchor + 1,
+                f"post-recovery pressure wave {wave} evicted replay authority",
+            )
+
+        for path in [selected, *pending, *other_owners, *pressure_paths]:
             path.unlink()
         rt.haystack = ""  # bounded Discord history has rolled off the delivery
         prior_gap_alerts = len(
             [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
         )
 
-        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 6)
 
         self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(target))
         self.assertEqual(
@@ -4054,6 +4173,426 @@ class TickChannelTests(unittest.TestCase):
             "haystack rolloff must not re-alert a delivery already confirmed",
         )
         self.assertFalse(chs.get("alerting", False))
+
+    def test_invariant_4435_recovered_guard_absence_ttl_starts_new_lifecycle(self):
+        anchor = float(int(self.now - 2000))
+        target = self.proj_dir / "absent-recovered.jsonl"
+        target.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "old lifecycle"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        path = str(target)
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: path,
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {path: target.stat().st_size},
+                relay_watchdog.TRANSCRIPT_SEEN_AT_KEY: {path: self.now},
+                relay_watchdog.TRANSCRIPT_KNOWN_AT_KEY: {path: self.now},
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    path: {
+                        "size": target.stat().st_size,
+                        "confirmed_at": self.now,
+                        "last_seen_at": self.now,
+                        "absent_since": None,
+                    }
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {"delivered_ts": anchor, "updated_at": self.now}
+                },
+            }
+        }
+        state_path = self.root / "absence-lifecycle.json"
+
+        def restart(current_state: dict) -> dict:
+            save_state(state_path, current_state)
+            return load_state(state_path)
+
+        target.unlink()
+        rt = self.make_rt()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        state = restart(state)
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[path]
+        self.assertEqual(guard[3], self.now + 1)
+
+        before_expiry = (
+            self.now + 1 + relay_watchdog.RECOVERED_GAP_GUARD_TTL_SECS - 1
+        )
+        tick_channel(rt, TICK_CHANNEL, state, before_expiry)
+        state = restart(state)
+        self.assertIn(
+            path, relay_watchdog._validated_recovered_gap_guards(state["999"])
+        )
+        self.assertEqual(delivered_watermark_for_path(state["999"], path), anchor)
+
+        after_expiry = before_expiry + 2
+        tick_channel(rt, TICK_CHANNEL, state, after_expiry)
+        state = restart(state)
+        chs = state["999"]
+        self.assertNotIn(
+            path, relay_watchdog._validated_recovered_gap_guards(chs)
+        )
+        self.assertEqual(delivered_watermark_for_path(chs, path), 0.0)
+        self.assertNotIn(path, chs.get(relay_watchdog.TRANSCRIPT_SIZES_KEY, {}))
+        self.assertTrue(
+            any("recovered-gap-guard-reclaimed" in line for line in rt.log_lines)
+        )
+
+        # Reuse after the proven-absence boundary is a new path lifecycle. The
+        # old delivery floor must not authenticate its stale content.
+        target.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {
+                        "content": [{"type": "text", "text": "old lifecycle"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(target, (after_expiry + 1, after_expiry + 1))
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, after_expiry + 1)
+        self.assertTrue(state["999"].get("alerting"))
+        self.assertEqual(state["999"][relay_watchdog.GAP_TRANSCRIPT_KEY], path)
+
+    def test_invariant_4435_present_recovered_guard_does_not_expire(self):
+        anchor = float(int(self.now - 2000))
+        selected = self.proj_dir / "present-selected.jsonl"
+        target = self.proj_dir / "present-recovered.jsonl"
+        selected.write_text("{}\n", encoding="utf-8")
+        target.write_text("{}\n", encoding="utf-8")
+        target_path = str(target)
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(selected): selected.stat().st_size,
+                    target_path: target.stat().st_size,
+                },
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    target_path: {
+                        "size": target.stat().st_size,
+                        "confirmed_at": self.now,
+                        "last_seen_at": self.now,
+                        "absent_since": None,
+                    }
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    target_path: {
+                        "delivered_ts": anchor,
+                        "updated_at": self.now,
+                    }
+                },
+            }
+        }
+        state_path = self.root / "present-lifecycle.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        tick_at = self.now + relay_watchdog.RECOVERED_GAP_GUARD_TTL_SECS + 1
+
+        tick_channel(self.make_rt(), TICK_CHANNEL, state, tick_at)
+
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[
+            target_path
+        ]
+        self.assertEqual(guard[1], self.now)
+        self.assertEqual(guard[2], tick_at)
+        self.assertIsNone(guard[3])
+        self.assertEqual(
+            delivered_watermark_for_path(state["999"], target_path), anchor
+        )
+
+    def test_invariant_4435_ancestor_symlink_is_ambiguous_not_absent(self):
+        target = self.proj_dir / "hidden-recovered.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        path = str(target)
+        state = {
+            "999": {
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    path: {
+                        "size": target.stat().st_size,
+                        "confirmed_at": self.now,
+                        "last_seen_at": self.now,
+                        "absent_since": None,
+                    }
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {
+                        "delivered_ts": self.now - 2000,
+                        "updated_at": self.now,
+                    }
+                },
+            }
+        }
+        hidden = self.projects / "hidden-real-project"
+        decoy = self.projects / "decoy-project"
+        self.proj_dir.rename(hidden)
+        decoy.mkdir()
+        self.proj_dir.symlink_to(decoy, target_is_directory=True)
+        state_path = self.root / "symlink-lifecycle.json"
+        rt = self.make_rt()
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        save_state(state_path, state)
+        state = load_state(state_path)
+        tick_channel(
+            rt,
+            TICK_CHANNEL,
+            state,
+            self.now + relay_watchdog.RECOVERED_GAP_GUARD_TTL_SECS + 2,
+        )
+
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[path]
+        self.assertIsNone(guard[3])
+        self.assertGreater(
+            delivered_watermark_for_path(state["999"], path), 0.0
+        )
+        self.assertFalse(
+            any("recovered-gap-guard-reclaimed" in line for line in rt.log_lines)
+        )
+
+    def test_invariant_4435_unchanged_guards_are_not_parsed_and_metadata_settles(self):
+        selected = self.proj_dir / "guard-perf-selected.jsonl"
+        selected.write_text("{}\n", encoding="utf-8")
+        guards: dict[str, dict] = {}
+        sizes = {str(selected): selected.stat().st_size}
+        watermarks: dict[str, dict] = {}
+        paths: list[Path] = []
+        for index in range(relay_watchdog.MAX_RECOVERED_GAP_GUARDS):
+            path = self.proj_dir / f"guard-perf-{index:03d}.jsonl"
+            path.write_text("{}\n", encoding="utf-8")
+            paths.append(path)
+            sizes[str(path)] = path.stat().st_size
+            guards[str(path)] = {
+                "size": path.stat().st_size,
+                "confirmed_at": self.now,
+                "last_seen_at": self.now,
+                "absent_since": None,
+            }
+            watermarks[str(path)] = {
+                "delivered_ts": self.now - 2000,
+                "updated_at": self.now,
+            }
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: sizes,
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: guards,
+                DELIVERED_WATERMARKS_KEY: watermarks,
+            }
+        }
+        rt = self.make_rt()
+
+        with mock.patch.object(
+            relay_watchdog,
+            "assistant_blocks",
+            wraps=relay_watchdog.assistant_blocks,
+        ) as parse:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(
+            [str(call.args[0]) for call in parse.call_args_list], [str(selected)]
+        )
+
+        target = paths[0]
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write('{"type":"progress","message":"metadata only"}\n')
+        os.utime(target, (self.now + 2, self.now + 2))
+        with mock.patch.object(
+            relay_watchdog,
+            "assistant_blocks",
+            wraps=relay_watchdog.assistant_blocks,
+        ) as parse:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        parsed = [str(call.args[0]) for call in parse.call_args_list]
+        self.assertEqual(parsed.count(str(target)), 1)
+        self.assertEqual(parsed.count(str(selected)), 1)
+        guard = relay_watchdog._validated_recovered_gap_guards(state["999"])[
+            str(target)
+        ]
+        self.assertEqual(guard[0], target.stat().st_size)
+        self.assertEqual(guard[1], self.now)
+
+        state_path = self.root / "guard-perf-state.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        with mock.patch.object(
+            relay_watchdog,
+            "assistant_blocks",
+            wraps=relay_watchdog.assistant_blocks,
+        ) as parse:
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertEqual(
+            [str(call.args[0]) for call in parse.call_args_list], [str(selected)]
+        )
+
+    def test_invariant_4435_simultaneous_guard_growth_checks_every_growing_path(self):
+        anchor = float(int(self.now - 4000))
+        selected = self.proj_dir / "multi-growth-selected.jsonl"
+        delivered_path = self.proj_dir / "multi-growth-delivered.jsonl"
+        missing_path = self.proj_dir / "multi-growth-missing.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        selected.write_text("{}\n", encoding="utf-8")
+        delivered_path.write_text(
+            record(anchor, "old delivered A") + "\n", encoding="utf-8"
+        )
+        missing_path.write_text(
+            record(anchor, "old delivered B") + "\n", encoding="utf-8"
+        )
+        old_sizes = {
+            str(delivered_path): delivered_path.stat().st_size,
+            str(missing_path): missing_path.stat().st_size,
+        }
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(selected),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(selected): selected.stat().st_size,
+                    **old_sizes,
+                },
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    path: {
+                        "size": old_sizes[path],
+                        "confirmed_at": self.now - 100,
+                        "last_seen_at": self.now - 100,
+                        "absent_since": None,
+                    }
+                    for path in old_sizes
+                },
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {
+                        "delivered_ts": anchor,
+                        "updated_at": self.now - 100,
+                    }
+                    for path in old_sizes
+                },
+            }
+        }
+        delivered_epoch = float(int(self.now - 2000))
+        missing_epoch = float(int(self.now - 1900))
+        with delivered_path.open("a", encoding="utf-8") as stream:
+            stream.write(record(delivered_epoch, "new delivered A") + "\n")
+        with missing_path.open("a", encoding="utf-8") as stream:
+            stream.write(record(missing_epoch, "new missing B") + "\n")
+        os.utime(delivered_path, (self.now, self.now))
+        os.utime(missing_path, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("new delivered A")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        state_path = self.root / "multi-growth-state.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        chs = state["999"]
+        guards = relay_watchdog._validated_recovered_gap_guards(chs)
+        self.assertEqual(guards[str(delivered_path)][0], delivered_path.stat().st_size)
+        self.assertEqual(guards[str(missing_path)][0], old_sizes[str(missing_path)])
+        self.assertEqual(
+            delivered_watermark_for_path(chs, delivered_path), delivered_epoch
+        )
+        self.assertEqual(delivered_watermark_for_path(chs, missing_path), anchor)
+        self.assertIn(
+            str(missing_path), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        self.assertTrue(chs.get("alerting"))
+
+        rt.haystack = norm("new missing B")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        chs = state["999"]
+        self.assertFalse(chs.get("alerting", False))
+        self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
+        self.assertEqual(
+            relay_watchdog._validated_recovered_gap_guards(chs)[str(missing_path)][
+                0
+            ],
+            missing_path.stat().st_size,
+        )
+
+    def test_invariant_4435_multi_owner_partial_recovery_keeps_incident_open(self):
+        anchor = float(int(self.now - 2000))
+        owner_a = self.proj_dir / "partial-owner-a.jsonl"
+        owner_b = self.proj_dir / "partial-owner-b.jsonl"
+
+        def record(text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(anchor)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner_a.write_text(record("partial delivered A") + "\n", encoding="utf-8")
+        owner_b.write_text(record("partial missing B") + "\n", encoding="utf-8")
+        owners = [str(owner_a), str(owner_b)]
+        original_gap_since = self.now - 5000
+        state = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(owner_a),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                    str(owner_a): owner_a.stat().st_size,
+                    str(owner_b): owner_b.stat().st_size,
+                },
+                relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: owners,
+                relay_watchdog.GAP_TRANSCRIPT_KEY: str(owner_a),
+                DELIVERED_WATERMARKS_KEY: {
+                    path: {
+                        "delivered_ts": anchor - 1,
+                        "updated_at": self.now - 100,
+                    }
+                    for path in owners
+                },
+                "alerting": True,
+                "gap_since": original_gap_since,
+                "last_alert": self.now,
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = norm("partial delivered A")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        state_path = self.root / "partial-recovery-state.json"
+        save_state(state_path, state)
+        state = load_state(state_path)
+        chs = state["999"]
+        self.assertIn(
+            str(owner_a), relay_watchdog._validated_recovered_gap_guards(chs)
+        )
+        self.assertNotIn(
+            str(owner_a), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY]
+        )
+        self.assertIn(str(owner_b), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
 
     def test_invariant_4435_invalid_persisted_selection_is_ignored_before_fallback(
         self,
