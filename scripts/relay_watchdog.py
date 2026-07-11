@@ -405,44 +405,99 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _open_regular_file_beneath_parent(
-    path: Path, flags: int
+    path: Path, flags: int, trusted_root: Path
 ) -> int | None:
-    """Open one pinned regular file without re-resolving a swapped parent.
+    """Open one regular file beneath a pinned, explicitly trusted root.
 
-    ``O_NOFOLLOW`` on a path string protects only its final component.  Open
-    and identity-pin the parent directory first, then use openat(dirfd,
-    basename) and verify both descriptors against their nofollow prechecks.
-    Any unsupported platform or race fails closed.
+    A final-component ``O_NOFOLLOW`` is insufficient: after discovery an
+    attacker can rename an ancestor such as the provider ``projects`` root and
+    replace it with a symlink to an outside, same-shaped tree.  Pin the trusted
+    root, then resolve *every* descendant directory with ``openat`` plus
+    ``O_NOFOLLOW|O_DIRECTORY``.  The trusted root itself must be an absolute,
+    non-symlink directory; symlinks above that explicit trust boundary retain
+    their normal platform semantics (notably macOS ``/var`` -> ``/private/var``).
+
+    Every pre-open identity is revalidated against the resulting descriptor.
+    The final open is nonblocking so a raced FIFO/device cannot hang the
+    watchdog before its regular-file ``fstat`` gate.  Unsupported platforms,
+    malformed paths, and every race fail closed, with all intermediate file
+    descriptors released.
     """
-    if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    nonblock_flag = getattr(os, "O_NONBLOCK", 0)
+    if not directory_flag or not nofollow_flag or not nonblock_flag:
         return None
-    try:
-        expected_parent = path.parent.stat(follow_symlinks=False)
-        expected_file = path.stat(follow_symlinks=False)
-    except (OSError, ValueError, UnicodeError):
-        return None
-    if not stat_mode.S_ISDIR(expected_parent.st_mode) or not stat_mode.S_ISREG(
-        expected_file.st_mode
+
+    normalized_path = _lexical_absolute_path(path)
+    normalized_root = _lexical_absolute_path(trusted_root)
+    if (
+        normalized_path is None
+        or normalized_root is None
+        or normalized_path != path
+        or normalized_root != trusted_root
     ):
         return None
-
-    parent_descriptor = -1
-    descriptor = -1
     try:
-        parent_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        parent_descriptor = os.open(path.parent, parent_flags)
-        opened_parent = os.fstat(parent_descriptor)
-        if not stat_mode.S_ISDIR(opened_parent.st_mode) or not _same_file_identity(
-            expected_parent, opened_parent
+        relative = normalized_path.relative_to(normalized_root)
+    except ValueError:
+        return None
+    components = relative.parts
+    if not components or any(component in ("", ".", "..") for component in components):
+        return None
+
+    directory_descriptors: list[int] = []
+    descriptor = -1
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | directory_flag
+        | nofollow_flag
+        | nonblock_flag
+    )
+    file_flags = (
+        flags
+        | getattr(os, "O_CLOEXEC", 0)
+        | nofollow_flag
+        | nonblock_flag
+    )
+    try:
+        expected_root = normalized_root.stat(follow_symlinks=False)
+        if not stat_mode.S_ISDIR(expected_root.st_mode):
+            return None
+        root_descriptor = os.open(normalized_root, directory_flags)
+        directory_descriptors.append(root_descriptor)
+        opened_root = os.fstat(root_descriptor)
+        if not stat_mode.S_ISDIR(opened_root.st_mode) or not _same_file_identity(
+            expected_root, opened_root
         ):
             return None
-        descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+
+        for component in components[:-1]:
+            parent_descriptor = directory_descriptors[-1]
+            expected_directory = os.stat(
+                component, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if not stat_mode.S_ISDIR(expected_directory.st_mode):
+                return None
+            child_descriptor = os.open(
+                component, directory_flags, dir_fd=parent_descriptor
+            )
+            directory_descriptors.append(child_descriptor)
+            opened_directory = os.fstat(child_descriptor)
+            if not stat_mode.S_ISDIR(
+                opened_directory.st_mode
+            ) or not _same_file_identity(expected_directory, opened_directory):
+                return None
+
+        parent_descriptor = directory_descriptors[-1]
+        filename = components[-1]
+        expected_file = os.stat(
+            filename, dir_fd=parent_descriptor, follow_symlinks=False
+        )
+        if not stat_mode.S_ISREG(expected_file.st_mode):
+            return None
+        descriptor = os.open(filename, file_flags, dir_fd=parent_descriptor)
         opened_file = os.fstat(descriptor)
         if not stat_mode.S_ISREG(opened_file.st_mode) or not _same_file_identity(
             expected_file, opened_file
@@ -454,12 +509,16 @@ def _open_regular_file_beneath_parent(
     except (OSError, TypeError, ValueError, UnicodeError):
         return None
     finally:
-        for opened in (descriptor, parent_descriptor):
-            if opened >= 0:
-                try:
-                    os.close(opened)
-                except OSError:
-                    pass
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        for opened_directory in reversed(directory_descriptors):
+            try:
+                os.close(opened_directory)
+            except OSError:
+                pass
 
 
 @dataclass(frozen=True)
@@ -923,7 +982,9 @@ def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
     return out
 
 
-def assistant_blocks(transcript: Path) -> TranscriptReadResult:
+def assistant_blocks(
+    transcript: Path, trusted_root: Path | None = None
+) -> TranscriptReadResult:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -932,7 +993,13 @@ def assistant_blocks(transcript: Path) -> TranscriptReadResult:
     )
     descriptor = -1
     try:
-        opened = _open_regular_file_beneath_parent(transcript, flags)
+        # Provider transcripts have shape ``projects/<session>/<uuid>.jsonl``;
+        # the projects directory is the narrowest stable trust boundary that
+        # still lets the component walk reject a swapped session directory.
+        # Production passes it explicitly; the derived value keeps this helper
+        # fail-closed and useful for focused tests.
+        root = trusted_root if trusted_root is not None else transcript.parent.parent
+        opened = _open_regular_file_beneath_parent(transcript, flags, root)
         if opened is None:
             return TranscriptReadResult([], "UnsafePath")
         descriptor = opened
@@ -2224,7 +2291,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     def read_candidate(candidate: TranscriptCandidate) -> TranscriptReadResult:
         path = str(candidate.path)
         if path not in read_cache:
-            read_cache[path] = assistant_blocks(candidate.path)
+            read_cache[path] = assistant_blocks(candidate.path, project_root)
         return read_cache[path]
 
     reactivated_paths: list[str] = []

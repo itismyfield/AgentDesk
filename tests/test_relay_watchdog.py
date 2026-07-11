@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import time
@@ -430,7 +431,7 @@ class TranscriptRecheckTests(unittest.TestCase):
 
         def swap_parent_then_open(path, flags, *args, **kwargs):
             nonlocal swapped
-            if not swapped and Path(path) in (self.project, self.transcript):
+            if not swapped and os.fspath(path) == self.project.name:
                 swapped = True
                 self.project.rename(moved_project)
                 self.project.symlink_to(outside_project, target_is_directory=True)
@@ -448,6 +449,143 @@ class TranscriptRecheckTests(unittest.TestCase):
             [],
             "a path-string reopen must never read through the swapped parent",
         )
+
+    def test_projects_root_symlink_swap_after_discovery_cannot_escape(self):
+        """Pin every ancestor below the trusted root, not just file.parent."""
+        trusted_home = self.root / "trusted-home"
+        projects_root = trusted_home / "projects"
+        project = projects_root / self.project.name
+        project.mkdir(parents=True)
+        transcript = project / "ancestor-swap.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        candidates = relay_watchdog.transcript_candidates([project])
+        self.assertEqual([candidate.path for candidate in candidates], [transcript])
+
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside_projects = Path(outside_tmp.name) / "projects"
+        outside_project = outside_projects / project.name
+        outside_project.mkdir(parents=True)
+        outside = outside_project / transcript.name
+        outside.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-11T07:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "escaped-ancestor-read"}
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        moved_projects = trusted_home / "projects-after-discovery"
+        projects_root.rename(moved_projects)
+        projects_root.symlink_to(outside_projects, target_is_directory=True)
+
+        # Independent semantic mutation oracle: the old immediate-parent-only
+        # implementation follows the swapped projects ancestor and reads the
+        # outside same-shaped transcript.  Keep this proof local to the test;
+        # the production helper below must reject the exact same filesystem.
+        def narrow_parent_only_open(path, flags, _trusted_root):
+            expected_parent = path.parent.stat(follow_symlinks=False)
+            expected_file = path.stat(follow_symlinks=False)
+            parent_fd = os.open(
+                path.parent,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+            descriptor = -1
+            try:
+                opened_parent = os.fstat(parent_fd)
+                if not relay_watchdog._same_file_identity(
+                    expected_parent, opened_parent
+                ):
+                    return None
+                descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+                opened_file = os.fstat(descriptor)
+                if not stat.S_ISREG(opened_file.st_mode) or not (
+                    relay_watchdog._same_file_identity(expected_file, opened_file)
+                ):
+                    return None
+                opened = descriptor
+                descriptor = -1
+                return opened
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(parent_fd)
+
+        with mock.patch.object(
+            relay_watchdog,
+            "_open_regular_file_beneath_parent",
+            side_effect=narrow_parent_only_open,
+        ):
+            legacy_result = relay_watchdog.assistant_blocks(
+                transcript, trusted_root=projects_root
+            )
+        self.assertEqual(
+            [text for _, text in legacy_result.blocks], ["escaped-ancestor-read"]
+        )
+
+        result = relay_watchdog.assistant_blocks(
+            transcript, trusted_root=projects_root
+        )
+        self.assertEqual(result.error, "UnsafePath")
+        self.assertEqual(result.blocks, [])
+
+    def test_trusted_root_boundary_allows_symlink_only_above_it(self):
+        """The explicit root may live below a legitimate platform symlink."""
+        real_home = self.root / "real-home"
+        real_projects = real_home / "projects"
+        real_project = real_projects / self.project.name
+        real_project.mkdir(parents=True)
+        transcript_name = "trusted-boundary.jsonl"
+        (real_project / transcript_name).write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-11T07:00:00Z",
+                    "message": {
+                        "content": [{"type": "text", "text": "trusted-read"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        alias_home = self.root / "home-alias"
+        alias_home.symlink_to(real_home, target_is_directory=True)
+        alias_projects = alias_home / "projects"
+        alias_transcript = alias_projects / real_project.name / transcript_name
+
+        result = relay_watchdog.assistant_blocks(
+            alias_transcript, trusted_root=alias_projects
+        )
+
+        self.assertIsNone(result.error)
+        self.assertEqual([text for _, text in result.blocks], ["trusted-read"])
+
+    def test_component_open_requires_absolute_path_beneath_trusted_root(self):
+        relative = relay_watchdog.assistant_blocks(
+            Path("relative.jsonl"), trusted_root=self.root
+        )
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside = Path(outside_tmp.name) / "outside.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        escaped = relay_watchdog.assistant_blocks(
+            outside, trusted_root=self.root
+        )
+
+        self.assertEqual(relative.error, "UnsafePath")
+        self.assertEqual(escaped.error, "UnsafePath")
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO unavailable on this platform")
     def test_fifo_swap_before_open_is_rejected_without_blocking(self):
