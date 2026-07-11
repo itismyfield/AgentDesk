@@ -664,6 +664,11 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     if existing_ids.contains(&msg.message_id) {
         return CatchUpClassification::Duplicate;
     }
+    if is_restart_gap_notice(msg.author_is_bot, &msg.trimmed_text) {
+        // #4443: checked BEFORE TooOld so aged notices skip the drop/DLQ/
+        // re-notice path entirely (see is_restart_gap_notice).
+        return CatchUpClassification::SelfAuthored;
+    }
     if msg.age_secs > max_age_secs {
         return CatchUpClassification::TooOld;
     }
@@ -685,6 +690,20 @@ pub(in crate::services::discord) fn classify_catch_up_message(
 /// #4260: max entries listed in the aggregate too-old notice before we
 /// summarize the remainder as "… 외 N건" (keep the card compact).
 const CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS: usize = 10;
+
+/// #4443: leading marker of the aggregate restart-gap notice. Shared between
+/// the notice builder and the catch-up classifiers so a reworded notice cannot
+/// silently break the self-recollection guard.
+const CATCH_UP_TOO_OLD_NOTICE_PREFIX: &str = "⚠️ 재시작 공백으로";
+
+/// #4443: true when a message is our own restart-gap notice reposted through
+/// an allowed sender bot. Both catch-up phases must classify these out:
+/// re-collecting one nests it inside the next notice (one level per restart,
+/// every channel) and phase2 would hand a young one to the agent as input.
+/// Prefix + bot-author scoped so a human quoting the marker still recovers.
+fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
+    author_is_bot && text.starts_with(CATCH_UP_TOO_OLD_NOTICE_PREFIX)
+}
 
 /// #4260: one message dropped as too-old during a catch-up scan, captured for
 /// the per-channel aggregate "재시작 공백" notice (silent-loss vector 1).
@@ -718,7 +737,7 @@ fn catch_up_too_old_notice(drops: &[CatchUpTooOldDrop]) -> Option<String> {
         return None;
     }
     let mut body = format!(
-        "⚠️ 재시작 공백으로 {}건이 5분 초과로 미처리되었습니다. 필요하면 다시 보내주세요:",
+        "{CATCH_UP_TOO_OLD_NOTICE_PREFIX} {}건이 5분 초과로 미처리되었습니다. 필요하면 다시 보내주세요:",
         drops.len()
     );
     for drop in drops.iter().take(CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS) {
@@ -1498,6 +1517,12 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 stats.skipped += 1;
                 continue;
             }
+            if is_restart_gap_notice(msg.author.bot, text) {
+                // #4443: phase2's 10-minute window would otherwise hand a
+                // young notice straight to the agent after every deploy.
+                stats.skipped += 1;
+                continue;
+            }
             let mid = msg.id.get();
             if !is_allowed_turn_sender(
                 &allowed_bot_ids_phase2,
@@ -1703,10 +1728,11 @@ mod catch_up_recovery_tests {
         catch_up_remaining_queue_capacity, catch_up_too_old_notice, catch_up_too_old_snippet,
         classify_catch_up_message, classify_phase2_enqueue_commit,
         collect_catch_up_retry_pending_channels, consume_catch_up_retry_state_for_scan,
-        insert_configured_catch_up_candidate, merge_catch_up_retry_checkpoint,
-        parse_catch_up_scan_pace, phase2_retry_after_checkpoint, prune_stale_checkpoint_files,
-        rearm_catch_up_retry_after_defer, rearm_catch_up_retry_after_fetch_failure,
-        run_catch_up_sweep, should_fetch_older_recent_page, should_pace_before_scan,
+        insert_configured_catch_up_candidate, is_restart_gap_notice,
+        merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
+        prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer,
+        rearm_catch_up_retry_after_fetch_failure, run_catch_up_sweep,
+        should_fetch_older_recent_page, should_pace_before_scan,
         take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::{
@@ -2100,6 +2126,83 @@ mod catch_up_recovery_tests {
         assert_eq!(
             classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None),
             CatchUpClassification::SelfAuthored
+        );
+    }
+
+    #[test]
+    fn restart_gap_notice_from_allowed_bot_is_never_recollected() {
+        // #4443: the aggregate restart-gap notice is posted through an
+        // allowed sender bot. Re-collecting it as TooOld quoted it inside the
+        // next notice — one more nesting level per restart, spammed to every
+        // channel. The guard must fire BEFORE the TooOld branch (no DLQ, no
+        // drop entry) and regardless of age.
+        let notice_bot_id = 1481522187197218816;
+        let current_bot_id = 9001;
+        let notice_text = catch_up_too_old_notice(&[CatchUpTooOldDrop {
+            author_id: notice_bot_id,
+            snippet: "⚠️ 재시작 공백으로 1건이 5분 초과로 미처리되었습니다…".to_string(),
+        }])
+        .expect("non-empty drops produce a notice");
+        let mut view = CatchUpMessageView {
+            message_id: 1504813049431724099,
+            author_id: notice_bot_id,
+            author_is_bot: true,
+            is_processable_kind: true,
+            age_secs: 3600, // far beyond max_age — would be TooOld without the guard
+            trimmed_text: notice_text,
+        };
+        let existing = HashSet::new();
+
+        assert_eq!(
+            classify_catch_up_message(
+                &view,
+                Some(current_bot_id),
+                &existing,
+                300,
+                &[notice_bot_id],
+                None
+            ),
+            CatchUpClassification::SelfAuthored,
+            "aged notice must be classified out before the TooOld drop path"
+        );
+        view.age_secs = 60;
+        assert_eq!(
+            classify_catch_up_message(
+                &view,
+                Some(current_bot_id),
+                &existing,
+                300,
+                &[notice_bot_id],
+                None
+            ),
+            CatchUpClassification::SelfAuthored,
+            "young notice must not be recovered as a turn input either"
+        );
+
+        // Shared predicate (also wired into the phase2 enqueue loop):
+        assert!(is_restart_gap_notice(true, &view.trimmed_text));
+        assert!(
+            !is_restart_gap_notice(false, &view.trimmed_text),
+            "human-authored text is never a notice"
+        );
+        assert!(
+            !is_restart_gap_notice(true, "PM triage: pick up #42"),
+            "ordinary allowed-bot traffic must stay recoverable"
+        );
+
+        // A human message that merely mentions the marker mid-text still
+        // recovers — the guard is prefix + bot-author scoped.
+        let human = CatchUpMessageView {
+            message_id: 1504813049431724100,
+            author_id: 343742347365974026,
+            author_is_bot: false,
+            is_processable_kind: true,
+            age_secs: 60,
+            trimmed_text: "어제 '⚠️ 재시작 공백으로' 카드 왜 떴어?".to_string(),
+        };
+        assert_eq!(
+            classify_catch_up_message(&human, Some(current_bot_id), &existing, 300, &[], None),
+            CatchUpClassification::Recover
         );
     }
 
