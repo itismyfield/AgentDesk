@@ -353,7 +353,7 @@
 | `services::auto_queue::phase_gate` | `src/services/auto_queue/phase_gate.rs` | 607 | 573 | 34 |  |
 | `services::auto_queue::phase_gate_catalog` | `src/services/auto_queue/phase_gate_catalog.rs` | 104 | 68 | 36 |  |
 | `services::auto_queue::phase_gate_violations` | `src/services/auto_queue/phase_gate_violations.rs` | 262 | 209 | 53 |  |
-| `services::auto_queue::planning` | `src/services/auto_queue/planning.rs` | 423 | 315 | 108 |  |
+| `services::auto_queue::planning` | `src/services/auto_queue/planning.rs` | 430 | 315 | 115 |  |
 | `services::auto_queue::query` | `src/services/auto_queue/query.rs` | 270 | 250 | 20 |  |
 | `services::auto_queue::route` | `src/services/auto_queue/route.rs` | 96 | 96 | 0 |  |
 | `services::auto_queue::route_generate` | `src/services/auto_queue/route_generate.rs` | 734 | 734 | 0 |  |
