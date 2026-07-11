@@ -2155,8 +2155,9 @@ mod message_outbox_retry_tests {
     };
     use super::{
         MessageOutboxFailureAction, MessageOutboxLeaseUpdateError, PendingMessageOutboxRow,
-        is_terminal_turn_delivery_outbox_source, mark_message_outbox_sent_pg,
-        message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
+        drain_message_outbox_batch_once, is_terminal_turn_delivery_outbox_source,
+        mark_message_outbox_sent_pg, message_outbox_failure_action,
+        session_can_be_released_for_terminal_outbox_failure,
     };
     use sqlx::Row as _;
 
@@ -2421,6 +2422,79 @@ mod message_outbox_retry_tests {
                 .unwrap()
                 .is_none()
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #4460/#4446 integration: the real message-outbox claim/drain path must
+    /// retain the stall alert's provider-owned DM identity through delivery.
+    #[tokio::test]
+    async fn stall_alert_dm_row_drains_with_provider_bot_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_stall_alert_outbox_drain",
+            "stall alert message-outbox drain routing tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let target = "channel:1479662682909966499";
+        let session_key = "codex/test/host:AgentDesk-codex-dm-343742347365974026";
+        let inserted = crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+            &pool,
+            crate::services::message_outbox::OutboxMessage {
+                target,
+                content: "stall alert drain fixture",
+                bot: "notify",
+                source: "stall_watchdog",
+                reason_code: Some("stall_watchdog_suspected_stall"),
+                session_key: Some(session_key),
+            },
+            1800,
+        )
+        .await
+        .expect("enqueue stall alert row");
+        assert!(inserted);
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_delivery = observed.clone();
+        let drained = drain_message_outbox_batch_once(&pool, Some("stall-alert-drain-test"), {
+            move |row| {
+                let observed_delivery = observed_delivery.clone();
+                async move {
+                    let bot = crate::services::message_outbox::delivery_bot_for_target_session(
+                        &row.target,
+                        &row.bot,
+                        row.session_key.as_deref(),
+                    )
+                    .into_owned();
+                    observed_delivery
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push((row.target.clone(), row.source.clone(), bot));
+                    ("200 OK".to_string(), String::new())
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(drained, 1);
+        assert_eq!(
+            *observed.lock().unwrap_or_else(|poison| poison.into_inner()),
+            vec![(
+                target.to_string(),
+                "stall_watchdog".to_string(),
+                "codex".to_string(),
+            )]
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM message_outbox WHERE source='stall_watchdog'")
+                .fetch_one(&pool)
+                .await
+                .expect("load drained stall alert status");
+        assert_eq!(status, "sent");
 
         pool.close().await;
         pg_db.drop().await;

@@ -209,7 +209,7 @@
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 144 | 110 | 34 |  |
 | `runtime_layout::skill_refresh` | `src/runtime_layout/skill_refresh.rs` | 376 | 276 | 100 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 1253 | 962 | 291 |  |
-| `server` | `src/server/mod.rs` | 3345 | 2821 | 524 | giant-file |
+| `server` | `src/server/mod.rs` | 3419 | 2821 | 598 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 9 | 9 | 0 |  |
 | `server::cluster_session_routing` | `src/server/cluster_session_routing.rs` | 9 | 9 | 0 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 67 | 67 | 0 |  |
@@ -476,9 +476,9 @@
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 113 | 113 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
 | `services::discord::health::rebind_request` | `src/services/discord/health/rebind_request.rs` | 112 | 87 | 25 |  |
-| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5394 | 2550 | 2844 | giant-file |
+| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5548 | 2549 | 2999 | giant-file |
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
-| `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 406 | 157 | 249 |  |
+| `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 467 | 157 | 310 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
 | `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1734 | 666 | 1068 |  |

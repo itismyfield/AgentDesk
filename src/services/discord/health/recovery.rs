@@ -2015,12 +2015,11 @@ pub(crate) async fn run_stall_watchdog_pass(
             STALL_WATCHDOG_THRESHOLD_SECS,
         );
         // #4460: DO NOT force-terminate the active turn here. The old branch-4
-        // "desynced force-clean" deleted the inflight state, released the
-        // mailbox cancel token, cancelled the watcher and cleared the turn
-        // view — which force-killed a *live* codex session on a false positive
-        // (watcher desync / post-restart re-sync lag while the producer was
-        // still working). Per operator directive we now MENTION the owner and
-        // leave the turn completely untouched.
+        // "desynced force-clean" deleted inflight state, released the mailbox
+        // cancel token, cancelled the watcher, and cleared the turn view. The
+        // incident that motivated #4460 was later traced to relay-recovery
+        // redrive rather than this branch, but the operator-requested hardening
+        // remains: page the owner and leave every turn authority untouched.
         //
         // #4460 follow-up: the W0 shadow classifier deliberately labels a
         // desynced control plane as `control_plane_desync` even when producer
@@ -4253,6 +4252,35 @@ mod stall_watchdog_auto_heal_tests {
         assert_eq!(session_id.as_deref(), Some("runtime-provider-session"));
     }
 
+    async fn assert_branch4_turn_authorities_preserved(
+        shared: &Arc<crate::services::discord::SharedData>,
+        channel: ChannelId,
+        user_msg: MessageId,
+        token: &Arc<CancelToken>,
+        watcher_cancel: &Arc<AtomicBool>,
+        turn_view_ops_before: usize,
+    ) {
+        assert_mailbox_and_session_preserved(shared, channel, user_msg, token).await;
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            1,
+            "branch 4 must not decrement global active"
+        );
+        assert!(
+            shared.tmux_watchers.contains_key(&channel),
+            "branch 4 must not remove the watcher"
+        );
+        assert!(
+            !watcher_cancel.load(Ordering::Relaxed),
+            "branch 4 must not cancel the watcher"
+        );
+        assert_eq!(
+            shared.turn_view_reconciler.ops().len(),
+            turn_view_ops_before,
+            "branch 4 must not mutate the turn view"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session() {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -4595,10 +4623,12 @@ mod stall_watchdog_auto_heal_tests {
         stale_state.updated_at = stale_at;
         crate::services::discord::inflight::save_inflight_state(&stale_state)
             .expect("save stale inflight timestamps");
+        let watcher_cancel = Arc::new(AtomicBool::new(false));
         shared.tmux_watchers.insert(
             channel,
-            watcher_handle(stale_tmux, &stale_output, Arc::new(AtomicBool::new(false))),
+            watcher_handle(stale_tmux, &stale_output, watcher_cancel.clone()),
         );
+        let turn_view_ops_before = shared.turn_view_reconciler.ops().len();
 
         let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
 
@@ -4608,8 +4638,15 @@ mod stall_watchdog_auto_heal_tests {
             cleaned, 0,
             "suspected stall must NOT be force-cleaned; the turn stays live (#4460)"
         );
-        assert_mailbox_and_session_preserved(&shared, channel, user_msg, &stale_token).await;
-        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert_branch4_turn_authorities_preserved(
+            &shared,
+            channel,
+            user_msg,
+            &stale_token,
+            &watcher_cancel,
+            turn_view_ops_before,
+        )
+        .await;
         let persisted =
             crate::services::discord::inflight::load_inflight_state(&provider, channel.get())
                 .expect("inflight row must survive — branch 4 no longer deletes it (#4460)");
@@ -4624,6 +4661,113 @@ mod stall_watchdog_auto_heal_tests {
         assert_eq!(
             alert_rows, 0,
             "fresh producer evidence must suppress paging"
+        );
+    }
+
+    /// Fresh producer evidence suppresses paging only until the existing
+    /// restart-invariant absolute backstop. Once crossed, branch 4 pages but
+    /// still preserves every live-turn authority.
+    #[tokio::test(flavor = "current_thread")]
+    async fn branch4_absolute_backstop_pages_without_cleaning_live_turn_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_stall_watchdog_absolute_backstop",
+            "stall watchdog absolute-backstop paging tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
+        let provider = ProviderKind::Codex;
+        let mut registry = HealthRegistry::new();
+        registry.started_at_unix = chrono::Utc::now().timestamp()
+            - super::stall_liveness::STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS as i64
+            - 60;
+        let shared =
+            super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let channel = ChannelId::new(1_479_662_682_909_966_493);
+        let user_msg = MessageId::new(1_504_813_049_431_724_054);
+        let tmux = "AgentDesk-codex-dm-343742347365974026";
+        let output = tempdir.path().join("absolute-backstop-live.jsonl");
+        std::fs::write(&output, "fresh producer output\n")
+            .expect("write fresh producer output fixture");
+        let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+        let mut state = seed_idle_inflight(
+            &provider,
+            channel,
+            user_msg.get(),
+            tmux,
+            &output,
+            0,
+            "absolute-backstop-session",
+        );
+        let backstop_at = (chrono::Local::now()
+            - chrono::Duration::seconds(
+                super::stall_liveness::STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS as i64 + 60,
+            ))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+        state.started_at = backstop_at.clone();
+        state.updated_at = backstop_at;
+        state.request_owner_user_id = 343_742_347_365_974_026;
+        state.session_key = Some(
+            crate::services::discord::adk_session::build_namespaced_session_key(
+                "test-token-hash",
+                &provider,
+                tmux,
+            ),
+        );
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("save absolute-backstop inflight");
+        let watcher_cancel = Arc::new(AtomicBool::new(false));
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux, &output, watcher_cancel.clone()),
+        );
+        let turn_view_ops_before = shared.turn_view_reconciler.ops().len();
+
+        for pass in 1..=2 {
+            let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
+            assert_eq!(cleaned, 0, "pass {pass} must not clean at the backstop");
+            assert_branch4_turn_authorities_preserved(
+                &shared,
+                channel,
+                user_msg,
+                &token,
+                &watcher_cancel,
+                turn_view_ops_before,
+            )
+            .await;
+        }
+
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT target, session_key, content
+               FROM message_outbox
+              WHERE source = 'stall_watchdog'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load absolute-backstop alert row");
+        assert_eq!(rows.len(), 1, "cooldown must dedupe the backstop page");
+        assert_eq!(rows[0].0, format!("channel:{}", channel.get()));
+        assert!(rows[0].2.contains("<@343742347365974026>"));
+        assert_eq!(
+            crate::services::message_outbox::delivery_bot_for_target_session(
+                &rows[0].0,
+                "notify",
+                Some(&rows[0].1),
+            )
+            .as_ref(),
+            "codex"
         );
     }
 
@@ -4689,15 +4833,25 @@ mod stall_watchdog_auto_heal_tests {
         );
         crate::services::discord::inflight::save_inflight_state(&state)
             .expect("save genuinely stalled inflight");
+        let watcher_cancel = Arc::new(AtomicBool::new(false));
         shared.tmux_watchers.insert(
             channel,
-            watcher_handle(tmux, &output, Arc::new(AtomicBool::new(false))),
+            watcher_handle(tmux, &output, watcher_cancel.clone()),
         );
+        let turn_view_ops_before = shared.turn_view_reconciler.ops().len();
 
         for pass in 1..=2 {
             let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
             assert_eq!(cleaned, 0, "pass {pass} must never force-clean branch 4");
-            assert_mailbox_and_session_preserved(&shared, channel, user_msg, &token).await;
+            assert_branch4_turn_authorities_preserved(
+                &shared,
+                channel,
+                user_msg,
+                &token,
+                &watcher_cancel,
+                turn_view_ops_before,
+            )
+            .await;
             assert!(
                 crate::services::discord::inflight::load_inflight_state(&provider, channel.get(),)
                     .is_some(),

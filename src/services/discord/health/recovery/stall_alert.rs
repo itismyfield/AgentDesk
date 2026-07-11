@@ -279,12 +279,19 @@ mod tests {
         );
         let shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
 
+        #[derive(Clone, Copy)]
+        enum SessionFixture {
+            Persisted,
+            TmuxFallback,
+            CorruptPersisted,
+            ChannelBindingFallback,
+        }
         struct Scenario {
             channel_id: u64,
             provider: ProviderKind,
             owner: u64,
             tmux_name: &'static str,
-            persist_session_key: bool,
+            session_fixture: SessionFixture,
             expected_bot: &'static str,
             expected_mention: Option<u64>,
         }
@@ -295,7 +302,7 @@ mod tests {
                 owner: 343_742_347_365_974_026,
                 tmux_name: "AgentDesk-claude-dm-343742347365974026",
                 // Exercise the legacy-row fallback from exact tmux identity.
-                persist_session_key: false,
+                session_fixture: SessionFixture::TmuxFallback,
                 expected_bot: "claude",
                 expected_mention: Some(343_742_347_365_974_026),
             },
@@ -304,7 +311,7 @@ mod tests {
                 provider: ProviderKind::Codex,
                 owner: 343_742_347_365_974_026,
                 tmux_name: "AgentDesk-codex-dm-343742347365974026",
-                persist_session_key: true,
+                session_fixture: SessionFixture::Persisted,
                 expected_bot: "codex",
                 expected_mention: Some(343_742_347_365_974_026),
             },
@@ -313,7 +320,7 @@ mod tests {
                 provider: ProviderKind::Codex,
                 owner: 343_742_347_365_974_026,
                 tmux_name: "AgentDesk-codex-adk-cc",
-                persist_session_key: true,
+                session_fixture: SessionFixture::Persisted,
                 expected_bot: "notify",
                 expected_mention: Some(343_742_347_365_974_026),
             },
@@ -322,7 +329,7 @@ mod tests {
                 provider: ProviderKind::Claude,
                 owner: 0,
                 tmux_name: "AgentDesk-claude-adk-cc",
-                persist_session_key: true,
+                session_fixture: SessionFixture::Persisted,
                 expected_bot: "notify",
                 expected_mention: None,
             },
@@ -331,20 +338,74 @@ mod tests {
                 provider: ProviderKind::Codex,
                 owner: discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
                 tmux_name: "AgentDesk-codex-adk-cc",
-                persist_session_key: true,
+                session_fixture: SessionFixture::Persisted,
                 expected_bot: "notify",
                 expected_mention: None,
+            },
+            Scenario {
+                channel_id: 1_479_662_682_909_966_494,
+                provider: ProviderKind::Codex,
+                owner: 343_742_347_365_974_026,
+                tmux_name: "AgentDesk-codex-dm-343742347365974026",
+                // A corrupt/wrong-provider persisted key must fall through to
+                // the exact tmux identity rather than selecting the wrong bot.
+                session_fixture: SessionFixture::CorruptPersisted,
+                expected_bot: "codex",
+                expected_mention: Some(343_742_347_365_974_026),
+            },
+            Scenario {
+                channel_id: 1_479_662_682_909_966_495,
+                provider: ProviderKind::Claude,
+                owner: 343_742_347_365_974_026,
+                tmux_name: "AgentDesk-claude-dm-343742347365974026",
+                // Legacy/corrupt rows may have neither persisted provider
+                // identity. The runtime channel binding remains authoritative.
+                session_fixture: SessionFixture::ChannelBindingFallback,
+                expected_bot: "claude",
+                expected_mention: Some(343_742_347_365_974_026),
             },
         ];
 
         for scenario in &scenarios {
-            let state = inflight_fixture(
+            let persist_session_key = matches!(scenario.session_fixture, SessionFixture::Persisted);
+            let mut state = inflight_fixture(
                 &scenario.provider,
                 scenario.channel_id,
                 scenario.owner,
                 scenario.tmux_name,
-                scenario.persist_session_key,
+                persist_session_key,
             );
+            match scenario.session_fixture {
+                SessionFixture::Persisted | SessionFixture::TmuxFallback => {}
+                SessionFixture::CorruptPersisted => {
+                    state.session_key = Some(
+                        "claude/wrong/host:AgentDesk-claude-dm-343742347365974026".to_string(),
+                    );
+                }
+                SessionFixture::ChannelBindingFallback => {
+                    state.session_key = None;
+                    state.tmux_session_name = None;
+                    shared.core.lock().await.sessions.insert(
+                        ChannelId::new(scenario.channel_id),
+                        discord::DiscordSession {
+                            session_id: Some("channel-binding-fallback".to_string()),
+                            memento_context_loaded: true,
+                            memento_reflected: false,
+                            current_path: None,
+                            history: Vec::new(),
+                            pending_uploads: Vec::new(),
+                            cleared: false,
+                            remote_profile_name: None,
+                            channel_id: Some(scenario.channel_id),
+                            channel_name: Some("dm-343742347365974026".to_string()),
+                            category_name: None,
+                            last_active: tokio::time::Instant::now(),
+                            worktree: None,
+                            born_generation: discord::runtime_store::load_generation(),
+                        },
+                    );
+                }
+            }
             // Two watchdog passes inside the cooldown must create one row.
             notify_suspected_stall_without_cleanup(
                 &shared,
