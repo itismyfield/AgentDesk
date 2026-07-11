@@ -53,6 +53,7 @@ import math
 import os
 import re
 import shutil
+import stat as stat_mode
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -99,12 +100,14 @@ MAX_DELIVERED_WATERMARKS = 16
 SELECTED_TRANSCRIPT_KEY = "selected_transcript"
 TRANSCRIPT_SIZES_KEY = "transcript_sizes"
 TRANSCRIPT_SEEN_AT_KEY = "transcript_seen_at"
+TRANSCRIPT_KNOWN_AT_KEY = "transcript_known_at"
 PENDING_TRANSCRIPTS_KEY = "pending_transcripts"
 PENDING_TRANSCRIPT_OVERFLOW_KEY = "pending_transcript_overflow"
 LAST_PENDING_TRANSCRIPT_OVERFLOW_ALERT_KEY = (
     "last_pending_transcript_overflow_alert"
 )
 MAX_TRANSCRIPT_HISTORY = 64
+MAX_KNOWN_TRANSCRIPTS = 256
 MAX_PENDING_TRANSCRIPTS = 32
 TRANSCRIPT_HISTORY_TTL_SECS = 7 * 24 * 60 * 60
 
@@ -347,9 +350,35 @@ def main_channel_project_re(worktree_root: str, worktree_prefix: str) -> re.Patt
 
 def channel_project_dirs(root: Path, pattern: re.Pattern[str]) -> list[Path]:
     try:
-        return [d for d in root.iterdir() if d.is_dir() and pattern.match(d.name)]
+        entries = list(root.iterdir())
     except OSError:
         return []
+    return [
+        entry
+        for entry in entries
+        if _directory_without_symlink(entry) and pattern.match(entry.name)
+    ]
+
+
+def _directory_without_symlink(path: Path) -> bool:
+    try:
+        path_stat = path.stat(follow_symlinks=False)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return stat_mode.S_ISDIR(path_stat.st_mode)
+
+
+def _regular_file_stat_without_symlink(path: Path) -> os.stat_result | None:
+    try:
+        parent_stat = path.parent.stat(follow_symlinks=False)
+        path_stat = path.stat(follow_symlinks=False)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not stat_mode.S_ISDIR(parent_stat.st_mode):
+        return None
+    if not stat_mode.S_ISREG(path_stat.st_mode):
+        return None
+    return path_stat
 
 
 @dataclass(frozen=True)
@@ -357,6 +386,12 @@ class TranscriptCandidate:
     path: Path
     size: int
     mtime: float
+
+
+@dataclass(frozen=True)
+class TranscriptReadResult:
+    blocks: list[tuple[float, str]]
+    error: str | None = None
 
 
 def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
@@ -367,11 +402,12 @@ def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
         except OSError:
             continue
         for path in paths:
-            try:
-                stat = path.stat()
-            except OSError:
+            path_stat = _regular_file_stat_without_symlink(path)
+            if path_stat is None:
                 continue
-            candidates.append(TranscriptCandidate(path, stat.st_size, stat.st_mtime))
+            candidates.append(
+                TranscriptCandidate(path, path_stat.st_size, path_stat.st_mtime)
+            )
     return candidates
 
 
@@ -400,11 +436,10 @@ def recheck_selected_transcript(
         or pattern.fullmatch(path.parent.name) is None
     ):
         return None
-    try:
-        stat = path.stat()
-    except (OSError, ValueError, UnicodeError):
+    path_stat = _regular_file_stat_without_symlink(path)
+    if path_stat is None:
         return None
-    return TranscriptCandidate(path, stat.st_size, stat.st_mtime)
+    return TranscriptCandidate(path, path_stat.st_size, path_stat.st_mtime)
 
 
 def _validated_transcript_sizes(channel_state: Mapping[str, Any]) -> dict[str, int]:
@@ -434,6 +469,22 @@ def _validated_transcript_seen_at(
             else now
         )
         for path in sizes
+    }
+
+
+def _validated_transcript_known_at(
+    channel_state: Mapping[str, Any], now: float
+) -> dict[str, float]:
+    raw = channel_state.get(TRANSCRIPT_KNOWN_AT_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        path: float(seen_at)
+        for path, seen_at in raw.items()
+        if isinstance(path, str)
+        and path
+        and _is_finite_nonnegative_number(seen_at)
+        and now - float(seen_at) <= TRANSCRIPT_HISTORY_TTL_SECS
     }
 
 
@@ -497,6 +548,34 @@ def _bounded_pending_transcripts(
         if path in history_paths and path not in pending:
             pending.append(path)
     return pending[:MAX_PENDING_TRANSCRIPTS]
+
+
+def _bounded_transcript_known_at(
+    known_at: Mapping[str, float], now: float, priority_paths: list[str]
+) -> dict[str, float]:
+    priority = {
+        path: index
+        for index, path in enumerate(dict.fromkeys(priority_paths))
+    }
+    entries = [
+        (path, float(seen_at))
+        for path, seen_at in known_at.items()
+        if isinstance(path, str)
+        and path
+        and _is_finite_nonnegative_number(seen_at)
+        and (
+            path in priority
+            or now - float(seen_at) <= TRANSCRIPT_HISTORY_TTL_SECS
+        )
+    ]
+    entries.sort(
+        key=lambda entry: (
+            priority.get(entry[0], len(priority)),
+            -entry[1],
+            entry[0],
+        )
+    )
+    return dict(entries[:MAX_KNOWN_TRANSCRIPTS])
 
 
 def select_watch_transcript(
@@ -628,12 +707,27 @@ def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
     return out
 
 
-def assistant_blocks(transcript: Path) -> list[tuple[float, str]]:
+def assistant_blocks(transcript: Path) -> TranscriptReadResult:
+    if _regular_file_stat_without_symlink(transcript) is None:
+        return TranscriptReadResult([], "UnsafePath")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
     try:
-        with transcript.open(encoding="utf-8") as f:
-            return assistant_blocks_from_lines(f)
-    except (OSError, UnicodeError):
-        return []
+        descriptor = os.open(transcript, flags)
+        if not stat_mode.S_ISREG(os.fstat(descriptor).st_mode):
+            return TranscriptReadResult([], "UnsafePath")
+        stream = os.fdopen(descriptor, "r", encoding="utf-8")
+        descriptor = -1
+        with stream as f:
+            return TranscriptReadResult(assistant_blocks_from_lines(f))
+    except (OSError, UnicodeError, ValueError) as exc:
+        return TranscriptReadResult([], type(exc).__name__)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 # ── Delivery matching + judgment (pure) ────────────────────────────────────────
@@ -1727,9 +1821,20 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     candidates = transcript_candidates(dirs)
     previous_sizes = _validated_transcript_sizes(chs)
     previous_seen_at = _validated_transcript_seen_at(chs, previous_sizes, now)
+    known_state_initialized = isinstance(chs.get(TRANSCRIPT_KNOWN_AT_KEY), dict)
+    known_at = _validated_transcript_known_at(chs, now)
     pending_paths = _validated_pending_transcripts(chs)
     previous_selected = chs.get(SELECTED_TRANSCRIPT_KEY)
     watermarks = delivered_watermarks(chs)
+    known_before = set(known_at) | set(previous_sizes) | set(watermarks)
+    read_cache: dict[str, TranscriptReadResult] = {}
+
+    def read_candidate(candidate: TranscriptCandidate) -> TranscriptReadResult:
+        path = str(candidate.path)
+        if path not in read_cache:
+            read_cache[path] = assistant_blocks(candidate.path)
+        return read_cache[path]
+
     tracking_initialized = bool(
         previous_sizes
         or pending_paths
@@ -1772,6 +1877,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         if watermarked_candidates and len(watermarked_candidates) == len(candidates):
             previous_selected = max(watermarked_candidates)[1]
             bootstrapped_from_watermark = True
+    selection_sizes = dict(previous_sizes)
     if tracking_initialized:
         debut_candidates = sorted(
             (
@@ -1790,14 +1896,40 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                     f"[{cid}] transcript-debut-skip reason=idle "
                     f"idle_min={int(min(idle, 86400 * 365) // 60)} path={path}"
                 )
+                selection_sizes[path] = candidate.size
                 continue
+            read_result = read_candidate(candidate)
+            content_is_recent = any(
+                now - epoch < cfg.idle_quiet_secs
+                for epoch, _ in read_result.blocks
+            )
+            first_observation = known_state_initialized and path not in known_before
+            first_observation_without_readable_history = first_observation and (
+                read_result.error is not None or not read_result.blocks
+            )
+            if not content_is_recent and not first_observation_without_readable_history:
+                reason = (
+                    "known_stale_content"
+                    if path in known_before
+                    else "unproven_stale_content"
+                )
+                rt.log(f"[{cid}] transcript-debut-skip reason={reason} path={path}")
+                selection_sizes[path] = candidate.size
+                continue
+            if first_observation_without_readable_history:
+                selection_sizes[path] = candidate.size
             live_debut_paths.append(path)
         live_debut_set = set(live_debut_paths)
         pending_paths = live_debut_paths + [
             path for path in pending_paths if path not in live_debut_set
         ]
+    if bootstrapped_from_watermark:
+        for candidate in candidates:
+            path = str(candidate.path)
+            if path in watermarks:
+                selection_sizes.setdefault(path, candidate.size)
     tr, selection_reason = select_watch_transcript_with_reason(
-        candidates, previous_sizes, previous_selected
+        candidates, selection_sizes, previous_selected
     )
     if bootstrapped_from_watermark and selection_reason == "sticky":
         selection_reason = "watermark_bootstrap"
@@ -1831,6 +1963,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 watermarks.items(), key=lambda item: (-item[1][1], item[0])
             )
         ]
+    )
+    merged_known_at = dict(known_at)
+    for candidate in candidates:
+        merged_known_at[str(candidate.path)] = now
+    merged_known_at = _bounded_transcript_known_at(
+        merged_known_at, now, priority_paths
     )
     merged_sizes, merged_seen_at = _bounded_transcript_history(
         merged_sizes, merged_seen_at, now, priority_paths
@@ -1875,6 +2013,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     pending_paths = bounded_pending_paths
     chs[TRANSCRIPT_SIZES_KEY] = merged_sizes
     chs[TRANSCRIPT_SEEN_AT_KEY] = merged_seen_at
+    chs[TRANSCRIPT_KNOWN_AT_KEY] = merged_known_at
     chs[PENDING_TRANSCRIPTS_KEY] = pending_paths
     selected = next((candidate for candidate in candidates if candidate.path == tr), None)
     # I1 selector sync (#4408 phase 2): compare the dcserver's asserted relay
@@ -1937,12 +2076,21 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     chs["read_failures"] = 0
 
     evaluated: list[tuple[TranscriptCandidate, Verdict]] = []
+    read_error_paths: list[str] = []
     remaining_pending = list(pending_paths)
     for candidate in active_candidates:
         path = str(candidate.path)
+        read_result = read_candidate(candidate)
+        if read_result.error is not None:
+            rt.log(
+                f"[{cid}] transcript-read-error path={path} "
+                f"error={read_result.error}"
+            )
+            read_error_paths.append(path)
+            continue
         prior_delivered_ts = delivered_watermark_for_path(chs, candidate.path)
         verdict = evaluate(
-            assistant_blocks(candidate.path),
+            read_result.blocks,
             hay,
             now,
             cfg.grace_secs,
@@ -1953,12 +2101,20 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             advance_delivered_watermark(
                 chs, candidate.path, verdict.delivered_ts, now
             )
+        fresh_undelivered = sum(
+            1
+            for epoch, text in read_result.blocks
+            if now - epoch <= cfg.grace_secs
+            and epoch > verdict.delivered_ts
+            and not delivered(text, hay)
+        )
         if path in pending_set:
             rt.log(
                 f"[{cid}] transcript-debut-eval path={path} "
-                f"state={verdict.state} lost={verdict.lost}"
+                f"state={verdict.state} lost={verdict.lost} "
+                f"fresh_undelivered={fresh_undelivered}"
             )
-            if path == str(tr) or verdict.state == STATE_OK:
+            if verdict.state == STATE_OK and fresh_undelivered == 0:
                 remaining_pending = [
                     pending for pending in remaining_pending if pending != path
                 ]
@@ -1966,6 +2122,8 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     chs[PENDING_TRANSCRIPTS_KEY] = _bounded_pending_transcripts(
         remaining_pending, set(merged_sizes)
     )
+    if not evaluated:
+        return
     state_rank = {STATE_OK: 0, STATE_LAGGING: 1, STATE_GAP: 2}
     verdict_candidate, v = max(
         evaluated,
@@ -1978,6 +2136,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         ),
     )
     verdict_path = str(verdict_candidate.path)
+    if read_error_paths and v.state == STATE_OK:
+        rt.log(
+            f"[{cid}] transcript-verdict-incomplete "
+            f"read_errors={len(read_error_paths)}"
+        )
+        return
 
     if v.state == STATE_GAP:
         if rt.in_deploy_window(now):

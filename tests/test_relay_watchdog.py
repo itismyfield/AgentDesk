@@ -359,6 +359,49 @@ class TranscriptRecheckTests(unittest.TestCase):
                     self.fail(f"malformed persisted path escaped recheck: {exc!r}")
                 self.assertIsNone(candidate)
 
+    def test_symlink_escape_is_rejected_across_recheck_discovery_and_read(self):
+        other_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(other_tmp.cleanup)
+        outside = Path(other_tmp.name) / "outside.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        linked = self.project / "linked.jsonl"
+        try:
+            linked.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+
+        self.assertIsNone(
+            recheck_selected_transcript(
+                str(linked), self.root, self.pattern, {str(linked)}
+            )
+        )
+        self.assertNotIn(
+            linked,
+            [
+                candidate.path
+                for candidate in relay_watchdog.transcript_candidates([self.project])
+            ],
+        )
+        self.assertIsNotNone(relay_watchdog.assistant_blocks(linked).error)
+        with mock.patch.object(
+            relay_watchdog,
+            "_regular_file_stat_without_symlink",
+            return_value=outside.stat(),
+        ):
+            self.assertIsNotNone(
+                relay_watchdog.assistant_blocks(linked).error,
+                "descriptor open must reject a symlink swapped in after precheck",
+            )
+
+        discovery_root = self.root / "discovery"
+        discovery_root.mkdir()
+        linked_project = discovery_root / self.project.name
+        linked_project.symlink_to(self.project, target_is_directory=True)
+        self.assertEqual(
+            channel_project_dirs(discovery_root, self.pattern),
+            [],
+        )
+
 
 class TimestampTests(unittest.TestCase):
     def test_transcript_timestamps_parse_as_utc(self):
@@ -1892,6 +1935,101 @@ class TickChannelTests(unittest.TestCase):
             )
         )
 
+    def test_invariant_4435_watermark_only_restart_ignores_mtime_override(self):
+        current = self.proj_dir / "current.jsonl"
+        touched_old = self.proj_dir / "old.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "confirmed current") + "\n", encoding="utf-8"
+        )
+        touched_old.write_text(
+            record(anchor - 100, "old delivered") + "\n", encoding="utf-8"
+        )
+        os.utime(current, (self.now - 100, self.now - 100))
+        os.utime(touched_old, (self.now, self.now))
+        state = {"999": {}}
+        advance_delivered_watermark(
+            state["999"], touched_old, anchor - 100, self.now - 2
+        )
+        advance_delivered_watermark(
+            state["999"], current, anchor, self.now - 1
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("confirmed current old delivered")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(rt.alerts, [])
+        self.assertTrue(
+            any(
+                "transcript-select reason=watermark_bootstrap" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_invariant_4435_watermark_bootstrap_yields_to_positive_growth(self):
+        current = self.proj_dir / "current.jsonl"
+        growing = self.proj_dir / "growing.jsonl"
+        anchor = float(int(self.now - 2000))
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(anchor, "current delivered") + "\n", encoding="utf-8"
+        )
+        growing.write_text(
+            record(anchor - 100, "growing delivered") + "\n", encoding="utf-8"
+        )
+        state = {
+            "999": {
+                "transcript_sizes": {
+                    str(current): current.stat().st_size,
+                    str(growing): growing.stat().st_size,
+                }
+            }
+        }
+        with growing.open("a", encoding="utf-8") as stream:
+            stream.write(record(anchor + 1, "positive growth delivered") + "\n")
+        advance_delivered_watermark(
+            state["999"], growing, anchor - 100, self.now - 2
+        )
+        advance_delivered_watermark(
+            state["999"], current, anchor, self.now - 1
+        )
+        rt = self.make_rt()
+        rt.haystack = norm(
+            "current delivered growing delivered positive growth delivered"
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(growing))
+        self.assertTrue(
+            any("transcript-select reason=growth" in line for line in rt.log_lines)
+        )
+
     def test_invariant_4435_partial_discovery_rechecks_tracked_selection(self):
         current = self.proj_dir / "current.jsonl"
         touched_old = self.proj_dir / "old.jsonl"
@@ -2078,7 +2216,21 @@ class TickChannelTests(unittest.TestCase):
         }
         for index in range(relay_watchdog.MAX_PENDING_TRANSCRIPTS + 5):
             (self.proj_dir / f"debut-{index:02d}.jsonl").write_text(
-                "{}\n", encoding="utf-8"
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 1)
+                        ),
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": f"debut {index}"}
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
             )
         rt = self.make_rt()
         rt.haystack = None
@@ -2202,6 +2354,145 @@ class TickChannelTests(unittest.TestCase):
             )
         )
 
+    def test_invariant_4435_fresh_debut_stays_pending_until_mature_verdict(self):
+        current = self.proj_dir / "current.jsonl"
+        final = self.proj_dir / "swap-final.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        current.write_text(
+            record(self.now - 1000, "current delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        final.write_text(
+            record(self.now + 60, "swap final never relayed") + "\n",
+            encoding="utf-8",
+        )
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now + 61, "current growth delivered") + "\n")
+        os.utime(final, (self.now + 60, self.now + 60))
+        os.utime(current, (self.now + 61, self.now + 61))
+        rt.haystack = norm("current delivered current growth delivered")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 120)
+
+        self.assertIn(str(final), state["999"]["pending_transcripts"])
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 0
+        )
+        self.assertTrue(
+            any(
+                f"transcript-debut-eval path={final} state=ok" in line
+                and "fresh_undelivered=1" in line
+                for line in rt.log_lines
+            )
+        )
+
+        with current.open("a", encoding="utf-8") as stream:
+            stream.write(record(self.now + 899, "current keepalive delivered") + "\n")
+        os.utime(current, (self.now + 900, self.now + 900))
+        rt.haystack = norm(
+            "current delivered current growth delivered current keepalive delivered"
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 900)
+
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 1
+        )
+        self.assertIn(str(final), state["999"]["pending_transcripts"])
+        self.assertEqual(
+            sum(
+                1
+                for line in rt.log_lines
+                if f"transcript-debut-eval path={final}" in line
+            ),
+            2,
+        )
+
+    def test_invariant_4435_touched_known_history_evictee_cannot_redebut(self):
+        current = self.proj_dir / "current.jsonl"
+        historic = self.proj_dir / "historic-old.jsonl"
+        day = 24 * 60 * 60
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        historic.write_text(
+            "\n".join(
+                record(self.now - 3 * day + index, f"historic block {index}")
+                for index in range(490)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(historic, (self.now - 3 * day, self.now - 3 * day))
+        for index in range(relay_watchdog.MAX_TRANSCRIPT_HISTORY):
+            recent = self.proj_dir / f"recent-{index:03d}.jsonl"
+            recent.write_text("{}\n", encoding="utf-8")
+            os.utime(
+                recent,
+                (self.now - 5000 - index, self.now - 5000 - index),
+            )
+        current.write_text(
+            record(self.now - 1000, "current delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(current, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("current delivered")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertNotIn(str(historic), state["999"]["transcript_sizes"])
+        self.assertIn("transcript_known_at", state["999"])
+        self.assertIn(str(historic), state["999"]["transcript_known_at"])
+
+        os.utime(historic, (self.now + 100, self.now + 100))
+        log_start = len(rt.log_lines)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 120)
+
+        second_tick_logs = rt.log_lines[log_start:]
+        self.assertEqual(state["999"][SELECTED_TRANSCRIPT_KEY], str(current))
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "릴레이 갭 감지" in body]), 0
+        )
+        self.assertNotIn(str(historic), state["999"]["pending_transcripts"])
+        self.assertFalse(
+            any(
+                f"transcript-debut-eval path={historic}" in line
+                for line in second_tick_logs
+            )
+        )
+        self.assertTrue(
+            any(
+                f"transcript-debut-skip reason=known_stale_content path={historic}"
+                in line
+                for line in second_tick_logs
+            )
+        )
+
     def test_invariant_4435_history_cap_evictees_do_not_redebut_when_idle(self):
         current = self.proj_dir / "current.jsonl"
         current_ts = float(int(self.now - 1000))
@@ -2306,6 +2597,8 @@ class TickChannelTests(unittest.TestCase):
         malformed.write_bytes(b"\xff\n")
         os.utime(malformed, (self.now + 1, self.now + 1))
         os.utime(current, (self.now + 2, self.now + 2))
+        state["999"]["alerting"] = True
+        state["999"]["gap_since"] = self.now - 60
         rt.haystack = norm("current delivered healthy selected growth")
 
         try:
@@ -2316,11 +2609,19 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(
             delivered_watermark_for_path(state["999"], current), grown_ts
         )
-        self.assertNotIn(str(malformed), state["999"]["pending_transcripts"])
+        self.assertIn(str(malformed), state["999"]["pending_transcripts"])
         self.assertEqual(rt.alerts, [])
+        self.assertTrue(state["999"]["alerting"])
         self.assertTrue(
             any(
-                f"transcript-debut-eval path={malformed} state=ok" in line
+                f"transcript-read-error path={malformed} error=UnicodeDecodeError"
+                in line
+                for line in rt.log_lines
+            )
+        )
+        self.assertFalse(
+            any(
+                f"transcript-debut-eval path={malformed}" in line
                 for line in rt.log_lines
             )
         )
