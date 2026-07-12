@@ -24,7 +24,9 @@ use std::sync::{Mutex, OnceLock};
 mod adoption;
 mod codex_tui_replay;
 mod episode_handoff;
+#[cfg(unix)]
 mod watcher_claim;
+#[cfg(unix)]
 use watcher_claim::claim_rebind_watcher;
 
 pub(crate) use self::adoption::{
