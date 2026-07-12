@@ -3212,6 +3212,68 @@ fn synthetic_relay_owner_gates_session_bound_on_live_producer() {
     );
 }
 
+/// #4455: the idle rollout observer records a provisional BridgeAdapter lease
+/// before the synthetic-start observer resolves the real owner. Waiting only
+/// for a Watcher row misses the healthy SessionBoundRelay outcome and creates a
+/// second Discord surface for the same provider output.
+#[test]
+fn idle_bridge_stands_down_for_every_resolved_non_bridge_synthetic_claim() {
+    use super::synthetic_start::tui_direct_synthetic_non_bridge_owner_matches;
+
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env = EnvRootGuard::set(root.path());
+    let tmux = "AgentDesk-codex-adk-cdx-4455";
+    let channel = ChannelId::new(1_479_671_301_387_059_200);
+    let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+    let mut state = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Codex,
+        channel,
+        MessageId::new(1_525_345_488_264_499_270),
+        None,
+        "external prompt",
+        tmux,
+        Some(std::path::Path::new("/tmp/codex-4455.jsonl")),
+        0,
+        &lease,
+        RelayOwnerKind::Watcher,
+    );
+
+    assert!(tui_direct_synthetic_non_bridge_owner_matches(
+        Some(&state),
+        tmux,
+        false,
+    ));
+
+    state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    assert!(tui_direct_synthetic_non_bridge_owner_matches(
+        Some(&state),
+        tmux,
+        true,
+    ));
+    assert!(
+        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux, false),
+        "a stale SessionBoundRelay stamp without its producer must leave the BridgeAdapter backstop eligible"
+    );
+
+    state.set_relay_owner_kind(RelayOwnerKind::None);
+    assert!(
+        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux, false),
+        "the provisional BridgeAdapter path stays eligible when no non-bridge claim landed"
+    );
+
+    state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    assert!(!tui_direct_synthetic_non_bridge_owner_matches(
+        Some(&state),
+        "AgentDesk-codex-other-session",
+        true,
+    ));
+    state.turn_source = TurnSource::Managed;
+    assert!(
+        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux, true),
+        "a normal Discord turn is not the passive synthetic claim the idle observer waits for"
+    );
+}
+
 /// #3876 regression pin (terminal delivery, both directions):
 /// * producer-present: the `SessionBoundRelay` synthetic owner makes the unchanged
 ///   sink ownership gate ACCEPT terminal delivery (body committed, not

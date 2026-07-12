@@ -1,5 +1,12 @@
 use super::*;
 
+#[path = "rebind_runtime/codex_relay_generation.rs"]
+mod codex_relay_generation;
+use codex_relay_generation::{
+    CodexRebindRelayGenerationGate, prepare as prepare_codex_rebind_relay_generation,
+    write_message as write_codex_rebind_normalized_message,
+};
+
 pub(super) struct RebindRuntimeState {
     pub(super) output_path: String,
     pub(super) synthetic_initial_offset: u64,
@@ -402,23 +409,8 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
 ) -> Result<String, RebindError> {
     let relay_output_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
-    if truncate_relay_output {
-        std::fs::File::create(&relay_output_path).map_err(|error| {
-            RebindError::Internal(format!(
-                "create Codex TUI rebind relay output {relay_output_path}: {error}"
-            ))
-        })?;
-    } else {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&relay_output_path)
-            .map_err(|error| {
-                RebindError::Internal(format!(
-                    "open Codex TUI rebind relay output {relay_output_path}: {error}"
-                ))
-            })?;
-    }
+    let (relay_generation_gate, relay_generation) =
+        prepare_codex_rebind_relay_generation(&relay_output_path, truncate_relay_output)?;
 
     persist_codex_tui_rebind_rollout_cursor(
         tmux_session_name,
@@ -498,11 +490,13 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
                     )
                 });
 
-            let writer_result = write_codex_rebind_normalized_stream(
+            let writer_result = write_codex_rebind_normalized_stream_for_generation(
                 &relay_path,
                 receiver,
                 already_relayed_response,
                 already_normalized_replay_events,
+                &relay_generation_gate,
+                relay_generation,
             );
             if let Err(error) = &writer_result {
                 tracing::warn!(
@@ -590,17 +584,50 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
     Ok(relay_output_path)
 }
 
+#[cfg(test)]
 fn write_codex_rebind_normalized_stream(
     relay_path: &std::path::Path,
     receiver: std::sync::mpsc::Receiver<crate::services::agent_protocol::StreamMessage>,
     already_relayed_response: String,
     already_normalized_replay_events: Vec<serde_json::Value>,
 ) -> Result<(), String> {
+    let relay_path_string = relay_path.to_string_lossy();
+    let (relay_generation_gate, relay_generation) =
+        prepare_codex_rebind_relay_generation(&relay_path_string, false)
+            .map_err(|error| format!("prepare test relay generation: {error}"))?;
+    write_codex_rebind_normalized_stream_for_generation(
+        relay_path,
+        receiver,
+        already_relayed_response,
+        already_normalized_replay_events,
+        &relay_generation_gate,
+        relay_generation,
+    )
+}
+
+fn write_codex_rebind_normalized_stream_for_generation(
+    relay_path: &std::path::Path,
+    receiver: std::sync::mpsc::Receiver<crate::services::agent_protocol::StreamMessage>,
+    already_relayed_response: String,
+    already_normalized_replay_events: Vec<serde_json::Value>,
+    relay_generation_gate: &CodexRebindRelayGenerationGate,
+    relay_generation: u64,
+) -> Result<(), String> {
     let mut already_relayed_response = already_relayed_response;
     let mut known_response_for_done = already_relayed_response.clone();
     let mut already_normalized_replay_events =
         std::collections::VecDeque::from(already_normalized_replay_events);
-    codex_rebind_ensure_jsonl_append_boundary(relay_path)?;
+    {
+        let current_generation = relay_generation_gate
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if *current_generation != relay_generation {
+            return Err(
+                "Codex TUI rebind relay generation was superseded before writer start".to_string(),
+            );
+        }
+        codex_rebind_ensure_jsonl_append_boundary(relay_path)?;
+    }
     let mut output = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -623,6 +650,8 @@ fn write_codex_rebind_normalized_stream(
                 relay_path,
                 suffix_message,
                 &mut already_normalized_replay_events,
+                relay_generation_gate,
+                relay_generation,
             )?;
             known_response_for_done.push_str(&suffix);
         }
@@ -637,35 +666,14 @@ fn write_codex_rebind_normalized_stream(
             relay_path,
             message,
             &mut already_normalized_replay_events,
+            relay_generation_gate,
+            relay_generation,
         )?;
         if let Some(text) = forwarded_text {
             known_response_for_done.push_str(&text);
         }
     }
     Ok(())
-}
-
-fn write_codex_rebind_normalized_message(
-    output: &mut std::fs::File,
-    relay_path: &std::path::Path,
-    message: crate::services::agent_protocol::StreamMessage,
-    already_normalized_replay_events: &mut std::collections::VecDeque<serde_json::Value>,
-) -> Result<bool, String> {
-    use std::io::Write;
-
-    let Some(json) = codex_rebind_stream_message_json(message) else {
-        return Ok(false);
-    };
-    if codex_rebind_should_skip_existing_normalized_event(&json, already_normalized_replay_events) {
-        return Ok(false);
-    }
-    serde_json::to_writer(&mut *output, &json)
-        .map_err(|error| format!("serialize normalized Codex rebind event: {error}"))?;
-    output
-        .write_all(b"\n")
-        .and_then(|_| output.flush())
-        .map_err(|error| format!("write {}: {error}", relay_path.display()))?;
-    Ok(true)
 }
 
 fn codex_rebind_done_result_suffix(known_response: &str, result: &str) -> Option<String> {
@@ -1723,6 +1731,61 @@ mod tests {
             crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name)
                 .expect("marker");
         assert_eq!(marker.rollout_start_offset, Some(88));
+    }
+
+    /// #4455: forced same-path watcher replacement cancels the incumbent, but
+    /// its detached converter thread can still have buffered output. The relay
+    /// generation gate must fence that writer before the replacement truncates
+    /// and begins a fresh Discord surface.
+    #[test]
+    fn codex_rebind_relay_generation_fences_superseded_same_path_writer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let relay_path = tmp.path().join("relay.jsonl");
+        let relay_path_string = relay_path.to_string_lossy();
+        let (gate, old_generation) =
+            prepare_codex_rebind_relay_generation(&relay_path_string, true)
+                .expect("prepare old generation");
+        let mut old_output = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&relay_path)
+            .expect("open old generation output");
+        let (_, replacement_generation) =
+            prepare_codex_rebind_relay_generation(&relay_path_string, true)
+                .expect("prepare replacement generation");
+
+        let error = write_codex_rebind_normalized_message(
+            &mut old_output,
+            &relay_path,
+            crate::services::agent_protocol::StreamMessage::Text {
+                content: "stale old response".to_string(),
+            },
+            &mut std::collections::VecDeque::new(),
+            &gate,
+            old_generation,
+        )
+        .expect_err("superseded writer must be fenced");
+        assert!(error.contains("superseded"));
+
+        let mut replacement_output = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&relay_path)
+            .expect("open replacement output");
+        assert!(
+            write_codex_rebind_normalized_message(
+                &mut replacement_output,
+                &relay_path,
+                crate::services::agent_protocol::StreamMessage::Text {
+                    content: "current response".to_string(),
+                },
+                &mut std::collections::VecDeque::new(),
+                &gate,
+                replacement_generation,
+            )
+            .expect("write replacement generation")
+        );
+        let relay = std::fs::read_to_string(&relay_path).expect("read relay");
+        assert!(!relay.contains("stale old response"));
+        assert!(relay.contains("current response"));
     }
 
     #[test]

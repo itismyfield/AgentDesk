@@ -177,7 +177,7 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                             runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
                             "Claude idle transcript relay selected external turn owner"
                         );
-                        if wait_for_tui_direct_watcher_synthetic_claim(
+                        if wait_for_tui_direct_synthetic_non_bridge_claim(
                             &ProviderKind::Claude,
                             channel_id,
                             &tmux_session_name,
@@ -189,7 +189,7 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                                 channel_id = channel_id.get(),
                                 turn_id = lease.turn_id.as_deref().unwrap_or(""),
                                 session_key = lease.session_key.as_deref().unwrap_or(""),
-                                "Claude idle transcript relay yielded to TUI-direct synthetic watcher inflight"
+                                "Claude idle transcript relay yielded to resolved TUI-direct synthetic non-bridge owner"
                             );
                             continue;
                         }

@@ -71,7 +71,7 @@ use self::tmux_session_files::{
 };
 use self::watcher_lifecycle::*;
 pub(in crate::services::discord) use self::watcher_lifecycle::{
-    claim_or_reuse_watcher, clear_recovery_handled_channels,
+    claim_or_replace_watcher, claim_or_reuse_watcher, clear_recovery_handled_channels,
     fail_dispatch_for_ready_for_input_stall, refresh_session_heartbeat_from_tmux_output,
     restore_tmux_watchers, session_belongs_to_current_runtime, store_recovery_handled_channels,
 };
