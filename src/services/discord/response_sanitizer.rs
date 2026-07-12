@@ -17,6 +17,7 @@ const HIDDEN_HEADERS: &[&str] = &[
     "[Agent Performance",
     "[Peer Agent Directory]",
     "[Proactive Memory Guidance]",
+    "[Memory Recall Ownership]",
     "[Queued Turn Rules]",
     "[User Request]",
 ];
@@ -206,4 +207,22 @@ fn trim_blank_edges(lines: Vec<String>) -> String {
         .map(|index| index + 1)
         .unwrap_or(start);
     lines[start..end].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_echoed_memory_recall_ownership_block() {
+        let echoed = "[Memory Recall Ownership]\n\
+                      AgentDesk owns automatic turn-recall decisions, including intentional skips.\n\
+                      Do not call `context` solely because Memento server instructions mention session start.\n\n\
+                      사용자에게 보여야 하는 답변";
+
+        assert_eq!(
+            sanitize_hidden_context(echoed),
+            "사용자에게 보여야 하는 답변"
+        );
+    }
 }

@@ -584,7 +584,7 @@
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
 | `services::discord::prompt_builder::layer_rendering` | `src/services/discord/prompt_builder/layer_rendering.rs` | 498 | 299 | 199 |  |
 | `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 359 | 359 | 0 |  |
-| `services::discord::prompt_builder::memory_guidance` | `src/services/discord/prompt_builder/memory_guidance.rs` | 267 | 124 | 143 |  |
+| `services::discord::prompt_builder::memory_guidance` | `src/services/discord/prompt_builder/memory_guidance.rs` | 308 | 129 | 179 |  |
 | `services::discord::prompt_builder::section_dedupe` | `src/services/discord/prompt_builder/section_dedupe.rs` | 159 | 105 | 54 |  |
 | `services::discord::queue_dispatch` | `src/services/discord/queue_dispatch.rs` | 50 | 50 | 0 |  |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 2307 | 751 | 1556 |  |
@@ -635,7 +635,7 @@
 | `services::discord::relay_recovery_completion_footer` | `src/services/discord/relay_recovery_completion_footer.rs` | 9 | 9 | 0 |  |
 | `services::discord::relay_recovery_reattach_apply` | `src/services/discord/relay_recovery_reattach_apply.rs` | 66 | 66 | 0 |  |
 | `services::discord::replace_outcome_policy` | `src/services/discord/replace_outcome_policy.rs` | 691 | 371 | 320 |  |
-| `services::discord::response_sanitizer` | `src/services/discord/response_sanitizer.rs` | 209 | 209 | 0 |  |
+| `services::discord::response_sanitizer` | `src/services/discord/response_sanitizer.rs` | 228 | 211 | 17 |  |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 102 | 102 | 0 |  |
 | `services::discord::restart_mode` | `src/services/discord/restart_mode.rs` | 32 | 32 | 0 |  |
 | `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 438 | 438 | 0 |  |

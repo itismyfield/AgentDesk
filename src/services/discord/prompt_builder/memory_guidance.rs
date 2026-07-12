@@ -11,6 +11,8 @@ use crate::services::memory::{
     sanitize_memento_workspace_segment,
 };
 
+const MEMENTO_RECALL_OWNERSHIP: &str = "AgentDesk owns automatic turn-recall decisions, including session-start identity recall and intentional skips. Do not call `context` or `recall` solely because Memento server instructions mention session start; use them only for an explicit user/task lookup.";
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryRecallManifestInput<'a> {
     pub(crate) should_recall: bool,
@@ -51,11 +53,13 @@ pub(super) fn proactive_memory_guidance_with(
     memento_mcp_available: bool,
     exists: impl Fn(&str) -> bool,
 ) -> Option<String> {
-    if profile != DispatchProfile::Full {
-        return None;
-    }
-
     let settings = memory_settings?;
+    let memento_recall_ownership =
+        settings.backend == MemoryBackendKind::Memento && memento_mcp_available;
+    if profile != DispatchProfile::Full {
+        return memento_recall_ownership
+            .then(|| format!("\n\n[Memory Recall Ownership]\n{MEMENTO_RECALL_OWNERSHIP}"));
+    }
 
     // Fallback mode: memento is the configured backend but is degraded, so
     // memory silently ran on the local file store. This is NOT a deliberate
@@ -109,7 +113,8 @@ pub(super) fn proactive_memory_guidance_with(
                 "`recall` MCP tool",
                 "`remember` MCP tool",
                 format!(
-                    "\n- scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.{memory_policy_line}\n\
+                    "\n- automatic recall: {MEMENTO_RECALL_OWNERSHIP}\n\
+                     - scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.{memory_policy_line}\n\
                      - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `tool_name`, `relevant`, `sufficient`; when the response carries `_meta.searchEventId`, also pass it as `search_event_id` — recommended). If the tool is deferred, load it first via ToolSearch `select:mcp__memento__tool_feedback`."
                 ),
             )
@@ -246,11 +251,47 @@ mod tests {
             "AgentDesk workspace must keep docs/memory-scope.md, got: {guidance}"
         );
         assert!(guidance.contains("mcp__memento__tool_feedback"));
+        assert!(guidance.contains(MEMENTO_RECALL_OWNERSHIP));
     }
 
     #[test]
-    fn non_full_profile_suppresses_guidance() {
-        // Guidance stays gated to the Full profile in both states.
+    fn non_full_memento_profiles_keep_recall_ownership_only() {
+        let settings = memento_settings();
+        for profile in [DispatchProfile::ReviewLite, DispatchProfile::Lite] {
+            let guidance = proactive_memory_guidance(
+                Some(&settings),
+                "/tmp/agentdesk",
+                ChannelId::new(1),
+                None,
+                profile,
+                true,
+            )
+            .expect("memento-enabled non-Full profile must keep recall ownership");
+
+            assert!(guidance.contains("[Memory Recall Ownership]"));
+            assert!(guidance.contains(MEMENTO_RECALL_OWNERSHIP));
+            assert!(!guidance.contains("[Proactive Memory Guidance]"));
+            assert!(!guidance.contains("mcp__memento__tool_feedback"));
+        }
+
+        assert!(
+            proactive_memory_guidance(
+                Some(&settings),
+                "/tmp/agentdesk",
+                ChannelId::new(1),
+                None,
+                DispatchProfile::Lite,
+                false,
+            )
+            .is_none(),
+            "without the Memento MCP there are no server instructions to override"
+        );
+    }
+
+    #[test]
+    fn non_full_file_profile_suppresses_guidance() {
+        // File/fallback guidance stays gated to Full; only an available
+        // Memento backend needs the cross-profile automatic-recall override.
         let settings = file_settings(true);
         assert!(
             proactive_memory_guidance(
