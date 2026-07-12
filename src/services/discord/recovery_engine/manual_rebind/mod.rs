@@ -18,9 +18,12 @@
 use super::manual_rebind_output_path::saved_output_path_for_rebind_resolution;
 use super::manual_rebind_override::upsert_rebind_session_id_override;
 use super::*;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 mod adoption;
 mod codex_tui_replay;
+mod episode_handoff;
 
 pub(crate) use self::adoption::{
     claude_tui_force_initial_offset_for_adopted_transcript,
@@ -42,11 +45,13 @@ enum PendingRebindInflightRollback {
         expected: super::inflight::InflightTurnIdentity,
         expected_turn_start_offset: Option<u64>,
         expected_last_offset_for_rebase: Option<u64>,
+        expected_episode: Option<super::inflight::InflightEpisodePin>,
     },
     ClearRebindOrigin {
         provider: crate::services::provider::ProviderKind,
         channel_id: u64,
         expected: super::inflight::InflightTurnIdentity,
+        expected_turn_nonce: Option<String>,
     },
 }
 
@@ -58,8 +63,26 @@ impl PendingRebindInflightRollback {
                 expected,
                 expected_turn_start_offset,
                 expected_last_offset_for_rebase,
+                expected_episode,
             } => {
-                let outcome = if let Some(expected_last_offset) = expected_last_offset_for_rebase {
+                let outcome = if let Some(expected_episode) = expected_episode.as_ref() {
+                    if let Some(expected_last_offset) = expected_last_offset_for_rebase {
+                        super::inflight::save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode(
+                            &state,
+                            &expected,
+                            expected_episode,
+                            expected_turn_start_offset,
+                            expected_last_offset,
+                        )
+                    } else {
+                        super::inflight::save_existing_inflight_rebind_adoption_if_matches_episode(
+                            &state,
+                            &expected,
+                            expected_episode,
+                            expected_turn_start_offset,
+                        )
+                    }
+                } else if let Some(expected_last_offset) = expected_last_offset_for_rebase {
                     super::inflight::save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity(
                         &state,
                         &expected,
@@ -79,14 +102,114 @@ impl PendingRebindInflightRollback {
                 provider,
                 channel_id,
                 expected,
+                expected_turn_nonce,
             } => {
                 let outcome =
                     super::inflight::clear_rebind_origin_inflight_state_if_matches_identity(
-                        &provider, channel_id, &expected,
+                        &provider,
+                        channel_id,
+                        &expected,
+                        expected_turn_nonce.as_deref(),
                     );
                 format!("clear_rebind_origin:{outcome:?}")
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct PostAdoptionClaimBarrier {
+    pub(crate) reached: std::sync::Arc<tokio::sync::Barrier>,
+    pub(crate) resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct EpisodeAuthorityHeldBarrier {
+    pub(crate) reached: std::sync::Arc<tokio::sync::Barrier>,
+    pub(crate) resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+fn post_adoption_claim_barrier_slot() -> &'static Mutex<Option<PostAdoptionClaimBarrier>> {
+    static SLOT: OnceLock<Mutex<Option<PostAdoptionClaimBarrier>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn episode_authority_held_barrier_slot() -> &'static Mutex<Option<EpisodeAuthorityHeldBarrier>> {
+    static SLOT: OnceLock<Mutex<Option<EpisodeAuthorityHeldBarrier>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) struct PostAdoptionClaimBarrierGuard(Option<PostAdoptionClaimBarrier>);
+
+#[cfg(test)]
+pub(crate) struct EpisodeAuthorityHeldBarrierGuard(Option<EpisodeAuthorityHeldBarrier>);
+
+#[cfg(test)]
+impl Drop for PostAdoptionClaimBarrierGuard {
+    fn drop(&mut self) {
+        *post_adoption_claim_barrier_slot()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = self.0.take();
+    }
+}
+
+#[cfg(test)]
+impl Drop for EpisodeAuthorityHeldBarrierGuard {
+    fn drop(&mut self) {
+        *episode_authority_held_barrier_slot()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = self.0.take();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_post_adoption_claim_barrier(
+    barrier: PostAdoptionClaimBarrier,
+) -> PostAdoptionClaimBarrierGuard {
+    let previous = post_adoption_claim_barrier_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .replace(barrier);
+    PostAdoptionClaimBarrierGuard(previous)
+}
+
+#[cfg(test)]
+pub(crate) fn install_episode_authority_held_barrier(
+    barrier: EpisodeAuthorityHeldBarrier,
+) -> EpisodeAuthorityHeldBarrierGuard {
+    let previous = episode_authority_held_barrier_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .replace(barrier);
+    EpisodeAuthorityHeldBarrierGuard(previous)
+}
+
+#[cfg(test)]
+async fn await_post_adoption_claim_barrier() {
+    let barrier = post_adoption_claim_barrier_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(barrier) = barrier {
+        barrier.reached.wait().await;
+        barrier.resume.wait().await;
+    }
+}
+
+#[cfg(test)]
+async fn await_episode_authority_held_barrier() {
+    let barrier = episode_authority_held_barrier_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(barrier) = barrier {
+        barrier.reached.wait().await;
+        barrier.resume.wait().await;
     }
 }
 
@@ -111,6 +234,7 @@ pub(crate) async fn rebind_inflight_for_channel(
     channel_id: u64,
     tmux_session_override: Option<String>,
     overrides: ManualRebindOverrides,
+    expected_episode: Option<&super::inflight::InflightEpisodePin>,
 ) -> Result<RebindOutcome, RebindError> {
     rebind_inflight_for_channel_inner(
         http,
@@ -120,6 +244,7 @@ pub(crate) async fn rebind_inflight_for_channel(
         tmux_session_override,
         overrides,
         None,
+        expected_episode,
     )
     .await
 }
@@ -140,6 +265,7 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
         tmux_session_override,
         ManualRebindOverrides::default(),
         minimum_initial_offset,
+        None,
     )
     .await
 }
@@ -152,6 +278,7 @@ async fn rebind_inflight_for_channel_inner(
     tmux_session_override: Option<String>,
     overrides: ManualRebindOverrides,
     minimum_initial_offset: Option<u64>,
+    expected_episode: Option<&super::inflight::InflightEpisodePin>,
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id = ChannelId::new(channel_id);
 
@@ -160,16 +287,41 @@ async fn rebind_inflight_for_channel_inner(
     // `save_inflight_state_create_new` below (`O_CREAT | O_EXCL`), so a live turn
     // winning the race between here and the write cannot be clobbered.
     let existing_inflight = match super::inflight::load_inflight_state(provider, channel_id) {
-        Some(existing) => match recovery_phase_for_existing_inflight_rebind(&existing) {
-            RecoveryPhase::WatcherReattach => {
-                super::inflight::clear_inflight_state(provider, channel_id);
-                None
+        Some(existing) => {
+            if expected_episode.is_some_and(|pin| !pin.matches_state(&existing)) {
+                return Err(RebindError::InflightEpisodeChanged);
             }
-            RecoveryPhase::InflightRestore => Some(existing),
-            RecoveryPhase::Pending | RecoveryPhase::Done => {
-                return Err(RebindError::InflightAlreadyExists);
+            match recovery_phase_for_existing_inflight_rebind(&existing) {
+                // The durable automatic lane owns one exact live episode.
+                // Preserve that row and adopt it below; clearing it into a
+                // synthetic rebind row would invalidate our own pin and drop
+                // the live mailbox/finalizer authority we are recovering.
+                RecoveryPhase::WatcherReattach if expected_episode.is_some() => Some(existing),
+                RecoveryPhase::WatcherReattach => {
+                    let identity = super::inflight::InflightTurnIdentity::from_state(&existing);
+                    let clear_outcome =
+                        super::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
+                            provider,
+                            channel_id,
+                            &identity,
+                            existing.turn_nonce.as_deref(),
+                        );
+                    if !matches!(
+                        clear_outcome,
+                        super::inflight::GuardedClearOutcome::Cleared
+                            | super::inflight::GuardedClearOutcome::Missing
+                    ) {
+                        return Err(RebindError::InflightAlreadyExists);
+                    }
+                    None
+                }
+                RecoveryPhase::InflightRestore => Some(existing),
+                RecoveryPhase::Pending | RecoveryPhase::Done => {
+                    return Err(RebindError::InflightAlreadyExists);
+                }
             }
-        },
+        }
+        None if expected_episode.is_some() => return Err(RebindError::InflightEpisodeChanged),
         None => None,
     };
     let resuming_existing_inflight = existing_inflight.is_some();
@@ -458,6 +610,11 @@ async fn rebind_inflight_for_channel_inner(
     }
 
     let mut inflight_rollback_on_relay_setup_failure: Option<PendingRebindInflightRollback>;
+    let mut locked_episode_from_adoption: Option<super::inflight::LockedInflightEpisode> = None;
+    #[cfg(test)]
+    if expected_episode.is_some() {
+        await_post_adoption_claim_barrier().await;
+    }
     let recovered_state_for_session = if let Some(mut existing) = existing_inflight.clone() {
         let rollback_state = existing.clone();
         let expected = super::inflight::InflightTurnIdentity::from_state(&existing);
@@ -483,7 +640,32 @@ async fn rebind_inflight_for_channel_inner(
         let rollback_expected_turn_start_offset = existing.turn_start_offset;
         let rollback_expected_last_offset_for_rebase =
             existing_offset_rebase_to_output.map(|_| existing.last_offset);
-        let save_outcome = if existing_offset_rebase_to_output.is_some() {
+        let save_outcome = if let Some(expected_episode) = expected_episode {
+            let adoption_state = existing.clone();
+            let expected_identity = expected.clone();
+            let expected_episode = expected_episode.clone();
+            let expected_last_offset =
+                existing_offset_rebase_to_output.map(|_| expected_last_offset_for_rebase);
+            let adoption = tokio::task::spawn_blocking(move || {
+                super::inflight::adopt_and_lock_inflight_episode(
+                    &adoption_state,
+                    &expected_identity,
+                    &expected_episode,
+                    expected_turn_start_offset,
+                    expected_last_offset,
+                )
+            })
+            .await
+            .unwrap_or(Err(super::inflight::GuardedSaveOutcome::IoError));
+            match adoption {
+                Ok(guard) => {
+                    existing = guard.state().clone();
+                    locked_episode_from_adoption = Some(guard);
+                    super::inflight::GuardedSaveOutcome::Saved
+                }
+                Err(outcome) => outcome,
+            }
+        } else if existing_offset_rebase_to_output.is_some() {
             super::inflight::save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity(
                 &existing,
                 &expected,
@@ -504,16 +686,23 @@ async fn rebind_inflight_for_channel_inner(
                 ?save_outcome,
                 "rebind could not persist existing inflight watcher adoption",
             );
-            return Err(RebindError::Internal(format!(
-                "persist existing inflight watcher adoption for channel {channel_id}: {save_outcome:?}"
-            )));
+            return Err(if expected_episode.is_some() {
+                RebindError::InflightEpisodeChanged
+            } else {
+                RebindError::Internal(format!(
+                    "persist existing inflight watcher adoption for channel {channel_id}: {save_outcome:?}"
+                ))
+            });
         }
+        let adopted_episode_pin =
+            expected_episode.map(|_| super::inflight::InflightEpisodePin::from_state(&existing));
         inflight_rollback_on_relay_setup_failure =
             Some(PendingRebindInflightRollback::RestoreExistingAdoption {
                 state: rollback_state,
                 expected: rollback_expected,
                 expected_turn_start_offset: rollback_expected_turn_start_offset,
                 expected_last_offset_for_rebase: rollback_expected_last_offset_for_rebase,
+                expected_episode: adopted_episode_pin.clone(),
             });
         existing
     } else {
@@ -594,73 +783,28 @@ async fn rebind_inflight_for_channel_inner(
                 provider: provider.clone(),
                 channel_id,
                 expected: super::inflight::InflightTurnIdentity::from_state(&state),
+                expected_turn_nonce: state.turn_nonce.clone(),
             });
         state
     };
 
-    if let Some(current_msg_id) = optional_message_id(recovered_state_for_session.current_msg_id) {
-        footer_view_reconciler::note_footer_suppressed_for_message_takeover(
-            discord_channel_id,
-            current_msg_id,
-        );
-    }
-
-    // Register / refresh the in-memory session so downstream handlers can
-    // locate this channel after the rebind.
-    {
-        let mut data = shared.core.lock().await;
-        let session = data
-            .sessions
-            .entry(discord_channel_id)
-            .or_insert_with(|| DiscordSession {
-                session_id: existing_session_id.clone(),
-                memento_context_loaded: false,
-                memento_reflected: false,
-                current_path: None,
-                history: Vec::new(),
-                pending_uploads: Vec::new(),
-                cleared: false,
-                remote_profile_name: None,
-                channel_id: Some(channel_id),
-                channel_name: channel_name.clone(),
-                category_name: None,
-                last_active: tokio::time::Instant::now(),
-                worktree: None,
-                born_generation: super::runtime_store::load_generation(),
-            });
-        session.channel_id = Some(channel_id);
-        session.last_active = tokio::time::Instant::now();
-        if session.channel_name.is_none() {
-            session.channel_name = channel_name.clone();
-        }
-        if session_id_for_state.is_some() {
-            session.session_id = session_id_for_state.clone();
-        }
-        restore_recovered_session_worktree(session, &recovered_state_for_session);
-    }
-
-    let finish_mailbox_on_completion = if existing_inflight.is_some() {
-        reregister_active_turn_from_inflight(shared, &recovered_state_for_session).await
-    } else {
-        false
-    };
-
-    if claude_tui_rebind_should_reregister_runtime_binding(runtime_kind_for_state, &output_path) {
-        crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-            provider.as_str(),
-            &tmux_session_name,
+    let (locked_episode, finish_mailbox_on_completion) =
+        episode_handoff::commit_episode_side_effects(
+            shared,
+            provider,
             channel_id,
-            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: RuntimeHandoffKind::ClaudeTui,
-                output_path: output_path.clone(),
-                relay_output_path: None,
-                input_fifo_path: None,
-                session_id: session_id_for_state.clone(),
-                last_offset: initial_offset,
-                relay_last_offset: None,
-            },
-        );
-    }
+            &recovered_state_for_session,
+            locked_episode_from_adoption.take(),
+            existing_inflight.is_some(),
+            &existing_session_id,
+            &channel_name,
+            &session_id_for_state,
+            runtime_kind_for_state,
+            &output_path,
+            &tmux_session_name,
+            initial_offset,
+        )
+        .await?;
 
     // #1135: claim with the single-watcher policy. A live watcher for this
     // same tmux session is reused; a cancelled same-session handle or a
@@ -726,6 +870,7 @@ async fn rebind_inflight_for_channel_inner(
                                     &output_path,
                                     &cancel,
                                 );
+                            drop(locked_episode);
                             let inflight_rollback = inflight_rollback_on_relay_setup_failure
                                 .take()
                                 .map(PendingRebindInflightRollback::apply)
@@ -791,6 +936,7 @@ async fn rebind_inflight_for_channel_inner(
             (false, false)
         }
     };
+    drop(locked_episode);
 
     Ok(RebindOutcome {
         tmux_session: tmux_session_name,
@@ -800,6 +946,10 @@ async fn rebind_inflight_for_channel_inner(
         watcher_replaced,
     })
 }
+
+#[cfg(test)]
+#[path = "post_adoption_guard_tests.rs"]
+mod post_adoption_guard_tests;
 
 #[cfg(test)]
 mod post_work_evidence_tests {
@@ -1170,6 +1320,7 @@ mod stall_watchdog_respawn_deadlock_tests {
             channel_id,
             Some(tmux_session.clone()),
             ManualRebindOverrides::default(),
+            None,
         ));
 
         // Synchronous assertion window: on a current-thread runtime the

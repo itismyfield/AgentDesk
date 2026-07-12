@@ -14,7 +14,9 @@
 use super::*;
 
 #[path = "save_store/identity_gate.rs"]
-mod identity_gate;
+pub(super) mod identity_gate;
+#[path = "save_store/rebind_adoption.rs"]
+mod rebind_adoption;
 
 pub(in crate::services::discord) use self::identity_gate::{
     GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
@@ -22,12 +24,15 @@ pub(in crate::services::discord) use self::identity_gate::{
     patch_restart_full_response_if_identity_unchanged,
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,
-    recovery_anchor_msg_id_if_matches_identity,
-    save_existing_inflight_rebind_adoption_if_matches_identity,
-    save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
-    save_inflight_delivery_rewind_if_matches_identity,
+    recovery_anchor_msg_id_if_matches_identity, save_inflight_delivery_rewind_if_matches_identity,
     save_inflight_state_if_identity_matches_allow_output_restamp,
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
+};
+pub(in crate::services::discord) use self::rebind_adoption::{
+    save_existing_inflight_rebind_adoption_if_matches_episode,
+    save_existing_inflight_rebind_adoption_if_matches_identity,
+    save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode,
+    save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
 };
 
 #[cfg(test)]

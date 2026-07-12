@@ -158,10 +158,10 @@ pub(super) fn refund_auto_heal_attempt(key: &str, now_ms: i64) {
     window.retry_not_before_ms = Some(now_ms.saturating_add(expanded_window_secs * 1000));
 }
 
-/// A startup-graced or actively-emitting, not-yet-confirmed spawn is neither
-/// success nor failure. Release only the reservation and preserve the current
-/// failure episode.
-pub(super) fn release_auto_heal_attempt(key: &str) {
+/// Return a reservation when a fail-closed pre-apply gate refused the action.
+/// This is deliberately narrower than confirmation settlement: once rebind was
+/// attempted, StartupGrace and RelayEmissionInFlight consume their reservation.
+pub(super) fn cancel_unapplied_auto_heal_attempt(key: &str) {
     let mut attempts = auto_heal_attempts()
         .lock()
         .expect("relay recovery attempt map poisoned");

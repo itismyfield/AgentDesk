@@ -2901,9 +2901,10 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
         // `background_should_yield`.
 
         if std::time::Instant::now() >= next_gc_at {
-            match gc_stale_message_outbox_rows(pg_pool.as_ref()).await {
-                Ok((failed, sent)) if failed + sent > 0 => {
+            match crate::services::message_outbox::gc_stale_outbox_rows(pg_pool.as_ref()).await {
+                Ok((held, failed, sent)) if held + failed + sent > 0 => {
                     tracing::info!(
+                        held_pruned = held,
                         failed_pruned = failed,
                         sent_pruned = sent,
                         "[outbox] gc swept stale message_outbox rows"
@@ -2961,28 +2962,6 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
         // Work found: reset to fast polling
         poll_interval = Duration::from_millis(500);
     }
-}
-
-/// Delete `message_outbox` rows whose status is terminal and beyond retention.
-/// Returns `(failed_pruned, sent_pruned)` for logging.
-async fn gc_stale_message_outbox_rows(pool: &PgPool) -> Result<(u64, u64), sqlx::Error> {
-    let failed = sqlx::query(
-        "DELETE FROM message_outbox
-          WHERE status = 'failed'
-            AND created_at < NOW() - INTERVAL '7 days'",
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    let sent = sqlx::query(
-        "DELETE FROM message_outbox
-          WHERE status = 'sent'
-            AND created_at < NOW() - INTERVAL '30 days'",
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok((failed, sent))
 }
 
 async fn dm_reply_retry_loop(pg_pool: Arc<PgPool>) {

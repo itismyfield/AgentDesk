@@ -563,6 +563,145 @@ pub(crate) async fn enqueue_outbox_pg_with_ttl(
     )
 }
 
+/// Stage a deduplicated row that outbox workers cannot claim. The caller must
+/// explicitly activate it after its external authority check, or cancel it.
+pub(crate) async fn stage_outbox_pg_with_ttl(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+) -> Result<i64, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
+    let reason_code = normalized_reason_code(message.reason_code);
+    let session_key = normalized_session_key(message.target, message.session_key);
+    let dedupe_key = dedupe_key_for_message(
+        message.target,
+        message.content,
+        reason_code,
+        session_key.as_deref(),
+    )
+    .ok_or_else(|| {
+        OutboxEnqueueError::Database(sqlx::Error::Protocol(
+            "staged outbox message requires a dedupe identity".to_string(),
+        ))
+    })?;
+    let mut tx = pool.begin().await?;
+    release_expired_outbox_dedupe_key_pg(&mut tx, Some(&dedupe_key)).await?;
+    let inserted = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO message_outbox
+         (target, content, bot, source, status, reason_code, session_key,
+          dedupe_key, dedupe_expires_at)
+         VALUES ($1,$2,$3,$4,'held',$5,$6,$7,
+                 NOW() + ($8::BIGINT * INTERVAL '1 second'))
+         ON CONFLICT (dedupe_key)
+             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+         DO NOTHING
+         RETURNING id",
+    )
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(session_key.as_deref())
+    .bind(&dedupe_key)
+    .bind(dedupe_ttl_secs)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let id = match inserted {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM message_outbox
+              WHERE dedupe_key=$1 AND status!='failed'
+              ORDER BY id LIMIT 1",
+            )
+            .bind(&dedupe_key)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+    };
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub(crate) async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
+    Ok(
+        sqlx::query("UPDATE message_outbox SET status='pending' WHERE id=$1 AND status='held'")
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected()
+            == 1,
+    )
+}
+
+/// Activate a held row, or confirm that a prior activation already made the
+/// same durable id deliverable/terminal before the caller crashed. A missing
+/// id is distinct so the sidecar obligation can be reopened instead of being
+/// falsely marked complete.
+pub(crate) async fn activate_or_confirm_staged_outbox_pg(
+    pool: &PgPool,
+    id: i64,
+) -> Result<bool, sqlx::Error> {
+    if activate_staged_outbox_pg(pool, id).await? {
+        return Ok(true);
+    }
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM message_outbox WHERE id=$1 AND status!='held')",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?)
+}
+
+pub(crate) async fn cancel_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
+    Ok(
+        sqlx::query("DELETE FROM message_outbox WHERE id=$1 AND status='held'")
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected()
+            == 1,
+    )
+}
+
+/// Prune terminal outbox history and expired worker-invisible staging rows.
+///
+/// A process can die after PostgreSQL commits a `held` row but before the
+/// recovery sidecar records its id. Those rows are never deliverable, and once
+/// their dedupe TTL expires no live recovery obligation may still depend on
+/// them: a sidecar that does retain the id treats a missing row as a signal to
+/// reopen and stage a fresh alert. Bounding them here prevents permanent
+/// housekeeping leaks without activating or otherwise exposing stale alerts.
+pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64), sqlx::Error> {
+    let held = sqlx::query(
+        "DELETE FROM message_outbox
+          WHERE status = 'held'
+            AND dedupe_expires_at IS NOT NULL
+            AND dedupe_expires_at <= NOW()",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let failed = sqlx::query(
+        "DELETE FROM message_outbox
+          WHERE status = 'failed'
+            AND created_at < NOW() - INTERVAL '7 days'",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let sent = sqlx::query(
+        "DELETE FROM message_outbox
+          WHERE status = 'sent'
+            AND created_at < NOW() - INTERVAL '30 days'",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok((held, failed, sent))
+}
+
 pub(crate) async fn enqueue_outbox_pg(
     pool: &PgPool,
     message: OutboxMessage<'_>,
@@ -833,6 +972,70 @@ mod postgres_source_contract_tests {
             .expect("enqueue fixed lifecycle source")
         );
         assert_eq!(row_count(&pool).await, 1);
+    }
+}
+
+#[cfg(test)]
+mod postgres_held_gc_tests {
+    use super::*;
+
+    fn staged_message(session_key: &'static str, content: &'static str) -> OutboxMessage<'static> {
+        OutboxMessage {
+            target: "channel:4465",
+            content,
+            bot: "notify",
+            source: "long_turn_watchdog",
+            reason_code: Some("relay_recovery.circuit_open"),
+            session_key: Some(session_key),
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_prunes_only_expired_held_rows_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_message_outbox_held_gc",
+            "message_outbox held-row gc tests",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let expired_id = stage_outbox_pg_with_ttl(
+            &pool,
+            staged_message("episode-expired", "expired held alert"),
+            0,
+        )
+        .await
+        .expect("stage expired held row");
+        let live_id = stage_outbox_pg_with_ttl(
+            &pool,
+            staged_message("episode-live", "live held alert"),
+            3_600,
+        )
+        .await
+        .expect("stage live held row");
+
+        let (held, failed, sent) = gc_stale_outbox_rows(&pool).await.expect("run outbox gc");
+        assert_eq!((held, failed, sent), (1, 0, 0));
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM message_outbox WHERE id=$1)",
+            )
+            .bind(expired_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query expired held row")
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM message_outbox WHERE id=$1 AND status='held')",
+            )
+            .bind(live_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query live held row")
+        );
     }
 }
 

@@ -115,19 +115,33 @@ fn mark_readopted_from_inflight(
     provider: &ProviderKind,
     channel_id: ChannelId,
     state: &inflight::InflightTurnState,
+    persist_durable_marker: bool,
 ) {
     // The re-adopted mailbox slot carries the turn's effective finalizer id as its
     // `active_user_message_id` (`mailbox_try_start_turn(..., finalizer_msg_id)` /
     // the existing-active-turn rebind below), so the ledger keys the row-ABSENT
     // reclaim decision on exactly that id.
     let active_user_message_id = state.effective_finalizer_turn_id();
-    shared.record_readopted_mailbox_owner(
-        provider,
-        channel_id.get(),
-        state.request_owner_user_id,
-        active_user_message_id,
-    );
+    if persist_durable_marker {
+        shared.record_readopted_mailbox_owner(
+            provider,
+            channel_id.get(),
+            state.request_owner_user_id,
+            active_user_message_id,
+        );
+    } else {
+        shared.record_readopted_mailbox_owner_for_episode(
+            provider,
+            channel_id.get(),
+            state.request_owner_user_id,
+            active_user_message_id,
+            state,
+        );
+    }
 
+    if !persist_durable_marker {
+        return;
+    }
     let expected = inflight::InflightTurnIdentity::from_state(state);
     match inflight::mark_readopted_from_inflight_if_identity_unchanged(
         provider,
@@ -159,9 +173,10 @@ fn mark_readopted_from_inflight(
     }
 }
 
-pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
+async fn reregister_active_turn_from_inflight_inner(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
+    persist_durable_marker: bool,
 ) -> bool {
     let finalizer_turn_id = state.effective_finalizer_turn_id();
     if finalizer_turn_id == 0 {
@@ -193,7 +208,15 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
             "recovery_terminal_delivery_already_committed",
         )
         .await;
-        clear_inflight_state(&provider, state.channel_id);
+        if persist_durable_marker {
+            clear_inflight_state(&provider, state.channel_id);
+        } else {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = state.channel_id,
+                "inflight reregister skipped recursive clear while exact-episode guard owns the sidecar flock"
+            );
+        }
         return false;
     }
     if snapshot.cancel_token.is_some() {
@@ -212,7 +235,13 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
             reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if readopted_ledger_record_allowed(state) {
-                mark_readopted_from_inflight(shared, &provider, channel_id, state);
+                mark_readopted_from_inflight(
+                    shared,
+                    &provider,
+                    channel_id,
+                    state,
+                    persist_durable_marker,
+                );
             }
         }
         return restored;
@@ -248,10 +277,35 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
         // this, #4018's synthetic-owner-only reclaim can never free it and the
         // follow-up relay text is silently dropped.
         if readopted_ledger_record_allowed(state) {
-            mark_readopted_from_inflight(shared, &provider, channel_id, state);
+            mark_readopted_from_inflight(
+                shared,
+                &provider,
+                channel_id,
+                state,
+                persist_durable_marker,
+            );
         }
     }
     started
+}
+
+pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    reregister_active_turn_from_inflight_inner(shared, state, true).await
+}
+
+/// Automatic reattach holds the canonical episode flock across mailbox and
+/// finalizer re-registration. The ordinary marker helper would recursively
+/// acquire that flock, so this variant records the episode-scoped in-memory
+/// ledger only; the caller persists the durable marker directly through the
+/// still-live guard before releasing authority.
+pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_under_episode_guard(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    reregister_active_turn_from_inflight_inner(shared, state, false).await
 }
 
 #[cfg(test)]
@@ -538,6 +592,14 @@ mod readopted_ledger_record_gate_tests {
     //     `user_msg_id`, which would misfire `OwnerInflightReplaced` on a LIVE turn.
     #[test]
     fn only_real_owner_with_real_message_id_is_recorded() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
         assert!(
             readopted_ledger_record_allowed(&row(343_742_347_365_974_026, 4_370_160)),
             "a real user turn with a real message id must be recorded"

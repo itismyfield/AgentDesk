@@ -749,40 +749,6 @@ pub(in crate::services::discord) fn save_inflight_state_if_matches_identity(
     )
 }
 
-pub(in crate::services::discord) fn save_existing_inflight_rebind_adoption_if_matches_identity(
-    state: &InflightTurnState,
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
-) -> GuardedSaveOutcome {
-    let Some(root) = inflight_runtime_root() else {
-        return GuardedSaveOutcome::IoError;
-    };
-    save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
-        &root,
-        state,
-        expected,
-        expected_turn_start_offset,
-    )
-}
-
-pub(in crate::services::discord) fn save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity(
-    state: &InflightTurnState,
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
-    expected_last_offset: u64,
-) -> GuardedSaveOutcome {
-    let Some(root) = inflight_runtime_root() else {
-        return GuardedSaveOutcome::IoError;
-    };
-    save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root(
-        &root,
-        state,
-        expected,
-        expected_turn_start_offset,
-        expected_last_offset,
-    )
-}
-
 pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
@@ -793,6 +759,7 @@ pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adop
         root,
         state,
         expected,
+        None,
         expected_turn_start_offset,
         None,
     )
@@ -809,41 +776,71 @@ pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adop
         root,
         state,
         expected,
+        None,
         expected_turn_start_offset,
         Some(expected_last_offset),
     )
 }
 
-fn save_existing_inflight_rebind_adoption_impl_in_root(
+pub(super) fn save_existing_inflight_rebind_adoption_impl_in_root(
     root: &Path,
     state: &InflightTurnState,
     expected: &InflightTurnIdentity,
+    expected_episode: Option<&InflightEpisodePin>,
     expected_turn_start_offset: Option<u64>,
     expected_last_offset_for_rebase: Option<u64>,
 ) -> GuardedSaveOutcome {
+    lock_and_save_existing_inflight_rebind_adoption_impl_in_root(
+        root,
+        state,
+        expected,
+        expected_episode,
+        expected_turn_start_offset,
+        expected_last_offset_for_rebase,
+    )
+    .map_or_else(|outcome| outcome, |_| GuardedSaveOutcome::Saved)
+}
+
+pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_rebind_adoption_impl_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_episode: Option<&InflightEpisodePin>,
+    expected_turn_start_offset: Option<u64>,
+    expected_last_offset_for_rebase: Option<u64>,
+) -> Result<
+    (
+        super::super::store::InflightStateFileLock,
+        InflightTurnState,
+    ),
+    GuardedSaveOutcome,
+> {
     let Some(provider) = state.provider_kind() else {
-        return GuardedSaveOutcome::IoError;
+        return Err(GuardedSaveOutcome::IoError);
     };
     let path = inflight_state_path(root, &provider, state.channel_id);
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_err() {
-            return GuardedSaveOutcome::IoError;
+            return Err(GuardedSaveOutcome::IoError);
         }
     }
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
-        return GuardedSaveOutcome::IoError;
+    let Ok(lock) = lock_inflight_state_path(&path) else {
+        return Err(GuardedSaveOutcome::IoError);
     };
     let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return Err(GuardedSaveOutcome::Missing);
     };
     let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return Err(GuardedSaveOutcome::IdentityMismatch);
     };
+    if expected_episode.is_some_and(|pin| !pin.matches_state(&on_disk)) {
+        return Err(GuardedSaveOutcome::IdentityMismatch);
+    }
     if on_disk.rebind_origin {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return Err(GuardedSaveOutcome::IdentityMismatch);
     }
     if on_disk.restart_mode != state.restart_mode {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return Err(GuardedSaveOutcome::IdentityMismatch);
     }
     // #4400 (b) r2: zero-id `expected` authorizes this save ONLY for the
     // adoptable #3107 self-heal orphan carrying a birth `turn_start_offset`
@@ -854,17 +851,17 @@ fn save_existing_inflight_rebind_adoption_impl_in_root(
             && !(on_disk.is_adoptable_orphaned_synthetic_watcher_row()
                 && on_disk.turn_start_offset.is_some()))
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return Err(GuardedSaveOutcome::IdentityMismatch);
     }
     if let Some(expected_offset) = expected_turn_start_offset {
         if on_disk.turn_start_offset != Some(expected_offset) {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return Err(GuardedSaveOutcome::IdentityMismatch);
         }
     }
     if expected_last_offset_for_rebase
         .is_some_and(|expected_last| on_disk.last_offset != expected_last)
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return Err(GuardedSaveOutcome::IdentityMismatch);
     }
 
     let mut updated = on_disk;
@@ -891,10 +888,10 @@ fn save_existing_inflight_rebind_adoption_impl_in_root(
     updated.updated_at = now_string();
     bump_save_generation_for_write(&path, &mut updated);
     let Ok(json) = serde_json::to_string_pretty(&updated) else {
-        return GuardedSaveOutcome::IoError;
+        return Err(GuardedSaveOutcome::IoError);
     };
     match atomic_write(&path, &json) {
-        Ok(()) => GuardedSaveOutcome::Saved,
+        Ok(()) => Ok((lock, updated)),
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -903,7 +900,7 @@ fn save_existing_inflight_rebind_adoption_impl_in_root(
                 error = %error,
                 "existing inflight rebind adoption save failed; leaving on-disk row untouched"
             );
-            GuardedSaveOutcome::IoError
+            Err(GuardedSaveOutcome::IoError)
         }
     }
 }

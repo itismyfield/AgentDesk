@@ -19,6 +19,7 @@ pub(in crate::services::discord) use model::{
     InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, optional_message_id,
 };
 
+mod episode_guard;
 mod store;
 
 // #3479: the FS path layout + flock guard moved to `store.rs`. `inflight_state_path`
@@ -28,6 +29,10 @@ mod store;
 // (root callers only) and is brought in via a plain import. `InflightStateFileLock`
 // is named nowhere outside `store` (it only flows as a return type), so it keeps
 // its module-tree visibility there without a parent re-export.
+pub(in crate::services::discord) use episode_guard::{
+    InflightEpisodeLockError, InflightEpisodePin, LockedInflightEpisode,
+    adopt_and_lock_inflight_episode, lock_inflight_episode,
+};
 pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
 pub(in crate::services::discord::inflight) use store::inflight_state_path;
@@ -140,7 +145,9 @@ pub(in crate::services::discord) use self::save_store::{
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,
     recovery_anchor_msg_id_if_matches_identity,
+    save_existing_inflight_rebind_adoption_if_matches_episode,
     save_existing_inflight_rebind_adoption_if_matches_identity,
+    save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
     save_inflight_state_if_identity_matches_allow_output_restamp,
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
@@ -4021,6 +4028,7 @@ mod stall_recovery_tests {
             &ProviderKind::Codex,
             state.channel_id,
             &expected,
+            state.turn_nonce.as_deref(),
         );
 
         assert_eq!(outcome, GuardedClearOutcome::Cleared);
@@ -4046,6 +4054,7 @@ mod stall_recovery_tests {
             &ProviderKind::Codex,
             state.channel_id,
             &expected,
+            state.turn_nonce.as_deref(),
         );
 
         assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
@@ -4076,6 +4085,7 @@ mod stall_recovery_tests {
             &ProviderKind::Codex,
             state.channel_id,
             &expected,
+            state.turn_nonce.as_deref(),
         );
 
         assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
