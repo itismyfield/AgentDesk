@@ -188,6 +188,7 @@ mod classification_order_tests;
 use classification::{
     CatchUpClassification, CatchUpClassificationDecision, CatchUpMessageView, CatchUpScanStats,
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
+    classify_phase2_message_with_utility_resolution,
 };
 #[cfg(test)]
 use phase2::catch_up_enqueue_accepted;
@@ -1406,8 +1407,6 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     };
     let (announce_resolution_phase2, notify_resolution_phase2) =
         api.utility_bot_user_ids(shared).await;
-    let announce_bot_id_phase2 = announce_resolution_phase2.user_id();
-    let notify_bot_id_phase2 = notify_resolution_phase2.user_id();
 
     // Same per-channel pacing as phase 1 (see `catch_up_scan_pace`).
     let mut paced_scan_phase2 = false;
@@ -1534,58 +1533,44 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 age_secs: msg_age.num_seconds(),
                 trimmed_text: text.to_string(),
             };
-            if matches!(
-                classify_catch_up_message_with_utility_resolution(
-                    &utility_view,
-                    current_bot_user_id,
-                    &existing_ids,
-                    600,
-                    &allowed_bot_ids_phase2,
-                    announce_resolution_phase2,
-                    notify_resolution_phase2,
-                ),
-                CatchUpClassificationDecision::UtilityIdentityUnavailable
-            ) {
-                let retry_after = phase2_retry_after_checkpoint(
-                    max_recovered_id,
-                    phase2_checkpoint,
-                    last_bot_response_id,
-                );
-                phase2_retry_after = rearm_catch_up_retry_after_defer(
-                    shared,
-                    channel_id,
-                    retry_after,
-                    consumed_retry_states_this_cycle.get(&channel_id).copied(),
-                );
-                stats.deferred += 1;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    channel_id = channel_id.get(),
-                    message_id = mid,
-                    retry_after = phase2_retry_after,
-                    "  [{ts}] 🔁 catch-up phase2: utility bot identity unavailable; preserving checkpoint before ambiguous message"
-                );
-                break;
-            }
-            if Some(msg.author.id.get()) == notify_bot_id_phase2 {
-                stats.skipped += 1;
-                continue;
-            }
-            if !is_allowed_turn_sender(
-                &allowed_bot_ids_phase2,
-                announce_bot_id_phase2,
-                msg.author.id.get(),
-                msg.author.bot,
-                text,
-            ) {
-                stats.skipped += 1;
-                continue;
-            }
-            let is_allowed_automation = allowed_bot_ids_phase2.contains(&msg.author.id.get())
-                || announce_bot_id_phase2.is_some_and(|id| id == msg.author.id.get());
-            if !is_allowed_automation {
+            let author_is_authorized = {
                 let settings = shared.settings.read().await;
-                if !discord_io::user_is_authorized(&settings, msg.author.id.get()) {
+                discord_io::user_is_authorized(&settings, msg.author.id.get())
+            };
+            match classify_phase2_message_with_utility_resolution(
+                &utility_view,
+                current_bot_user_id,
+                &existing_ids,
+                600,
+                &allowed_bot_ids_phase2,
+                announce_resolution_phase2,
+                notify_resolution_phase2,
+                author_is_authorized,
+            ) {
+                CatchUpClassificationDecision::UtilityIdentityUnavailable => {
+                    let retry_after = phase2_retry_after_checkpoint(
+                        max_recovered_id,
+                        phase2_checkpoint,
+                        last_bot_response_id,
+                    );
+                    phase2_retry_after = rearm_catch_up_retry_after_defer(
+                        shared,
+                        channel_id,
+                        retry_after,
+                        consumed_retry_states_this_cycle.get(&channel_id).copied(),
+                    );
+                    stats.deferred += 1;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        message_id = mid,
+                        retry_after = phase2_retry_after,
+                        "  [{ts}] 🔁 catch-up phase2: utility bot identity unavailable; preserving checkpoint before ambiguous message"
+                    );
+                    break;
+                }
+                CatchUpClassificationDecision::Determinate(CatchUpClassification::Recover) => {}
+                CatchUpClassificationDecision::Determinate(_) => {
                     stats.skipped += 1;
                     continue;
                 }

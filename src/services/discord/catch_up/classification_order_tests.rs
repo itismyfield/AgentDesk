@@ -529,16 +529,21 @@ fn write_checkpoint(
     channel_id: ChannelId,
     checkpoint: u64,
 ) {
-    let dir = root
-        .join("runtime")
+    let path = checkpoint_path(root, provider, channel_id);
+    std::fs::create_dir_all(path.parent().expect("last-message provider dir"))
+        .expect("create last-message provider dir");
+    std::fs::write(path, checkpoint.to_string()).expect("write last-message checkpoint");
+}
+
+fn checkpoint_path(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> std::path::PathBuf {
+    root.join("runtime")
         .join("last_message")
-        .join(provider.as_str());
-    std::fs::create_dir_all(&dir).expect("create last-message provider dir");
-    std::fs::write(
-        dir.join(format!("{}.txt", channel_id.get())),
-        checkpoint.to_string(),
-    )
-    .expect("write last-message checkpoint");
+        .join(provider.as_str())
+        .join(format!("{}.txt", channel_id.get()))
 }
 
 fn write_role_map(root: &std::path::Path, provider: &ProviderKind, channel_id: ChannelId) {
@@ -1444,6 +1449,98 @@ async fn phase2_fresh_announce_unavailable_then_resolved_recovers_eventually() {
             .map(|intervention| intervention.message_id)
             .collect::<Vec<_>>(),
         vec![announce_message_id]
+    );
+    assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_false_flag_announce_unavailable_preserves_then_recovers_exact_message() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_014);
+    let bot_response_id = message_id_with_age(1, Duration::from_secs(60));
+    let announce_message_id = message_id_with_age(2, Duration::from_secs(30));
+    write_checkpoint(root.path(), &provider, channel_id, bot_response_id.get());
+    let phase2_messages = vec![
+        discord_message(
+            channel_id,
+            announce_message_id,
+            ANNOUNCE_BOT_ID,
+            false,
+            "PM triage: recover false-flag announce",
+        ),
+        discord_message(
+            channel_id,
+            bot_response_id,
+            CURRENT_BOT_ID,
+            true,
+            "previous bot response",
+        ),
+    ];
+
+    let (first_api, _) = TestCatchUpApi::new(Vec::new());
+    let first_api = first_api
+        .with_utility_bot_resolutions(
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        )
+        .with_phase2_messages(phase2_messages.clone());
+    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
+
+    let retry = shared
+        .catch_up_retry_pending
+        .get(&channel_id)
+        .expect("unresolved announce authorization bypass must arm a retry");
+    assert_eq!(
+        retry.checkpoint,
+        bot_response_id.get(),
+        "the retry must preserve the durable frontier before the ambiguous message"
+    );
+    drop(retry);
+    assert_eq!(
+        std::fs::read_to_string(checkpoint_path(root.path(), &provider, channel_id))
+            .expect("read preserved durable checkpoint")
+            .trim(),
+        bot_response_id.get().to_string(),
+        "the unavailable scan must not advance the durable checkpoint"
+    );
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+
+    let pending_retry_channels = HashSet::from([channel_id]);
+    let (second_api, _) = TestCatchUpApi::new(Vec::new());
+    let second_api = second_api
+        .with_utility_bot_resolutions(
+            UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
+            UtilityBotUserIdResolution::Unconfigured,
+        )
+        .with_phase2_messages(phase2_messages);
+    run_catch_up_sweep(
+        CatchUpDeps::new(&second_api, &shared, &provider)
+            .with_pending_retry_channels(&pending_retry_channels),
+    )
+    .await;
+
+    assert_eq!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .iter()
+            .map(|intervention| (intervention.message_id, intervention.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(
+            announce_message_id,
+            "PM triage: recover false-flag announce"
+        )]
+    );
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(announce_message_id.get())
     );
     assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
 }
