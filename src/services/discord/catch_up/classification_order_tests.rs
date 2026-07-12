@@ -13,11 +13,13 @@ use std::time::{Duration, Instant};
 use poise::serenity_prelude as serenity;
 
 use super::{
-    CatchUpClassification, CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView,
-    CatchUpTooOldOutboxRequest, ChannelId, MessageId, ProviderKind, RuntimeChannelBindingStatus,
-    advance_catch_up_settled_frontier, catch_up_too_old_drop, catch_up_too_old_notice,
-    classify_catch_up_message, run_catch_up_sweep,
+    CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CatchUpClassification, CatchUpClassificationDecision,
+    CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, CatchUpTooOldOutboxRequest, ChannelId,
+    MessageId, ProviderKind, RuntimeChannelBindingStatus, advance_catch_up_settled_frontier,
+    catch_up_too_old_drop, catch_up_too_old_notice, classify_catch_up_message,
+    classify_catch_up_message_with_utility_resolution, run_catch_up_sweep,
 };
+use crate::services::discord::health::UtilityBotUserIdResolution;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
 };
@@ -49,6 +51,114 @@ fn classify(view: &CatchUpMessageView) -> CatchUpClassification {
         None,
         None,
     )
+}
+
+fn classify_with_resolutions(
+    view: &CatchUpMessageView,
+    announce_resolution: UtilityBotUserIdResolution,
+    notify_resolution: UtilityBotUserIdResolution,
+) -> CatchUpClassificationDecision {
+    classify_catch_up_message_with_utility_resolution(
+        view,
+        Some(CURRENT_BOT_ID),
+        &HashSet::new(),
+        300,
+        &[],
+        announce_resolution,
+        notify_resolution,
+    )
+}
+
+#[test]
+fn unconfigured_utility_id_is_stable_absence_not_a_retry_loop() {
+    let human = view(HUMAN_ID, false, 60, "계속 진행해");
+    assert_eq!(
+        classify_with_resolutions(
+            &human,
+            UtilityBotUserIdResolution::Unconfigured,
+            UtilityBotUserIdResolution::Unconfigured,
+        ),
+        CatchUpClassificationDecision::Determinate(CatchUpClassification::Recover)
+    );
+
+    let ordinary_bot = view(INFO_BOT_ID, true, 60, "informational status only");
+    assert_eq!(
+        classify_with_resolutions(
+            &ordinary_bot,
+            UtilityBotUserIdResolution::Unconfigured,
+            UtilityBotUserIdResolution::Unconfigured,
+        ),
+        CatchUpClassificationDecision::Determinate(CatchUpClassification::NotAllowed),
+        "a deliberately absent utility identity must not defer every ordinary bot forever"
+    );
+}
+
+#[test]
+fn unavailable_utility_id_defers_only_when_sender_semantics_can_change() {
+    let markerless_bot = view(
+        INFO_BOT_ID,
+        true,
+        60,
+        "PM triage: inspect the stalled workflow",
+    );
+    assert_eq!(
+        classify_with_resolutions(
+            &markerless_bot,
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        ),
+        CatchUpClassificationDecision::UtilityIdentityUnavailable,
+        "an unresolved announce identity can turn NotAllowed into Recover"
+    );
+
+    let false_flag_human_shape = view(HUMAN_ID, false, 60, "계속 진행해");
+    assert_eq!(
+        classify_with_resolutions(
+            &false_flag_human_shape,
+            UtilityBotUserIdResolution::Unconfigured,
+            UtilityBotUserIdResolution::Unavailable,
+        ),
+        CatchUpClassificationDecision::UtilityIdentityUnavailable,
+        "an unresolved notify identity can turn a false-flag Recover into NotAllowed"
+    );
+
+    let stale_false_flag = view(HUMAN_ID, false, 3_600, "진짜 사용자 요청");
+    assert_eq!(
+        classify_with_resolutions(
+            &stale_false_flag,
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        ),
+        CatchUpClassificationDecision::UtilityIdentityUnavailable,
+        "same TooOld enum still defers when announce identity changes the user-facing resend surface"
+    );
+
+    let legacy_card = view(
+        INFO_BOT_ID,
+        true,
+        60,
+        "📋 **새 이슈 #42** — fix the thing\n> 상태: 🟡 open",
+    );
+    assert_eq!(
+        classify_with_resolutions(
+            &legacy_card,
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        ),
+        CatchUpClassificationDecision::Determinate(CatchUpClassification::NotAllowed),
+        "legacy announce cards are suppressed with or without the identity and must not retry forever"
+    );
+
+    let ordinary_bot = view(INFO_BOT_ID, true, 60, "informational status only");
+    assert_eq!(
+        classify_with_resolutions(
+            &ordinary_bot,
+            UtilityBotUserIdResolution::Unconfigured,
+            UtilityBotUserIdResolution::Unavailable,
+        ),
+        CatchUpClassificationDecision::Determinate(CatchUpClassification::NotAllowed),
+        "a plain bot message is NotAllowed even if it is notify, so lookup failure is immaterial"
+    );
 }
 
 #[test]
@@ -437,8 +547,8 @@ struct TestCatchUpApi {
     fetch_calls: AtomicUsize,
     outbox: Arc<Mutex<Vec<CatchUpTooOldOutboxRequest>>>,
     dead_letters: Arc<Mutex<Vec<crate::db::relay_dead_letter::RelayDeadLetterRecord>>>,
-    announce_bot_id: Option<u64>,
-    notify_bot_id: Option<u64>,
+    announce_resolution: UtilityBotUserIdResolution,
+    notify_resolution: UtilityBotUserIdResolution,
 }
 
 impl TestCatchUpApi {
@@ -453,8 +563,8 @@ impl TestCatchUpApi {
                 fetch_calls: AtomicUsize::new(0),
                 outbox: Arc::clone(&outbox),
                 dead_letters: Arc::new(Mutex::new(Vec::new())),
-                announce_bot_id: None,
-                notify_bot_id: None,
+                announce_resolution: UtilityBotUserIdResolution::Unconfigured,
+                notify_resolution: UtilityBotUserIdResolution::Unconfigured,
             },
             outbox,
         )
@@ -465,8 +575,24 @@ impl TestCatchUpApi {
         announce_bot_id: Option<u64>,
         notify_bot_id: Option<u64>,
     ) -> Self {
-        self.announce_bot_id = announce_bot_id;
-        self.notify_bot_id = notify_bot_id;
+        self.announce_resolution = announce_bot_id.map_or(
+            UtilityBotUserIdResolution::Unconfigured,
+            UtilityBotUserIdResolution::Resolved,
+        );
+        self.notify_resolution = notify_bot_id.map_or(
+            UtilityBotUserIdResolution::Unconfigured,
+            UtilityBotUserIdResolution::Resolved,
+        );
+        self
+    }
+
+    fn with_utility_bot_resolutions(
+        mut self,
+        announce_resolution: UtilityBotUserIdResolution,
+        notify_resolution: UtilityBotUserIdResolution,
+    ) -> Self {
+        self.announce_resolution = announce_resolution;
+        self.notify_resolution = notify_resolution;
         self
     }
 
@@ -550,9 +676,215 @@ impl CatchUpDiscordApi for TestCatchUpApi {
     async fn utility_bot_user_ids(
         &self,
         _shared: &super::SharedData,
-    ) -> (Option<u64>, Option<u64>) {
-        (self.announce_bot_id, self.notify_bot_id)
+    ) -> (UtilityBotUserIdResolution, UtilityBotUserIdResolution) {
+        (self.announce_resolution, self.notify_resolution)
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn production_two_scan_retries_unavailable_announce_then_recovers() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_007);
+    let announce_message_id = message_id_with_age(1, Duration::from_secs(30));
+    let initial_checkpoint = announce_message_id.get() - 1;
+    write_checkpoint(root.path(), &provider, channel_id, initial_checkpoint);
+    shared.settings.write().await.allowed_bot_ids = vec![ANNOUNCE_BOT_ID];
+    let message = discord_message(
+        channel_id,
+        announce_message_id,
+        ANNOUNCE_BOT_ID,
+        true,
+        "PM triage: inspect the stalled workflow",
+    );
+
+    let (first_api, first_outbox) = TestCatchUpApi::new(vec![message.clone()]);
+    let first_api = first_api.with_utility_bot_resolutions(
+        UtilityBotUserIdResolution::Unavailable,
+        UtilityBotUserIdResolution::Unconfigured,
+    );
+    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
+
+    assert!(
+        shared
+            .last_message_ids
+            .get(&channel_id)
+            .is_none_or(|checkpoint| *checkpoint < announce_message_id.get()),
+        "an ambiguous markerless announce message must remain beyond the durable frontier"
+    );
+    let first_retry = shared
+        .catch_up_retry_pending
+        .get(&channel_id)
+        .expect("identity uncertainty must preserve a bounded retry");
+    assert_eq!(first_retry.checkpoint, initial_checkpoint);
+    drop(first_retry);
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty(),
+        "the unavailable scan must neither lose nor prematurely enqueue the message"
+    );
+    assert!(first_outbox.lock().expect("outbox capture lock").is_empty());
+
+    let pending_retry_channels = HashSet::from([channel_id]);
+    let (second_api, second_outbox) = TestCatchUpApi::new(vec![message]);
+    let second_api = second_api.with_utility_bot_resolutions(
+        UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
+        UtilityBotUserIdResolution::Unconfigured,
+    );
+    run_catch_up_sweep(
+        CatchUpDeps::new(&second_api, &shared, &provider)
+            .with_pending_retry_channels(&pending_retry_channels),
+    )
+    .await;
+
+    let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
+    assert_eq!(
+        mailbox
+            .intervention_queue
+            .iter()
+            .map(|intervention| intervention.message_id)
+            .collect::<Vec<_>>(),
+        vec![announce_message_id],
+        "the resolved scan must recover the exact markerless announce trigger"
+    );
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(announce_message_id.get())
+    );
+    assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+    assert!(
+        second_outbox
+            .lock()
+            .expect("outbox capture lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn production_two_scan_retries_unavailable_notify_then_settles_silently() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_009);
+    let notify_message_id = message_id_with_age(1, Duration::from_secs(30));
+    let initial_checkpoint = notify_message_id.get() - 1;
+    write_checkpoint(root.path(), &provider, channel_id, initial_checkpoint);
+    shared.settings.write().await.allowed_bot_ids = vec![NOTIFY_BOT_ID];
+    let message = discord_message(
+        channel_id,
+        notify_message_id,
+        NOTIFY_BOT_ID,
+        false,
+        "DISPATCH:false-flag-notify-overlap",
+    );
+
+    let (first_api, _) = TestCatchUpApi::new(vec![message.clone()]);
+    let first_api = first_api.with_utility_bot_resolutions(
+        UtilityBotUserIdResolution::Unconfigured,
+        UtilityBotUserIdResolution::Unavailable,
+    );
+    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
+    assert!(
+        shared
+            .last_message_ids
+            .get(&channel_id)
+            .is_none_or(|checkpoint| *checkpoint < notify_message_id.get())
+    );
+    assert!(shared.catch_up_retry_pending.contains_key(&channel_id));
+
+    let pending_retry_channels = HashSet::from([channel_id]);
+    let (second_api, second_outbox) = TestCatchUpApi::new(vec![message]);
+    let second_api = second_api.with_utility_bot_resolutions(
+        UtilityBotUserIdResolution::Unconfigured,
+        UtilityBotUserIdResolution::Resolved(NOTIFY_BOT_ID),
+    );
+    run_catch_up_sweep(
+        CatchUpDeps::new(&second_api, &shared, &provider)
+            .with_pending_retry_channels(&pending_retry_channels),
+    )
+    .await;
+
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(notify_message_id.get()),
+        "resolved notify output is a stable terminal skip and can settle"
+    );
+    assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty(),
+        "notify output must never become a turn"
+    );
+    assert!(
+        second_outbox
+            .lock()
+            .expect("outbox capture lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unavailable_identity_retry_cap_never_settles_ambiguous_trigger() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_008);
+    let message_id = message_id_with_age(1, Duration::from_secs(30));
+    let initial_checkpoint = message_id.get() - 1;
+    write_checkpoint(root.path(), &provider, channel_id, initial_checkpoint);
+    shared.settings.write().await.allowed_bot_ids = vec![ANNOUNCE_BOT_ID];
+    let message = discord_message(
+        channel_id,
+        message_id,
+        ANNOUNCE_BOT_ID,
+        true,
+        "PM triage: preserve me while identity lookup is down",
+    );
+
+    // One initial arm plus exactly the configured number of carried retries
+    // exhausts the tight retry chain. The cap clears the in-memory arm/backoff;
+    // it must never convert uncertainty into a settled checkpoint. A later
+    // periodic catch-up therefore starts again from the same durable cursor.
+    for _ in 0..=CATCH_UP_RETRY_DEFERRED_REARM_LIMIT {
+        let pending_retry_channels = shared
+            .catch_up_retry_pending
+            .contains_key(&channel_id)
+            .then(|| HashSet::from([channel_id]))
+            .unwrap_or_default();
+        let (api, _) = TestCatchUpApi::new(vec![message.clone()]);
+        let api = api.with_utility_bot_resolutions(
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        );
+        run_catch_up_sweep(
+            CatchUpDeps::new(&api, &shared, &provider)
+                .with_pending_retry_channels(&pending_retry_channels),
+        )
+        .await;
+    }
+
+    assert!(
+        !shared.catch_up_retry_pending.contains_key(&channel_id),
+        "the bounded retry chain must stop after its configured budget"
+    );
+    assert!(
+        shared
+            .last_message_ids
+            .get(&channel_id)
+            .is_none_or(|checkpoint| *checkpoint < message_id.get()),
+        "retry exhaustion must preserve the ambiguous trigger beyond the durable frontier"
+    );
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

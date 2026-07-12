@@ -112,10 +112,22 @@ trait CatchUpDiscordApi: Sync {
         crate::db::relay_dead_letter::record_detached(pool, record)
     }
 
-    async fn utility_bot_user_ids(&self, shared: &SharedData) -> (Option<u64>, Option<u64>) {
+    async fn utility_bot_user_ids(
+        &self,
+        shared: &SharedData,
+    ) -> (
+        health::UtilityBotUserIdResolution,
+        health::UtilityBotUserIdResolution,
+    ) {
+        let Some(registry) = shared.health_registry() else {
+            return (
+                health::UtilityBotUserIdResolution::Unconfigured,
+                health::UtilityBotUserIdResolution::Unconfigured,
+            );
+        };
         (
-            resolve_announce_bot_user_id(shared).await,
-            resolve_notify_bot_user_id(shared).await,
+            registry.utility_bot_user_id_resolution("announce").await,
+            registry.utility_bot_user_id_resolution("notify").await,
         )
     }
 }
@@ -174,7 +186,8 @@ mod too_old_notice;
 mod classification_order_tests;
 
 use classification::{
-    CatchUpClassification, CatchUpMessageView, CatchUpScanStats, classify_catch_up_message,
+    CatchUpClassification, CatchUpClassificationDecision, CatchUpMessageView, CatchUpScanStats,
+    classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
 };
 #[cfg(test)]
 use phase2::catch_up_enqueue_accepted;
@@ -1037,7 +1050,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             let settings = shared.settings.read().await;
             settings.allowed_bot_ids.clone()
         };
-        let (announce_bot_id, notify_bot_id) = api.utility_bot_user_ids(shared).await;
+        let (announce_resolution, notify_resolution) = api.utility_bot_user_ids(shared).await;
+        let announce_bot_id = announce_resolution.user_id();
+        let notify_bot_id = notify_resolution.user_id();
         // Newest message that this oldest-first scan has durably settled.
         // Non-recover classifications settle immediately; Recover settles only
         // after an accepted/safe-dedup enqueue. The current cap/defer item never
@@ -1084,15 +1099,37 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 age_secs,
                 trimmed_text: text.clone(),
             };
-            let outcome = classify_catch_up_message(
+            let outcome = match classify_catch_up_message_with_utility_resolution(
                 &view,
                 current_bot_user_id,
                 &existing_ids,
                 max_age.as_secs() as i64,
                 &allowed_bot_ids,
-                announce_bot_id,
-                notify_bot_id,
-            );
+                announce_resolution,
+                notify_resolution,
+            ) {
+                CatchUpClassificationDecision::Determinate(outcome) => outcome,
+                CatchUpClassificationDecision::UtilityIdentityUnavailable => {
+                    let mid = msg.id.get();
+                    let retry_after = max_settled_id
+                        .or(scan_checkpoint)
+                        .unwrap_or_else(|| mid.saturating_sub(1));
+                    let retry_after = rearm_catch_up_retry_after_defer(
+                        shared,
+                        channel_id,
+                        retry_after,
+                        retry_state,
+                    );
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        message_id = mid,
+                        retry_after,
+                        "  [{ts}] 🔁 catch-up: utility bot identity unavailable; preserving checkpoint before ambiguous message"
+                    );
+                    break;
+                }
+            };
             let mid = msg.id.get();
             // Codex P2 round 2 on #1301: check the cap BEFORE recording the
             // recover, otherwise `stats.recovered` would tally a message we
@@ -1317,7 +1354,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let settings = shared.settings.read().await;
         settings.allowed_bot_ids.clone()
     };
-    let (announce_bot_id_phase2, notify_bot_id_phase2) = api.utility_bot_user_ids(shared).await;
+    let (announce_resolution_phase2, notify_resolution_phase2) =
+        api.utility_bot_user_ids(shared).await;
+    let announce_bot_id_phase2 = announce_resolution_phase2.user_id();
+    let notify_bot_id_phase2 = notify_resolution_phase2.user_id();
 
     // Same per-channel pacing as phase 1 (see `catch_up_scan_pace`).
     let mut paced_scan_phase2 = false;
@@ -1414,11 +1454,53 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 stats.skipped += 1;
                 continue;
             }
+            let mid = msg.id.get();
+            let msg_age = chrono::Utc::now().signed_duration_since(*msg.id.created_at());
+            let utility_view = CatchUpMessageView {
+                message_id: mid,
+                author_id: msg.author.id.get(),
+                author_is_bot: msg.author.bot,
+                is_processable_kind: true,
+                age_secs: msg_age.num_seconds(),
+                trimmed_text: text.to_string(),
+            };
+            if matches!(
+                classify_catch_up_message_with_utility_resolution(
+                    &utility_view,
+                    current_bot_user_id,
+                    &existing_ids,
+                    600,
+                    &allowed_bot_ids_phase2,
+                    announce_resolution_phase2,
+                    notify_resolution_phase2,
+                ),
+                CatchUpClassificationDecision::UtilityIdentityUnavailable
+            ) {
+                let retry_after = phase2_retry_after_checkpoint(
+                    max_recovered_id,
+                    phase2_checkpoint,
+                    last_bot_response_id,
+                );
+                phase2_retry_after = rearm_catch_up_retry_after_defer(
+                    shared,
+                    channel_id,
+                    retry_after,
+                    consumed_retry_states_this_cycle.get(&channel_id).copied(),
+                );
+                stats.deferred += 1;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    message_id = mid,
+                    retry_after = phase2_retry_after,
+                    "  [{ts}] 🔁 catch-up phase2: utility bot identity unavailable; preserving checkpoint before ambiguous message"
+                );
+                break;
+            }
             if Some(msg.author.id.get()) == notify_bot_id_phase2 {
                 stats.skipped += 1;
                 continue;
             }
-            let mid = msg.id.get();
             if !is_allowed_turn_sender(
                 &allowed_bot_ids_phase2,
                 announce_bot_id_phase2,
@@ -1439,7 +1521,6 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
             }
             // Skip messages older than 10 minutes (generous window for restart gap)
-            let msg_age = chrono::Utc::now().signed_duration_since(*msg.id.created_at());
             if msg_age.num_seconds() > 600 {
                 stats.skipped += 1;
                 continue;

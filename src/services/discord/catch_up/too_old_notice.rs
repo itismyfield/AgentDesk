@@ -1,4 +1,6 @@
-use super::{CATCH_UP_TOO_OLD_NOTICE_PREFIX, CatchUpClassification};
+use super::{
+    CATCH_UP_TOO_OLD_NOTICE_PREFIX, CatchUpClassification, classification::too_old_is_actionable,
+};
 
 pub(super) const CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS: usize = 10;
 
@@ -27,11 +29,14 @@ pub(super) fn actionable_drop(
     notify_bot_id: Option<u64>,
     text: &str,
 ) -> Option<CatchUpTooOldDrop> {
-    (outcome == CatchUpClassification::TooOld
-        && !author_is_bot
-        && !allowed_bot_ids.contains(&author_id)
-        && announce_bot_id != Some(author_id)
-        && notify_bot_id != Some(author_id))
+    too_old_is_actionable(
+        outcome,
+        author_id,
+        author_is_bot,
+        allowed_bot_ids,
+        announce_bot_id,
+        notify_bot_id,
+    )
     .then(|| CatchUpTooOldDrop {
         author_id,
         snippet: catch_up_too_old_snippet(text),

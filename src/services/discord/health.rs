@@ -196,6 +196,31 @@ pub struct HealthRegistry {
     notify_token_generation: AtomicU64,
 }
 
+/// Result of resolving one utility bot's Discord user id.
+///
+/// `Unconfigured` is a stable absence: there is no HTTP client for that bot, so
+/// catch-up does not need to wait for an identity that this runtime cannot
+/// produce. `Unavailable` is deliberately distinct: a configured/current HTTP
+/// client exists, but Discord could not resolve its user id (or token rotation
+/// kept changing underneath the lookup). Callers that would make an irreversible
+/// sender-identity decision must defer rather than treating that transient miss
+/// as "not this utility bot".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UtilityBotUserIdResolution {
+    Resolved(u64),
+    Unconfigured,
+    Unavailable,
+}
+
+impl UtilityBotUserIdResolution {
+    pub(crate) fn user_id(self) -> Option<u64> {
+        match self {
+            Self::Resolved(user_id) => Some(user_id),
+            Self::Unconfigured | Self::Unavailable => None,
+        }
+    }
+}
+
 impl HealthRegistry {
     pub fn new() -> Self {
         Self {
@@ -586,9 +611,18 @@ impl HealthRegistry {
     }
 
     pub async fn utility_bot_user_id(&self, bot_name: &str) -> Option<u64> {
+        self.utility_bot_user_id_resolution(bot_name)
+            .await
+            .user_id()
+    }
+
+    pub(crate) async fn utility_bot_user_id_resolution(
+        &self,
+        bot_name: &str,
+    ) -> UtilityBotUserIdResolution {
         match bot_name {
             "announce" => {
-                Self::utility_bot_user_id_from(
+                Self::utility_bot_user_id_resolution_from(
                     &self.announce_http,
                     &self.announce_user_id,
                     &self.announce_token_generation,
@@ -596,36 +630,38 @@ impl HealthRegistry {
                 .await
             }
             "notify" => {
-                Self::utility_bot_user_id_from(
+                Self::utility_bot_user_id_resolution_from(
                     &self.notify_http,
                     &self.notify_user_id,
                     &self.notify_token_generation,
                 )
                 .await
             }
-            _ => None,
+            _ => UtilityBotUserIdResolution::Unconfigured,
         }
     }
 
-    async fn utility_bot_user_id_from(
+    async fn utility_bot_user_id_resolution_from(
         http_field: &tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
         user_id_field: &tokio::sync::Mutex<Option<(u64, u64)>>,
         token_generation: &AtomicU64,
-    ) -> Option<u64> {
+    ) -> UtilityBotUserIdResolution {
         for _ in 0..3 {
             let current_generation = token_generation.load(Ordering::SeqCst);
             if let Some((id, cached_generation)) = *user_id_field.lock().await
                 && cached_generation == current_generation
             {
-                return Some(id);
+                return UtilityBotUserIdResolution::Resolved(id);
             }
-            let http = http_field.lock().await.clone()?;
+            let Some(http) = http_field.lock().await.clone() else {
+                return UtilityBotUserIdResolution::Unconfigured;
+            };
             let observed_generation = token_generation.load(Ordering::SeqCst);
             let user = match http.get_current_user().await {
                 Ok(user) => user,
                 Err(_) => {
                     if Self::utility_bot_http_matches_current(http_field, &http).await {
-                        return None;
+                        return UtilityBotUserIdResolution::Unavailable;
                     }
                     continue;
                 }
@@ -641,10 +677,10 @@ impl HealthRegistry {
             )
             .await
             {
-                return Some(id);
+                return UtilityBotUserIdResolution::Resolved(id);
             }
         }
-        None
+        UtilityBotUserIdResolution::Unavailable
     }
 
     async fn utility_bot_http_matches_current(

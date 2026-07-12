@@ -425,10 +425,10 @@
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1079 | 652 | 427 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1083 | 982 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
-| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 2969 | 1610 | 1359 | giant-file |
-| `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 105 | 105 | 0 |  |
+| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 3050 | 1691 | 1359 | giant-file |
+| `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 230 | 230 | 0 |  |
 | `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 97 | 97 | 0 |  |
-| `services::discord::catch_up::too_old_notice` | `src/services/discord/catch_up/too_old_notice.rs` | 190 | 101 | 89 |  |
+| `services::discord::catch_up::too_old_notice` | `src/services/discord/catch_up/too_old_notice.rs` | 195 | 106 | 89 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 121 | 121 | 0 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 221 | 209 | 12 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
@@ -474,7 +474,7 @@
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 1414 | 942 | 472 |  |
 | `services::discord::gateway::outbound_messages` | `src/services/discord/gateway/outbound_messages.rs` | 249 | 164 | 85 |  |
 | `services::discord::gateway_voice_queue` | `src/services/discord/gateway_voice_queue.rs` | 95 | 17 | 78 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 841 | 688 | 153 |  |
+| `services::discord::health` | `src/services/discord/health.rs` | 877 | 724 | 153 |  |
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 369 | 369 | 0 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 113 | 113 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
