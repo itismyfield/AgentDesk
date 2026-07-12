@@ -8,8 +8,9 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 mkdir -p "$TMP_ROOT/bin"
 FAKE_MODE_FILE="$TMP_ROOT/mode"
 FAKE_NOTIFY_LOG="$TMP_ROOT/notify.jsonl"
+FAKE_DIRECT_LOG="$TMP_ROOT/direct.log"
 STATE_FILE="$TMP_ROOT/state/monitor.json"
-export FAKE_MODE_FILE FAKE_NOTIFY_LOG
+export FAKE_MODE_FILE FAKE_NOTIFY_LOG FAKE_DIRECT_LOG
 
 cat > "$TMP_ROOT/bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
@@ -45,6 +46,9 @@ case "$url" in
         ;;
       review-fresh-only)
         printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-review-fresh","github_issue_number":4450,"status":"pending","card_status":"review","review_round":3,"review_entered_at":999000,"dispatch_history":[],"created_at":1}]}'
+        ;;
+      review-old-only)
+        printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-review-old","github_issue_number":4450,"status":"pending","card_status":"review","review_round":3,"review_entered_at":1,"dispatch_history":[],"created_at":1}]}'
         ;;
       review-missing-only)
         printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-review-missing","github_issue_number":4450,"status":"pending","card_status":"review","review_round":4,"dispatch_history":[],"created_at":1}]}'
@@ -100,6 +104,17 @@ esac
 FAKE_CURL
 chmod +x "$TMP_ROOT/bin/curl"
 
+cat > "$TMP_ROOT/bin/agentdesk" <<'FAKE_AGENTDESK'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${FAKE_DIRECT_FAIL:-0}" = "1" ]; then
+  exit 9
+fi
+[ "${1:-}" = "discord-sendmessage" ] || exit 8
+printf '%s\n' "$*" >> "$FAKE_DIRECT_LOG"
+FAKE_AGENTDESK
+chmod +x "$TMP_ROOT/bin/agentdesk"
+
 run_once() {
   PATH="$TMP_ROOT/bin:$PATH" \
   AQ_MONITOR_ONCE=1 \
@@ -108,6 +123,8 @@ run_once() {
   AQ_STUCK_THRESHOLD_MIN=1 \
   AQ_REVIEW_THRESHOLD_MIN=1 \
   AQ_MONITOR_STATE_FILE="$STATE_FILE" \
+  AGENTDESK_BIN="$TMP_ROOT/bin/agentdesk" \
+  AQ_MONITOR_NOTIFY_KEY="discord_test_notify" \
   PYTHON="${PYTHON:-python3}" \
   bash "$ROOT/scripts/auto-queue-monitor.sh" >/dev/null
 }
@@ -131,7 +148,7 @@ assert_notify_count() {
 }
 
 echo active > "$FAKE_MODE_FILE"
-FAKE_FAIL_POST=1 run_once
+FAKE_FAIL_POST=1 FAKE_DIRECT_FAIL=1 run_once
 assert_notify_count 0
 jq -e '.pending_action.action_id | test("^[0-9a-f]{32}$")' "$STATE_FILE" >/dev/null || {
   echo "failed enqueue must preserve a durable pending action ID" >&2
@@ -238,5 +255,41 @@ second_pid=$!
 wait "$first_pid"
 wait "$second_pid"
 assert_notify_count 3
+
+# Actionable STUCK/ANOMALY alerts use the durable announce route first. When
+# the API/PG path is down, a direct Discord post preserves human visibility and
+# commits the same durable action ID. REVIEW_LONG remains informational and
+# must not enter the direct fallback.
+rm -f "$STATE_FILE" "$STATE_FILE.lock" "$FAKE_NOTIFY_LOG" "$FAKE_DIRECT_LOG"
+echo stuck-only > "$FAKE_MODE_FILE"
+FAKE_FAIL_POST=1 run_once
+[ "$(wc -l < "$FAKE_DIRECT_LOG" | tr -d ' ')" -eq 1 ] || {
+  echo "STUCK API failure must use exactly one direct fallback" >&2
+  exit 1
+}
+grep -q 'discord-sendmessage.*STUCK' "$FAKE_DIRECT_LOG" || {
+  echo "direct fallback must retain the actionable STUCK body" >&2
+  exit 1
+}
+grep -q -- '--key discord_test_notify' "$FAKE_DIRECT_LOG" || {
+  echo "direct fallback must pin the notify bot credential" >&2
+  exit 1
+}
+jq -e '.pending_action == null' "$STATE_FILE" >/dev/null || {
+  echo "successful direct fallback must commit the durable action" >&2
+  exit 1
+}
+
+rm -f "$STATE_FILE" "$STATE_FILE.lock" "$FAKE_NOTIFY_LOG" "$FAKE_DIRECT_LOG"
+echo review-old-only > "$FAKE_MODE_FILE"
+FAKE_FAIL_POST=1 run_once
+[ ! -e "$FAKE_DIRECT_LOG" ] || {
+  echo "REVIEW_LONG must remain notify-only when durable enqueue fails" >&2
+  exit 1
+}
+jq -e '.pending_action.condition.kind == "REVIEW_LONG"' "$STATE_FILE" >/dev/null || {
+  echo "failed REVIEW_LONG enqueue must retain its pending action" >&2
+  exit 1
+}
 
 echo "auto-queue monitor restart/cooldown/recovery behavior passed"

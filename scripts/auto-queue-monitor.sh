@@ -13,10 +13,18 @@ INTERVAL="${AQ_MONITOR_INTERVAL:-30}"
 STUCK_THRESHOLD_MIN="${AQ_STUCK_THRESHOLD_MIN:-30}"
 REVIEW_THRESHOLD_MIN="${AQ_REVIEW_THRESHOLD_MIN:-60}"
 NOTIFY_CHANNEL="${AQ_MONITOR_CHANNEL:-1479671298497183835}"
+AGENTDESK_BIN="${AGENTDESK_BIN:-agentdesk}"
+PYTHON="${PYTHON:-python3}"
+NOTIFY_KEY="${AQ_MONITOR_NOTIFY_KEY:-}"
+NOTIFY_TOKEN_FILE="${AQ_MONITOR_NOTIFY_TOKEN_FILE:-${HOME}/.adk/release/credential/notify_bot_token}"
+if [ -z "$NOTIFY_KEY" ] && [ -r "$NOTIFY_TOKEN_FILE" ]; then
+  NOTIFY_KEY=$("$PYTHON" -c \
+    'import hashlib, sys; token=sys.stdin.read().strip(); print("discord_" + hashlib.sha256(token.encode()).hexdigest()[:16])' \
+    < "$NOTIFY_TOKEN_FILE")
+fi
 COOLDOWN_SECS="${AQ_MONITOR_COOLDOWN_SECS:-1800}"
 STATE_FILE="${AQ_MONITOR_STATE_FILE:-${HOME}/.adk/release/data/auto-queue-monitor-state.json}"
 STATE_HELPER="$SCRIPT_DIR/auto_queue_monitor_state.py"
-PYTHON="${PYTHON:-python3}"
 
 api_get() {
   curl -sf "$API$1"
@@ -32,14 +40,34 @@ notify_anomaly() {
   local msg="$1"
   local action_id="$2"
   local action="$3"
+  local incident_kind="$4"
   local body
   body=$(jq -n -c \
     --arg target "channel:$NOTIFY_CHANNEL" \
     --arg content "$msg" \
     --arg action_id "$action_id" \
     --arg action "$action" \
-    '{target:$target, content:$content, action_id:$action_id, action:$action}')
-  api_post_json "/api/message-outbox/monitor-alerts" "$body"
+    --arg kind "$incident_kind" \
+    '{target:$target, content:$content, action_id:$action_id, action:$action, kind:$kind}')
+  if api_post_json "/api/message-outbox/monitor-alerts" "$body"; then
+    return 0
+  fi
+
+  # STUCK/ANOMALY are actionable. Their durable row normally uses the
+  # announce bot and wakes the operations-channel AgentDesk role. If the API
+  # or PG is unavailable, preserve human visibility with a bot-token direct
+  # post. REVIEW_LONG and all recovery notices stay notify-only and keep the
+  # old durable retry semantics (#4449).
+  if [ "$action" != "alert" ] \
+    || { [ "$incident_kind" != "STUCK" ] && [ "$incident_kind" != "ANOMALY" ]; }; then
+    return 1
+  fi
+  if [ -z "$NOTIFY_KEY" ]; then
+    echo "auto-queue monitor: notify bot credential unavailable; direct fallback deferred" >&2
+    return 1
+  fi
+  "$AGENTDESK_BIN" discord-sendmessage \
+    --channel "$NOTIFY_CHANNEL" --key "$NOTIFY_KEY" --message "$msg"
 }
 
 entry_age_min() {
@@ -185,7 +213,7 @@ collect_active_conditions() {
 
 monitor_once_unlocked() {
   local status_json run_status run_id sessions_json sessions_available now_epoch now_ms
-  local temp_dir active_file unknown_file actions_file action_file action action_id kind message
+  local temp_dir active_file unknown_file actions_file action_file action action_id action_kind incident_kind message
 
   if ! status_json=$(api_get "/api/queue/status" 2>/dev/null); then
     echo "auto-queue monitor: status API unavailable; preserving incident state" >&2
@@ -248,15 +276,16 @@ monitor_once_unlocked() {
     action=$(head -n 1 "$actions_file")
     [ -n "$action" ] || break
     printf '%s\n' "$action" > "$action_file"
-    kind=$(printf '%s' "$action" | jq -r '.action')
+    action_kind=$(printf '%s' "$action" | jq -r '.action')
+    incident_kind=$(printf '%s' "$action" | jq -r '.condition.kind')
     action_id=$(printf '%s' "$action" | jq -r '.action_id')
-    if [ "$kind" = "recovery" ]; then
+    if [ "$action_kind" = "recovery" ]; then
       message=$(printf '%s' "$action" | jq -r '.condition.recovery')
     else
       message=$(printf '%s' "$action" | jq -r '.condition.alert')
     fi
     echo "$message"
-    if notify_anomaly "$message" "$action_id" "$kind"; then
+    if notify_anomaly "$message" "$action_id" "$action_kind" "$incident_kind"; then
       if ! "$PYTHON" "$STATE_HELPER" commit \
         --state-file "$STATE_FILE" --action-file "$action_file"; then
         echo "auto-queue monitor: durable notification queued but state commit lost CAS; will retry the same action ID" >&2

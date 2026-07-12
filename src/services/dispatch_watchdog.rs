@@ -182,7 +182,7 @@ async fn enqueue_stuck_alert(
         crate::services::message_outbox::OutboxMessage {
             target,
             content,
-            bot: "notify",
+            bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
             source: "dispatch_watchdog",
             reason_code: Some("dispatch_stuck"),
             session_key: None,

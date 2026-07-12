@@ -19,9 +19,10 @@
 //!   * Anti-spam is a TOCTOU-safe kv_meta dedupe-slot claim keyed by
 //!     `relay_alert:{signal}:{hour_bucket}` with a
 //!     1-hour TTL so each signal alerts at most once per hour.
-//!   * Delivery reuses the existing `message_outbox` enqueue path (bot
-//!     "notify"). It deliberately does NOT use the announce-bot fallback, whose
-//!     messages are re-ingested as agent input and would inject noise.
+//!   * Delivery reuses the existing `message_outbox` enqueue path with the
+//!     announce bot because a threshold breach is operator-actionable. The
+//!     shared #4449 worker policy falls back to notify only if announce delivery
+//!     fails; cooldown and target off-switches still bound turn creation.
 //!   * Double off-switch: the alert target (`kanban_human_alert_channel_id`)
 //!     being unset short-circuits to 0 alerts, so an unconfigured deploy is
 //!     guaranteed never to spam.
@@ -186,7 +187,7 @@ async fn enqueue_relay_alert_pg(
         crate::services::message_outbox::OutboxMessage {
             target,
             content,
-            bot: "notify",
+            bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
             source: "relay_signal_rollup",
             reason_code: Some("relay_signal.threshold"),
             session_key: Some(dedupe_key),

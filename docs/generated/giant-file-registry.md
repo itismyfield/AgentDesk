@@ -69,7 +69,7 @@
 | `src/pipeline.rs` | 1383 |
 | `src/receipt.rs` | 1842 |
 | `src/reconcile.rs` | 1902 |
-| `src/server/mod.rs` | 2800 |
+| `src/server/mod.rs` | 2778 |
 | `src/server/routes/agents.rs` | 1278 |
 | `src/server/routes/agents_crud.rs` | 1903 |
 | `src/server/routes/agents_setup.rs` | 1365 |

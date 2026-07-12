@@ -289,7 +289,7 @@ impl RoutineDiscordLogger {
             .is_some()
         {
             return self
-                .log_to_routine_target_with_ttl(
+                .log_actionable_to_routine_target_with_ttl(
                     Some(store),
                     Some(&routine.id),
                     Some(&routine.name),
@@ -307,7 +307,7 @@ impl RoutineDiscordLogger {
             return self
                 .log_to_target_with_ttl(
                     target,
-                    "notify",
+                    crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
                     STALE_PAUSED_REASON_CODE,
                     &session_key,
                     &message,
@@ -366,7 +366,7 @@ impl RoutineDiscordLogger {
     /// for periodic alerts (e.g. the stale-paused stall) that must not re-fire
     /// every tick (#3564).
     #[allow(clippy::too_many_arguments)]
-    async fn log_to_routine_target_with_ttl(
+    async fn log_actionable_to_routine_target_with_ttl(
         &self,
         store: Option<&RoutineStore>,
         routine_id: Option<&str>,
@@ -395,7 +395,7 @@ impl RoutineDiscordLogger {
 
         self.log_to_target_with_ttl(
             &target.target,
-            &target.bot,
+            crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
             reason_code,
             session_key,
             content,

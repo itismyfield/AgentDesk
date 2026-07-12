@@ -161,9 +161,9 @@
 | `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:231` | `src/server/routes/domains/agents.rs:56` |
 | `POST` | `/api/memory/recall` | `memory_api::memory_recall` | `src/server/routes/memory_api.rs:107` | `src/server/routes/domains/agents.rs:54` |
 | `POST` | `/api/memory/remember` | `memory_api::memory_remember` | `src/server/routes/memory_api.rs:136` | `src/server/routes/domains/agents.rs:55` |
-| `GET` | `/api/message-outbox/failed` | `message_outbox::list_failed` | `src/server/routes/message_outbox.rs:180` | `src/server/routes/domains/ops.rs:28` |
-| `POST` | `/api/message-outbox/failed/redrive` | `message_outbox::redrive_failed` | `src/server/routes/message_outbox.rs:215` | `src/server/routes/domains/ops.rs:33` |
-| `POST` | `/api/message-outbox/monitor-alerts` | `message_outbox::enqueue_monitor_alert` | `src/server/routes/message_outbox.rs:123` | `src/server/routes/domains/ops.rs:29` |
+| `GET` | `/api/message-outbox/failed` | `message_outbox::list_failed` | `src/server/routes/message_outbox.rs:194` | `src/server/routes/domains/ops.rs:28` |
+| `POST` | `/api/message-outbox/failed/redrive` | `message_outbox::redrive_failed` | `src/server/routes/message_outbox.rs:229` | `src/server/routes/domains/ops.rs:33` |
+| `POST` | `/api/message-outbox/monitor-alerts` | `message_outbox::enqueue_monitor_alert` | `src/server/routes/message_outbox.rs:137` | `src/server/routes/domains/ops.rs:29` |
 | `GET` | `/api/messages` | `messages::list_messages` | `src/server/routes/messages.rs:41` | `src/server/routes/domains/ops.rs:221` |
 | `POST` | `/api/messages` | `messages::create_message` | `src/server/routes/messages.rs:61` | `src/server/routes/domains/ops.rs:221` |
 | `GET` | `/api/offices` | `offices::list_offices` | `src/server/routes/offices.rs:58` | `src/server/routes/domains/admin.rs:16` |
@@ -300,4 +300,4 @@
 | `GET` | `/api/v1/tokens` | `tokens` | `src/server/routes/v1.rs:202` | `src/server/routes/v1.rs:119` |
 | `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:109` | `src/server/routes/domains/admin.rs:68` |
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:117` | `src/server/routes/domains/admin.rs:68` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:24` | `src/server/mod.rs:460` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:24` | `src/server/mod.rs:461` |

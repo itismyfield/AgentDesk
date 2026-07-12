@@ -35,7 +35,7 @@ fn failed_entry_alert(
     Ok(crate::db::auto_queue::EntryDispatchFailureAlert {
         target: target.to_string(),
         content,
-        bot: "notify".to_string(),
+        bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT.to_string(),
         source: "auto-queue".to_string(),
         reason_code: Some(FAILED_ENTRY_ALERT_REASON_CODE.to_string()),
         session_key: Some(session_key),

@@ -62,8 +62,9 @@ pub(super) async fn outbox_alert_target_pg(pg_pool: &PgPool) -> Option<String> {
 /// spawns a detached task for the DB work — resolving the
 /// `kanban_human_alert_channel_id` target and enqueueing one per-incident
 /// operator card — so the outbox drain loop never awaits a pool acquire on the
-/// alert path (#4260 dual r1, codex#1). Never propagates; a notify failure only
-/// logs. Returns the join handle of the spawned card task (`None` when the
+/// alert path (#4260 dual r1, codex#1). Never propagates; enqueue failure only
+/// logs. Delivery uses the #4449 announce-first/notify-fallback worker policy.
+/// Returns the join handle of the spawned card task (`None` when the
 /// recursion guard suppressed it) so tests can await deterministically;
 /// production callers drop it.
 pub(super) fn note_terminal_outbox_delivery_failure(
@@ -131,7 +132,7 @@ pub(super) fn note_terminal_outbox_delivery_failure(
             crate::services::message_outbox::OutboxMessage {
                 target: &target,
                 content: &card,
-                bot: "notify",
+                bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
                 source: OUTBOX_DELIVERY_ALERT_SOURCE,
                 reason_code: Some("outbox_delivery_failed"),
                 session_key: Some(&session_key),

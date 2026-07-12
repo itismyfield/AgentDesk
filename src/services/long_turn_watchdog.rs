@@ -225,7 +225,7 @@ async fn enqueue_alert(
         crate::services::message_outbox::OutboxMessage {
             target,
             content,
-            bot: "notify",
+            bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
             source: "long_turn_watchdog",
             reason_code: Some(LONG_TURN_ALERT_REASON_CODE),
             session_key: Some(LONG_TURN_ALERT_SESSION_KEY),

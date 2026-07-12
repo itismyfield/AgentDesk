@@ -394,7 +394,7 @@ pub async fn enqueue_alert_pg(pool: &PgPool, target: &str, content: &str) -> Res
         crate::services::message_outbox::OutboxMessage {
             target,
             content,
-            bot: "notify",
+            bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
             source: "slo_alerter",
             reason_code: Some("slo_threshold_breach"),
             session_key: None,
