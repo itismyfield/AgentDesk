@@ -31,6 +31,31 @@ pub(super) const MEMORY_RECALL_LAYER_NAME: &str = "memory_recall";
 pub(super) const MEMORY_RECALL_LAYER_SOURCE: &str = "memento";
 const ADK_PROMPT_MANIFEST_PREVIEW_MAX_BYTES: usize = 200;
 
+pub(super) fn prompt_manifest_layer(
+    layer_name: &str,
+    source: &str,
+    reason: Option<String>,
+    visibility: PromptContentVisibility,
+    content: &str,
+) -> PromptManifestLayer {
+    let enabled = !content.trim().is_empty();
+    let mut layer = PromptManifestLayer::from_content(
+        layer_name,
+        enabled,
+        Some(source),
+        reason,
+        visibility,
+        content.to_string(),
+    );
+    if visibility == PromptContentVisibility::UserDerived {
+        layer.redacted_preview = enabled.then(|| redacted_prompt_manifest_preview(content));
+        layer.full_content = None;
+    } else if !enabled {
+        layer.full_content = None;
+    }
+    layer
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RecoveryContextManifestInput<'a> {
     pub(crate) raw_context: &'a str,

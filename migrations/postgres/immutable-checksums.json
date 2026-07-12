@@ -450,6 +450,11 @@
       "path": "migrations/postgres/0087_scheduled_message_launch_commit_and_runtime_defer.sql",
       "sha256": "dffcc1786298a319875f7a1113b7c7d9a3ea538f2111537daef1f13dae0b2877",
       "version": 87
+    },
+    {
+      "path": "migrations/postgres/0088_prompt_manifest_total_input_bytes.sql",
+      "sha256": "0ccba730df1a6df1efd0c0262c81aa21c0cc5607e8b0bd1aeefc6e3fe6f23821",
+      "version": 88
     }
   ],
   "version": 1

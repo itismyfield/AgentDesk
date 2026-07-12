@@ -84,7 +84,28 @@ fn prompt_manifest_log_records_hash_metadata_without_full_content() {
 
     // Exactly the metadata logged at info level — no full_content field exists.
     let layer_hashes = format!("{:?}", prompt_manifest_layer_hashes(&manifest));
-    assert_eq!(manifest.layers.len(), 3);
+    assert_eq!(manifest.layers.len(), 7);
+    assert_eq!(manifest.layer_count, 6);
+    assert_eq!(
+        manifest.total_input_bytes,
+        i64::try_from(built.system_prompt.len()).unwrap()
+    );
+    for required in [
+        "base_discord",
+        "tool_output_efficiency",
+        "context_compression",
+        "api_friction_guidance",
+        "current_task",
+        "dispatch_contract",
+    ] {
+        assert!(
+            manifest
+                .layers
+                .iter()
+                .any(|layer| layer.enabled && layer.layer_name == required),
+            "missing enabled layer {required}"
+        );
+    }
     assert_eq!(manifest.turn_id, "turn-current-task-test");
     assert!(layer_hashes.contains("dispatch_contract"));
     assert!(layer_hashes.contains(&dispatch_layer.content_sha256));
@@ -113,7 +134,7 @@ fn current_task_dispatch_layer_is_recorded_with_redacted_preview_only() {
 
     assert!(built.system_prompt.contains("[Current Task]"));
     let manifest = built.manifest.expect("prompt manifest");
-    assert_eq!(manifest.layers.len(), 3);
+    assert_eq!(manifest.layers.len(), 7);
     let layer = manifest
         .layers
         .iter()
@@ -132,12 +153,64 @@ fn current_task_dispatch_layer_is_recorded_with_redacted_preview_only() {
     let preview = layer.redacted_preview.as_deref().unwrap();
     assert!(preview.contains("[redacted-email]"));
     assert!(preview.contains("token=***"));
+    assert!(!preview.contains("[Dispatch Contract]"));
     assert!(!preview.contains("user@example.com"));
     assert!(!preview.contains("super-secret-123"));
 
     let serialized = serde_json::to_value(layer).unwrap();
     assert_eq!(serialized["enabled"], true);
     assert_eq!(serialized["full_content"], serde_json::Value::Null);
+}
+
+#[test]
+fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
+    let binding = test_role_binding("manifest-inventory-agent");
+    let built = build_system_prompt_with_manifest(
+        "ctx",
+        &[],
+        "/tmp",
+        ChannelId::new(1),
+        "tok",
+        Some(&binding),
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        Some("[Shared Agent Knowledge]\nimportant invariant"),
+        Some("- memory.md: durable fact"),
+        None,
+        false,
+        None,
+        None,
+        Some("turn-layer-inventory"),
+    );
+
+    let manifest = built.manifest.expect("prompt manifest");
+    for (name, expected_fragment) in [
+        (
+            "base_discord",
+            "You are chatting with a user through Discord.",
+        ),
+        ("shared_knowledge", "important invariant"),
+        ("longterm_catalog", "durable fact"),
+    ] {
+        let layer = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.layer_name == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(layer.enabled, "{name} should describe injected content");
+        let recorded = layer
+            .full_content
+            .as_deref()
+            .or(layer.redacted_preview.as_deref())
+            .expect("recorded content");
+        assert!(recorded.contains(expected_fragment));
+    }
+    assert_eq!(
+        manifest.layer_count as usize,
+        manifest.layers.iter().filter(|layer| layer.enabled).count()
+    );
 }
 
 #[test]
@@ -150,7 +223,7 @@ fn current_task_freeform_layer_uses_discord_message_source() {
     let built = build_prompt_with_manifest_for(&current_task, None);
 
     let manifest = built.manifest.expect("prompt manifest");
-    assert_eq!(manifest.layers.len(), 3);
+    assert_eq!(manifest.layers.len(), 7);
     let layer = manifest
         .layers
         .iter()
@@ -378,6 +451,10 @@ fn build_prompt_manifest_includes_recovery_context_layer() {
     );
 
     let manifest = built.manifest.expect("prompt manifest");
+    assert_eq!(
+        manifest.total_input_bytes,
+        i64::try_from(built.system_prompt.len() + raw_context.len()).unwrap()
+    );
     let layer = manifest
         .layers
         .iter()

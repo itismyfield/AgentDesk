@@ -684,6 +684,12 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
         .into_iter()
         .map(|(trigger_type, count)| (trigger_type, json!(count)))
         .collect::<serde_json::Map<String, Value>>();
+    let full_turns = FULL_CONTEXT_TURNS.load(Ordering::Relaxed);
+    let full_bytes = FULL_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
+    let identity_turns = IDENTITY_CONTEXT_TURNS.load(Ordering::Relaxed);
+    let identity_bytes = IDENTITY_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
+    let identity_empty_turns = IDENTITY_EMPTY_CONTEXT_TURNS.load(Ordering::Relaxed);
+    let skipped_turns = SKIPPED_CONTEXT_TURNS.load(Ordering::Relaxed);
 
     json!({
         "generated_at": now.with_timezone(&kst).to_rfc3339(),
@@ -694,8 +700,22 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
         "searchObservability": {
             "feedback_counts_by_trigger_type": feedback_trigger_json,
         },
+        "recall_context": {
+            "full_turns": full_turns,
+            "full_bytes": full_bytes,
+            "full_average_bytes": average_bytes(full_bytes, full_turns),
+            "identity_only_turns": identity_turns,
+            "identity_only_bytes": identity_bytes,
+            "identity_only_average_bytes": average_bytes(identity_bytes, identity_turns),
+            "identity_only_empty_turns": identity_empty_turns,
+            "skipped_turns": skipped_turns,
+        },
         "hours": hours,
     })
+}
+
+fn average_bytes(total: u64, turns: u64) -> u64 {
+    if turns == 0 { 0 } else { total / turns }
 }
 
 fn normalize_feedback_trigger_type(trigger_type: &str) -> String {
@@ -714,6 +734,7 @@ static FULL_CONTEXT_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static FULL_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
 static IDENTITY_CONTEXT_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static IDENTITY_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
+static IDENTITY_EMPTY_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
 static SKIPPED_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
@@ -732,6 +753,9 @@ pub(crate) fn note_recall_context_size(bucket: RecallSizeBucket, bytes: usize) {
         RecallSizeBucket::IdentityOnly => {
             IDENTITY_CONTEXT_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
             IDENTITY_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
+            if bytes == 0 {
+                IDENTITY_EMPTY_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
+            }
         }
         RecallSizeBucket::Skipped => {
             SKIPPED_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
@@ -832,5 +856,29 @@ mod forget_ratio_tests {
         // The empty key is normalised to a sentinel; observation still
         // increments forget_count so downstream callers see the signal.
         assert!(snapshot.forget_count >= 1);
+    }
+
+    #[test]
+    fn identity_only_empty_recall_is_exposed_in_stats() {
+        let before =
+            memento_call_metrics_snapshot(1)["recall_context"]["identity_only_empty_turns"]
+                .as_u64()
+                .unwrap_or(0);
+
+        note_recall_context_size(RecallSizeBucket::IdentityOnly, 0);
+
+        let recall_context = memento_call_metrics_snapshot(1)["recall_context"].clone();
+        assert!(
+            recall_context["identity_only_empty_turns"]
+                .as_u64()
+                .unwrap_or(0)
+                >= before.saturating_add(1)
+        );
+        assert!(
+            recall_context["identity_only_turns"].as_u64().unwrap_or(0)
+                >= recall_context["identity_only_empty_turns"]
+                    .as_u64()
+                    .unwrap_or(0)
+        );
     }
 }

@@ -75,6 +75,7 @@ impl PromptManifestBuilder {
             channel_id,
             dispatch_id: self.dispatch_id,
             profile: self.profile,
+            total_input_bytes: 0,
             total_input_tokens_est: 0,
             layer_count: 0,
             layers: self.layers,

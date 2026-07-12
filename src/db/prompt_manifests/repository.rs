@@ -50,8 +50,10 @@ async fn save_prompt_manifest_pg(pool: &PgPool, manifest: &PromptManifest) -> Re
     let total_input_tokens_est = manifest
         .layers
         .iter()
+        .filter(|layer| layer.enabled)
         .fold(0_i64, |sum, layer| sum.saturating_add(layer.tokens_est));
-    let layer_count = usize_to_i64(manifest.layers.len());
+    let total_input_bytes = manifest.total_input_bytes.max(0);
+    let layer_count = usize_to_i64(manifest.layers.iter().filter(|layer| layer.enabled).count());
 
     let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO prompt_manifests (
@@ -59,14 +61,16 @@ async fn save_prompt_manifest_pg(pool: &PgPool, manifest: &PromptManifest) -> Re
             channel_id,
             dispatch_id,
             profile,
+            total_input_bytes,
             total_input_tokens_est,
             layer_count
-         ) VALUES ($1, $2, $3, $4, $5, $6)
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (turn_id) DO UPDATE SET
             created_at = NOW(),
             channel_id = EXCLUDED.channel_id,
             dispatch_id = EXCLUDED.dispatch_id,
             profile = EXCLUDED.profile,
+            total_input_bytes = EXCLUDED.total_input_bytes,
             total_input_tokens_est = EXCLUDED.total_input_tokens_est,
             layer_count = EXCLUDED.layer_count
          RETURNING id",
@@ -75,6 +79,7 @@ async fn save_prompt_manifest_pg(pool: &PgPool, manifest: &PromptManifest) -> Re
     .bind(channel_id)
     .bind(normalized_opt(manifest.dispatch_id.as_deref()))
     .bind(normalized_opt(manifest.profile.as_deref()))
+    .bind(total_input_bytes)
     .bind(total_input_tokens_est)
     .bind(layer_count)
     .fetch_one(&mut *tx)
@@ -186,6 +191,7 @@ async fn fetch_prompt_manifest_pg(pool: &PgPool, turn_id: &str) -> Result<Option
             channel_id,
             dispatch_id,
             profile,
+            total_input_bytes,
             total_input_tokens_est,
             layer_count
          FROM prompt_manifests
@@ -210,6 +216,7 @@ async fn fetch_prompt_manifest_pg(pool: &PgPool, turn_id: &str) -> Result<Option
         channel_id: row.try_get("channel_id")?,
         dispatch_id: row.try_get("dispatch_id")?,
         profile: row.try_get("profile")?,
+        total_input_bytes: row.try_get("total_input_bytes")?,
         total_input_tokens_est: row.try_get("total_input_tokens_est")?,
         layer_count: row.try_get("layer_count")?,
         layers,

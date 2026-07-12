@@ -33,7 +33,11 @@ pub(super) fn render_prompt_manifest_report(
     push_kv(
         &mut out,
         "total input estimate",
-        &format!("{} tokens", format_tokens(manifest.total_input_tokens_est)),
+        &format!(
+            "{} bytes / {} tokens",
+            manifest.total_input_bytes,
+            format_tokens(manifest.total_input_tokens_est)
+        ),
     );
     push_kv(
         &mut out,

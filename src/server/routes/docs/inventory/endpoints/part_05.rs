@@ -356,7 +356,20 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({"query": {"hours": 24}}),
-            json!({"hours": 24, "calls": [{"hour": "2026-07-08T00:00:00Z", "logical_calls": 12, "dedup_hits": 3}]}),
+            json!({
+                "window_hours": 24,
+                "summary": {"logical_calls": 12, "dedup_hits": 3},
+                "recall_context": {
+                    "full_turns": 8,
+                    "full_bytes": 4096,
+                    "full_average_bytes": 512,
+                    "identity_only_turns": 4,
+                    "identity_only_bytes": 384,
+                    "identity_only_average_bytes": 96,
+                    "identity_only_empty_turns": 1,
+                    "skipped_turns": 2
+                }
+            }),
         ),
         ep(
             "GET",

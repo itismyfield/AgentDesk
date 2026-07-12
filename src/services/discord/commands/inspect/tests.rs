@@ -15,6 +15,7 @@ fn test_manifest() -> PromptManifest {
         channel_id: "1".to_string(),
         dispatch_id: None,
         profile: Some("Full".to_string()),
+        total_input_bytes: 1_200,
         total_input_tokens_est: 1_600,
         layer_count: 2,
         layers: vec![

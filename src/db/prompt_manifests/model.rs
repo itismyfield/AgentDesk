@@ -58,6 +58,8 @@ pub struct PromptManifest {
     pub channel_id: String,
     pub dispatch_id: Option<String>,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub total_input_bytes: i64,
     pub total_input_tokens_est: i64,
     pub layer_count: i64,
     pub layers: Vec<PromptManifestLayer>,
@@ -65,11 +67,19 @@ pub struct PromptManifest {
 
 impl PromptManifest {
     pub fn recompute_totals(&mut self) {
+        self.total_input_bytes = self
+            .layers
+            .iter()
+            .filter(|layer| layer.enabled)
+            .fold(0_i64, |sum, layer| {
+                sum.saturating_add(layer.original_bytes.unwrap_or(layer.chars).max(0))
+            });
         self.total_input_tokens_est = self
             .layers
             .iter()
+            .filter(|layer| layer.enabled)
             .fold(0_i64, |sum, layer| sum.saturating_add(layer.tokens_est));
-        self.layer_count = usize_to_i64(self.layers.len());
+        self.layer_count = usize_to_i64(self.layers.iter().filter(|layer| layer.enabled).count());
     }
 }
 

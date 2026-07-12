@@ -128,10 +128,10 @@
 | `db::meetings` | `src/db/meetings.rs` | 621 | 621 | 0 |  |
 | `db::postgres` | `src/db/postgres.rs` | 2699 | 1280 | 1419 | giant-file |
 | `db::prompt_manifests` | `src/db/prompt_manifests/mod.rs` | 26 | 26 | 0 |  |
-| `db::prompt_manifests::builder` | `src/db/prompt_manifests/builder.rs` | 89 | 89 | 0 |  |
-| `db::prompt_manifests::model` | `src/db/prompt_manifests/model.rs` | 181 | 181 | 0 |  |
+| `db::prompt_manifests::builder` | `src/db/prompt_manifests/builder.rs` | 90 | 90 | 0 |  |
+| `db::prompt_manifests::model` | `src/db/prompt_manifests/model.rs` | 191 | 191 | 0 |  |
 | `db::prompt_manifests::redaction` | `src/db/prompt_manifests/redaction.rs` | 77 | 77 | 0 |  |
-| `db::prompt_manifests::repository` | `src/db/prompt_manifests/repository.rs` | 268 | 268 | 0 |  |
+| `db::prompt_manifests::repository` | `src/db/prompt_manifests/repository.rs` | 275 | 275 | 0 |  |
 | `db::prompt_manifests::retention` | `src/db/prompt_manifests/retention.rs` | 96 | 96 | 0 |  |
 | `db::prompt_manifests::storage_stats` | `src/db/prompt_manifests/storage_stats.rs` | 122 | 122 | 0 |  |
 | `db::relay_dead_letter` | `src/db/relay_dead_letter.rs` | 250 | 133 | 117 |  |
@@ -258,7 +258,7 @@
 | `server::routes::docs::inventory::endpoints::part_02` | `src/server/routes/docs/inventory/endpoints/part_02.rs` | 684 | 684 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_03` | `src/server/routes/docs/inventory/endpoints/part_03.rs` | 646 | 646 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_04` | `src/server/routes/docs/inventory/endpoints/part_04.rs` | 719 | 719 | 0 |  |
-| `server::routes::docs::inventory::endpoints::part_05` | `src/server/routes/docs/inventory/endpoints/part_05.rs` | 719 | 719 | 0 |  |
+| `server::routes::docs::inventory::endpoints::part_05` | `src/server/routes/docs/inventory/endpoints/part_05.rs` | 732 | 732 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_06` | `src/server/routes/docs/inventory/endpoints/part_06.rs` | 749 | 749 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_07` | `src/server/routes/docs/inventory/endpoints/part_07.rs` | 679 | 679 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_08` | `src/server/routes/docs/inventory/endpoints/part_08.rs` | 739 | 739 | 0 |  |
@@ -450,7 +450,7 @@
 | `services::discord::commands::inspect::query` | `src/services/discord/commands/inspect/query.rs` | 153 | 153 | 0 |  |
 | `services::discord::commands::inspect::render_context` | `src/services/discord/commands/inspect/render_context.rs` | 65 | 65 | 0 |  |
 | `services::discord::commands::inspect::render_last` | `src/services/discord/commands/inspect/render_last.rs` | 54 | 54 | 0 |  |
-| `services::discord::commands::inspect::render_prompt` | `src/services/discord/commands/inspect/render_prompt.rs` | 177 | 177 | 0 |  |
+| `services::discord::commands::inspect::render_prompt` | `src/services/discord/commands/inspect/render_prompt.rs` | 181 | 181 | 0 |  |
 | `services::discord::commands::inspect::render_recovery` | `src/services/discord/commands/inspect/render_recovery.rs` | 60 | 60 | 0 |  |
 | `services::discord::commands::inspect::render_session` | `src/services/discord/commands/inspect/render_session.rs` | 37 | 37 | 0 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 102 | 102 | 0 |  |
@@ -580,10 +580,10 @@
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
 | `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 270 | 270 | 0 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1315 | 1020 | 295 | giant-file |
-| `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 436 | 436 | 0 |  |
+| `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 597 | 597 | 0 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
 | `services::discord::prompt_builder::layer_rendering` | `src/services/discord/prompt_builder/layer_rendering.rs` | 507 | 307 | 200 |  |
-| `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 334 | 334 | 0 |  |
+| `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 359 | 359 | 0 |  |
 | `services::discord::prompt_builder::memory_guidance` | `src/services/discord/prompt_builder/memory_guidance.rs` | 267 | 124 | 143 |  |
 | `services::discord::prompt_builder::section_dedupe` | `src/services/discord/prompt_builder/section_dedupe.rs` | 159 | 105 | 54 |  |
 | `services::discord::queue_dispatch` | `src/services/discord/queue_dispatch.rs` | 50 | 50 | 0 |  |
@@ -940,7 +940,7 @@
 | `services::memory::local` | `src/services/memory/local.rs` | 85 | 45 | 40 |  |
 | `services::memory::memento` | `src/services/memory/memento.rs` | 2122 | 1893 | 229 | giant-file |
 | `services::memory::memento_instructions_cache` | `src/services/memory/memento_instructions_cache.rs` | 241 | 143 | 98 |  |
-| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 836 | 752 | 84 |  |
+| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 884 | 776 | 108 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 315 | 315 | 0 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 1420 | 863 | 557 |  |
 | `services::message_outbox_recovery` | `src/services/message_outbox_recovery.rs` | 166 | 166 | 0 |  |

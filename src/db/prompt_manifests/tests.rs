@@ -92,6 +92,7 @@ fn prompt_manifest_builder_separates_content_visibility() {
     assert_eq!(manifest.dispatch_id.as_deref(), Some("dispatch-1"));
     assert_eq!(manifest.profile.as_deref(), Some("project-agentdesk"));
     assert_eq!(manifest.layer_count, 2);
+    assert_eq!(manifest.total_input_bytes, 26);
     assert_eq!(manifest.total_input_tokens_est, 6);
     assert_eq!(
         manifest.layers[0].content_visibility,
@@ -108,6 +109,34 @@ fn prompt_manifest_builder_separates_content_visibility() {
         manifest.layers[1].redacted_preview.as_deref(),
         Some("sensitive user content")
     );
+}
+
+#[test]
+fn prompt_manifest_totals_exclude_disabled_layers() {
+    let manifest = PromptManifestBuilder::new("turn-enabled-only", "channel-1")
+        .content_layer(
+            "enabled",
+            true,
+            Some("test"),
+            Some("present"),
+            PromptContentVisibility::AdkProvided,
+            "12345678",
+        )
+        .content_layer(
+            "disabled",
+            false,
+            Some("test"),
+            Some("absent"),
+            PromptContentVisibility::AdkProvided,
+            "this disabled body must not affect totals",
+        )
+        .build()
+        .expect("manifest");
+
+    assert_eq!(manifest.layers.len(), 2);
+    assert_eq!(manifest.layer_count, 1);
+    assert_eq!(manifest.total_input_bytes, 8);
+    assert_eq!(manifest.total_input_tokens_est, 2);
 }
 
 #[tokio::test]
@@ -152,6 +181,7 @@ async fn prompt_manifest_save_fetch_round_trip_pg() {
     assert_eq!(fetched.id, Some(manifest_id));
     assert_eq!(fetched.turn_id, "turn-round-trip");
     assert_eq!(fetched.channel_id, "1499610614904131594");
+    assert_eq!(fetched.total_input_bytes, manifest.total_input_bytes);
     assert_eq!(fetched.dispatch_id.as_deref(), Some("dispatch-1"));
     assert_eq!(fetched.profile.as_deref(), Some("project-agentdesk"));
     assert_eq!(fetched.layer_count, 2);
