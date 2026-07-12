@@ -563,7 +563,10 @@ src/
 │   │   │   │   ├── codex_tui_replay.rs
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── post_adoption_guard_tests.rs
+│   │   │   │   ├── post_adoption_guard_tests.rs
+│   │   │   │   └── watcher_claim.rs
+│   │   │   ├── rebind_runtime/
+│   │   │   │   └── codex_relay_generation.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs

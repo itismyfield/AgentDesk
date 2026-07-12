@@ -193,14 +193,18 @@ fn crossed_codex_turn_forces_watcher_replacement_before_normal_reuse() {
             "crossed-turn production wiring lost required guard: {required}"
         );
     }
-    let branch = parent
-        .find("let claim = if discard_restored_render_seed")
+    assert!(parent.contains("claim_rebind_watcher("));
+    assert!(parent.contains("discard_restored_render_seed,"));
+
+    let helper = include_str!("watcher_claim.rs");
+    let branch = helper
+        .find("if crossed_codex_turn")
         .expect("crossed-turn watcher claim branch");
-    let forced = parent[branch..]
+    let forced = helper[branch..]
         .find("claim_or_replace_watcher")
         .map(|relative| branch + relative)
         .expect("crossed Codex turn must force watcher replacement");
-    let normal = parent[forced..]
+    let normal = helper[forced..]
         .find("claim_or_reuse_watcher")
         .map(|relative| forced + relative)
         .expect("ordinary rebind must retain healthy-watcher reuse");

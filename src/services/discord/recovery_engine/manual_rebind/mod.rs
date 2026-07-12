@@ -24,6 +24,8 @@ use std::sync::{Mutex, OnceLock};
 mod adoption;
 mod codex_tui_replay;
 mod episode_handoff;
+mod watcher_claim;
+use watcher_claim::claim_rebind_watcher;
 
 pub(crate) use self::adoption::{
     claude_tui_force_initial_offset_for_adopted_transcript,
@@ -848,10 +850,6 @@ async fn rebind_inflight_for_channel_inner(
         )
         .await?;
 
-    // #1135: claim with the single-watcher policy. A live watcher for this
-    // same tmux session is reused; a cancelled same-session handle or a
-    // different-session channel incumbent is replaced so recovery is not
-    // blocked by stale registry state.
     let (watcher_spawned, watcher_replaced) = {
         #[cfg(unix)]
         {
@@ -873,27 +871,14 @@ async fn rebind_inflight_for_channel_inner(
                 turn_delivered: turn_delivered.clone(),
                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
             };
-            // Normal rebinds reuse a healthy same-session watcher. A proven
-            // crossed Codex turn must replace it so neither its stale render
-            // seed nor its detached converter remains authoritative.
-            let claim = if discard_restored_render_seed {
-                super::tmux::claim_or_replace_watcher(
-                    &shared.tmux_watchers,
-                    discord_channel_id,
-                    handle,
-                    provider,
-                    "recovery_restore_inflight_crossed_codex_turn",
-                )
-            } else {
-                super::tmux::claim_or_reuse_watcher(
-                    &shared.tmux_watchers,
-                    discord_channel_id,
-                    handle,
-                    provider,
-                    "recovery_restore_inflight",
-                )
-            };
-            if claim.should_spawn() {
+            let (watcher_should_spawn, watcher_replaced) = claim_rebind_watcher(
+                &shared.tmux_watchers,
+                discord_channel_id,
+                handle,
+                provider,
+                discard_restored_render_seed,
+            );
+            if watcher_should_spawn {
                 if let Some(PendingCodexTuiRebindRelay {
                     rollout_path,
                     raw_start_offset,
@@ -985,7 +970,7 @@ async fn rebind_inflight_for_channel_inner(
                     ),
                 );
             }
-            (claim.should_spawn(), claim.replaced_existing())
+            (watcher_should_spawn, watcher_replaced)
         }
         #[cfg(not(unix))]
         {

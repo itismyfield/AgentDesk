@@ -207,7 +207,7 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2052 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2077 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
@@ -220,7 +220,9 @@
     `watchers/lifecycle/activity.rs`; -32 from #3898 removing the false-positive
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
-    `TmuxDeathLifecycleDecision` plumbing).
+    `TmuxDeathLifecycleDecision` plumbing; +25 from #4455 adding the explicit
+    force-replace claim action used only when Codex rebind proves that a live
+    same-output watcher still belongs to an earlier provider turn).
   - `src/services/discord/tmux.rs` (1624 lines; test-only #4253 wires the
     deterministic task-notification-kind disk-save/reload/restart roundtrip
     module, with no production-LoC or runtime behavior change; +11 from #4380 broadening the
@@ -267,7 +269,9 @@
     distinct `ActiveTurnKind::MonitorAutoTurn` marker so stale synthetic reclaim
     excludes live monitor relays while preserving background queue-yield behavior;
     +6 from #3818 sanitizing restored/orphan subagent-notification placeholders;
-    +1 from #3384 restored-seed undelivered-body discard guard;
+    +1 from #3384 restored-seed undelivered-body discard guard; +0 from #4455
+    re-exporting the force-replace claim helper while its implementation stays
+    in `watchers/lifecycle.rs`;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
     status/footer stripping in the placeholder suppression decisions;
     -15 from #3717 footer-only placeholder target preservation plus status-strip
@@ -1207,8 +1211,8 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (964 prod lines
-    after #4465; remains below the giant threshold. Keeps the manual rebind entrypoints,
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (995 prod lines
+    after #4455; remains below the giant threshold. Keeps the manual rebind entrypoints,
     rollback carrier, session refresh, active-turn re-registration hook, and
     watcher claim/spawn path. #4465's durable automatic lane performs the
     blocking exact-episode adoption on `spawn_blocking`, retains that same
@@ -1216,13 +1220,19 @@
     mutation and watcher claim/spawn, and commits the episode-scoped readoption
     marker plus in-memory ledger before releasing authority. The
     `episode_handoff.rs` child never waits for a flock while holding
-    `shared.core`.
+    `shared.core`. #4455 keeps the crossed-turn watcher selection in the
+    30-line `watcher_claim.rs` child so the parent stays below the threshold.
     `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs`
-    (233 prod lines) owns the Codex-TUI replay/resume helper cluster, and
-    `src/services/discord/recovery_engine/manual_rebind/adoption.rs` (77 prod
+    (363 prod lines) owns the Codex-TUI replay/resume helper cluster, and
+    `src/services/discord/recovery_engine/manual_rebind/adoption.rs` (95 prod
     lines) owns transcript-adoption offset and binding decisions. The retired
     `manual_rebind.rs` giant registration was removed from
     scripts/giant_file_registry.toml.)
+  - `src/services/discord/recovery_engine/rebind_runtime.rs` (980 prod lines
+    after #4455; below the giant threshold) owns provider runtime resolution
+    and normalized Codex relay conversion. Its 89-line
+    `rebind_runtime/codex_relay_generation.rs` child owns the per-path
+    generation registry, prepare/truncate gate, and fenced JSONL write.
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
