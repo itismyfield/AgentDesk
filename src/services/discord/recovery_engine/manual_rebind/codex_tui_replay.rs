@@ -28,6 +28,55 @@ pub(crate) fn codex_tui_existing_normalized_relay_resume_path(
     let relay_len = std::fs::metadata(&relay_path).ok()?.len();
     (relay_len > 0).then_some(relay_path)
 }
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexTuiRebindPromptReplayEvidence {
+    pub(crate) replay_start_offset: Option<u64>,
+    pub(crate) latest_matching_prompt_offset: Option<u64>,
+    pub(crate) latest_user_prompt_offset: Option<u64>,
+}
+
+impl CodexTuiRebindPromptReplayEvidence {
+    pub(crate) fn later_user_prompt_after_match(self) -> bool {
+        matches!(
+            (
+                self.latest_matching_prompt_offset,
+                self.latest_user_prompt_offset
+            ),
+            (Some(matching), Some(latest)) if latest > matching
+        )
+    }
+}
+
+/// Detect that an existing normalized-relay inflight belongs to an earlier
+/// Codex provider turn than the latest user prompt in the live rollout.
+///
+/// The Codex rollout marker is a monotonic cursor and can advance to EOF after
+/// the *same* turn completes. It therefore cannot prove a turn transition by
+/// itself. A later user-prompt entry after the persisted row's matching prompt
+/// is the conservative boundary proof used here (#4455).
+pub(crate) fn codex_tui_rebind_crossed_provider_turn(
+    tmux_session_name: &str,
+    existing_inflight: Option<&inflight::InflightTurnState>,
+    prompt_replay_evidence: CodexTuiRebindPromptReplayEvidence,
+) -> bool {
+    let Some(existing) = existing_inflight else {
+        return false;
+    };
+    if existing.runtime_kind != Some(RuntimeHandoffKind::CodexTui) {
+        return false;
+    }
+    let normalized_relay =
+        crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
+    if existing
+        .output_path
+        .as_deref()
+        .is_none_or(|path| std::path::Path::new(path) != std::path::Path::new(&normalized_relay))
+    {
+        return false;
+    }
+    prompt_replay_evidence.later_user_prompt_after_match()
+}
 pub(crate) fn codex_tui_rebind_raw_start_offset(
     tmux_session_name: &str,
     rollout_path: &str,
@@ -87,17 +136,28 @@ pub(crate) fn codex_tui_rebind_prompt_replay_start_offset(
     rollout_path: &str,
     prompt_text: &str,
 ) -> Option<u64> {
+    codex_tui_rebind_prompt_replay_evidence(rollout_path, prompt_text).replay_start_offset
+}
+
+pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
+    rollout_path: &str,
+    prompt_text: &str,
+) -> CodexTuiRebindPromptReplayEvidence {
     use std::io::BufRead;
 
     let prompt_text = prompt_text.trim();
-    let file = std::fs::File::open(rollout_path).ok()?;
+    let Ok(file) = std::fs::File::open(rollout_path) else {
+        return CodexTuiRebindPromptReplayEvidence::default();
+    };
     let mut reader = std::io::BufReader::new(file);
     let mut offset = 0_u64;
     let mut latest_user_prompt_offset = None;
     let mut latest_matching_prompt_offset = None;
     loop {
         let mut line = Vec::new();
-        let read = reader.read_until(b'\n', &mut line).ok()?;
+        let Ok(read) = reader.read_until(b'\n', &mut line) else {
+            return CodexTuiRebindPromptReplayEvidence::default();
+        };
         if read == 0 {
             break;
         }
@@ -119,7 +179,11 @@ pub(crate) fn codex_tui_rebind_prompt_replay_start_offset(
             latest_matching_prompt_offset = Some(offset);
         }
     }
-    latest_matching_prompt_offset.or(latest_user_prompt_offset)
+    CodexTuiRebindPromptReplayEvidence {
+        replay_start_offset: latest_matching_prompt_offset.or(latest_user_prompt_offset),
+        latest_matching_prompt_offset,
+        latest_user_prompt_offset,
+    }
 }
 pub(crate) fn codex_tui_existing_inflight_cursor_is_raw_rollout(
     tmux_session_name: &str,
@@ -469,6 +533,102 @@ mod tests {
             ),
             0,
             "if no prompt boundary can be recovered, replay from the beginning with normalized-event dedupe rather than skipping to EOF"
+        );
+    }
+
+    /// Production shape from #4455: a long-lived normalized relay row still
+    /// points at the prior Discord card while the rollout contains a later
+    /// warm-followup prompt. The reattach must not restore the old card/body
+    /// seed. A same-turn completion after the old prompt is not enough proof.
+    #[test]
+    fn normalized_rebind_detects_later_rollout_user_prompt() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux = "AgentDesk-codex-adk-cdx-4455";
+        let normalized_relay = crate::services::tmux_common::session_temp_path(tmux, "jsonl");
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            1_479_671_301_387_059_200,
+            Some("adk-cdx".to_string()),
+            343_742_347_365_974_026,
+            1_525_345_488_264_499_270,
+            1_525_358_225_392_664_636,
+            "initial external prompt".to_string(),
+            Some("provider-session".to_string()),
+            Some(tmux.to_string()),
+            Some(normalized_relay),
+            None,
+            0,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        state.full_response = "old card body plus timeout".to_string();
+
+        let rollout = tmp.path().join("rollout.jsonl");
+        let old_prompt = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "initial external prompt"}],
+                "id": "old-user"
+            }
+        });
+        let completion = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "old response"}],
+                "id": "old-assistant"
+            }
+        });
+        let later_prompt = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue with the next issue"}],
+                "id": "later-user"
+            }
+        });
+        std::fs::write(
+            &rollout,
+            format!("{old_prompt}\n{completion}\n{later_prompt}\n"),
+        )
+        .expect("write multi-turn rollout");
+        let evidence = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            "initial external prompt",
+        );
+        assert!(evidence.later_user_prompt_after_match());
+        assert!(codex_tui_rebind_crossed_provider_turn(
+            tmux,
+            Some(&state),
+            evidence,
+        ));
+        let unmatched_evidence =
+            codex_tui_rebind_prompt_replay_evidence(rollout.to_str().unwrap(), "missing prompt");
+        assert!(
+            !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), unmatched_evidence),
+            "a later user entry without a matching persisted prompt is not enough proof to discard an existing render seed"
+        );
+
+        std::fs::write(&rollout, format!("{old_prompt}\n{completion}\n"))
+            .expect("write same-turn rollout");
+        let same_turn_evidence = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            "initial external prompt",
+        );
+        assert!(
+            !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), same_turn_evidence,),
+            "a same-turn completion and advanced EOF cursor must preserve its render seed"
+        );
+
+        state.output_path = Some("/tmp/raw-codex-rollout.jsonl".to_string());
+        assert!(
+            !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), evidence,),
+            "raw-rollout rows already carry their own monotonic cursor and do not restore a normalized render seed"
         );
     }
 

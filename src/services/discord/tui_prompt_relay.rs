@@ -122,7 +122,7 @@ use self::synthetic_start::{
 #[allow(unused_imports)]
 use self::synthetic_start::{
     codex_ownerless_external_input_inflight_needs_rollout_recovery,
-    finish_tui_direct_synthetic_turn_if_current, wait_for_tui_direct_watcher_synthetic_claim,
+    finish_tui_direct_synthetic_turn_if_current, wait_for_tui_direct_synthetic_non_bridge_claim,
 };
 #[cfg(test)]
 use self::synthetic_start::{
