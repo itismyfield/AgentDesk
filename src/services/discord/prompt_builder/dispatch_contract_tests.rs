@@ -937,6 +937,14 @@ fn full_memento_prompt_carries_tool_feedback_contract() {
     ));
     // Deferred-tool loading instruction.
     assert!(prompt.contains("ToolSearch `select:mcp__memento__tool_feedback`"));
+    assert_eq!(
+        prompt
+            .matches(
+                "Do not call `context` or `recall` solely because Memento server instructions mention session start"
+            )
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -944,7 +952,9 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
     // #4306: the tool_feedback contract lives inside the Full-only Proactive
     // Memory Guidance block. ReviewLite/Lite must show zero output change — the
     // whole block (and thus the contract) stays absent even with the memento
-    // backend selected and the MCP available.
+    // backend selected and the MCP available. The compact recall-ownership
+    // override is intentionally retained so MCP SessionStart instructions do
+    // not trigger a second automatic lookup.
     let settings = ResolvedMemorySettings {
         backend: MemoryBackendKind::Memento,
         ..ResolvedMemorySettings::default()
@@ -978,6 +988,15 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
         assert!(
             !prompt.contains("mcp__memento__tool_feedback"),
             "{profile:?} prompt must not carry the tool_feedback contract, got: {prompt}"
+        );
+        assert!(prompt.contains("[Memory Recall Ownership]"));
+        assert_eq!(
+            prompt
+                .matches(
+                    "Do not call `context` or `recall` solely because Memento server instructions mention session start"
+                )
+                .count(),
+            1
         );
     }
 }
