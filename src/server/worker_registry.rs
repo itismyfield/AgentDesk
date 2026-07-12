@@ -343,6 +343,7 @@ enum ServerWorkerId {
     RateLimitSync,
     MaintenanceScheduler,
     MessageOutbox,
+    ScheduledMessages,
     DispatchOutbox,
     DmReplyRetry,
     WsBatchFlusher,
@@ -451,7 +452,7 @@ pub(crate) struct WorkerSpec {
     pub(crate) notes: &'static str,
 }
 
-pub(crate) const WORKER_SPECS: [WorkerSpec; 11] = [
+pub(crate) const WORKER_SPECS: [WorkerSpec; 12] = [
     WorkerSpec {
         id: ServerWorkerId::GithubSync,
         name: "github_sync_loop",
@@ -526,6 +527,21 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 11] = [
         execution_scope: WorkerExecutionScope::LeaderOnly,
         health_owner: "message_outbox row state and delivery tracing",
         notes: "Waits three seconds for Discord runtime readiness before polling with adaptive backoff",
+    },
+    WorkerSpec {
+        id: ServerWorkerId::ScheduledMessages,
+        name: "scheduled_message_loop",
+        kind: WorkerKind::TokioTask,
+        target: "services::scheduled_messages::scheduled_message_loop",
+        responsibility: "Fire due scheduled-message reservations: hand push fires to message_outbox and drive agent fires through headless turns",
+        owner: "server::worker_registry",
+        start_stage: WorkerStartStage::AfterBootReconcile,
+        start_order: 45,
+        restart_policy: WorkerRestartPolicy::LoopOwned,
+        shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
+        execution_scope: WorkerExecutionScope::LeaderOnly,
+        health_owner: "scheduled_messages/scheduled_message_deliveries row state and tracing logs",
+        notes: "Waits three seconds for Discord runtime readiness before polling with adaptive backoff; lease-based delivery claims keep firing at-most-once per slot",
     },
     WorkerSpec {
         id: ServerWorkerId::DispatchOutbox,
@@ -883,6 +899,25 @@ impl SupervisedWorkerRegistry {
                     let outbox_health_registry = outbox_health_registry.clone();
                     async move {
                         super::message_outbox_loop(outbox_pg_pool, outbox_health_registry).await;
+                    }
+                });
+                Ok(None)
+            }
+            ServerWorkerId::ScheduledMessages => {
+                let Some(smsg_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
+                let smsg_health_registry = self.health_registry.clone();
+                self.register_leader_tokio(spec, move || {
+                    let smsg_pg_pool = smsg_pg_pool.clone();
+                    let smsg_health_registry = smsg_health_registry.clone();
+                    async move {
+                        crate::services::scheduled_messages::scheduled_message_loop(
+                            smsg_pg_pool,
+                            smsg_health_registry,
+                        )
+                        .await;
                     }
                 });
                 Ok(None)

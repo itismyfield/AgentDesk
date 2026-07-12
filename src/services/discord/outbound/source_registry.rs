@@ -50,6 +50,7 @@ enum StaticSendSource {
     MergeAutomation,
     LifecycleNotifier,
     RoutineRuntime,
+    ScheduledMessage,
     HeadlessTurn,
     SloAlerter,
     QualityRegressionAlerter,
@@ -102,6 +103,7 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(MergeAutomation, "merge-automation", LOOPBACK),
     policy!(LifecycleNotifier, "lifecycle_notifier", LOOPBACK),
     policy!(RoutineRuntime, "routine-runtime", LOOPBACK),
+    policy!(ScheduledMessage, "scheduled_message", LOOPBACK),
     policy!(HeadlessTurn, "headless_turn", LOOPBACK),
     policy!(SloAlerter, "slo_alerter", LOOPBACK),
     policy!(
@@ -178,6 +180,7 @@ mod tests {
         "voice",
     ];
     const NEW_LOOPBACK_LABELS: &[&str] = &[
+        "scheduled_message",
         "github_sync",
         "catch_up_too_old",
         "queue_overflow_notice",

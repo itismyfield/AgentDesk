@@ -82,6 +82,7 @@ pub mod process;
 pub mod provider;
 pub mod provider_auth;
 pub mod provider_cli;
+pub(crate) mod provider_error_transcript;
 pub mod provider_exec;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during provider_hosting dead-code cleanup.
@@ -100,6 +101,8 @@ pub mod remote_stub;
 pub mod retrospectives;
 pub mod review_decision;
 pub mod routines;
+pub mod scheduled_messages;
+pub(crate) mod scheduling;
 pub mod service_error;
 pub mod session_activity;
 pub(crate) mod session_selector_validity;

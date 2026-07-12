@@ -13,7 +13,7 @@
 | --- | ---: | --- | --- | --- |
 | `src/db/automation_candidates.rs` | 1003 | automation-pipeline | 2026-08-31 | #3405 |
 | `src/server/maintenance.rs` | 1119 | server-runtime | 2026-10-31 | #3909 |
-| `src/server/worker_registry.rs` | 1278 | server-runtime | 2026-08-31 | #3739 |
+| `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/catch_up.rs` | 1746 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2561 | discord-relay | 2026-10-31 | #3839 |
@@ -105,7 +105,7 @@
 | `src/services/qwen.rs` | 2198 |
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1593 |
-| `src/services/routines/store.rs` | 3687 |
+| `src/services/routines/store.rs` | 3505 |
 | `src/services/settings.rs` | 1114 |
 | `src/services/tui_prompt_dedupe.rs` | 1849 |
 | `src/services/turn_orchestrator.rs` | 3290 |

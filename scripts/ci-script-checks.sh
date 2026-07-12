@@ -93,6 +93,9 @@ echo "=== CI timeout wrapper tests (#4413) ==="
 echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
 "$PYTHON" -m unittest tests.test_relay_recovery_ci_wiring
 
+echo "=== Scheduled-message PG path-filter wiring contract ==="
+"$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
+
 echo "=== Scratch file guard ==="
 FAIL=0
 for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql verify.sh; do
