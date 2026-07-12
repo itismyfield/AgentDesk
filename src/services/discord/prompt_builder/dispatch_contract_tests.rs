@@ -56,6 +56,72 @@ fn test_role_binding(role_id: &str) -> RoleBinding {
 }
 
 #[test]
+fn issue_4313_prompt_policy_contract() {
+    let built = build_prompt_with_optional_manifest_for(None, Some("implementation"));
+    let prompt = built.system_prompt;
+
+    assert!(prompt.contains(
+        "If another instruction says to plan first, write a brief plan in plain text and proceed without entering plan mode"
+    ));
+    assert_eq!(
+        prompt.matches("inspect `GET /api/docs`").count(),
+        1,
+        "the runtime prompt must have one canonical docs-first API order: {prompt}"
+    );
+    assert!(prompt.contains("docs override guessed CLI/source patterns"));
+    assert!(prompt.contains("Constrain output before invoking a tool"));
+    assert!(!prompt.contains("summarize the result instead of pasting raw output"));
+    assert!(!prompt.contains("10 lines"));
+    assert!(prompt.contains("one standalone `API_FRICTION: {...}` final-response line"));
+    assert!(prompt.contains("provider-managed automatic compaction uses its own contract"));
+    assert!(!prompt.contains("docs/memory-scope.md"));
+    assert!(
+        prompt.len() < 3_053,
+        "fixed Full prompt must shrink from the measured 3,053-byte baseline, got {}",
+        prompt.len()
+    );
+}
+
+#[test]
+fn issue_4313_agentdesk_prompt_has_single_policy_owner() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let binding = test_role_binding("project-agentdesk");
+    let prompt = build_system_prompt(
+        "ctx",
+        &[],
+        env!("CARGO_MANIFEST_DIR"),
+        ChannelId::new(1),
+        "tok",
+        Some(&binding),
+        false,
+        DispatchProfile::Full,
+        Some("implementation"),
+        None,
+        None,
+        None,
+        Some(&ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        }),
+        true,
+    );
+
+    for (needle, owner) in [
+        ("inspect `GET /api/docs`", "ADK API Usage"),
+        ("targeted `rg`", "Tool Output Efficiency"),
+        ("docs/memory-scope.md", "Proactive Memory Guidance"),
+    ] {
+        assert_eq!(
+            prompt.matches(needle).count(),
+            1,
+            "{needle} must be owned once by {owner}: {prompt}"
+        );
+    }
+    assert!(prompt.contains("docs/source-of-truth.md"));
+}
+
+#[test]
 fn prompt_manifest_log_records_hash_metadata_without_full_content() {
     // The `info!("recorded prompt manifest", ...)` call logs the manifest's
     // `turn_id`/`channel_id`/`layer_count` plus the `?layer_hashes` field whose

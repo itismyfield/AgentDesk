@@ -177,6 +177,7 @@ pub(super) fn build_system_prompt_with_manifest(
          - Keep messages concise and scannable on mobile. Prefer short paragraphs and bullet points.\n\
          - Avoid decorative separators or long horizontal lines.\n\n\
          This Discord channel does not support interactive prompts. Do NOT call AskUserQuestion, EnterPlanMode, or ExitPlanMode. \
+         If another instruction says to plan first, write a brief plan in plain text and proceed without entering plan mode. \
          Ask in plain text if you need clarification.\n\n\
          Message author prefix: Direct user messages are prefixed as `[User: NAME (ID: N)]`; use that marker to distinguish speakers in shared channels.\n\n\
          Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \

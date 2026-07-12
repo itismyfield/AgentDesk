@@ -16,30 +16,25 @@ pub(super) const STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE: &str =
 pub(super) fn context_compression_guidance() -> String {
     format!(
         "[Context Compression]\n\
-         When conversation compaction happens (`/compact`, automatic compaction, or equivalent summarization), \
-         rewrite prior context using these sections in order: {CONTEXT_COMPRESSION_SECTION_ORDER}.\n\
-         - Keep each section short, factual, and focused on the latest state.\n\
-         - Preserve unresolved blockers, assumptions, failures, and the latest user intent.\n\
-         - In `Files`, list only files that still matter and why they matter.\n\
-         - Replace stale tool chatter, raw logs, and old command output with placeholders like {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE}.\n\
-         - Prefer outcomes and follow-up implications over verbatim output, and drop already-resolved repetition once summarized."
+         Only when asked to write a continuation summary (`/compact`, handoff, recovery), use \
+         {CONTEXT_COMPRESSION_SECTION_ORDER}; provider-managed automatic compaction uses its own contract.\n\
+         - Preserve latest intent, progress, decisions, unresolved blockers/failures, relevant files, and next action.\n\
+         - Replace raw logs and stale tool chatter with {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE}; omit resolved repetition."
     )
 }
 
 pub(super) fn tool_output_efficiency_guidance() -> &'static str {
     "[Tool Output Efficiency]\n\
-     Large tool results persist in context and increase cost for every subsequent turn.\n\
-     - Bash/Read: If output would exceed 10 lines, summarize the result instead of pasting raw output\n\
-     - Bash: Use LIMIT clauses for SQL, pipe to head/grep for filtering, avoid tail with large line counts\n\
-     - Read: Use offset/limit to read specific sections; do not read entire files when a section is enough\n\
-     - Grep: Set head_limit, use narrow glob/type filters, avoid broad patterns that match hundreds of lines\n\
-     - Prefer targeted queries over exhaustive dumps"
+     Constrain output before invoking a tool; a post-hoc summary cannot reclaim dumped context.\n\
+     - Bash: use SQL LIMIT, targeted `rg`, or `head`; avoid broad grep and large tail counts\n\
+     - Read/Grep: narrow ranges, globs, types, and head limits; do not dump whole files\n\
+     - Keep only task-relevant output"
 }
 
 pub(super) fn api_friction_guidance(profile: DispatchProfile) -> Option<String> {
     (profile == DispatchProfile::Full).then_some(
         "\n\n[ADK API Usage]\n\
-         Before ADK API work, inspect `GET /api/docs` or `GET /api/docs/{category}`. If docs are missing/wrong, do not use sqlite fallback; report one `API_FRICTION: {...}` marker with endpoint, summary, workaround, and suggested_fix. The runtime stores valid markers under Memento `topic=api-friction` when Memento is configured."
+         Before ADK API work, inspect `GET /api/docs` or `GET /api/docs/{category}`; docs override guessed CLI/source patterns. If missing or wrong, do not use sqlite fallback. Emit one standalone `API_FRICTION: {...}` final-response line with endpoint, friction_type, summary, workaround, and suggested_fix; runtime extracts it before delivery."
             .to_string(),
     )
 }
@@ -81,14 +76,11 @@ fn shared_agent_rules_lookup_with(current_path: &str, exists: impl Fn(&str) -> b
     let mut section = String::from(
         "\n\n[Shared Agent Rules Index]\n\
          - Keep changes scoped, verified, and no broader than the current request.\n\
-         - Verify user claims against code/data before acting.\n\
-         - Prefer `rg` and narrow reads; avoid dumping long tool output.\n\
-         - Do not use sqlite for ADK operational data; inspect `/api/docs` first.",
+         - Verify user claims against code/data before acting.",
     );
     if workspace_has_agentdesk_docs_with(current_path, &exists) {
         section.push_str(
-            "\n- Source-of-truth map: `docs/source-of-truth.md`; read it before editing prompts, config, skills, policies, or memory surfaces.\n\
-             - Memory scope map: `docs/memory-scope.md`; read it before memory cleanup or scope decisions.",
+            "\n- Source-of-truth map: `docs/source-of-truth.md`; read it before editing prompts, config, skills, policies, or memory surfaces.",
         );
     }
     section.push_str(
@@ -351,7 +343,7 @@ mod workspace_aware_shared_rules_tests {
         // refs are always injected makes THIS assert fail on its own.
         let section = shared_agent_rules_lookup_with("/foreign/repo", |_| false);
         assert!(section.contains("[Shared Agent Rules Index]"));
-        assert!(section.contains("Do not use sqlite for ADK operational data"));
+        assert!(section.contains("Keep changes scoped, verified"));
         assert!(section.contains("_shared.prompt.md"));
         assert!(
             !section.contains("docs/source-of-truth.md"),
@@ -365,8 +357,10 @@ mod workspace_aware_shared_rules_tests {
 
     #[test]
     fn agentdesk_workspace_keeps_repo_relative_doc_refs() {
-        // T2 (reverse mutation, A block): with the docs present, both
-        // repo-relative references must be injected. Forcing the guard to
+        // T2 (reverse mutation, A block): with the docs present, the
+        // source-of-truth reference must be injected. Memory policy is owned
+        // by Proactive Memory Guidance, so the index must not duplicate it.
+        // Forcing the guard to
         // always omit makes THIS assert fail on its own.
         let section = shared_agent_rules_lookup_with("/agentdesk", |_| true);
         assert!(section.contains("[Shared Agent Rules Index]"));
@@ -374,10 +368,7 @@ mod workspace_aware_shared_rules_tests {
             section.contains("docs/source-of-truth.md"),
             "AgentDesk workspace must keep docs/source-of-truth.md, got: {section}"
         );
-        assert!(
-            section.contains("docs/memory-scope.md"),
-            "AgentDesk workspace must keep docs/memory-scope.md, got: {section}"
-        );
+        assert!(!section.contains("docs/memory-scope.md"));
         assert!(section.contains("_shared.prompt.md"));
     }
 }
