@@ -1023,6 +1023,110 @@ async fn recent_partial_page_failure_preserves_gap_then_recovers_older_human() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_015);
+    write_role_map(root.path(), &provider, channel_id);
+
+    let bot_response_id = message_id_with_age(1, Duration::from_secs(180));
+    let older_human_id = message_id_with_age(2, Duration::from_secs(120));
+    let newer_human_id = message_id_with_age(3, Duration::from_secs(30));
+    let older_human = discord_message(
+        channel_id,
+        older_human_id,
+        HUMAN_ID,
+        false,
+        "older user request below the failed Recent page",
+    );
+    let newer_human = discord_message(
+        channel_id,
+        newer_human_id,
+        HUMAN_ID,
+        false,
+        "newer unanswered user request",
+    );
+    let bot_response = discord_message(
+        channel_id,
+        bot_response_id,
+        CURRENT_BOT_ID,
+        true,
+        "previous bot response",
+    );
+
+    // If the initial Recent failure is not marked incomplete, phase 2 consumes
+    // the second response, enqueues `newer_human`, and persists its id across
+    // the unknown lower gap. The correct path stops after the first fetch.
+    let (first_api, first_outbox) = TestCatchUpApi::new(Vec::new());
+    let first_api = first_api.with_scripted_fetches(vec![
+        Err("transient initial Recent fetch failure".to_string()),
+        Ok(vec![newer_human.clone(), bot_response]),
+    ]);
+    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
+
+    assert_eq!(
+        first_api.fetch_calls.load(Ordering::Relaxed),
+        1,
+        "an unread unbounded Recent gap must block the entire channel's phase-2 scan"
+    );
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty(),
+        "the failed sweep must not enqueue the newer phase-2 item"
+    );
+    assert!(shared.last_message_ids.get(&channel_id).is_none());
+    assert!(
+        !checkpoint_path(root.path(), &provider, channel_id).exists(),
+        "the failed sweep must not create a durable frontier"
+    );
+    assert!(first_outbox.lock().expect("outbox capture lock").is_empty());
+    assert!(
+        first_api
+            .dead_letters
+            .lock()
+            .expect("dead-letter capture lock")
+            .is_empty()
+    );
+
+    // A later complete Recent sweep starts from the still-open lower bound and
+    // recovers both messages chronologically instead of only the newer one.
+    let (second_api, second_outbox) = TestCatchUpApi::new(Vec::new());
+    let second_api = second_api.with_scripted_fetches(vec![
+        Ok(vec![newer_human, older_human]),
+        Ok(Vec::new()),
+        Ok(Vec::new()),
+    ]);
+    run_catch_up_sweep(CatchUpDeps::new(&second_api, &shared, &provider)).await;
+
+    let recovered_mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
+    assert_eq!(
+        super::super::recovery_known_message_ids(&recovered_mailbox),
+        HashSet::from([older_human_id.get(), newer_human_id.get()]),
+        "the next complete sweep must recover the whole previously unknown gap, including ids merged into one intervention"
+    );
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(newer_human_id.get())
+    );
+    assert!(
+        second_outbox
+            .lock()
+            .expect("outbox capture lock")
+            .is_empty()
+    );
+    assert!(
+        second_api
+            .dead_letters
+            .lock()
+            .expect("dead-letter capture lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn production_sweep_advances_through_mixed_terminal_aged_page() {
     let root = scoped_runtime_root();
     let shared = super::super::make_shared_data_for_tests();

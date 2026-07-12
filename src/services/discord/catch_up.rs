@@ -966,6 +966,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 continue;
             }
             RuntimeChannelBindingStatus::Unknown => {
+                // A transient binding-resolution failure happened before the
+                // unbounded Recent gap could be read at all. Do not let phase 2
+                // establish a newer durable frontier across that unknown lower
+                // bound in the same sweep. `After` has a precise lower bound and
+                // retains its existing independent phase-2 behavior.
+                if matches!(fetch_mode, CatchUpFetchMode::Recent) {
+                    incomplete_recent_channels.insert(channel_id);
+                }
                 if let Some(retry_state) = retry_state {
                     rearm_catch_up_retry_after_fetch_failure(shared, channel_id, retry_state);
                 }
@@ -995,6 +1003,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 tracing::warn!(
                     "  [{ts}] ⚠ catch-up: failed to fetch messages for channel {channel_id}: {e}"
                 );
+                // The first Recent page is part of the same unbounded
+                // pagination proof as every backward page below. If it fails,
+                // phase 2 must not recover a newer last-20 item and turn the
+                // unknown lower gap into `After(newer)` in this sweep.
+                if matches!(fetch_mode, CatchUpFetchMode::Recent) {
+                    incomplete_recent_channels.insert(channel_id);
+                }
                 // #429: permanent errors — remove checkpoint to avoid retrying every restart
                 if e.contains("Missing Access") || e.contains("Unknown Channel") {
                     if let Some(path) = candidate.checkpoint_path.as_ref() {
