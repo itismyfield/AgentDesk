@@ -2121,6 +2121,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_end,
                 &inflight_before_relay,
                 &inflight_identity_before_relay,
+                turn_identity_for_panel.as_ref(),
                 external_input_lease_before_relay,
                 external_input_lease_generation_before_relay,
                 prompt_anchor_present_before_relay,
@@ -2532,7 +2533,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         channel_id,
                         session_panel_lifecycle_user_msg_id,
                         &tmux_session_name,
-                        &watcher_provider, // #3983 item4: one-shot session banner render
                     ),
                 )
                 .await

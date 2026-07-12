@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
 pub(super) enum CancelPromptReplaceMessage {
     Cancelled,
@@ -78,6 +79,14 @@ pub(super) async fn handle_cancel_prompt_replace(
     let mut preserve_inflight_for_cleanup_retry = *state.preserve_inflight_for_cleanup_retry;
     let mut bridge_skip_holder_owns_inflight = *state.bridge_skip_holder_owns_inflight;
     let mut status_panel_terminal_committed = *state.status_panel_terminal_committed;
+    let banner = DiscordTurnSessionBanner::new_with_turn_key(
+        shared_owned.as_ref(),
+        channel_id,
+        &provider,
+        inflight_state.user_msg_id,
+        Some(&inflight_state.started_at),
+        inflight_state.turn_start_offset,
+    );
 
     match message {
         CancelPromptReplaceMessage::Cancelled => {
@@ -97,8 +106,7 @@ pub(super) async fn handle_cancel_prompt_replace(
         }
         // #1255: cancelled turn → drive any active long-running placeholder
         // into Aborted before the rest of the cleanup machinery runs. The
-        // controller's idempotent terminal transition guarantees this is
-        // safe even if the ToolResult event already fired Completed.
+        // Safe even if the idempotent ToolResult transition already completed.
         // #2289 (Codex review): mirror the Done/stream-end outcome handling
         // — only clear the persisted flag when the transition actually
         // committed (Edited / Coalesced / AlreadyTerminal). On
@@ -216,19 +224,10 @@ pub(super) async fn handle_cancel_prompt_replace(
         } else if remaining_response.trim().is_empty() {
             "[Stopped]".to_string()
         } else {
-            let formatted = if shared_owned.ui.status_panel_v2_enabled {
-                super::super::super::formatting::format_for_discord_with_status_panel(
-                    remaining_response,
-                    &provider,
-                )
-            } else {
-                super::super::super::formatting::format_for_discord_with_provider(
-                    remaining_response,
-                    &provider,
-                )
-            };
+            let formatted = banner.format_discord_body(remaining_response);
             format!("{}\n\n[Stopped]", formatted)
         };
+        let terminal_response = banner.prefix(response_sent_offset == 0, terminal_response);
 
         // #3041 P1-2 (site 1 — cancel/stop terminal replace): acquire the
         // shared delivery lease BEFORE delivering the `[Stopped]` body; a B2
@@ -340,6 +339,7 @@ pub(super) async fn handle_cancel_prompt_replace(
              컨텍스트를 줄이려면 `/compact` 또는 `/clear`를 사용해 주세요.",
             mention
         );
+        let display_response = banner.prefix(response_sent_offset == 0, full_response.clone());
         // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
         // routing as site 1 — acquire before replace; B2-skip if held. (codex
         // P1-a) lease on `watcher_owner_channel_id` (shared cell + TurnKey).
@@ -374,7 +374,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                 current_msg_id,
                 inflight_state.tmux_session_name.as_deref(),
                 gateway
-                    .replace_message_with_outcome(channel_id, current_msg_id, &full_response)
+                    .replace_message_with_outcome(channel_id, current_msg_id, &display_response)
                     .await,
                 dispatch_id.as_deref(),
                 adk_session_key.as_deref(),

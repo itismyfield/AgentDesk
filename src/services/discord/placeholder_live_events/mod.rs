@@ -14,6 +14,7 @@ mod completion_footer;
 mod context_panel;
 mod freshness;
 mod recent_events;
+mod session_banner_claim;
 mod session_panel;
 mod slot_rehydration;
 mod status_events;
@@ -335,7 +336,12 @@ impl PlaceholderLiveEvents {
         self.set_session_panel_snapshot(channel_id, None)
     }
 
-    /// #3983 item4: atomically claim the one-shot top session banner for this
+    /// Test-only compatibility probe for #3983/#4451's session-key ledger.
+    /// Production #4147 delivery uses `claim_session_banner_prefix_line`, while
+    /// these historical regressions keep asserting that one session identity
+    /// consumes only one logical claim and a genuine boundary re-arms it.
+    ///
+    /// Atomically claim the one-shot session banner for this
     /// channel's CURRENT session snapshot, returning the rendered session line
     /// EXACTLY ONCE per session. Both the sink and tmux-watcher refresh paths
     /// call this after (re)setting the snapshot; the per-channel mutex makes the
@@ -345,6 +351,7 @@ impl PlaceholderLiveEvents {
     /// `None` when the channel has no session snapshot or its banner was already
     /// claimed. See `StatusPanelState::claim_session_banner` for the identity
     /// keying (session_instance_key → provider_session_id → rendered line).
+    #[cfg(test)]
     pub(in crate::services::discord) fn claim_session_banner_line(
         &self,
         channel_id: ChannelId,
@@ -355,6 +362,23 @@ impl PlaceholderLiveEvents {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.claim_session_banner(provider)
+    }
+
+    /// #4147: return the one-shot session line for the turn that owns the first
+    /// answer-message prefix. Repeated calls for that same turn are sticky so
+    /// streaming edits and terminal replacement render byte-identical chrome;
+    /// later turns in the same session receive `None`.
+    pub(in crate::services::discord) fn claim_session_banner_prefix_line(
+        &self,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+        turn_id: &str,
+    ) -> Option<String> {
+        let entry = self.status_by_channel.get(&channel_id)?;
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.claim_session_banner_prefix(provider, turn_id)
     }
 
     fn set_session_panel_snapshot(

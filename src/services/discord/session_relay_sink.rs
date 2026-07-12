@@ -845,13 +845,8 @@ impl SessionBoundDiscordRelaySink {
             ))
         })?;
 
-        let raw_response_text = delivery.response_text.clone();
-        let relay_text = relay_format::session_bound_relay_text(
-            &shared,
-            &provider,
-            &raw_response_text,
-            delivery.task_notification_kind.as_ref(),
-        );
+        let (raw_response_text, relay_text) =
+            relay_format::session_bound_relay_bodies(&shared, &provider, &delivery);
         let channel = ChannelId::new(channel_id);
         let (route, task_card_message_id, task_response_claim_outcome) =
             ensure_card_and_route(&self.health_registry, &shared, &delivery, route).await?;

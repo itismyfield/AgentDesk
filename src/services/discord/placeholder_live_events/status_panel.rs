@@ -6,7 +6,8 @@ use super::common::{
     STATUS_PANEL_WORKFLOW_LIMIT, escape_status_panel_markdown, normalize_summary, truncate_chars,
 };
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
-use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
+use super::session_banner_claim::SessionBannerClaims;
+use super::session_panel::SessionPanelSnapshot;
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
 use super::subagent_panel::{
     SubagentKeyTombstones, clean_match_key, log_idless_terminal_fallback,
@@ -112,17 +113,9 @@ pub(super) struct StatusPanelState {
     // #3811: intake-set original-request user_msg_id; drives the `요청:` deeplink
     // (`None` for headless/synthetic/voice/id-0 — no real Discord message).
     pub(super) request_user_msg_id: Option<u64>,
-    // #3983 item4: dedup token for the one-shot session banner. Holds the
-    // identity (session_instance_key, falling back to provider_session_id, then
-    // the rendered line) of the session whose banner was already emitted, so the
-    // dual-path refresh (sink + watcher) posts the top banner EXACTLY ONCE per
-    // session. `None` until the first banner for this channel is claimed; a new
-    // session identity (new spawn nonce / provider session) makes the stored key
-    // stale and re-arms the claim for the next session boundary. This is
-    // bookkeeping only and is intentionally excluded from the `session ==
-    // snapshot` boundary compare in `set_session_panel_snapshot` (which compares
-    // the `session` field alone).
-    session_banner_emitted_key: Option<String>,
+    // #3983/#4147/#4451: session one-shot + sticky winning-turn prefix ledger.
+    // Bookkeeping only; excluded from session snapshot equality.
+    session_banner_claims: SessionBannerClaims,
 }
 
 impl StatusPanelState {
@@ -162,19 +155,29 @@ impl StatusPanelState {
     /// whichever of the sink/watcher refresh paths reaches it FIRST for a given
     /// session wins the banner, and the other observes the recorded key and skips
     /// (no double emit, no omission).
+    #[cfg(test)]
     pub(super) fn claim_session_banner(&mut self, provider: &ProviderKind) -> Option<String> {
-        let session = self.session.as_ref()?;
-        let line = render_session_panel_line(session, provider);
-        let key = session
-            .session_instance_key()
-            .map(str::to_owned)
-            .or_else(|| session.provider_session_id().map(str::to_owned))
-            .unwrap_or_else(|| line.clone());
-        if self.session_banner_emitted_key.as_deref() == Some(key.as_str()) {
-            return None;
-        }
-        self.session_banner_emitted_key = Some(key);
-        Some(line)
+        self.session_banner_claims
+            .claim_once(self.session.as_ref(), provider)
+    }
+
+    /// #4147: claim the current session banner for the first answer message of
+    /// `turn_id`. Unlike the legacy one-shot POST claim, the winning turn gets
+    /// the same rendered line on every re-compose so a terminal replace cannot
+    /// wipe a banner shown during streaming. A later turn in the same session
+    /// gets `None`; a new session identity re-arms the prefix.
+    ///
+    /// When ordinary turn cleanup has temporarily cleared the session snapshot,
+    /// the already-winning turn may still re-compose from its stored line. This
+    /// preserves #4451's redrive guarantee without letting a different turn
+    /// inherit stale session chrome.
+    pub(super) fn claim_session_banner_prefix(
+        &mut self,
+        provider: &ProviderKind,
+        turn_id: &str,
+    ) -> Option<String> {
+        self.session_banner_claims
+            .claim_prefix(self.session.as_ref(), provider, turn_id)
     }
 
     pub(super) fn reset_turn_content_preserving_unfinished_footer_residuals(&mut self) -> bool {
@@ -222,7 +225,7 @@ impl StatusPanelState {
             // redrive path can run ordinary turn cleanup every 30 seconds while
             // the same tmux/provider session remains alive. Dropping the claim
             // here re-posted the same one-shot banner on every redrive.
-            session_banner_emitted_key: self.session_banner_emitted_key.clone(),
+            session_banner_claims: self.session_banner_claims.clone(),
             ..StatusPanelState::default()
         };
         has_residuals
@@ -233,7 +236,7 @@ impl StatusPanelState {
     /// footer residuals or request anchor, otherwise removing the entry would
     /// discard the preserved claim immediately.
     pub(super) fn has_session_banner_claim(&self) -> bool {
-        self.session_banner_emitted_key.is_some()
+        self.session_banner_claims.has_claim()
     }
 
     pub(super) fn apply(&mut self, event: StatusEvent) {
@@ -621,11 +624,10 @@ pub(super) fn render_status_panel(
     ];
 
     // #3983 item4: the session line is NO LONGER rendered in the every-tick
-    // footer. It is emitted once, at the top, per session boundary via
-    // `StatusPanelState::claim_session_banner` (see `session_banner.rs`), so the
+    // footer. It is composed once at the top of the first answer message via
+    // `session_banner.rs`, so the
     // repeated per-tick footer echo of `🆕 새 세션 시작 · provider session … · tmux …`
-    // is retired. `render_session_panel_line` is now used only by that one-shot
-    // banner claim. Track A's 3-line header (activity / time / 턴 트리거) is
+    // is retired. Track A's 3-line header (activity / time / 턴 트리거) is
     // unaffected.
 
     if let Some(task) = snapshot.task.as_ref() {

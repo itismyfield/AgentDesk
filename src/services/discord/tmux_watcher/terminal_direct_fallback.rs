@@ -65,6 +65,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
     watcher_lease_end: u64,
     inflight_before_relay: &Option<InflightTurnState>,
     inflight_identity_before_relay: &Option<InflightTurnIdentity>,
+    banner_identity_fallback: Option<&InflightTurnIdentity>,
     external_input_lease_before_relay: bool,
     external_input_lease_generation_before_relay: Option<u64>,
     prompt_anchor_present_before_relay: bool,
@@ -121,6 +122,26 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         crate::services::discord::prepend_monitor_auto_turn_origin(&formatted)
     } else {
         formatted
+    };
+    let prefixed_relay_text = prefix_watcher_terminal_session_banner(
+        shared,
+        channel_id,
+        watcher_provider,
+        inflight_identity_before_relay.as_ref(),
+        banner_identity_fallback,
+        response_sent_offset == 0 || session_bound_fallback_uses_full_body,
+        relay_text.clone(),
+    );
+    let prefixed_full_body_will_replace_frozen_prefixes =
+        watcher_should_send_ordered_new_chunks_for_terminal_fallback(
+            session_bound_fallback_uses_full_body,
+            &prefixed_relay_text,
+        );
+    let relay_text = if response_sent_offset == 0 || prefixed_full_body_will_replace_frozen_prefixes
+    {
+        prefixed_relay_text
+    } else {
+        relay_text
     };
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(

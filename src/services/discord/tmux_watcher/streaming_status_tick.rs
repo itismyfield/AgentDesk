@@ -13,55 +13,9 @@ pub(super) enum StreamingStatusTickOutcome {
     Fallthrough,
 }
 
-pub(super) struct StreamingStatusTickContext<'a> {
-    pub(super) http: &'a Arc<serenity::Http>,
-    pub(super) shared: &'a Arc<SharedData>,
-    pub(super) channel_id: serenity::ChannelId,
-    pub(super) watcher_provider: &'a ProviderKind,
-    pub(super) tmux_session_name: &'a String,
-    pub(super) output_path: &'a String,
-    pub(super) turn_delivered: &'a Arc<AtomicBool>,
-}
-
-pub(super) struct StreamingStatusTickTurn<'a> {
-    pub(super) data_start_offset: u64,
-    pub(super) current_offset: u64,
-    pub(super) full_response: &'a String,
-    pub(super) tool_state: &'a WatcherToolState,
-    pub(super) task_notification_kind:
-        Option<crate::services::agent_protocol::TaskNotificationKind>,
-    pub(super) status_panel_started_at: i64,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) restored_injected_prompt_message_id: Option<u64>,
-}
-
-pub(super) struct StreamingRenderState<'a> {
-    pub(super) last_status_update: &'a mut tokio::time::Instant,
-    pub(super) spin_idx: &'a mut usize,
-    pub(super) placeholder_msg_id: &'a mut Option<serenity::MessageId>,
-    pub(super) placeholder_from_restored_inflight: &'a mut bool,
-    pub(super) last_edit_text: &'a mut String,
-    pub(super) response_sent_offset: &'a mut usize,
-    pub(super) watcher_streaming_rollover_frozen_msg_ids: &'a mut Vec<serenity::MessageId>,
-}
-
-pub(super) struct StatusPanelState<'a> {
-    pub(super) status_panel_msg_id: &'a mut Option<serenity::MessageId>,
-    pub(super) last_status_panel_text: &'a mut String,
-}
-
-pub(super) struct StreamingSuppressState<'a> {
-    pub(super) turn_is_external_input_for_session: &'a mut bool,
-    pub(super) turn_identity_for_panel:
-        &'a mut Option<crate::services::discord::inflight::InflightTurnIdentity>,
-    pub(super) streaming_suppressed_by_recent_stop: &'a mut bool,
-    pub(super) streaming_suppressed_by_missing_inflight: &'a mut bool,
-    pub(super) active_stream_inflight_reacquire_logged: &'a mut bool,
-}
-
-pub(super) struct PanelGenerationState<'a> {
-    pub(super) this_turn_status_panel_generation: &'a mut u64,
-}
+#[path = "streaming_status_tick/types.rs"]
+mod types;
+pub(super) use types::*;
 
 pub(super) async fn update_streaming_status_tick(
     ctx: &StreamingStatusTickContext<'_>,
@@ -205,7 +159,6 @@ pub(super) async fn update_streaming_status_tick(
                     .map(|identity| identity.user_msg_id)
                     .unwrap_or(0),
                 &tmux_session_name,
-                &watcher_provider, // #3983 item4: one-shot session banner render
             )
             .await;
         }
@@ -737,10 +690,17 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
+        let banner_identity = turn_identity_for_panel.as_ref();
+        let banner_user_msg_id = banner_identity
+            .map(|identity| identity.user_msg_id)
+            .unwrap_or(0);
+        let banner_started_at = banner_identity.map(|identity| identity.started_at.as_str());
+        let banner_turn_start_offset =
+            banner_identity.and_then(|identity| identity.turn_start_offset);
         let mut watcher_did_rollover_this_interval = false;
         loop {
-            let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
-            if current_portion.is_empty() {
+            let raw_current_portion = full_response.get(response_sent_offset..).unwrap_or("");
+            if raw_current_portion.is_empty() {
                 break;
             }
 
@@ -758,13 +718,23 @@ pub(super) async fn update_streaming_status_tick(
             let Some(msg_id) = placeholder_msg_id else {
                 break;
             };
-            if watcher_streaming_rollover_should_skip(current_portion) {
+            if watcher_streaming_rollover_should_skip(raw_current_portion) {
                 break;
             }
-            let Some(plan) = plan_streaming_rollover(current_portion, &status_block) else {
+            let Some((plan, raw_split_at)) = plan_watcher_streaming_rollover_with_session_banner(
+                &shared,
+                channel_id,
+                &watcher_provider,
+                banner_user_msg_id,
+                banner_started_at,
+                banner_turn_start_offset,
+                response_sent_offset,
+                raw_current_portion,
+                &status_block,
+            ) else {
                 break;
             };
-            if !guard_rollover(ctx, msg_id, current_portion, &plan.frozen_chunk).await {
+            if !guard_rollover(ctx, msg_id, raw_current_portion, &plan.frozen_chunk).await {
                 break;
             }
             rate_limit_wait(&shared, channel_id).await;
@@ -791,7 +761,7 @@ pub(super) async fn update_streaming_status_tick(
                             placeholder_msg_id = Some(message.id);
                             placeholder_from_restored_inflight = false;
                             watcher_did_rollover_this_interval = true;
-                            response_sent_offset += plan.split_at;
+                            response_sent_offset += raw_split_at;
                             last_edit_text = status_block;
                             persist_watcher_stream_progress(
                                 &watcher_provider,
@@ -895,8 +865,8 @@ pub(super) async fn update_streaming_status_tick(
             &full_response,
             status_panel_msg_id,
         );
-        let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
-        if current_portion.trim().is_empty()
+        let raw_current_portion = full_response.get(response_sent_offset..).unwrap_or("");
+        if raw_current_portion.trim().is_empty()
             && !watcher_should_render_status_only_placeholder(
                 placeholder_msg_id.is_some(),
                 tool_state.current_tool_line.as_deref(),
@@ -906,13 +876,18 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
-        let mut display_text = build_watcher_streaming_edit_text(
-            shared.ui.status_panel_v2_enabled,
-            current_portion,
-            &status_block,
+        let mut display_text = build_watcher_streaming_edit_text_with_session_banner(
+            &shared,
+            channel_id,
             &watcher_provider,
+            banner_user_msg_id,
+            banner_started_at,
+            banner_turn_start_offset,
+            response_sent_offset,
+            raw_current_portion,
+            &status_block,
         );
-        if guard_streaming_frame(&watcher_provider, current_portion, &mut display_text)
+        if guard_streaming_frame(&watcher_provider, raw_current_portion, &mut display_text)
             && crate::services::discord::single_message_panel::streaming_footer_text_changed(
                 single_message_panel_footer_mode,
                 &last_edit_text,

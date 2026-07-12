@@ -36,6 +36,7 @@ mod empty_response_recovery;
 mod recovery_retry;
 
 use super::*;
+use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
 pub(super) struct TerminalOutcomeDeliveryContext {
     pub(super) channel_id: ChannelId,
@@ -466,17 +467,15 @@ pub(super) async fn run_terminal_outcome_delivery(
                 terminal_body_visible = true;
             }
         } else {
-            delivery_response = if shared_owned.ui.status_panel_v2_enabled {
-                super::super::formatting::format_for_discord_with_status_panel(
-                    &delivery_response,
-                    &provider,
-                )
-            } else {
-                super::super::formatting::format_for_discord_with_provider(
-                    &delivery_response,
-                    &provider,
-                )
-            };
+            delivery_response = DiscordTurnSessionBanner::new_with_turn_key(
+                shared_owned.as_ref(),
+                channel_id,
+                &provider,
+                inflight_state.user_msg_id,
+                Some(&inflight_state.started_at),
+                inflight_state.turn_start_offset,
+            )
+            .format_and_prefix(response_sent_offset == 0, &delivery_response);
             if can_chain_locally {
                 if terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response) {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);

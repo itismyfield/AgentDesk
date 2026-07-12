@@ -181,9 +181,6 @@ pub(super) async fn refresh_watcher_session_panel_from_lifecycle(
     channel_id: ChannelId,
     user_msg_id: u64,
     tmux_session_name: &str,
-    // #3983 item4: provider for the one-shot session banner render (provider
-    // session id label). Threaded from the watcher call sites.
-    provider: &crate::services::provider::ProviderKind,
 ) {
     if !shared.ui.status_panel_v2_enabled {
         return;
@@ -227,12 +224,4 @@ pub(super) async fn refresh_watcher_session_panel_from_lifecycle(
             );
         }
     }
-    // #3983 item4: after the snapshot is (re)set, emit the one-shot top session
-    // banner. The claim is deduped per session across this watcher path and the
-    // sink path, so posting is at most once per session regardless of which path
-    // refreshes first.
-    crate::services::discord::session_banner::emit_session_banner_if_new(
-        shared, channel_id, provider,
-    )
-    .await;
 }

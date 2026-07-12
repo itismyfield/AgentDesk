@@ -256,6 +256,7 @@ pub(super) async fn run_standby_relay(
                 placeholder_msg_id,
                 &shared,
                 &provider,
+                &turn_binding,
                 result_text,
             )
             .await;
@@ -732,6 +733,7 @@ async fn deliver_response(
     placeholder_msg_id: Option<MessageId>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
+    turn_binding: &StandbyRelayTurnBinding,
     response_text: &str,
 ) -> bool {
     let formatted = if shared.ui.status_panel_v2_enabled {
@@ -739,6 +741,16 @@ async fn deliver_response(
     } else {
         formatting::format_for_discord_with_provider(response_text, provider)
     };
+    let formatted = super::session_banner::with_discord_turn_session_banner_identity_prefix(
+        shared,
+        channel_id,
+        provider,
+        turn_binding.identity.user_msg_id,
+        Some(&turn_binding.identity.started_at),
+        turn_binding.turn_start_offset,
+        true,
+        formatted,
+    );
     let chars = formatted.chars().count();
 
     match placeholder_msg_id {

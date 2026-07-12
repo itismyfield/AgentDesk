@@ -7,25 +7,36 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
 use serenity::model::id::{ChannelId, MessageId};
 
-pub(super) fn session_bound_relay_text(
+pub(super) fn session_bound_relay_bodies(
     shared: &super::super::SharedData,
     provider: &ProviderKind,
-    raw_response_text: &str,
-    task_notification_kind: Option<&TaskNotificationKind>,
-) -> String {
+    delivery: &super::SessionRelayDelivery,
+) -> (String, String) {
+    let raw_response_text = delivery.response_text.clone();
     let formatted = if shared.ui.status_panel_v2_enabled {
-        formatting::format_for_discord_with_status_panel(raw_response_text, provider)
+        formatting::format_for_discord_with_status_panel(&raw_response_text, provider)
     } else {
-        formatting::format_for_discord_with_provider(raw_response_text, provider)
+        formatting::format_for_discord_with_provider(&raw_response_text, provider)
     };
-    if matches!(
-        task_notification_kind,
+    let formatted = if matches!(
+        delivery.task_notification_kind.as_ref(),
         Some(TaskNotificationKind::MonitorAutoTurn)
     ) {
         super::super::prepend_monitor_auto_turn_origin(&formatted)
     } else {
         formatted
-    }
+    };
+    let relay_text = super::super::session_banner::with_discord_turn_session_banner_identity_prefix(
+        shared,
+        ChannelId::new(delivery.channel_id),
+        provider,
+        delivery.frame_turn_user_msg_id,
+        Some(&delivery.frame_turn_started_at),
+        delivery.frame_turn_start_offset,
+        true,
+        formatted,
+    );
+    (raw_response_text, relay_text)
 }
 
 pub(super) fn ssh_direct_prompt_anchor_for_response(

@@ -246,7 +246,6 @@ pub(super) async fn run_bridge_stream_tick(
             channel_id,
             turn_id.as_str(),
             inflight_state.tmux_session_name.as_deref(),
-            &provider, // #3983 item4: one-shot session banner render
         )
         .await;
     }
@@ -319,11 +318,11 @@ pub(super) async fn run_bridge_stream_tick(
         // re-anchored BELOW it exactly once (not on quiet intervals).
         let mut rolled_over_this_interval = false;
         loop {
-            let current_portion =
+            let raw_current_portion =
                 response_portion_after_offset(&full_response, response_sent_offset);
             // #3813 AC#1 tail: mark first-output pre-rollover (first_output<=first_relay).
-            bridge_spans.mark_first_output(!current_portion.is_empty());
-            if done || current_portion.is_empty() {
+            bridge_spans.mark_first_output(!raw_current_portion.is_empty());
+            if done || raw_current_portion.is_empty() {
                 break;
             }
 
@@ -338,21 +337,42 @@ pub(super) async fn run_bridge_stream_tick(
                 current_tool_line.as_deref(),
                 &full_response,
             );
-            if bridge_streaming_rollover_should_skip(current_portion) {
+            if bridge_streaming_rollover_should_skip(raw_current_portion) {
                 break;
             }
-            let Some(plan) =
-                super::super::formatting::plan_streaming_rollover(current_portion, &status_block)
-            else {
+            let rendered_current_portion =
+                crate::services::discord::session_banner::with_discord_turn_session_banner_identity_prefix(
+                    shared_owned.as_ref(),
+                    channel_id,
+                    &provider,
+                    inflight_state.user_msg_id,
+                    Some(&inflight_state.started_at),
+                    inflight_state.turn_start_offset,
+                    response_sent_offset == 0,
+                    raw_current_portion.to_string(),
+                );
+            let Some(plan) = super::super::formatting::plan_streaming_rollover(
+                &rendered_current_portion,
+                &status_block,
+            ) else {
                 break;
             };
+            let raw_split_at =
+                crate::services::discord::session_banner::raw_split_after_session_banner_prefix(
+                    plan.split_at,
+                    rendered_current_portion.len(),
+                    raw_current_portion.len(),
+                );
+            if raw_split_at == 0 {
+                break;
+            }
 
             match guarded_bridge_rollover_edit(
                 gateway.as_ref(),
                 &provider,
                 channel_id,
                 current_msg_id,
-                current_portion,
+                raw_current_portion,
                 &plan.frozen_chunk,
             )
             .await
@@ -362,7 +382,7 @@ pub(super) async fn run_bridge_stream_tick(
                         .await
                     {
                         Ok(next_msg_id) => {
-                            let next_response_sent_offset = response_sent_offset + plan.split_at;
+                            let next_response_sent_offset = response_sent_offset + raw_split_at;
                             assert_response_sent_offset_progress(
                                 &provider,
                                 channel_id,
@@ -495,7 +515,8 @@ pub(super) async fn run_bridge_stream_tick(
             }
         }
 
-        let current_portion = response_portion_after_offset(&full_response, response_sent_offset);
+        let raw_current_portion =
+            response_portion_after_offset(&full_response, response_sent_offset);
         let status_block = build_bridge_single_message_panel_status_block(
             shared_owned.as_ref(),
             channel_id,
@@ -506,9 +527,20 @@ pub(super) async fn run_bridge_stream_tick(
             current_tool_line.as_deref(),
             &full_response,
         );
+        let rendered_current_portion =
+            crate::services::discord::session_banner::with_discord_turn_session_banner_identity_prefix(
+                shared_owned.as_ref(),
+                channel_id,
+                &provider,
+                inflight_state.user_msg_id,
+                Some(&inflight_state.started_at),
+                inflight_state.turn_start_offset,
+                response_sent_offset == 0,
+                raw_current_portion.to_string(),
+            );
         let stable_display_text = build_turn_bridge_streaming_edit_text(
             shared_owned.ui.status_panel_v2_enabled,
-            current_portion,
+            &rendered_current_portion,
             &status_block,
             &provider,
         );
@@ -521,7 +553,7 @@ pub(super) async fn run_bridge_stream_tick(
             && bridge_streaming_edit_gate_open(
                 last_status_edit.elapsed() >= status_interval,
                 first_answer_relayed,
-                current_portion.is_empty(),
+                raw_current_portion.is_empty(),
             )
             && long_running_placeholder_active.is_none()
             && pending_long_running_open_after_state_save.is_none()
@@ -537,9 +569,9 @@ pub(super) async fn run_bridge_stream_tick(
             .is_ok();
             last_status_edit = tokio::time::Instant::now();
             if edit_ok {
-                first_answer_relayed |= !current_portion.is_empty();
+                first_answer_relayed |= !raw_current_portion.is_empty();
                 // #3813 AC#1 tail: first bridge-owned relay delivered.
-                bridge_spans.mark_first_relay(!current_portion.is_empty());
+                bridge_spans.mark_first_relay(!raw_current_portion.is_empty());
                 last_edit_text = stable_display_text;
                 inflight_state.current_msg_id = current_msg_id.get();
                 inflight_state.current_msg_len = last_edit_text.len();

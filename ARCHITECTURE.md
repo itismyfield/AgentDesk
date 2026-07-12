@@ -547,6 +547,7 @@ src/
 │   │   │   ├── freshness.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── recent_events.rs
+│   │   │   ├── session_banner_claim.rs
 │   │   │   ├── session_panel.rs
 │   │   │   ├── slot_rehydration.rs
 │   │   │   ├── status_events.rs
@@ -694,6 +695,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── ops.rs
 │   │   ├── tmux_watcher/
+│   │   │   ├── streaming_status_tick/
+│   │   │   │   └── types.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── completion_gate.rs
 │   │   │   ├── completion_gate_tests.rs
@@ -717,6 +720,7 @@ src/
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── single_message_footer_tests.rs
 │   │   │   ├── stall_exit.rs
+│   │   │   ├── streaming_session_banner.rs
 │   │   │   ├── streaming_status_tick.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs

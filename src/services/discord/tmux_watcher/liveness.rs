@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod streaming_session_banner;
+pub(super) use streaming_session_banner::*;
+
 #[cfg(unix)]
 pub(super) async fn commit_watcher_direct_terminal_session_idle(
     shared: &std::sync::Arc<SharedData>,
