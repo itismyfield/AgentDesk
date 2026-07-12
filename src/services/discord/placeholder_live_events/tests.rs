@@ -1650,6 +1650,301 @@ fn session_banner_claim_survives_repeated_turn_cleanup_redrive() {
     );
 }
 
+#[test]
+fn issue_4451_full_channel_clear_drops_the_session_banner_claim() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(44_511);
+    let instance_key = "AgentDesk-codex-ch4451#full-clear";
+    let details = json!({
+        "provider_session_id": "session-full-clear",
+        "tmux_reused": true
+    });
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &details,
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+            .is_some()
+    );
+
+    events.clear_channel(channel_id);
+    assert!(
+        events.status_by_channel.get(&channel_id).is_none(),
+        "a full generation clear must remove the channel-scoped claim"
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &details,
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+            .is_some(),
+        "after a full clear the next lifecycle snapshot owns a fresh claim"
+    );
+}
+
+#[test]
+fn issue_4451_turn_reset_preserves_only_claim_not_stale_panel_content() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(44_512);
+    let instance_key = "AgentDesk-claude-ch4451#claim-only";
+    let details = json!({
+        "provider_session_id": "session-claim-only",
+        "tmux_reused": true
+    });
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &details,
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some()
+    );
+    events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "dispatch-stale-4451",
+            card_id: Some("CARD-4451"),
+            dispatch_type: Some("issue"),
+            owner_instance_id: Some("mac-book-release"),
+            card_title: Some("stale task 4451"),
+            dispatch_title: None,
+            github_issue_number: Some(4451),
+        },
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TodoWrite",
+            &json!({
+                "todos": [{"content": "stale todo 4451", "status": "in_progress"}]
+            })
+            .to_string(),
+        ),
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::WorkflowStart {
+            task_id: Some("workflow-stale-4451".to_string()),
+            name: Some("stale workflow 4451".to_string()),
+        },
+    );
+    let before = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(before.contains("stale task 4451"));
+    assert!(before.contains("stale todo 4451"));
+    assert!(before.contains("stale workflow 4451"));
+
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("the session-scoped banner claim keeps the entry alive");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            guard.session.is_none(),
+            "turn reset must drop the stale session snapshot"
+        );
+        assert!(
+            guard.task.is_none(),
+            "turn reset must drop stale task metadata"
+        );
+        assert!(
+            guard.workflows.is_empty(),
+            "turn reset must drop stale workflow slots: {:?}",
+            guard.workflows
+        );
+    }
+    let after = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        !after.contains("stale task 4451"),
+        "stale task survived: {after}"
+    );
+    assert!(
+        !after.contains("stale todo 4451"),
+        "stale todo survived: {after}"
+    );
+    assert!(
+        !after.contains("stale workflow 4451"),
+        "stale workflow survived: {after}"
+    );
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &details,
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none(),
+        "clearing turn-local content must not clear the same-session banner claim"
+    );
+}
+
+#[test]
+fn issue_4451_same_identity_detail_churn_after_reset_stays_suppressed() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(44_513);
+    let instance_key = "AgentDesk-codex-ch4451#detail-churn";
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &json!({
+            "provider_session_id": "session-detail-churn",
+            "tmux_reused": true,
+            "recovery_message_count": 1
+        }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+            .is_some()
+    );
+
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &json!({
+            "provider_session_id": "session-detail-churn",
+            "tmux_reused": false,
+            "recovery_message_count": 99
+        }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Codex)
+            .is_none(),
+        "render-only detail churn must not mint a new identity after turn cleanup"
+    );
+}
+
+#[test]
+fn issue_4451_provider_session_fallback_survives_turn_reset() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(44_514);
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None,
+        "session_resumed",
+        &json!({"provider_session_id": "fallback-A", "tmux_reused": true}),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some()
+    );
+
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None,
+        "session_resumed",
+        &json!({"provider_session_id": "fallback-A", "tmux_reused": false}),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none(),
+        "the provider-session fallback key must survive ordinary turn cleanup"
+    );
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None,
+        "session_resumed",
+        &json!({"provider_session_id": "fallback-B", "tmux_reused": true}),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some(),
+        "a genuinely different fallback provider session must still re-arm"
+    );
+}
+
+#[test]
+fn issue_4451_banner_retention_does_not_retain_wrong_terminal_task_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(44_515);
+    let instance_key = "AgentDesk-claude-ch4451#task-isolation";
+    let details = json!({
+        "provider_session_id": "session-task-isolation",
+        "tmux_reused": true
+    });
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &details,
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some()
+    );
+    for (tool_use_id, summary) in [
+        ("toolu_4451_target", "target terminal 4451"),
+        ("toolu_4451_decoy", "decoy terminal 4451"),
+    ] {
+        push_background_bash_task(&events, channel_id, summary, tool_use_id);
+        complete_background_bash_task(&events, channel_id, tool_use_id);
+    }
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &[bg_task_id("toolu_4451_target")]);
+    let exact_after = events
+        .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+        .block
+        .expect("the non-target terminal slot must remain before turn cleanup");
+    assert!(!exact_after.contains("target terminal 4451"));
+    assert!(
+        exact_after.contains("decoy terminal 4451"),
+        "exact tool-id eviction must not remove the decoy: {exact_after}"
+    );
+
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    assert!(
+        events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠼")
+            .block
+            .is_none(),
+        "a terminal decoy must not survive merely because the banner claim keeps the entry alive"
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some(instance_key),
+        "session_resumed",
+        &details,
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none(),
+        "task cleanup must remain isolated from the same-session banner claim"
+    );
+}
+
 /// #3983 item4 — with no live tmux marker (`session_instance_key == None`) the
 /// dedup falls back to the provider session id, so a headless session still
 /// banners exactly once and a genuinely different provider session re-arms it.
