@@ -78,6 +78,13 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub provider: String,
     pub channel_id: u64,
     pub channel_name: Option<String>,
+    /// Resolved Memento/role scope for this turn. Persisting the resolved
+    /// scope keeps restart recovery and idle-expiry writes aligned with the
+    /// live thread-parent inheritance decision. Absent on legacy rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_scope_channel_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_scope_channel_name: Option<String>,
     /// Offset-authority channel for tmux watcher delivery records.
     ///
     /// This is usually identical to `channel_id`, but a bridge turn can reuse a
@@ -903,6 +910,8 @@ impl InflightTurnState {
             provider: provider_name,
             channel_id,
             channel_name,
+            memory_scope_channel_id: None,
+            memory_scope_channel_name: None,
             watcher_owner_channel_id: Some(channel_id),
             logical_channel_id: Some(channel_id),
             thread_id: None,
@@ -981,6 +990,22 @@ impl InflightTurnState {
 
     pub fn provider_kind(&self) -> Option<ProviderKind> {
         ProviderKind::from_str(&self.provider)
+    }
+
+    pub(in crate::services::discord) fn set_memory_scope(
+        &mut self,
+        channel_id: u64,
+        channel_name: Option<String>,
+    ) {
+        self.memory_scope_channel_id = Some(channel_id);
+        self.memory_scope_channel_name = channel_name;
+    }
+
+    pub(in crate::services::discord) fn resolved_memory_scope(&self) -> (u64, Option<String>) {
+        match self.memory_scope_channel_id {
+            Some(channel_id) => (channel_id, self.memory_scope_channel_name.clone()),
+            None => (self.channel_id, self.channel_name.clone()),
+        }
     }
 
     pub(in crate::services::discord) fn effective_finalizer_turn_id(&self) -> u64 {
@@ -1269,4 +1294,66 @@ where
 {
     let value = Option::<String>::deserialize(deserializer)?;
     Ok(value.as_deref().and_then(TaskNotificationKind::from_str))
+}
+
+#[cfg(test)]
+mod memory_scope_tests {
+    use super::*;
+
+    fn state() -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            222,
+            Some("thread".to_string()),
+            1,
+            2,
+            3,
+            "hello".to_string(),
+            Some("provider-session".to_string()),
+            None,
+            None,
+            None,
+            0,
+        )
+    }
+
+    #[test]
+    fn legacy_rows_fall_back_to_delivery_channel_scope() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let state = state();
+        assert_eq!(
+            state.resolved_memory_scope(),
+            (222, Some("thread".to_string()))
+        );
+        let json = serde_json::to_value(state).expect("serialize state");
+        assert!(json.get("memory_scope_channel_id").is_none());
+        assert!(json.get("memory_scope_channel_name").is_none());
+    }
+
+    #[test]
+    fn inherited_memory_scope_survives_inflight_round_trip() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let mut state = state();
+        state.set_memory_scope(111, Some("parent".to_string()));
+        let json = serde_json::to_string(&state).expect("serialize state");
+        let restored: InflightTurnState = serde_json::from_str(&json).expect("restore state");
+        assert_eq!(
+            restored.resolved_memory_scope(),
+            (111, Some("parent".to_string()))
+        );
+    }
 }

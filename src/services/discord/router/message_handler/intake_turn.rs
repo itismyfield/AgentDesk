@@ -1910,7 +1910,7 @@ pub(super) async fn handle_text_message(
                     .cloned()
             })
     };
-    let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
+    let kind = prelaunch_runtime_kind_for_managed_session(
         &provider,
         remote_profile.is_none(),
         tmux_session_name.is_some(),
@@ -1921,7 +1921,7 @@ pub(super) async fn handle_text_message(
         &provider,
         channel_id,
         tmux_session_name.as_deref(),
-        prelaunch_runtime_kind,
+        kind,
     );
 
     let model_for_turn =
@@ -2482,7 +2482,7 @@ pub(super) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
-    apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
+    resolved_role.stamp_inflight(&mut inflight_state, channel_id, &channel_name, kind);
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;
         data.sessions

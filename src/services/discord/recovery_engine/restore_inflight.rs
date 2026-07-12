@@ -10,6 +10,14 @@
 use super::terminal_watcher::restart_report_watcher_start;
 use super::*;
 
+fn resolve_inflight_role_binding(state: &InflightTurnState) -> Option<RoleBinding> {
+    let (scope_channel_id, scope_channel_name) = state.resolved_memory_scope();
+    resolve_role_binding(
+        ChannelId::new(scope_channel_id),
+        scope_channel_name.as_deref(),
+    )
+}
+
 /// Retry-aware tmux session check for recovery after dcserver restart.
 /// The first check can false-negative if tmux CLI hasn't fully initialized yet.
 pub(super) fn tmux_session_alive_with_retry(name: &str) -> bool {
@@ -227,8 +235,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             state.turn_start_offset,
             &state.started_at,
         );
-        let recovery_agent_id =
-            resolve_role_binding(channel_id, state.channel_name.as_deref()).map(|b| b.role_id);
+        let recovery_agent_id = resolve_inflight_role_binding(&state).map(|b| b.role_id);
         let recovery_reason = if restart_report_exists {
             "restart_report"
         } else {
@@ -396,7 +403,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 let recovered_dispatch_id = parse_dispatch_id(&state.user_text).or(
                     lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id).await,
                 );
-                let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
+                let role_binding = resolve_inflight_role_binding(&state);
                 let duration_ms =
                     recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
                 let has_completion_evidence = if shared.pg_pool.is_some() {
@@ -1029,7 +1036,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
             let recovered_dispatch_id = parse_dispatch_id(&state.user_text)
                 .or(lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id).await);
-            let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
+            let role_binding = resolve_inflight_role_binding(&state);
             let duration_ms =
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
             let has_completion_evidence = if shared.pg_pool.is_some() {
@@ -1290,7 +1297,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             // #225 P1-3: Use DB lookup for dispatch ID (text parsing fails in unified threads)
             let recovered_dispatch_id = parse_dispatch_id(&state.user_text)
                 .or(lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id).await);
-            let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
+            let role_binding = resolve_inflight_role_binding(&state);
             let duration_ms =
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
             let has_completion_evidence = if shared.pg_pool.is_some() {
@@ -1804,8 +1811,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                                 &state.started_at,
                             );
                         let recovery_agent_id =
-                            resolve_role_binding(channel_id, state.channel_name.as_deref())
-                                .map(|b| b.role_id);
+                            resolve_inflight_role_binding(&state).map(|b| b.role_id);
                         crate::services::observability::emit_recovery_fired(
                             provider.as_str(),
                             state.channel_id,
@@ -2029,9 +2035,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     state.turn_start_offset,
                     &state.started_at,
                 );
-                let recovery_agent_id =
-                    resolve_role_binding(channel_id, state.channel_name.as_deref())
-                        .map(|b| b.role_id);
+                let recovery_agent_id = resolve_inflight_role_binding(&state).map(|b| b.role_id);
                 crate::services::observability::emit_recovery_fired(
                     provider.as_str(),
                     state.channel_id,
@@ -2144,7 +2148,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             channel_name.as_deref(),
             recovery_adk_cwd.as_deref(),
         );
-        let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
+        let (memory_scope_channel_id, memory_scope_channel_name) = state.resolved_memory_scope();
+        let memory_scope_channel_id = ChannelId::new(memory_scope_channel_id);
+        let role_binding = resolve_inflight_role_binding(&state);
         let adk_thread_channel_id = adk_session_name
             .as_deref()
             .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name);
@@ -2258,6 +2264,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             lookup_turn_finished_dispatch_kind(recovery_dispatch_id.as_deref()).await;
         // Backfill session_key/dispatch_id on inflight state for long-turn detection ([L]).
         let mut state = state;
+        state.set_memory_scope(
+            memory_scope_channel_id.get(),
+            memory_scope_channel_name.clone(),
+        );
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
         // #3166: read the real configured thresholds (e.g.
@@ -2287,7 +2297,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 user_text_owned: state.user_text.clone(),
                 request_owner_name: String::new(),
                 role_binding,
-                memory_scope: (channel_id, state.channel_name.clone()),
+                memory_scope: (memory_scope_channel_id, memory_scope_channel_name),
                 adk_session_key,
                 adk_session_name,
                 adk_session_info: Some(adk_session_info),

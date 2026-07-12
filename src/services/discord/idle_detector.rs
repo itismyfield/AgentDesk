@@ -255,19 +255,31 @@ async fn spawn_idle_expiry_reflect_if_needed(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) {
-    let channel_name = {
+    let session_channel_name = {
         let data = shared.core.lock().await;
         data.sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
     };
-    let role_binding = settings::resolve_role_binding(channel_id, channel_name.as_deref());
+    let inflight_state = super::inflight::load_inflight_state(provider, channel_id.get());
+    let (memory_scope_channel_id, memory_scope_channel_name) =
+        resolve_idle_memory_scope(inflight_state.as_ref(), channel_id, session_channel_name);
+    let role_binding = settings::resolve_role_binding(
+        memory_scope_channel_id,
+        memory_scope_channel_name.as_deref(),
+    );
     let reflect_job = {
         let mut data = shared.core.lock().await;
         let Some(session) = data.sessions.get_mut(&channel_id) else {
             return;
         };
-        take_idle_expiry_reflect_request(session, provider, role_binding.as_ref(), channel_id)
+        take_idle_expiry_reflect_request(
+            session,
+            provider,
+            role_binding.as_ref(),
+            memory_scope_channel_id,
+            memory_scope_channel_name,
+        )
     };
     let Some((memory_settings, reflect_request)) = reflect_job else {
         return;
@@ -275,21 +287,32 @@ async fn spawn_idle_expiry_reflect_if_needed(
     super::turn_bridge::spawn_memory_reflect_task(channel_id, memory_settings, reflect_request);
 }
 
+fn resolve_idle_memory_scope(
+    inflight_state: Option<&super::inflight::InflightTurnState>,
+    channel_id: ChannelId,
+    channel_name: Option<String>,
+) -> (ChannelId, Option<String>) {
+    inflight_state
+        .map(|state| state.resolved_memory_scope())
+        .map(|(scope_id, scope_name)| (ChannelId::new(scope_id), scope_name))
+        .unwrap_or((channel_id, channel_name))
+}
+
 fn take_idle_expiry_reflect_request(
     session: &mut super::DiscordSession,
     provider: &ProviderKind,
     role_binding: Option<&RoleBinding>,
-    channel_id: ChannelId,
+    memory_scope_channel_id: ChannelId,
+    memory_scope_channel_name: Option<String>,
 ) -> Option<(ResolvedMemorySettings, ReflectRequest)> {
     let memory_settings = settings::memory_settings_for_binding(role_binding);
-    let channel_name = session.channel_name.clone();
     let reflect_request = super::turn_bridge::take_memento_reflect_request(
         session,
         &memory_settings,
         provider,
         role_binding,
-        channel_id.get(),
-        channel_name,
+        memory_scope_channel_id.get(),
+        memory_scope_channel_name,
         SessionEndReason::IdleExpiry,
     )?;
     Some((memory_settings, reflect_request))
@@ -473,5 +496,90 @@ mod tests {
         let stale = now - chrono::Duration::minutes(30);
         let result = classify(true, Some(stale), Some(stale), now, IDLE_THRESHOLD);
         assert_eq!(result, IdleClassification::Idle);
+    }
+
+    #[test]
+    fn idle_scope_uses_persisted_parent_inflight_scope() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let mut state = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            222,
+            Some("thread".to_string()),
+            1,
+            2,
+            3,
+            "hello".to_string(),
+            Some("provider-session".to_string()),
+            None,
+            None,
+            None,
+            0,
+        );
+        state.set_memory_scope(111, Some("parent".to_string()));
+
+        assert_eq!(
+            resolve_idle_memory_scope(
+                Some(&state),
+                ChannelId::new(222),
+                Some("thread".to_string()),
+            ),
+            (ChannelId::new(111), Some("parent".to_string()))
+        );
+    }
+
+    #[test]
+    fn idle_reflect_uses_persisted_parent_scope() {
+        use crate::ui::ai_screen::{HistoryItem, HistoryType};
+
+        let mut session = super::super::DiscordSession {
+            session_id: Some("provider-session".to_string()),
+            memento_context_loaded: true,
+            memento_reflected: false,
+            current_path: None,
+            history: vec![HistoryItem {
+                item_type: HistoryType::User,
+                content: "question".to_string(),
+            }],
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(222),
+            channel_name: Some("thread".to_string()),
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        };
+        let binding = RoleBinding {
+            role_id: "project-agentdesk".to_string(),
+            prompt_file: String::new(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
+            memory: ResolvedMemorySettings {
+                backend: settings::MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+        };
+
+        let (_, request) = take_idle_expiry_reflect_request(
+            &mut session,
+            &ProviderKind::Codex,
+            Some(&binding),
+            ChannelId::new(111),
+            Some("parent".to_string()),
+        )
+        .expect("idle reflect request");
+        assert_eq!(request.channel_id, 111);
+        assert_eq!(request.channel_name.as_deref(), Some("parent"));
     }
 }

@@ -366,6 +366,18 @@ impl ResolvedRoleBinding {
             self.memory_name(channel_name),
         )
     }
+
+    pub(super) fn stamp_inflight(
+        &self,
+        state: &mut InflightTurnState,
+        channel_id: serenity::ChannelId,
+        channel_name: &Option<String>,
+        runtime_kind: Option<RuntimeHandoffKind>,
+    ) {
+        let (scope_id, scope_name) = self.memory_scope(channel_id, channel_name);
+        state.set_memory_scope(scope_id.get(), scope_name);
+        apply_prelaunch_runtime_kind(state, runtime_kind);
+    }
 }
 
 pub(super) fn resolve_role_binding_with_parents<'a>(

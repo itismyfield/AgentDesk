@@ -9,6 +9,8 @@ fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnStat
         provider: ProviderKind::Codex.as_str().to_string(),
         channel_id: 42,
         channel_name: Some("adk-cdx".to_string()),
+        memory_scope_channel_id: None,
+        memory_scope_channel_name: None,
         watcher_owner_channel_id: Some(42),
         logical_channel_id: Some(42),
         thread_id: None,
