@@ -1120,7 +1120,12 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1849 lines; +2 from #4091 r6 mandatory env-first lock-order comment at TEST_LOCK; +23 from #4091 r3
+  - `src/services/tui_prompt_dedupe.rs` (1966 lines; +117 from #4423: adopt Claude's
+    actual continuation UUID from a hook payload only through the registered
+    launch UUID and a real sibling transcript; retain the launch UUID as the
+    live hook-routing identity, register the payload alias, require newer mtime
+    for later hops, reset the cursor only on a genuine transition, and reject
+    delayed rewind payloads; +2 from #4091 r6 mandatory env-first lock-order comment at TEST_LOCK; +23 from #4091 r3
     refresh_runtime_binding_activity so live transcript activity extends the
     24h binding-mapping TTL even when the relay offset never advances (the
     exact relay-dead state the anchor protects); shared TUI prompt

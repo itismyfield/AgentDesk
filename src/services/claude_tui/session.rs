@@ -1,4 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
 
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
@@ -14,6 +21,250 @@ impl ClaudeTuiSessionFiles {
         let _ = std::fs::remove_file(&self.hook_settings_path);
         let _ = std::fs::remove_file(&self.launch_script_path);
     }
+}
+
+#[derive(Debug)]
+struct PersistedContinuationSession {
+    session_id: String,
+    recorded_at: Instant,
+}
+
+static PERSISTED_CONTINUATION_SESSIONS: LazyLock<
+    Mutex<HashMap<String, PersistedContinuationSession>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const PERSISTED_CONTINUATION_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn continuation_persistence_cached(tmux_session_name: &str, session_id: &str) -> bool {
+    let now = Instant::now();
+    let mut persisted = PERSISTED_CONTINUATION_SESSIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    persisted.retain(|_, entry| {
+        now.duration_since(entry.recorded_at) <= PERSISTED_CONTINUATION_CACHE_TTL
+    });
+    persisted
+        .get(tmux_session_name)
+        .is_some_and(|entry| entry.session_id == session_id)
+}
+
+fn remember_persisted_continuation(tmux_session_name: &str, session_id: &str) {
+    PERSISTED_CONTINUATION_SESSIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            tmux_session_name.to_string(),
+            PersistedContinuationSession {
+                session_id: session_id.to_string(),
+                recorded_at: Instant::now(),
+            },
+        );
+}
+
+/// Persist a Claude continuation cutover into the AgentDesk-owned artifacts
+/// that survive dcserver restarts (#4423).
+///
+/// Claude can keep the live TUI pane while changing the provider session UUID.
+/// Updating only the in-memory transcript binding lets the launch script's old
+/// UUID win again after rehydration. Both artifacts are therefore repaired:
+/// the launch script selects the new transcript on the next pane restart, and
+/// the hook settings address the same identity. A partially completed repair is
+/// accepted and converges on the next call.
+pub(crate) fn persist_claude_continuation_session(
+    tmux_session_name: &str,
+    new_session_id: &str,
+) -> Result<bool, String> {
+    let tmux_session_name = tmux_session_name.trim();
+    let new_session_id = new_session_id.trim();
+    if tmux_session_name.is_empty() {
+        return Err("Claude continuation tmux session name is required".to_string());
+    }
+    if uuid::Uuid::parse_str(new_session_id).is_err() {
+        return Err("Claude continuation session id must be a UUID".to_string());
+    }
+    if continuation_persistence_cached(tmux_session_name, new_session_id) {
+        return Ok(false);
+    }
+    let hook_settings_path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
+    )
+    .ok_or_else(|| format!("missing Claude hook settings for {tmux_session_name}"))?;
+    let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+    )
+    .ok_or_else(|| format!("missing Claude launch script for {tmux_session_name}"))?;
+    let changed = persist_claude_continuation_session_files(
+        &ClaudeTuiSessionFiles {
+            hook_settings_path: PathBuf::from(hook_settings_path),
+            launch_script_path: PathBuf::from(launch_script_path),
+        },
+        new_session_id,
+    )?;
+    // Cache only a verified success. Any read/parse/write/rollback failure is
+    // deliberately left uncached so the next mismatched hook retries it.
+    remember_persisted_continuation(tmux_session_name, new_session_id);
+    Ok(changed)
+}
+
+fn uuid_after(content: &str, marker: &str) -> Vec<String> {
+    let mut remainder = content;
+    let mut values = Vec::new();
+    while let Some(index) = remainder.find(marker) {
+        remainder = &remainder[index + marker.len()..];
+        remainder = remainder.strip_prefix('\'').unwrap_or(remainder);
+        let value = &remainder[..remainder
+            .find(|character: char| !(character.is_ascii_hexdigit() || character == '-'))
+            .unwrap_or(remainder.len())];
+        if uuid::Uuid::parse_str(value).is_ok() && !values.iter().any(|existing| existing == value)
+        {
+            values.push(value.to_string());
+        }
+        remainder = &remainder[value.len()..];
+    }
+    values
+}
+
+fn single_artifact_session_id(
+    label: &str,
+    content: &str,
+    markers: &[&str],
+) -> Result<String, String> {
+    let mut values = Vec::new();
+    for marker in markers {
+        for value in uuid_after(content, marker) {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+    }
+    match values.as_slice() {
+        [value] => Ok(value.clone()),
+        [] => Err(format!(
+            "{label} contains no generated Claude session selector"
+        )),
+        _ => Err(format!(
+            "{label} contains multiple Claude session selectors"
+        )),
+    }
+}
+
+fn atomic_replace_preserving_permissions(path: &Path, data: &str) -> Result<(), String> {
+    let permissions = fs::metadata(path)
+        .map_err(|error| format!("stat {}: {error}", path.display()))?
+        .permissions();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.{}.continuation.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| format!("create {}: {error}", temp_path.display()))?;
+        file.write_all(data.as_bytes())
+            .map_err(|error| format!("write {}: {error}", temp_path.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("sync {}: {error}", temp_path.display()))?;
+        fs::set_permissions(&temp_path, permissions)
+            .map_err(|error| format!("chmod {}: {error}", temp_path.display()))?;
+        replace_existing_file(&temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn replace_existing_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    fs::rename(temp_path, path).map_err(|error| format!("replace {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn replace_existing_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    // Claude TUI hosting requires tmux and is Unix-only. Keep tests and shared
+    // compilation functional on Windows, where std::fs::rename cannot replace
+    // an existing file, even though that platform cannot execute this path.
+    fs::remove_file(path).map_err(|error| format!("remove {}: {error}", path.display()))?;
+    fs::rename(temp_path, path).map_err(|error| format!("replace {}: {error}", path.display()))
+}
+
+fn persist_claude_continuation_session_files(
+    files: &ClaudeTuiSessionFiles,
+    new_session_id: &str,
+) -> Result<bool, String> {
+    let original_launch = fs::read_to_string(&files.launch_script_path).map_err(|error| {
+        format!(
+            "read Claude launch script {}: {error}",
+            files.launch_script_path.display()
+        )
+    })?;
+    let original_settings = fs::read_to_string(&files.hook_settings_path).map_err(|error| {
+        format!(
+            "read Claude hook settings {}: {error}",
+            files.hook_settings_path.display()
+        )
+    })?;
+    let launch_session_id = single_artifact_session_id(
+        "Claude launch script",
+        &original_launch,
+        &["'--session-id' ", "'--resume' "],
+    )?;
+    serde_json::from_str::<serde_json::Value>(&original_settings)
+        .map_err(|error| format!("Claude hook settings are invalid JSON: {error}"))?;
+    let settings_session_id = single_artifact_session_id(
+        "Claude hook settings",
+        &original_settings,
+        &["--session-id "],
+    )?;
+    // A process crash can leave either artifact one continuation hop ahead of
+    // the other. The caller has already authenticated the live payload against
+    // the tmux binding, so converge each generated selector independently.
+    let launch = (launch_session_id != new_session_id)
+        .then(|| original_launch.replace(&launch_session_id, new_session_id));
+    let settings = (settings_session_id != new_session_id)
+        .then(|| original_settings.replace(&settings_session_id, new_session_id));
+    if launch.is_none() && settings.is_none() {
+        return Ok(false);
+    }
+    if let Some(updated) = settings.as_deref() {
+        serde_json::from_str::<serde_json::Value>(updated)
+            .map_err(|error| format!("updated Claude hook settings are invalid JSON: {error}"))?;
+    }
+    if let Some(updated) = launch.as_deref()
+        && (!updated.contains(new_session_id) || updated.contains(&launch_session_id))
+    {
+        return Err("updated Claude launch script failed session-id validation".to_string());
+    }
+
+    // Repair the launch selector first. If the settings write then fails, put
+    // the original launch script back; either partial ordering is also safe at
+    // runtime because hook_server routes a mismatched payload through whichever
+    // provider UUID is currently registered.
+    if let Some(updated) = launch.as_deref() {
+        atomic_replace_preserving_permissions(&files.launch_script_path, updated)?;
+    }
+    if let Some(updated) = settings.as_deref()
+        && let Err(error) =
+            atomic_replace_preserving_permissions(&files.hook_settings_path, updated)
+    {
+        if launch.is_some()
+            && let Err(rollback_error) =
+                atomic_replace_preserving_permissions(&files.launch_script_path, &original_launch)
+        {
+            return Err(format!(
+                "{error}; additionally failed to roll back Claude launch script: {rollback_error}"
+            ));
+        }
+        return Err(error);
+    }
+    Ok(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,6 +640,134 @@ mod tests {
 
         assert!(!files.hook_settings_path.exists());
         assert!(!files.launch_script_path.exists());
+    }
+
+    #[test]
+    fn successful_continuation_persistence_is_cached_per_target_uuid() {
+        let tmux = format!("tmux-4423-persist-cache-{}", uuid::Uuid::new_v4());
+        let session = uuid::Uuid::new_v4().to_string();
+        let later_session = uuid::Uuid::new_v4().to_string();
+        assert!(!continuation_persistence_cached(&tmux, &session));
+        remember_persisted_continuation(&tmux, &session);
+        assert!(continuation_persistence_cached(&tmux, &session));
+        assert!(
+            !continuation_persistence_cached(&tmux, &later_session),
+            "a later continuation UUID must still trigger artifact convergence"
+        );
+    }
+
+    #[test]
+    fn continuation_cutover_rewrites_both_artifacts_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_session_id = uuid::Uuid::new_v4().to_string();
+        let new_session_id = uuid::Uuid::new_v4().to_string();
+        let files = ClaudeTuiSessionFiles {
+            hook_settings_path: dir.path().join("settings.json"),
+            launch_script_path: dir.path().join("launch.sh"),
+        };
+        let mut config = sample_config();
+        config.session_id = old_session_id.clone();
+        write_claude_hook_settings(
+            &files.hook_settings_path,
+            &HookBundleConfig {
+                endpoint: config.hook_endpoint.clone(),
+                provider: "claude".to_string(),
+                session_id: old_session_id.clone(),
+                agentdesk_exe: config.agentdesk_exe.display().to_string(),
+            },
+        )
+        .unwrap();
+        write_launch_script(
+            &files.launch_script_path,
+            &config,
+            &files.hook_settings_path,
+        )
+        .unwrap();
+
+        assert!(persist_claude_continuation_session_files(&files, &new_session_id).unwrap());
+        let launch = fs::read_to_string(&files.launch_script_path).unwrap();
+        let settings = fs::read_to_string(&files.hook_settings_path).unwrap();
+        assert!(!launch.contains(&old_session_id));
+        assert!(launch.contains(&new_session_id));
+        assert!(!settings.contains(&old_session_id));
+        assert!(settings.contains(&new_session_id));
+        serde_json::from_str::<serde_json::Value>(&settings).unwrap();
+        assert!(
+            !persist_claude_continuation_session_files(&files, &new_session_id).unwrap(),
+            "an already durable cutover must not rewrite artifacts again"
+        );
+
+        let third_session_id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            persist_claude_continuation_session_files(&files, &third_session_id).unwrap(),
+            "a later continuation must advance from the artifact's current UUID, not the original query UUID"
+        );
+        let launch = fs::read_to_string(&files.launch_script_path).unwrap();
+        let settings = fs::read_to_string(&files.hook_settings_path).unwrap();
+        assert!(!launch.contains(&new_session_id));
+        assert!(launch.contains(&third_session_id));
+        assert!(!settings.contains(&new_session_id));
+        assert!(settings.contains(&third_session_id));
+    }
+
+    #[test]
+    fn continuation_cutover_repairs_a_partial_artifact_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_session_id = uuid::Uuid::new_v4().to_string();
+        let new_session_id = uuid::Uuid::new_v4().to_string();
+        let files = ClaudeTuiSessionFiles {
+            hook_settings_path: dir.path().join("settings.json"),
+            launch_script_path: dir.path().join("launch.sh"),
+        };
+        fs::write(
+            &files.launch_script_path,
+            format!("exec claude '--resume' '{new_session_id}'\n"),
+        )
+        .unwrap();
+        fs::write(
+            &files.hook_settings_path,
+            serde_json::to_string(&serde_json::json!({
+                "command": format!("agentdesk claude-hook-relay --session-id '{old_session_id}'")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(persist_claude_continuation_session_files(&files, &new_session_id).unwrap());
+        assert!(
+            fs::read_to_string(&files.hook_settings_path)
+                .unwrap()
+                .contains(&new_session_id)
+        );
+        assert!(
+            fs::read_to_string(&files.launch_script_path)
+                .unwrap()
+                .contains(&new_session_id)
+        );
+
+        let later_session_id = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            &files.hook_settings_path,
+            serde_json::to_string(&serde_json::json!({
+                "command": format!("agentdesk claude-hook-relay --session-id '{old_session_id}'")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            persist_claude_continuation_session_files(&files, &later_session_id).unwrap(),
+            "a later hop must converge even when a prior crash left two older selectors"
+        );
+        assert!(
+            fs::read_to_string(&files.hook_settings_path)
+                .unwrap()
+                .contains(&later_session_id)
+        );
+        assert!(
+            fs::read_to_string(&files.launch_script_path)
+                .unwrap()
+                .contains(&later_session_id)
+        );
     }
 
     #[test]

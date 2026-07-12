@@ -248,7 +248,10 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
             if existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
                 && Path::new(&existing.output_path).exists()
                 && match fresh_binding.as_ref() {
-                    Some(fresh) => claude_tui_runtime_binding_matches_launch(existing, fresh),
+                    Some(fresh) => {
+                        claude_tui_runtime_binding_matches_launch(existing, fresh)
+                            || claude_continuation_binding_supersedes_launch(existing, fresh)
+                    }
                     None => true,
                 }
             {

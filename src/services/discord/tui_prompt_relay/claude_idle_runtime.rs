@@ -1,6 +1,84 @@
 use super::*;
 
 #[cfg(unix)]
+const CLAUDE_CONTINUATION_BOUND_STALE_SECS: u64 = 10 * 60;
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+struct ClaudeContinuationGrowthObservation {
+    candidate_path: PathBuf,
+    length: u64,
+    observed_at: std::time::Instant,
+}
+
+#[cfg(unix)]
+const CLAUDE_CONTINUATION_GROWTH_WINDOW: Duration = Duration::from_secs(30);
+
+#[cfg(unix)]
+static CLAUDE_CONTINUATION_GROWTH: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ClaudeContinuationGrowthObservation>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ClaudeContinuationAdoptionFacts {
+    pub(super) bound_stale_for_threshold: bool,
+    pub(super) pane_alive: bool,
+    pub(super) candidate_newer_than_bound: bool,
+    pub(super) candidate_grew_across_samples: bool,
+    pub(super) candidate_starts_after_bound_activity: bool,
+}
+
+#[cfg(unix)]
+pub(super) fn should_adopt_newer_claude_transcript(facts: ClaudeContinuationAdoptionFacts) -> bool {
+    facts.bound_stale_for_threshold
+        && facts.pane_alive
+        && facts.candidate_newer_than_bound
+        && facts.candidate_grew_across_samples
+        && facts.candidate_starts_after_bound_activity
+}
+
+#[cfg(unix)]
+fn observe_claude_continuation_candidate_growth(
+    tmux_session_name: &str,
+    candidate_path: &Path,
+) -> bool {
+    let Ok(length) = std::fs::metadata(candidate_path).map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let mut observations = CLAUDE_CONTINUATION_GROWTH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let now = std::time::Instant::now();
+    observations.retain(|_, observation| {
+        now.duration_since(observation.observed_at)
+            <= CLAUDE_CONTINUATION_GROWTH_WINDOW.saturating_mul(2)
+    });
+    let grew = observations.get(tmux_session_name).is_some_and(|previous| {
+        previous.candidate_path == candidate_path
+            && length > previous.length
+            && now.duration_since(previous.observed_at) <= CLAUDE_CONTINUATION_GROWTH_WINDOW
+    });
+    observations.insert(
+        tmux_session_name.to_string(),
+        ClaudeContinuationGrowthObservation {
+            candidate_path: candidate_path.to_path_buf(),
+            length,
+            observed_at: now,
+        },
+    );
+    grew
+}
+
+#[cfg(unix)]
+fn clear_claude_continuation_candidate_growth(tmux_session_name: &str) {
+    CLAUDE_CONTINUATION_GROWTH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(tmux_session_name);
+}
+
+#[cfg(unix)]
 pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
     if CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED.swap(true, Ordering::AcqRel) {
         return;
@@ -261,6 +339,44 @@ pub(super) fn claude_tui_runtime_binding_matches_launch(
 }
 
 #[cfg(unix)]
+pub(super) fn claude_continuation_binding_supersedes_launch(
+    existing: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    launch: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> bool {
+    if existing.runtime_kind != RuntimeHandoffKind::ClaudeTui
+        || launch.runtime_kind != RuntimeHandoffKind::ClaudeTui
+        || existing.session_id.is_none()
+        || launch.session_id.is_none()
+        || existing.session_id == launch.session_id
+    {
+        return false;
+    }
+    let existing_path = Path::new(&existing.output_path);
+    let launch_path = Path::new(&launch.output_path);
+    if !existing_path.is_file()
+        || !launch_path.is_file()
+        || transcript_mtime(existing_path) <= transcript_mtime(launch_path)
+    {
+        return false;
+    }
+    let Ok(Some((existing_first, _))) =
+        crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_bounds(
+            existing_path,
+        )
+    else {
+        return false;
+    };
+    let Ok(Some((_, launch_last))) =
+        crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_bounds(
+            launch_path,
+        )
+    else {
+        return false;
+    };
+    existing_first > launch_last
+}
+
+#[cfg(unix)]
 pub(super) fn transcript_mtime(path: &Path) -> std::time::SystemTime {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
@@ -349,18 +465,107 @@ pub(super) fn freshest_claude_transcript_for_session(
     tmux_session_name: &str,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) -> Option<(PathBuf, Option<String>)> {
-    // #2843 multi-session fix: when the bound (launch-script) transcript still
-    // EXISTS, it is the authoritative per-session identity — trust it and do NOT
-    // override with a project-newer file. Picking max-by-mtime across the whole
-    // project dir was wrong for a cwd shared by several Claude sessions: a
-    // *different* session's (or an orphaned older session's) newer transcript
-    // gets pulled in, thrashing the binding against launch rehydration (~5s) and
-    // mis-tailing relay output. The project scan now only fills in when the
-    // bound transcript is genuinely missing (the legitimate stale/rotated-away
-    // case), and even then skips transcripts other live sessions claim.
+    // Existing paths remain authoritative unless all continuation-cutover
+    // evidence agrees. This preserves #2843's shared-cwd anti-steal rule while
+    // closing #4423, where the old transcript remains on disk forever after
+    // Claude compaction moves the live pane to a new UUID.
     let bound_path = PathBuf::from(&binding.output_path);
     if bound_path.exists() {
-        return Some((bound_path, binding.session_id.clone()));
+        // This function runs in the 500ms idle poll. Keep the ordinary
+        // (<10-minute-stale) path to one local stat and return before the
+        // blocking tmux/session inventory and project-directory scan.
+        let now = std::time::SystemTime::now();
+        let bound_mtime = transcript_mtime(&bound_path);
+        let bound_stale_for_threshold = now
+            .duration_since(bound_mtime)
+            .is_ok_and(|age| age.as_secs() >= CLAUDE_CONTINUATION_BOUND_STALE_SECS);
+        if !bound_stale_for_threshold {
+            return Some((bound_path, binding.session_id.clone()));
+        }
+        let claimed_by_other_sessions =
+            other_session_claimed_transcripts(shared, tmux_session_name);
+        let candidate =
+            claude_tui_launch_context(tmux_session_name).and_then(|(cwd, launch_mtime)| {
+                crate::services::claude_tui::transcript_tail::latest_claude_transcript_for_cwd(
+                    &cwd,
+                    launch_mtime,
+                    None,
+                    &claimed_by_other_sessions,
+                )
+            });
+        let Some(candidate_path) = candidate.filter(|candidate| candidate != &bound_path) else {
+            return Some((bound_path, binding.session_id.clone()));
+        };
+        let candidate_mtime = transcript_mtime(&candidate_path);
+        if candidate_mtime <= bound_mtime
+            || !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+        {
+            return Some((bound_path, binding.session_id.clone()));
+        }
+        let candidate_grew_across_samples =
+            observe_claude_continuation_candidate_growth(tmux_session_name, &candidate_path);
+        if !candidate_grew_across_samples {
+            return Some((bound_path, binding.session_id.clone()));
+        }
+        let candidate_starts_after_bound_activity = match (
+            crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_bounds(
+                &bound_path,
+            ),
+            crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_bounds(
+                &candidate_path,
+            ),
+        ) {
+            (Ok(Some((_, bound_last))), Ok(Some((candidate_first, _)))) => {
+                candidate_first > bound_last
+            }
+            _ => false,
+        };
+        let facts = ClaudeContinuationAdoptionFacts {
+            bound_stale_for_threshold,
+            pane_alive: true,
+            candidate_newer_than_bound: candidate_mtime > bound_mtime,
+            candidate_grew_across_samples,
+            candidate_starts_after_bound_activity,
+        };
+        if !should_adopt_newer_claude_transcript(facts) {
+            return Some((bound_path, binding.session_id.clone()));
+        }
+        let session_id = candidate_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string);
+        let Some(candidate_session_id) = session_id.as_deref() else {
+            return Some((bound_path, binding.session_id.clone()));
+        };
+        let Some(bound_session_id) = binding.session_id.as_deref() else {
+            return Some((bound_path, binding.session_id.clone()));
+        };
+        if let Err(error) =
+            crate::services::claude_tui::session::persist_claude_continuation_session(
+                tmux_session_name,
+                candidate_session_id,
+            )
+        {
+            tracing::error!(
+                tmux_session_name,
+                bound_session_id,
+                candidate_session_id,
+                error,
+                "deferred Claude continuation adoption because durable artifact cutover failed"
+            );
+            return Some((bound_path, binding.session_id.clone()));
+        }
+        clear_claude_continuation_candidate_growth(tmux_session_name);
+        tracing::warn!(
+            tmux_session_name,
+            bound_path = %bound_path.display(),
+            candidate_path = %candidate_path.display(),
+            bound_session_id = binding.session_id.as_deref().unwrap_or(""),
+            candidate_session_id = session_id.as_deref().unwrap_or(""),
+            bound_stale_secs = now.duration_since(bound_mtime).map(|age| age.as_secs()).unwrap_or(0),
+            "adopted growing Claude continuation transcript after bounded two-sample proof"
+        );
+        return Some((candidate_path, session_id));
     }
     // Bound transcript is gone — fall back to the freshest project transcript,
     // excluding files that authoritatively belong to other live Claude TUI tmux
@@ -515,6 +720,116 @@ fn transcript_recent_enough_for_binding_refresh(path: &Path) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuation_adoption_requires_every_safety_fact() {
+        let all = ClaudeContinuationAdoptionFacts {
+            bound_stale_for_threshold: true,
+            pane_alive: true,
+            candidate_newer_than_bound: true,
+            candidate_grew_across_samples: true,
+            candidate_starts_after_bound_activity: true,
+        };
+        assert!(should_adopt_newer_claude_transcript(all));
+
+        for mutate in [
+            |facts: &mut ClaudeContinuationAdoptionFacts| facts.bound_stale_for_threshold = false,
+            |facts: &mut ClaudeContinuationAdoptionFacts| facts.pane_alive = false,
+            |facts: &mut ClaudeContinuationAdoptionFacts| facts.candidate_newer_than_bound = false,
+            |facts: &mut ClaudeContinuationAdoptionFacts| {
+                facts.candidate_grew_across_samples = false
+            },
+            |facts: &mut ClaudeContinuationAdoptionFacts| {
+                facts.candidate_starts_after_bound_activity = false
+            },
+        ] {
+            let mut facts = all;
+            mutate(&mut facts);
+            assert!(!should_adopt_newer_claude_transcript(facts));
+        }
+    }
+
+    #[test]
+    fn continuation_candidate_requires_growth_across_two_samples() {
+        let tmp = tempfile::tempdir().unwrap();
+        let candidate = tmp.path().join("candidate.jsonl");
+        std::fs::write(&candidate, b"first\n").unwrap();
+        let tmux = format!("AgentDesk-claude-4423-growth-{}", std::process::id());
+
+        assert!(!observe_claude_continuation_candidate_growth(
+            &tmux, &candidate
+        ));
+        assert!(!observe_claude_continuation_candidate_growth(
+            &tmux, &candidate
+        ));
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&candidate)
+            .unwrap()
+            .write_all(b"second\n")
+            .unwrap();
+        assert!(observe_claude_continuation_candidate_growth(
+            &tmux, &candidate
+        ));
+    }
+
+    #[test]
+    fn timestamp_continuation_binding_supersedes_stale_launch_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let launch_path = tmp.path().join("old.jsonl");
+        let continuation_path = tmp.path().join("new.jsonl");
+        std::fs::write(
+            &launch_path,
+            concat!(
+                "{\"timestamp\":\"2026-07-10T00:00:01Z\"}\n",
+                "{\"timestamp\":\"2026-07-10T00:00:09Z\"}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &continuation_path,
+            concat!(
+                "{\"timestamp\":\"2026-07-10T00:00:10Z\"}\n",
+                "{\"timestamp\":\"2026-07-10T00:00:11Z\"}\n"
+            ),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            &launch_path,
+            filetime::FileTime::from_unix_time(1_700_000_000, 0),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            &continuation_path,
+            filetime::FileTime::from_unix_time(1_700_000_001, 0),
+        )
+        .unwrap();
+        let binding =
+            |path: &Path, session: &str| crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(session.to_string()),
+                last_offset: 0,
+                relay_last_offset: None,
+            };
+        let existing = binding(&continuation_path, "new");
+        let launch = binding(&launch_path, "old");
+        assert!(claude_continuation_binding_supersedes_launch(
+            &existing, &launch
+        ));
+
+        std::fs::write(
+            &continuation_path,
+            "{\"timestamp\":\"2026-07-10T00:00:08Z\"}\n",
+        )
+        .unwrap();
+        assert!(!claude_continuation_binding_supersedes_launch(
+            &existing, &launch
+        ));
+    }
 
     #[test]
     fn transcript_binding_refresh_requires_recent_activity() {

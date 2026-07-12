@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -306,6 +307,10 @@ pub fn provider_session_for_tmux(provider: &str, tmux_session_name: &str) -> Opt
         })
         .max_by_key(|(_, timed)| timed.recorded_at)
         .map(|(promptkey, _)| promptkey.key.clone())
+}
+
+pub(crate) fn provider_session_is_registered(provider: &str, provider_session_id: &str) -> bool {
+    resolve_tmux_session_name(provider, provider_session_id).is_some()
 }
 
 pub fn register_tmux_channel(tmux_session_name: &str, channel_id: u64) {
@@ -730,6 +735,118 @@ pub(crate) fn runtime_binding_for_tmux_session(
         .runtime_by_tmux
         .get(tmux_session_name)
         .map(|entry| entry.value.clone())
+}
+
+/// Adopt the actual Claude session UUID reported inside a hook payload while
+/// retaining the launch-time UUID as a stable hook-routing alias (#4423).
+///
+/// Claude continuation keeps the tmux process and hook command alive but moves
+/// transcript writes to a new `<uuid>.jsonl`.  The hook command therefore still
+/// addresses the old UUID while stdin carries the new one.  This update is
+/// deliberately limited to an existing ClaudeTui binding reached through the
+/// command UUID and to a real sibling transcript file. For a second or later
+/// continuation hop, the candidate must also be newer than the transcript
+/// currently bound to that pane. It never guesses across project directories.
+pub(crate) fn adopt_claude_continuation_session(
+    command_session_id: &str,
+    payload_session_id: &str,
+) -> Option<(String, String)> {
+    let command_session_id = command_session_id.trim();
+    let payload_session_id = payload_session_id.trim();
+    if command_session_id.is_empty()
+        || payload_session_id.is_empty()
+        || command_session_id == payload_session_id
+        || uuid::Uuid::parse_str(payload_session_id).is_err()
+    {
+        return None;
+    }
+
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let command_key = PromptKey::new("claude", command_session_id);
+    let tmux_session_name = state
+        .tmux_by_provider_session
+        .get(&command_key)?
+        .value
+        .clone();
+    let binding = state.runtime_by_tmux.get(&tmux_session_name)?;
+    if binding.value.runtime_kind != RuntimeHandoffKind::ClaudeTui {
+        return None;
+    }
+    let old_output_path = PathBuf::from(&binding.value.output_path);
+    let new_output_path = old_output_path
+        .parent()?
+        .join(format!("{payload_session_id}.jsonl"));
+    if !new_output_path.is_file() {
+        return None;
+    }
+    if let Some(current_session_id) = binding.value.session_id.as_deref()
+        && current_session_id != command_session_id
+        && current_session_id != payload_session_id
+    {
+        let current_mtime = std::fs::metadata(&old_output_path)
+            .and_then(|metadata| metadata.modified())
+            .ok()?;
+        let candidate_mtime = std::fs::metadata(&new_output_path)
+            .and_then(|metadata| metadata.modified())
+            .ok()?;
+        if candidate_mtime <= current_mtime {
+            return None;
+        }
+    }
+    let new_output_path = new_output_path.display().to_string();
+
+    if binding.value.session_id.as_deref() == Some(payload_session_id)
+        && binding.value.output_path == new_output_path
+    {
+        // Subsequent hooks still carry the launch-time query UUID. Do not reset
+        // the already-adopted continuation cursor to zero on every event.
+        state.tmux_by_provider_session.insert(
+            PromptKey::new("claude", payload_session_id),
+            TimedValue {
+                value: tmux_session_name.clone(),
+                recorded_at: Instant::now(),
+            },
+        );
+        state.tmux_by_provider_session.insert(
+            command_key,
+            TimedValue {
+                value: tmux_session_name.clone(),
+                recorded_at: Instant::now(),
+            },
+        );
+        return Some((tmux_session_name, new_output_path));
+    }
+
+    let binding = state.runtime_by_tmux.get_mut(&tmux_session_name)?;
+    binding.value.output_path = new_output_path.clone();
+    binding.value.relay_output_path = None;
+    binding.value.session_id = Some(payload_session_id.to_string());
+    // Start conservatively at the new transcript head. Stable prompt-entry
+    // identities suppress replay; starting at EOF would silently skip the
+    // continuation boundary that taught us the new UUID.
+    binding.value.last_offset = 0;
+    binding.value.relay_last_offset = None;
+    binding.recorded_at = Instant::now();
+    state.tmux_by_provider_session.insert(
+        PromptKey::new("claude", payload_session_id),
+        TimedValue {
+            value: tmux_session_name.clone(),
+            recorded_at: Instant::now(),
+        },
+    );
+    // The running Claude process can cache the launch-time hook command even
+    // after its settings artifact is rewritten. Keep that observed command
+    // identity newest for future waits until dcserver rehydration establishes
+    // the persisted payload UUID as the sole mapping.
+    state.tmux_by_provider_session.insert(
+        command_key,
+        TimedValue {
+            value: tmux_session_name.clone(),
+            recorded_at: Instant::now(),
+        },
+    );
+    Some((tmux_session_name, new_output_path))
 }
 
 pub(crate) fn refresh_tmux_runtime_binding_activity(
@@ -1897,6 +2014,114 @@ mod tests {
         assert_eq!(
             provider_session_for_tmux("claude", "tmux-relaunch"),
             Some("uuid-new".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let old_session = uuid::Uuid::new_v4().to_string();
+        let new_session = uuid::Uuid::new_v4().to_string();
+        let old_path = tmp.path().join(format!("{old_session}.jsonl"));
+        let new_path = tmp.path().join(format!("{new_session}.jsonl"));
+        std::fs::write(&old_path, b"old\n").unwrap();
+        std::fs::write(&new_path, b"new\n").unwrap();
+        let tmux = format!("tmux-4423-continuation-{}", std::process::id());
+        register_provider_session("claude", &old_session, &tmux);
+        register_tmux_runtime_binding(
+            &tmux,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: old_path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(old_session.clone()),
+                last_offset: 99,
+                relay_last_offset: Some(99),
+            },
+        );
+
+        let adopted = adopt_claude_continuation_session(&old_session, &new_session)
+            .expect("safe sibling continuation adoption");
+        assert_eq!(adopted.0, tmux);
+        assert_eq!(adopted.1, new_path.display().to_string());
+        let binding = runtime_binding_for_tmux_session(&tmux).unwrap();
+        assert_eq!(binding.session_id.as_deref(), Some(new_session.as_str()));
+        assert_eq!(binding.output_path, new_path.display().to_string());
+        assert_eq!(binding.last_offset, 0);
+        assert_eq!(
+            provider_session_for_tmux("claude", &tmux).as_deref(),
+            Some(old_session.as_str()),
+            "future waits must keep using the live process's cached hook command UUID"
+        );
+
+        assert!(adopt_claude_continuation_session(&old_session, &new_session).is_some());
+        let mut progressed = runtime_binding_for_tmux_session(&tmux).unwrap();
+        progressed.last_offset = 4;
+        register_tmux_runtime_binding(&tmux, progressed);
+        assert!(adopt_claude_continuation_session(&old_session, &new_session).is_some());
+        assert_eq!(
+            runtime_binding_for_tmux_session(&tmux).unwrap().last_offset,
+            4,
+            "subsequent old-query/new-payload hooks must not rewind the adopted cursor"
+        );
+    }
+
+    #[test]
+    fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let command_session = uuid::Uuid::new_v4().to_string();
+        let first_continuation = uuid::Uuid::new_v4().to_string();
+        let second_continuation = uuid::Uuid::new_v4().to_string();
+        let stale_continuation = uuid::Uuid::new_v4().to_string();
+        let command_path = tmp.path().join(format!("{command_session}.jsonl"));
+        let first_path = tmp.path().join(format!("{first_continuation}.jsonl"));
+        let second_path = tmp.path().join(format!("{second_continuation}.jsonl"));
+        let stale_path = tmp.path().join(format!("{stale_continuation}.jsonl"));
+        for path in [&command_path, &first_path, &second_path, &stale_path] {
+            std::fs::write(path, b"{}\n").unwrap();
+        }
+        filetime::set_file_mtime(&first_path, filetime::FileTime::from_unix_time(20, 0)).unwrap();
+        filetime::set_file_mtime(&second_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
+        filetime::set_file_mtime(&stale_path, filetime::FileTime::from_unix_time(10, 0)).unwrap();
+        let tmux = format!("tmux-4423-multihop-{}", std::process::id());
+        register_provider_session("claude", &command_session, &tmux);
+        register_tmux_runtime_binding(
+            &tmux,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: command_path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(command_session.clone()),
+                last_offset: 7,
+                relay_last_offset: None,
+            },
+        );
+
+        adopt_claude_continuation_session(&command_session, &first_continuation)
+            .expect("first continuation hop");
+        adopt_claude_continuation_session(&command_session, &second_continuation)
+            .expect("newer second continuation hop through cached command UUID");
+        let binding = runtime_binding_for_tmux_session(&tmux).unwrap();
+        assert_eq!(
+            binding.session_id.as_deref(),
+            Some(second_continuation.as_str())
+        );
+        assert!(
+            adopt_claude_continuation_session(&command_session, &stale_continuation).is_none(),
+            "a delayed historical payload must not rewind the current continuation"
+        );
+        assert_eq!(
+            runtime_binding_for_tmux_session(&tmux)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some(second_continuation.as_str())
         );
     }
 

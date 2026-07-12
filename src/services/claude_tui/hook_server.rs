@@ -196,6 +196,28 @@ struct HookQuery {
     session_id: Option<String>,
 }
 
+fn hook_routing_session_ids(
+    command_session_id: Option<String>,
+    payload_session_id: Option<String>,
+    command_is_registered: bool,
+    payload_is_registered: bool,
+) -> (Option<String>, Option<String>) {
+    match (command_session_id, payload_session_id) {
+        (Some(command), Some(payload))
+            if command != payload && !command_is_registered && payload_is_registered =>
+        {
+            (Some(payload), None)
+        }
+        (Some(command), Some(payload))
+            if command != payload && command_is_registered && payload_is_registered =>
+        {
+            (Some(command), Some(payload))
+        }
+        (Some(command), _) => (Some(command), None),
+        (None, payload) => (payload, None),
+    }
+}
+
 async fn receive_hook(
     State(state): State<HookServerState>,
     Path((provider, event)): Path<(String, String)>,
@@ -210,11 +232,71 @@ async fn receive_hook(
         );
     }
 
-    let session_id = query
-        .session_id
+    let command_session_id = query.session_id.as_deref().and_then(non_empty_string);
+    let observed_payload_session_id = payload_session_id(&payload);
+    if provider == "claude"
+        && let (Some(command_session_id), Some(payload_session_id)) = (
+            command_session_id.as_deref(),
+            observed_payload_session_id.as_deref(),
+        )
+        && command_session_id != payload_session_id
+    {
+        match crate::services::tui_prompt_dedupe::adopt_claude_continuation_session(
+            command_session_id,
+            payload_session_id,
+        ) {
+            Some((tmux_session_name, transcript_path)) => {
+                match crate::services::claude_tui::session::persist_claude_continuation_session(
+                    &tmux_session_name,
+                    payload_session_id,
+                ) {
+                    Ok(changed) => tracing::warn!(
+                        provider,
+                        command_session_id,
+                        payload_session_id,
+                        tmux_session_name,
+                        transcript_path,
+                        persistent_artifacts_changed = changed,
+                        "adopted Claude continuation session from hook payload"
+                    ),
+                    Err(error) => tracing::error!(
+                        provider,
+                        command_session_id,
+                        payload_session_id,
+                        tmux_session_name,
+                        error,
+                        "adopted Claude continuation in memory but failed to persist cutover artifacts"
+                    ),
+                }
+            }
+            None => tracing::debug!(
+                provider,
+                command_session_id,
+                payload_session_id,
+                "Claude hook payload session differs from command identity but no safe runtime binding adoption was available"
+            ),
+        }
+    }
+    // Keep the launch-time query UUID as the hook wait/routing identity while
+    // it is registered; replacing it would strand callers already waiting on
+    // that stable key. After restart or a partial artifact cutover, fall back
+    // to the registered payload UUID so stale settings cannot strand events.
+    let command_is_registered = command_session_id.as_deref().is_some_and(|session_id| {
+        crate::services::tui_prompt_dedupe::provider_session_is_registered(&provider, session_id)
+    });
+    let payload_is_registered = observed_payload_session_id
         .as_deref()
-        .and_then(non_empty_string)
-        .or_else(|| payload_session_id(&payload));
+        .is_some_and(|session_id| {
+            crate::services::tui_prompt_dedupe::provider_session_is_registered(
+                &provider, session_id,
+            )
+        });
+    let (session_id, alias_session_id) = hook_routing_session_ids(
+        command_session_id,
+        observed_payload_session_id,
+        command_is_registered,
+        payload_is_registered,
+    );
     let Some(session_id) = session_id else {
         return (
             StatusCode::BAD_REQUEST,
@@ -271,6 +353,10 @@ async fn receive_hook(
         received_at: Utc::now(),
         payload,
     };
+    let alias_event = alias_session_id.map(|alias_session_id| HookEvent {
+        session_id: alias_session_id,
+        ..event.clone()
+    });
     let event_name = event.kind.as_str().to_string();
     let memento_stop_flush = match event.kind {
         HookEventKind::PostToolUse => {
@@ -402,6 +488,15 @@ async fn receive_hook(
         ) {
             crate::services::claude_tui::hook_registry::global().deliver(key, event.clone());
         }
+        if let Some(alias_event) = alias_event.as_ref()
+            && let Some(key) = crate::services::claude_tui::hook_registry::RegistryKey::new(
+                &alias_event.provider,
+                Some(alias_event.session_id.as_str()),
+                None,
+            )
+        {
+            crate::services::claude_tui::hook_registry::global().deliver(key, alias_event.clone());
+        }
     }
 
     if should_drop_broadcast {
@@ -411,13 +506,19 @@ async fn receive_hook(
             session_id,
             "tui hook event has empty payload or pending memento feedback flush; dropping broadcast"
         );
-    } else if state.event_tx.send(event).is_err() {
-        tracing::debug!(
-            provider,
-            event = event_name,
-            session_id,
-            "tui hook event accepted with no subscribers; event discarded"
-        );
+    } else {
+        let primary_discarded = state.event_tx.send(event).is_err();
+        let alias_discarded = alias_event
+            .map(|alias_event| state.event_tx.send(alias_event).is_err())
+            .unwrap_or(true);
+        if primary_discarded && alias_discarded {
+            tracing::debug!(
+                provider,
+                event = event_name,
+                session_id,
+                "tui hook event accepted with no subscribers; event discarded"
+            );
+        }
     }
 
     let mut body = json!({
@@ -1184,6 +1285,58 @@ mod tests {
         let replayed = global().claim_once(key);
         assert_eq!(replayed.len(), 1, "empty-body Stop must still be buffered");
         assert_eq!(replayed[0].kind, HookEventKind::Stop);
+    }
+
+    #[test]
+    fn mismatched_hook_routes_through_the_registered_side_of_partial_cutover() {
+        assert_eq!(
+            hook_routing_session_ids(
+                Some("stale-command".to_string()),
+                Some("live-payload".to_string()),
+                false,
+                true,
+            )
+            .0
+            .as_deref(),
+            Some("live-payload"),
+            "after restart, a rewritten launch with stale settings must route through the rehydrated payload UUID"
+        );
+        assert_eq!(
+            hook_routing_session_ids(
+                Some("stable-command".to_string()),
+                Some("new-payload".to_string()),
+                true,
+                true,
+            )
+            .0
+            .as_deref(),
+            Some("stable-command"),
+            "while the original waiter is live, its stable command UUID remains authoritative"
+        );
+        assert_eq!(
+            hook_routing_session_ids(
+                Some("rewritten-command".to_string()),
+                Some("old-payload".to_string()),
+                false,
+                true,
+            )
+            .0
+            .as_deref(),
+            Some("old-payload"),
+            "a settings-first partial update must remain routable until launch repair converges"
+        );
+        assert_eq!(
+            hook_routing_session_ids(
+                Some("stable-command".to_string()),
+                Some("new-payload".to_string()),
+                true,
+                true,
+            )
+            .1
+            .as_deref(),
+            Some("new-payload"),
+            "the payload alias must also receive the transition event for waiters created after idle adoption"
+        );
     }
 
     #[test]

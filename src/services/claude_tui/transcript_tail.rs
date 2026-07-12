@@ -274,6 +274,35 @@ fn claude_transcript_line_timestamp(value: &serde_json::Value) -> Option<DateTim
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
+/// Return the first and last parseable Claude JSONL timestamps. Continuation
+/// discovery uses these semantic activity bounds instead of filesystem mtime
+/// alone so a newer same-cwd transcript cannot steal another session's relay.
+pub(crate) fn claude_transcript_timestamp_bounds(
+    transcript_path: &Path,
+) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, String> {
+    let file = std::fs::File::open(transcript_path).map_err(|error| {
+        format!(
+            "read transcript {}: {error}",
+            transcript_path.to_string_lossy()
+        )
+    })?;
+    let reader = std::io::BufReader::new(file);
+    let mut first = None;
+    let mut last = None;
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("read transcript line: {error}"))?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let Some(timestamp) = claude_transcript_line_timestamp(&value) else {
+            continue;
+        };
+        first.get_or_insert(timestamp);
+        last = Some(timestamp);
+    }
+    Ok(first.zip(last))
+}
+
 pub(crate) fn observe_transcript_turn_state(
     transcript_path: &Path,
 ) -> crate::services::tui_turn_state::TuiTurnState {
@@ -507,6 +536,28 @@ mod tests {
 
         let expected = r#"{"type":"assistant"}"#.len() + 1 + "not-json".len() + 1;
         assert_eq!(offset, Some(expected as u64));
+    }
+
+    #[test]
+    fn claude_transcript_timestamp_bounds_ignore_unusable_lines() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                "not-json\n",
+                "{\"type\":\"system\"}\n",
+                "{\"timestamp\":\"2026-07-10T00:00:01Z\",\"type\":\"user\"}\n",
+                "{\"timestamp\":\"bad\",\"type\":\"assistant\"}\n",
+                "{\"timestamp\":\"2026-07-10T00:00:09Z\",\"type\":\"assistant\"}\n",
+            ),
+        )
+        .unwrap();
+
+        let (first, last) = claude_transcript_timestamp_bounds(file.path())
+            .unwrap()
+            .expect("timestamp bounds");
+        assert_eq!(first.to_rfc3339(), "2026-07-10T00:00:01+00:00");
+        assert_eq!(last.to_rfc3339(), "2026-07-10T00:00:09+00:00");
     }
 
     #[test]
