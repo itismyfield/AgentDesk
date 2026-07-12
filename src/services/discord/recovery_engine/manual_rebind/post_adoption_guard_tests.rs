@@ -179,6 +179,23 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
     assert!(acquire < commit && commit < claim && claim < spawn && spawn < release);
 }
 
+#[test]
+fn crossed_codex_turn_forces_watcher_replacement_before_normal_reuse() {
+    let parent = include_str!("mod.rs");
+    let branch = parent
+        .find("let claim = if discard_restored_render_seed")
+        .expect("crossed-turn watcher claim branch");
+    let forced = parent[branch..]
+        .find("claim_or_replace_watcher")
+        .map(|relative| branch + relative)
+        .expect("crossed Codex turn must force watcher replacement");
+    let normal = parent[forced..]
+        .find("claim_or_reuse_watcher")
+        .map(|relative| forced + relative)
+        .expect("ordinary rebind must retain healthy-watcher reuse");
+    assert!(branch < forced && forced < normal);
+}
+
 #[cfg(unix)]
 #[test]
 fn replacement_after_adoption_before_claim_is_untouched() {

@@ -920,6 +920,42 @@ mod tests {
         assert!(!watchers.contains_key(&channel_a));
     }
 
+    /// #4455: a crossed-provider-turn Codex rebind must replace even a live
+    /// same-session/same-output incumbent. Reuse would leave its stale
+    /// `current_msg_id` render seed and converter generation in authority.
+    #[test]
+    fn forced_rebind_replaces_live_same_output_incumbent() {
+        let watchers = TmuxWatcherRegistry::new();
+        let owner = ChannelId::new(1_485_506_232_256_168_136);
+        let dispatch = ChannelId::new(1_485_506_232_256_168_137);
+        let tmux_name = "AgentDesk-codex-adk-cdx-4455-forced";
+        let output = "/tmp/codex-4455-normalized.jsonl";
+        let incumbent = test_watcher_handle(tmux_name, output);
+        let incumbent_cancel = incumbent.cancel.clone();
+        assert!(try_claim_watcher(&watchers, owner, incumbent));
+
+        let outcome = claim_or_replace_watcher(
+            &watchers,
+            dispatch,
+            test_watcher_handle(tmux_name, output),
+            &ProviderKind::Codex,
+            "recovery_restore_inflight_crossed_codex_turn",
+        );
+
+        assert_eq!(outcome.action, WatcherClaimAction::SpawnReplacedForced);
+        assert!(outcome.should_spawn() && outcome.replaced_existing());
+        assert_eq!(outcome.owner_channel_id(), dispatch);
+        assert!(incumbent_cancel.load(Ordering::Relaxed));
+        assert!(!watchers.contains_key(&owner));
+        assert_eq!(
+            watchers
+                .get(&dispatch)
+                .expect("forced replacement watcher")
+                .output_path,
+            output
+        );
+    }
+
     /// #3277 verify-2 truth table for the `recovery_restore_inflight` claim: a
     /// same-session incumbent is REPLACED only when it provably cannot own the
     /// relay — cancelled, heartbeat-stale (the Defect D hung-watcher subcase;
@@ -1637,6 +1673,7 @@ pub(crate) enum WatcherClaimAction {
     SpawnFresh,
     SpawnReplacedStale,
     SpawnReplacedDifferentSession,
+    SpawnReplacedForced,
     ReuseExisting,
 }
 
@@ -1664,6 +1701,7 @@ impl WatcherClaimOutcome {
             WatcherClaimAction::SpawnFresh
                 | WatcherClaimAction::SpawnReplacedStale
                 | WatcherClaimAction::SpawnReplacedDifferentSession
+                | WatcherClaimAction::SpawnReplacedForced
         )
     }
 
@@ -1672,6 +1710,7 @@ impl WatcherClaimOutcome {
             self.action,
             WatcherClaimAction::SpawnReplacedStale
                 | WatcherClaimAction::SpawnReplacedDifferentSession
+                | WatcherClaimAction::SpawnReplacedForced
         )
     }
 
@@ -1680,6 +1719,7 @@ impl WatcherClaimOutcome {
             WatcherClaimAction::SpawnFresh => "spawn_fresh",
             WatcherClaimAction::SpawnReplacedStale => "spawn_replaced_stale",
             WatcherClaimAction::SpawnReplacedDifferentSession => "spawn_replaced_different_session",
+            WatcherClaimAction::SpawnReplacedForced => "spawn_replaced_forced",
             WatcherClaimAction::ReuseExisting => "reuse_existing",
         }
     }
@@ -1788,7 +1828,21 @@ pub(in crate::services::discord) fn claim_or_reuse_watcher(
     provider: &ProviderKind,
     source: &str,
 ) -> WatcherClaimOutcome {
-    claim_watcher(watchers, channel_id, handle, provider, source)
+    claim_watcher(watchers, channel_id, handle, provider, source, false)
+}
+
+/// Force a fresh watcher/converter generation even when a live same-session
+/// incumbent watches the same output path. Recovery uses this only after it
+/// proves that the persisted Codex render seed belongs to an earlier provider
+/// turn: reusing that incumbent would keep the stale Discord anchor alive.
+pub(in crate::services::discord) fn claim_or_replace_watcher(
+    watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    provider: &ProviderKind,
+    source: &str,
+) -> WatcherClaimOutcome {
+    claim_watcher(watchers, channel_id, handle, provider, source, true)
 }
 
 pub(super) fn claim_watcher(
@@ -1797,6 +1851,7 @@ pub(super) fn claim_watcher(
     handle: TmuxWatcherHandle,
     provider: &ProviderKind,
     source: &str,
+    force_replace_live_same_tmux: bool,
 ) -> WatcherClaimOutcome {
     let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
@@ -1808,7 +1863,8 @@ pub(super) fn claim_watcher(
     {
         let replace_paused_incumbent =
             existing_paused && !matches!(source, "turn_start_message" | "turn_start_headless");
-        if existing_cancelled
+        if force_replace_live_same_tmux
+            || existing_cancelled
             || replace_paused_incumbent
             || existing_output_path != requested_output_path
         {
@@ -1826,6 +1882,7 @@ pub(super) fn claim_watcher(
                     tmux_session = %requested_tmux,
                     existing_channel = existing_channel_id.get(),
                     existing_cancelled,
+                    force_replace_live_same_tmux,
                     replace_paused_incumbent,
                     output_path_changed = existing_output_path != requested_output_path,
                     "watcher claim cancelled same-tmux incumbent before spawning replacement"
@@ -1899,7 +1956,9 @@ pub(super) fn claim_watcher(
             channel_id.get(),
             source,
         );
-        if same_tmux {
+        if force_replace_live_same_tmux && same_tmux {
+            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedForced, channel_id)
+        } else if same_tmux {
             WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedStale, channel_id)
         } else {
             WatcherClaimOutcome::new(
@@ -1909,7 +1968,9 @@ pub(super) fn claim_watcher(
         }
     } else {
         watchers.insert_locked(&guard, channel_id, handle);
-        if removed_stale_same_tmux {
+        if force_replace_live_same_tmux && removed_stale_same_tmux {
+            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedForced, channel_id)
+        } else if removed_stale_same_tmux {
             WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedStale, channel_id)
         } else {
             WatcherClaimOutcome::new(WatcherClaimAction::SpawnFresh, channel_id)

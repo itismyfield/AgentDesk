@@ -39,6 +39,7 @@ pub(crate) use self::codex_tui_replay::{
     codex_tui_rebind_prompt_replay_evidence, codex_tui_rebind_raw_start_offset,
     codex_tui_rebind_replays_existing_raw_bytes,
     codex_tui_rebind_should_load_existing_normalized_replay_events,
+    codex_tui_rebind_start_after_crossed_provider_turn,
 };
 
 enum PendingRebindInflightRollback {
@@ -477,12 +478,16 @@ async fn rebind_inflight_for_channel_inner(
                 !codex_tui_existing_inflight_cursor_is_raw_rollout(&tmux_session_name, existing)
             })
             .map(|existing| {
-                codex_tui_rebind_prompt_replay_evidence(rollout_path, &existing.user_text)
+                codex_tui_rebind_prompt_replay_evidence(
+                    rollout_path,
+                    &existing.user_text,
+                    Some(&existing.started_at),
+                )
             })
             .unwrap_or_else(CodexTuiRebindPromptReplayEvidence::default);
         let normalized_relay_prompt_replay_start_offset =
             prompt_replay_evidence.replay_start_offset;
-        let raw_start_offset = codex_tui_rebind_raw_start_offset(
+        let mut raw_start_offset = codex_tui_rebind_raw_start_offset(
             &tmux_session_name,
             rollout_path,
             runtime_state.codex_rollout_resume_offset,
@@ -494,6 +499,15 @@ async fn rebind_inflight_for_channel_inner(
         discard_restored_render_seed = codex_tui_rebind_crossed_provider_turn(
             &tmux_session_name,
             existing_inflight.as_ref(),
+            prompt_replay_evidence,
+        );
+        // The persisted prompt boundary belongs to the stale turn. A marker
+        // can also be stale while dcserver is down, so a crossed-turn rebuild
+        // begins at the latest proven user-prompt boundary rather than
+        // re-posting earlier turns into the replacement Discord surface.
+        raw_start_offset = codex_tui_rebind_start_after_crossed_provider_turn(
+            raw_start_offset,
+            discard_restored_render_seed,
             prompt_replay_evidence,
         );
         let normalized_relay_resume_path = codex_tui_existing_normalized_relay_resume_path(
@@ -542,9 +556,10 @@ async fn rebind_inflight_for_channel_inner(
                 channel_id,
                 tmux_session = %tmux_session_name,
                 marker_offset = runtime_state.codex_rollout_resume_offset.unwrap_or(0),
-                persisted_prompt_end_offset = prompt_replay_evidence.latest_matching_prompt_offset.unwrap_or(0),
+                persisted_prompt_end_offset = prompt_replay_evidence.persisted_prompt_offset.unwrap_or(0),
                 latest_user_prompt_end_offset = prompt_replay_evidence.latest_user_prompt_offset.unwrap_or(0),
-                "Codex rebind found a later rollout user prompt; rebuilding at the live marker and dropping the stale Discord render seed"
+                raw_start_offset,
+                "Codex rebind found a later rollout user prompt; rebuilding at the latest prompt frontier and dropping the stale Discord render seed"
             );
         }
         if let Some(relay_path) = normalized_relay_resume_path {
@@ -857,16 +872,26 @@ async fn rebind_inflight_for_channel_inner(
                 turn_delivered: turn_delivered.clone(),
                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
             };
-            // `claim_or_reuse_watcher` reuses a live watcher for the same
-            // tmux session and only spawns when it claimed or replaced a
-            // stale/different-session slot.
-            let claim = super::tmux::claim_or_reuse_watcher(
-                &shared.tmux_watchers,
-                discord_channel_id,
-                handle,
-                provider,
-                "recovery_restore_inflight",
-            );
+            // Normal rebinds reuse a healthy same-session watcher. A proven
+            // crossed Codex turn must replace it so neither its stale render
+            // seed nor its detached converter remains authoritative.
+            let claim = if discard_restored_render_seed {
+                super::tmux::claim_or_replace_watcher(
+                    &shared.tmux_watchers,
+                    discord_channel_id,
+                    handle,
+                    provider,
+                    "recovery_restore_inflight_crossed_codex_turn",
+                )
+            } else {
+                super::tmux::claim_or_reuse_watcher(
+                    &shared.tmux_watchers,
+                    discord_channel_id,
+                    handle,
+                    provider,
+                    "recovery_restore_inflight",
+                )
+            };
             if claim.should_spawn() {
                 if let Some(PendingCodexTuiRebindRelay {
                     rollout_path,

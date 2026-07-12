@@ -32,6 +32,7 @@ pub(crate) fn codex_tui_existing_normalized_relay_resume_path(
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CodexTuiRebindPromptReplayEvidence {
     pub(crate) replay_start_offset: Option<u64>,
+    pub(crate) persisted_prompt_offset: Option<u64>,
     pub(crate) latest_matching_prompt_offset: Option<u64>,
     pub(crate) latest_user_prompt_offset: Option<u64>,
 }
@@ -40,7 +41,7 @@ impl CodexTuiRebindPromptReplayEvidence {
     pub(crate) fn later_user_prompt_after_match(self) -> bool {
         matches!(
             (
-                self.latest_matching_prompt_offset,
+                self.persisted_prompt_offset,
                 self.latest_user_prompt_offset
             ),
             (Some(matching), Some(latest)) if latest > matching
@@ -76,6 +77,21 @@ pub(crate) fn codex_tui_rebind_crossed_provider_turn(
         return false;
     }
     prompt_replay_evidence.later_user_prompt_after_match()
+}
+
+pub(crate) fn codex_tui_rebind_start_after_crossed_provider_turn(
+    raw_start_offset: u64,
+    discard_restored_render_seed: bool,
+    prompt_replay_evidence: CodexTuiRebindPromptReplayEvidence,
+) -> u64 {
+    if !discard_restored_render_seed {
+        return raw_start_offset;
+    }
+    raw_start_offset.max(
+        prompt_replay_evidence
+            .latest_user_prompt_offset
+            .unwrap_or(raw_start_offset),
+    )
 }
 pub(crate) fn codex_tui_rebind_raw_start_offset(
     tmux_session_name: &str,
@@ -136,12 +152,13 @@ pub(crate) fn codex_tui_rebind_prompt_replay_start_offset(
     rollout_path: &str,
     prompt_text: &str,
 ) -> Option<u64> {
-    codex_tui_rebind_prompt_replay_evidence(rollout_path, prompt_text).replay_start_offset
+    codex_tui_rebind_prompt_replay_evidence(rollout_path, prompt_text, None).replay_start_offset
 }
 
 pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
     rollout_path: &str,
     prompt_text: &str,
+    persisted_started_at: Option<&str>,
 ) -> CodexTuiRebindPromptReplayEvidence {
     use std::io::BufRead;
 
@@ -153,6 +170,11 @@ pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
     let mut offset = 0_u64;
     let mut latest_user_prompt_offset = None;
     let mut latest_matching_prompt_offset = None;
+    let mut latest_matching_prompt_before_persisted_start = None;
+    let persisted_start_second_end_ms = persisted_started_at
+        .and_then(inflight::parse_started_at_unix)
+        .and_then(|unix_secs| unix_secs.checked_mul(1_000))
+        .and_then(|unix_ms| unix_ms.checked_add(999));
     loop {
         let mut line = Vec::new();
         let Ok(read) = reader.read_until(b'\n', &mut line) else {
@@ -177,10 +199,30 @@ pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
             && crate::services::tui_prompt_dedupe::prompts_match(prompt_text, &candidate)
         {
             latest_matching_prompt_offset = Some(offset);
+            let rollout_timestamp_ms = value
+                .get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+                .map(|timestamp| timestamp.timestamp_millis());
+            if matches!(
+                (rollout_timestamp_ms, persisted_start_second_end_ms),
+                (Some(prompt_ms), Some(start_ms)) if prompt_ms <= start_ms
+            ) {
+                latest_matching_prompt_before_persisted_start = Some(offset);
+            }
         }
     }
+    // `started_at` and Codex rollout timestamps come from the same host clock.
+    // The persisted timestamp has second precision, so its inclusive end-of-
+    // second boundary identifies the latest matching prompt that could have
+    // created this row. This preserves turn identity even when a later prompt
+    // repeats identical text or the same slash command (#4455). Legacy/missing
+    // timestamps fall back to the prior conservative content-only choice.
+    let persisted_prompt_offset =
+        latest_matching_prompt_before_persisted_start.or(latest_matching_prompt_offset);
     CodexTuiRebindPromptReplayEvidence {
-        replay_start_offset: latest_matching_prompt_offset.or(latest_user_prompt_offset),
+        replay_start_offset: persisted_prompt_offset.or(latest_user_prompt_offset),
+        persisted_prompt_offset,
         latest_matching_prompt_offset,
         latest_user_prompt_offset,
     }
@@ -563,9 +605,15 @@ mod tests {
         );
         state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
         state.full_response = "old card body plus timeout".to_string();
+        state.started_at = chrono::DateTime::parse_from_rfc3339("2026-07-11T03:38:39Z")
+            .expect("fixed UTC timestamp")
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
 
         let rollout = tmp.path().join("rollout.jsonl");
         let old_prompt = serde_json::json!({
+            "timestamp": "2026-07-11T03:38:38.800Z",
             "type": "response_item",
             "payload": {
                 "type": "message",
@@ -575,6 +623,7 @@ mod tests {
             }
         });
         let completion = serde_json::json!({
+            "timestamp": "2026-07-11T03:39:10.000Z",
             "type": "response_item",
             "payload": {
                 "type": "message",
@@ -584,6 +633,7 @@ mod tests {
             }
         });
         let later_prompt = serde_json::json!({
+            "timestamp": "2026-07-11T04:21:00.000Z",
             "type": "response_item",
             "payload": {
                 "type": "message",
@@ -600,15 +650,58 @@ mod tests {
         let evidence = codex_tui_rebind_prompt_replay_evidence(
             rollout.to_str().unwrap(),
             "initial external prompt",
+            Some(&state.started_at),
         );
         assert!(evidence.later_user_prompt_after_match());
+        assert_eq!(
+            codex_tui_rebind_start_after_crossed_provider_turn(0, true, evidence),
+            evidence.latest_user_prompt_offset.unwrap(),
+            "a stale marker must not replay the already-posted old response into the replacement surface"
+        );
+        assert_eq!(
+            codex_tui_rebind_start_after_crossed_provider_turn(0, false, evidence),
+            0,
+            "same-turn normalized resume keeps its original replay frontier"
+        );
         assert!(codex_tui_rebind_crossed_provider_turn(
             tmux,
             Some(&state),
             evidence,
         ));
-        let unmatched_evidence =
-            codex_tui_rebind_prompt_replay_evidence(rollout.to_str().unwrap(), "missing prompt");
+        let repeated_prompt = serde_json::json!({
+            "timestamp": "2026-07-11T04:22:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "initial external prompt"}],
+                "id": "repeated-user"
+            }
+        });
+        std::fs::write(
+            &rollout,
+            format!("{old_prompt}\n{completion}\n{repeated_prompt}\n"),
+        )
+        .expect("write repeated-prompt rollout");
+        let repeated_evidence = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            "initial external prompt",
+            Some(&state.started_at),
+        );
+        assert!(
+            repeated_evidence.later_user_prompt_after_match(),
+            "the persisted row timestamp keeps a repeated later prompt from replacing the original matching boundary"
+        );
+        assert_ne!(
+            repeated_evidence.persisted_prompt_offset,
+            repeated_evidence.latest_user_prompt_offset
+        );
+
+        let unmatched_evidence = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            "missing prompt",
+            Some(&state.started_at),
+        );
         assert!(
             !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), unmatched_evidence),
             "a later user entry without a matching persisted prompt is not enough proof to discard an existing render seed"
@@ -619,6 +712,7 @@ mod tests {
         let same_turn_evidence = codex_tui_rebind_prompt_replay_evidence(
             rollout.to_str().unwrap(),
             "initial external prompt",
+            Some(&state.started_at),
         );
         assert!(
             !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), same_turn_evidence,),

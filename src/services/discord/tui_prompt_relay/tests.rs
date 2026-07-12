@@ -3240,29 +3240,36 @@ fn idle_bridge_stands_down_for_every_resolved_non_bridge_synthetic_claim() {
 
     assert!(tui_direct_synthetic_non_bridge_owner_matches(
         Some(&state),
-        tmux
+        tmux,
+        false,
     ));
 
     state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
     assert!(tui_direct_synthetic_non_bridge_owner_matches(
         Some(&state),
-        tmux
+        tmux,
+        true,
     ));
+    assert!(
+        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux, false),
+        "a stale SessionBoundRelay stamp without its producer must leave the BridgeAdapter backstop eligible"
+    );
 
     state.set_relay_owner_kind(RelayOwnerKind::None);
     assert!(
-        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux),
+        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux, false),
         "the provisional BridgeAdapter path stays eligible when no non-bridge claim landed"
     );
 
     state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
     assert!(!tui_direct_synthetic_non_bridge_owner_matches(
         Some(&state),
-        "AgentDesk-codex-other-session"
+        "AgentDesk-codex-other-session",
+        true,
     ));
     state.turn_source = TurnSource::Managed;
     assert!(
-        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux),
+        !tui_direct_synthetic_non_bridge_owner_matches(Some(&state), tmux, true),
         "a normal Discord turn is not the passive synthetic claim the idle observer waits for"
     );
 }

@@ -2204,14 +2204,16 @@ fn tui_direct_watcher_synthetic_inflight_shape_matches(
 pub(super) fn tui_direct_synthetic_non_bridge_owner_matches(
     state: Option<&InflightTurnState>,
     tmux_session_name: &str,
+    session_bound_relay_has_live_producer: bool,
 ) -> bool {
     state.is_some_and(|state| {
         state.turn_source == TurnSource::ExternalInput
             && state.tmux_session_name.as_deref() == Some(tmux_session_name)
-            && matches!(
-                state.effective_relay_owner_kind(),
-                RelayOwnerKind::Watcher | RelayOwnerKind::SessionBoundRelay
-            )
+            && match state.effective_relay_owner_kind() {
+                RelayOwnerKind::Watcher => true,
+                RelayOwnerKind::SessionBoundRelay => session_bound_relay_has_live_producer,
+                _ => false,
+            }
     })
 }
 
@@ -2259,9 +2261,14 @@ pub(super) async fn wait_for_tui_direct_synthetic_non_bridge_claim(
 ) -> bool {
     let deadline = tokio::time::Instant::now() + TUI_DIRECT_SYNTHETIC_CLAIM_WAIT;
     loop {
+        let session_bound_relay_has_live_producer =
+            crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+                .get_live_producer(tmux_session_name)
+                .is_some();
         if tui_direct_synthetic_non_bridge_owner_matches(
             super::super::inflight::load_inflight_state(provider, channel_id.get()).as_ref(),
             tmux_session_name,
+            session_bound_relay_has_live_producer,
         ) {
             return true;
         }
