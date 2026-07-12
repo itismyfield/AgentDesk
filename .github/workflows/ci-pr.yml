@@ -14,17 +14,17 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Group runs by PR head branch. Only pull_request/workflow_dispatch events
-  # reach here now, so `github.head_ref` is set for PRs; fall back to
-  # `github.ref` for manual dispatch.
-  group: ci-pr-${{ github.head_ref || github.ref }}
-  # cancel-in-progress=false: superseded runs finish instead of being
-  # cancelled. Cancelling them makes the `*_required_context` mirrors below
-  # (which run `if: always()` and FAIL CLOSED on a `cancelled` upstream)
-  # surface spurious `terminated by signal 15` / exit-143 required-check
-  # failures, forcing constant re-runs (#3927). Trade-off: extra runner
-  # minutes on rapid re-pushes; branch protection still gates the HEAD commit.
-  cancel-in-progress: false
+  # A PR number is unique inside the base repository, unlike `head_ref`: two
+  # forks can use the same source branch name and must never cancel each other.
+  # Manual dispatch has no PR payload, so isolate it by the selected ref.
+  group: ci-pr-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  # A newer push makes every result from the older SHA stale, so release its
+  # hosted runners immediately. The `*_required_context` mirrors remain
+  # fail-closed: cancellation may leave failed/cancelled contexts on the OLD
+  # SHA, while branch protection still requires fresh green contexts on the
+  # newest exact HEAD SHA. Manual cancellation of the newest run therefore
+  # remains blocking until that exact SHA is rerun successfully.
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -380,6 +380,13 @@ jobs:
     # on the nightly full macOS/Windows matrix.
     if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'
     runs-on: ${{ matrix.os }}
+    env:
+      # Cross-OS failures need compiler/test diagnostics, not native debug
+      # symbols. Windows spends most of this lane compiling and linking test
+      # harnesses; stripping debuginfo preserves every target and test while
+      # reducing the critical path and peak linker memory.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -438,6 +445,11 @@ jobs:
       # signal, while fmt/staged clippy and full workspace checks are
       # authoritative in the Ubuntu jobs above.
       - name: cargo check
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo check --workspace --all-targets
 
       - name: cargo test (non-PG, targeted subset)
@@ -445,6 +457,10 @@ jobs:
         # known test/runner flakes must not paint the PR red. See #4202/#4423.
         continue-on-error: true
         shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           set -euo pipefail
           cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
@@ -547,6 +563,11 @@ jobs:
       PGPORT: "5432"
       PGUSER: postgres
       PGPASSWORD: postgres
+      # Preserve the full serial PostgreSQL suite while reducing cold-link
+      # time and memory exposure on hosted runners. Assertions and panic text
+      # remain available; only native debug symbols are omitted.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -580,6 +601,11 @@ jobs:
 
       - name: just test-postgres
         timeout-minutes: 20
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: just test-postgres
 
       - name: Stop PostgreSQL service
