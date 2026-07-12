@@ -183,8 +183,10 @@ async fn validate_create(
             // Recurring definitions self-correct: the pool's contract is "next
             // occurrence of the schedule", not the possibly-stale first slot.
             Some(schedule) => {
-                scheduled_at = crate::services::routines::next_due_after(schedule, &timezone, now)
-                    .map_err(|error| error_response(StatusCode::BAD_REQUEST, format!("{error}")))?;
+                scheduled_at = crate::services::scheduling::next_due_after(
+                    schedule, &timezone, now,
+                )
+                .map_err(|error| error_response(StatusCode::BAD_REQUEST, format!("{error}")))?;
             }
             None => {
                 return Err(error_response(
@@ -196,7 +198,7 @@ async fn validate_create(
     } else if let Some(schedule) = schedule.as_deref() {
         // Validate grammar/timezone up front so the fire path never hits an
         // unparseable recurrence.
-        crate::services::routines::next_due_after(schedule, &timezone, now)
+        crate::services::scheduling::next_due_after(schedule, &timezone, now)
             .map_err(|error| error_response(StatusCode::BAD_REQUEST, format!("{error}")))?;
     }
 
@@ -558,9 +560,13 @@ fn normalize_effective_scheduled_at(
     now: DateTime<Utc>,
 ) -> Result<DateTime<Utc>, String> {
     if let Some(schedule) = schedule {
-        let next =
-            crate::services::routines::next_due_after_anchor(schedule, timezone, scheduled_at, now)
-                .map_err(|error| format!("{error}"))?;
+        let next = crate::services::scheduling::next_due_after_anchor(
+            schedule,
+            timezone,
+            scheduled_at,
+            now,
+        )
+        .map_err(|error| format!("{error}"))?;
         return Ok(
             if scheduled_at < now - Duration::seconds(PAST_TOLERANCE_SECS) {
                 next

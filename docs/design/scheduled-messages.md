@@ -21,7 +21,8 @@ outbox를 거치지 않고 기존 headless turn relay로 Discord에 게시된다
 |---|---|
 | `message_outbox` (0001, 0042, 0066) | 최종 Discord 전송 큐. push 모드 발화 시 여기로 enqueue. **outbox drain claim이 이미 `next_attempt_at <= NOW()`를 게이트하므로(`server/mod.rs` claim_pending_message_outbox_batch_pg) 지연 전송·재시도·claim을 outbox가 온전히 소유** — handoff 이후 스케줄러는 관여하지 않는다 |
 | headless agent turn (`services/discord/health`) | agent 모드에서 턴 ID를 먼저 예약하고 `start_reserved_headless_agent_turn_with_owner_channel`로 대상 채널에 relay. 완료는 routines와 같은 transcript/quality-event 증거 모델로 판정 |
-| `routines` / `routine_runs` (0035) | 스키마 패턴 차용: 정의 row + 실행 이력 row 분리, `next_due_at` partial index due-scan, lease 기반 중복 실행 방지, `schedule` 파서 재사용 |
+| `routines` / `routine_runs` (0035) | 스키마 패턴 차용: 정의 row + 실행 이력 row 분리, `next_due_at` partial index due-scan, lease 기반 중복 실행 방지 |
+| `services/scheduling.rs` | routines와 scheduled messages가 함께 사용하는 `@every`/5-field cron 파싱 및 slot-anchor 다음 시각 계산 |
 | `worker_registry` + `message_outbox_loop` 패턴 | `scheduled_message_loop` 워커를 기존 등록 패턴으로 추가. adaptive backoff(500ms–5s) 폴링 패턴 동일 적용 |
 | agent channel bindings | agent 모드는 명시적 `target_channel_id` 유무와 무관하게 primary Discord 채널을 필수로 한다. primary는 turn owner/session 컨텍스트이고, target 미지정 시 delivery 채널로도 사용 |
 | `outbound/source_registry.rs` | push/강등 outbox enqueue 소스 `scheduled_message`를 `LoopbackInternal`로만 허용 |
@@ -443,7 +444,7 @@ agent를 호출하지 않더라도 agent-bound 대상 채널의 수신 에이전
    교체 attempt를 덮어쓸 수 없다. agent poll도 active owner lease를 독점하고
    takeover 때 token을 회전한다.
 3. **반복은 선택 기능이고 slot 기준으로 anchor**: 1회성 예약이 1급
-   시민. 반복 문법은 `routines.schedule` 파서를 재사용하고 다음 시각은
+   시민. 반복 문법은 공용 `services::scheduling` 파서를 재사용하고 다음 시각은
    완료 시각이 아닌 예정 slot에서 계산해 지연이 축적되지 않게 한다.
 4. **agent 모드 실패 강등 옵션**(`on_agent_failure='push_raw'`): "반드시 나가야
    하는 공지"와 "에이전트 가공이 의미인 메시지"를 예약 단위로 구분한다.
@@ -461,10 +462,10 @@ agent를 호출하지 않더라도 agent-bound 대상 채널의 수신 에이전
 | `src/server/routes/scheduled_messages.rs` | 위 7개 핸들러 |
 | `src/server/routes/mod.rs`, `domains/ops.rs` | 라우트 등록 (protected ops 도메인) |
 | `src/server/routes/docs/inventory/endpoints/part_09.rs` | API docs 인벤토리 항목 (coverage 가드 필수) |
-| `src/services/scheduled_messages.rs`, `src/services/scheduled_messages/evidence.rs` | `scheduled_message_loop` 워커 (fire/감시/복구) + launch-anchor evidence 조회 |
+| `src/services/scheduled_messages.rs`, `src/services/scheduled_messages/{evidence,timing}.rs` | `scheduled_message_loop` 워커 (fire/감시/복구) + 완료 evidence + 반복/retry timing 정책 |
 | `src/server/worker_registry.rs` | 워커 등록 항목 추가 (`ScheduledMessages`, leader-only) |
 | `src/server/outbox_gc.rs`, `src/services/maintenance/jobs/db_retention.rs` | 영구 slot dedupe sentinel을 GC/retention에서 보존 |
-| `src/services/routines/store.rs` | `next_due_after_anchor`를 `pub(crate)`로 공개 (스케줄 문법 + slot anchor 재사용) |
+| `src/services/scheduling.rs` | routines와 scheduled messages 양쪽이 의존하는 공용 스케줄 문법 + slot-anchor 계산 |
 | `src/services/discord/outbound/source_registry.rs` | `scheduled_message`를 LoopbackInternal source로 등록 |
 
 구현 노트 (설계와의 차이):

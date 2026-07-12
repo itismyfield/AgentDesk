@@ -16,6 +16,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
 
 mod evidence;
+mod timing;
 
 #[cfg(test)]
 use evidence::transcript_delivery_evidence;
@@ -23,6 +24,7 @@ use evidence::{
     TurnEvidence, find_turn_delivery_evidence, find_turn_delivery_evidence_on_connection,
     poll_running_agent_deliveries,
 };
+use timing::{MAX_FIRE_RETRIES, compute_resume, fire_retry_next_at};
 
 use crate::db::scheduled_messages as db;
 use crate::db::scheduled_messages::{ClaimedFire, RunningAgentDelivery, ScheduledMessageRow};
@@ -37,11 +39,6 @@ use crate::services::message_outbox::{
 const CLAIM_BATCH: i64 = 10;
 const AGENT_POLL_BATCH: i64 = 20;
 pub(crate) const LEASE_SECS: i64 = 120;
-/// A fire slot is retried this many times after interruptions before the
-/// definition is failed outright (claim-time cap; slot retry_count counts
-/// re-arms of the same fire slot).
-const MAX_FIRE_RETRIES: i32 = 3;
-const FIRE_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 900];
 /// Agent turns without terminal evidence after this window fail closed. Raw
 /// fallback is reserved for definitive NO_REPLY/empty-response outcomes so a
 /// late live turn cannot race a second user-visible delivery.
@@ -895,43 +892,6 @@ async fn finish_terminal(
     }
 }
 
-/// Recurrence: a live future slot (manual trigger-now case) resumes as-is;
-/// otherwise the next occurrence comes from the routine schedule grammar.
-/// Recurrences past expires_at end the definition as `expired`.
-fn compute_resume(
-    message_schedule: Option<&str>,
-    timezone: &str,
-    current_scheduled_at: DateTime<Utc>,
-    expires_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> (Option<DateTime<Utc>>, Option<&'static str>) {
-    let Some(schedule) = message_schedule.filter(|value| !value.trim().is_empty()) else {
-        return (None, None);
-    };
-    let next = if current_scheduled_at > now {
-        current_scheduled_at
-    } else {
-        match crate::services::routines::next_due_after_anchor(
-            schedule,
-            timezone,
-            current_scheduled_at,
-            now,
-        ) {
-            Ok(next) => next,
-            Err(error) => {
-                tracing::warn!("[smsg] recurrence computation failed: {error}");
-                return (None, Some(db::STATUS_FAILED));
-            }
-        }
-    };
-    if let Some(expires_at) = expires_at {
-        if next >= expires_at {
-            return (None, Some(db::STATUS_EXPIRED));
-        }
-    }
-    (Some(next), None)
-}
-
 /// Transient failure: mark the delivery interrupted and rewind the parent to
 /// its fire slot so the due scan re-arms it (bounded by MAX_FIRE_RETRIES).
 async fn interrupt_for_retry(pool: &PgPool, fire: &ClaimedFire, error: &str) {
@@ -946,16 +906,6 @@ async fn interrupt_for_retry(pool: &PgPool, fire: &ClaimedFire, error: &str) {
         error,
     )
     .await;
-}
-
-fn fire_retry_next_at(
-    retry_count_before_increment: i32,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    usize::try_from(retry_count_before_increment)
-        .ok()
-        .and_then(|index| FIRE_RETRY_BACKOFF_SECS.get(index))
-        .map(|delay_secs| now + chrono::Duration::seconds(*delay_secs))
 }
 
 async fn interrupt_delivery(
