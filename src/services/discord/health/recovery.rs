@@ -1838,9 +1838,20 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             registry.started_at_unix(),
         );
+        // Alert eligibility is deliberately wider than the retired destructive
+        // cleanup gate. Advancing capture must always prevent cleanup, but once
+        // the restart-invariant raw turn age crosses the finite 4h ceiling it
+        // must no longer suppress an operator page.
+        let absolute_backstop_page_due = snapshot.attached
+            && snapshot.desynced
+            && !snapshot.inflight_terminal_delivery_committed
+            && judgment_basis
+                .turn_age_secs
+                .is_some_and(|age| age >= stall_liveness::STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS);
+        let should_evaluate_stall_alert = should_clean || absolute_backstop_page_due;
         let mut force_clean_inflight = None;
         let mut liveness_decision = None;
-        if should_clean {
+        if should_evaluate_stall_alert {
             force_clean_inflight =
                 discord::inflight::load_inflight_state(provider, channel_id.get());
             let decision = stall_liveness::evaluate_stall_watchdog_liveness(
@@ -1872,7 +1883,7 @@ pub(crate) async fn run_stall_watchdog_pass(
                 provider, channel_id, &snapshot,
             );
         }
-        if !should_clean {
+        if !should_evaluate_stall_alert {
             // Detection-only sibling probe for "completed-stale" inflight
             // leaks: bridge handed off cleanup to the watcher (or the watcher
             // delivered the response itself), but the inflight file persisted
@@ -2005,15 +2016,6 @@ pub(crate) async fn run_stall_watchdog_pass(
             }
             continue;
         }
-        stall_liveness::log_stall_watchdog_force_cleanup_judgment(
-            provider,
-            channel_id,
-            &snapshot,
-            &judgment_basis,
-            liveness_decision.as_ref(),
-            stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
-            STALL_WATCHDOG_THRESHOLD_SECS,
-        );
         // #4460: DO NOT force-terminate the active turn here. The old branch-4
         // "desynced force-clean" deleted inflight state, released the mailbox
         // cancel token, cancelled the watcher, and cleared the turn view. The
@@ -2030,6 +2032,15 @@ pub(crate) async fn run_stall_watchdog_pass(
         if !stall_alert::should_page_suspected_stall(liveness_decision.as_ref()) {
             continue;
         }
+        stall_liveness::log_stall_watchdog_force_cleanup_judgment(
+            provider,
+            channel_id,
+            &snapshot,
+            &judgment_basis,
+            liveness_decision.as_ref(),
+            stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        );
         // #4460: not classified live — surface a rate-limited mention so the
         // owner can decide, but NEVER terminate/cancel/delete anything. The
         // turn (inflight state, mailbox token, watcher, turn view) is left
@@ -4734,6 +4745,40 @@ mod stall_watchdog_auto_heal_tests {
             watcher_handle(tmux, &output, watcher_cancel.clone()),
         );
         let turn_view_ops_before = shared.turn_view_reconciler.ops().len();
+
+        // Prime the cross-tick pane-capture guard, then prove the pane advances
+        // before the production pass. This is the exact path that bypassed the
+        // old destructive `should_clean` gate before alert eligibility was
+        // separated from cleanup eligibility.
+        let initial_snapshot = registry
+            .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
+            .await
+            .expect("initial absolute-backstop watcher snapshot");
+        let observation_time = chrono::Utc::now().timestamp();
+        assert!(
+            !super::stall_liveness::stall_watchdog_capture_offset_advancing(
+                &provider,
+                channel,
+                &initial_snapshot,
+                observation_time,
+            ),
+            "first capture observation only establishes the baseline"
+        );
+        std::fs::write(&output, "fresh producer output\nstill advancing\n")
+            .expect("advance producer capture fixture");
+        let advanced_snapshot = registry
+            .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
+            .await
+            .expect("advanced absolute-backstop watcher snapshot");
+        assert!(
+            super::stall_liveness::stall_watchdog_capture_offset_advancing(
+                &provider,
+                channel,
+                &advanced_snapshot,
+                observation_time + 1,
+            ),
+            "fixture must prove cross-tick capture advancement"
+        );
 
         for pass in 1..=2 {
             let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;

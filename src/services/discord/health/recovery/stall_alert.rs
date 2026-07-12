@@ -19,12 +19,13 @@ const STALL_WATCHDOG_MENTION_REASON_CODE: &str = "stall_watchdog_suspected_stall
 /// A persistently suspect session pages at most once per 30 minutes.
 const STALL_WATCHDOG_MENTION_COOLDOWN_SECS: i64 = 1800;
 
-fn session_key_matches_provider(session_key: &str, provider: &ProviderKind) -> bool {
+fn session_key_tmux_for_provider(session_key: &str, provider: &ProviderKind) -> Option<String> {
     let Some(identity) = discord::session_identity::SessionIdentity::parse(session_key) else {
-        return false;
+        return None;
     };
     crate::services::provider::parse_provider_and_channel_from_tmux_name(&identity.tmux_name)
-        .is_some_and(|(parsed, _)| parsed == *provider)
+        .filter(|(parsed, _)| parsed == provider)
+        .map(|_| identity.tmux_name)
 }
 
 fn namespaced_key_for_tmux(
@@ -44,35 +45,51 @@ fn namespaced_key_for_tmux(
 }
 
 /// Resolve the same provider/session identity that normal Discord delivery uses.
-/// The persisted inflight key is authoritative; legacy rows fall back to their
-/// exact tmux identity, then to the channel binding. Synthetic watchdog keys are
-/// deliberately forbidden because they hide DM provider ownership from the
-/// outbox worker.
+/// A persisted inflight key is accepted only when its tmux identity matches the
+/// exact inflight tmux or channel binding; legacy/corrupt rows fall through to
+/// those trusted identities. Synthetic watchdog keys are deliberately forbidden
+/// because they hide DM provider ownership from the outbox worker.
 async fn canonical_alert_session_key(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     inflight: Option<&discord::inflight::InflightTurnState>,
 ) -> Option<String> {
+    let tmux_fallback = inflight
+        .and_then(|state| state.tmux_session_name.as_deref())
+        .and_then(|tmux_name| {
+            namespaced_key_for_tmux(shared, provider, tmux_name)
+                .map(|key| (tmux_name.to_string(), key))
+        });
+    let channel_fallback =
+        discord::adk_session::build_adk_session_key(shared, channel_id, provider)
+            .await
+            .filter(|key| session_key_tmux_for_provider(key, provider).is_some());
+    let expected_tmux = tmux_fallback
+        .as_ref()
+        .map(|(tmux_name, _)| tmux_name.clone())
+        .or_else(|| {
+            channel_fallback
+                .as_deref()
+                .and_then(|key| session_key_tmux_for_provider(key, provider))
+        });
+
     if let Some(session_key) = inflight
         .and_then(|state| state.session_key.as_deref())
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .filter(|key| session_key_matches_provider(key, provider))
+        .filter(|key| {
+            expected_tmux.as_deref() == session_key_tmux_for_provider(key, provider).as_deref()
+        })
     {
         return Some(session_key.to_string());
     }
 
-    if let Some(session_key) = inflight
-        .and_then(|state| state.tmux_session_name.as_deref())
-        .and_then(|tmux_name| namespaced_key_for_tmux(shared, provider, tmux_name))
-    {
+    if let Some((_, session_key)) = tmux_fallback {
         return Some(session_key);
     }
 
-    discord::adk_session::build_adk_session_key(shared, channel_id, provider)
-        .await
-        .filter(|key| session_key_matches_provider(key, provider))
+    channel_fallback
 }
 
 fn owner_mention(inflight: Option<&discord::inflight::InflightTurnState>) -> String {
@@ -283,7 +300,9 @@ mod tests {
         enum SessionFixture {
             Persisted,
             TmuxFallback,
-            CorruptPersisted,
+            CorruptWrongProvider,
+            CorruptSameProviderGuild,
+            CorruptSameProviderDm,
             ChannelBindingFallback,
         }
         struct Scenario {
@@ -349,8 +368,30 @@ mod tests {
                 tmux_name: "AgentDesk-codex-dm-343742347365974026",
                 // A corrupt/wrong-provider persisted key must fall through to
                 // the exact tmux identity rather than selecting the wrong bot.
-                session_fixture: SessionFixture::CorruptPersisted,
+                session_fixture: SessionFixture::CorruptWrongProvider,
                 expected_bot: "codex",
+                expected_mention: Some(343_742_347_365_974_026),
+            },
+            Scenario {
+                channel_id: 1_479_662_682_909_966_496,
+                provider: ProviderKind::Codex,
+                owner: 343_742_347_365_974_026,
+                tmux_name: "AgentDesk-codex-dm-343742347365974026",
+                // Provider equality alone is insufficient: a stale public
+                // key for the same provider must not downgrade a DM alert.
+                session_fixture: SessionFixture::CorruptSameProviderGuild,
+                expected_bot: "codex",
+                expected_mention: Some(343_742_347_365_974_026),
+            },
+            Scenario {
+                channel_id: 1_504_455_726_595_051_596,
+                provider: ProviderKind::Codex,
+                owner: 343_742_347_365_974_026,
+                tmux_name: "AgentDesk-codex-adk-cc",
+                // Conversely, a stale same-provider DM key must not upgrade a
+                // public informational alert to the provider bot.
+                session_fixture: SessionFixture::CorruptSameProviderDm,
+                expected_bot: "notify",
                 expected_mention: Some(343_742_347_365_974_026),
             },
             Scenario {
@@ -377,10 +418,17 @@ mod tests {
             );
             match scenario.session_fixture {
                 SessionFixture::Persisted | SessionFixture::TmuxFallback => {}
-                SessionFixture::CorruptPersisted => {
+                SessionFixture::CorruptWrongProvider => {
                     state.session_key = Some(
                         "claude/wrong/host:AgentDesk-claude-dm-343742347365974026".to_string(),
                     );
+                }
+                SessionFixture::CorruptSameProviderGuild => {
+                    state.session_key = Some("codex/wrong/host:AgentDesk-codex-adk-cc".to_string());
+                }
+                SessionFixture::CorruptSameProviderDm => {
+                    state.session_key =
+                        Some("codex/wrong/host:AgentDesk-codex-dm-343742347365974026".to_string());
                 }
                 SessionFixture::ChannelBindingFallback => {
                     state.session_key = None;
