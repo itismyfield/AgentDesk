@@ -95,6 +95,41 @@ trait CatchUpDiscordApi: Sync {
         channel_id: ChannelId,
         message_id: MessageId,
     );
+
+    fn enqueue_too_old_notice(
+        &self,
+        pool: Option<sqlx::PgPool>,
+        request: CatchUpTooOldOutboxRequest,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        pool.map(|pool| too_old_notice::spawn_outbox(pool, request))
+    }
+
+    fn record_too_old_dead_letter(
+        &self,
+        pool: Option<&sqlx::PgPool>,
+        record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        crate::db::relay_dead_letter::record_detached(pool, record)
+    }
+
+    async fn utility_bot_user_ids(
+        &self,
+        shared: &SharedData,
+    ) -> (
+        health::UtilityBotUserIdResolution,
+        health::UtilityBotUserIdResolution,
+    ) {
+        let Some(registry) = shared.health_registry() else {
+            return (
+                health::UtilityBotUserIdResolution::Unconfigured,
+                health::UtilityBotUserIdResolution::Unconfigured,
+            );
+        };
+        (
+            registry.utility_bot_user_id_resolution("announce").await,
+            registry.utility_bot_user_id_resolution("notify").await,
+        )
+    }
 }
 
 struct SerenityCatchUpDiscordApi<'a> {
@@ -144,14 +179,28 @@ impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
 
 mod classification;
 mod phase2;
+mod too_old_notice;
 
-use classification::{CatchUpClassification, CatchUpScanStats};
+#[cfg(test)]
+#[path = "catch_up/classification_order_tests.rs"]
+mod classification_order_tests;
+
+use classification::{
+    CatchUpClassification, CatchUpClassificationDecision, CatchUpMessageView, CatchUpScanStats,
+    classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
+    classify_phase2_message_with_utility_resolution,
+};
 #[cfg(test)]
 use phase2::catch_up_enqueue_accepted;
 use phase2::{
     Phase2EnqueueCommit, Phase2RecoveryStats, advance_phase2_checkpoint,
     catch_up_remaining_queue_capacity, classify_phase2_enqueue_commit,
     log_catch_up_enqueue_not_accepted, phase2_retry_after_checkpoint,
+};
+use too_old_notice::{
+    CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS, CatchUpTooOldDrop, CatchUpTooOldOutboxRequest,
+    actionable_drop as catch_up_too_old_drop, catch_up_too_old_snippet,
+    notice as catch_up_too_old_notice,
 };
 
 pub(in crate::services::discord) fn should_trigger_catch_up_retry(queue_len: usize) -> bool {
@@ -566,18 +615,32 @@ const CATCH_UP_RECENT_MAX_PAGES: u8 = 4;
 /// (i.e. an older page could still hold an eligible message). `oldest_age_secs`
 /// is the age of the oldest message in the page just fetched; `None` means the
 /// page was empty (no cursor to page before → stop).
-fn should_fetch_older_recent_page(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecentPageDecision {
+    FetchOlder,
+    Complete,
+    IncompleteBudget,
+}
+
+fn recent_page_decision(
     pages_fetched: u8,
     oldest_age_secs: Option<i64>,
     max_age_secs: i64,
-) -> bool {
-    if pages_fetched >= CATCH_UP_RECENT_MAX_PAGES {
-        return false;
-    }
+) -> RecentPageDecision {
     match oldest_age_secs {
-        Some(age) => age <= max_age_secs,
-        None => false,
+        None => RecentPageDecision::Complete,
+        Some(age) if age > max_age_secs => RecentPageDecision::Complete,
+        Some(_) if pages_fetched >= CATCH_UP_RECENT_MAX_PAGES => {
+            RecentPageDecision::IncompleteBudget
+        }
+        Some(_) => RecentPageDecision::FetchOlder,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpFetchCompleteness {
+    Complete,
+    Incomplete,
 }
 
 /// Inter-channel pacing for the catch-up REST sweep.
@@ -629,68 +692,6 @@ async fn catch_up_scan_pace_gap() {
     }
 }
 
-/// Plain inputs to the catch-up filter, decoupled from `serenity::Message` so
-/// we can unit test the regression scenario without a Discord runtime.
-#[derive(Debug, Clone)]
-pub(in crate::services::discord) struct CatchUpMessageView {
-    pub message_id: u64,
-    pub author_id: u64,
-    pub author_is_bot: bool,
-    pub is_processable_kind: bool,
-    pub age_secs: i64,
-    pub trimmed_text: String,
-}
-
-/// Pure classifier for the catch-up filter pipeline. Mirrors the order of
-/// checks inside the per-message loop in [`catch_up_missed_messages`] so a
-/// regression there is caught here. Critically, this function does NOT apply
-/// any limit/page-size logic — that decision lives at the REST fetch site
-/// (see `CATCH_UP_FETCH_LIMIT`). This means a "buried user message" test must
-/// assert against the full fetched page, not a single classification call.
-pub(in crate::services::discord) fn classify_catch_up_message(
-    msg: &CatchUpMessageView,
-    bot_user_id: Option<u64>,
-    existing_ids: &std::collections::HashSet<u64>,
-    max_age_secs: i64,
-    allowed_bot_ids: &[u64],
-    announce_bot_id: Option<u64>,
-) -> CatchUpClassification {
-    if !msg.is_processable_kind {
-        return CatchUpClassification::SystemKind;
-    }
-    if Some(msg.author_id) == bot_user_id {
-        return CatchUpClassification::SelfAuthored;
-    }
-    if existing_ids.contains(&msg.message_id) {
-        return CatchUpClassification::Duplicate;
-    }
-    if is_restart_gap_notice(msg.author_is_bot, &msg.trimmed_text) {
-        // #4443: checked BEFORE TooOld so aged notices skip the drop/DLQ/
-        // re-notice path entirely (see is_restart_gap_notice).
-        return CatchUpClassification::SelfAuthored;
-    }
-    if msg.age_secs > max_age_secs {
-        return CatchUpClassification::TooOld;
-    }
-    if msg.trimmed_text.is_empty() {
-        return CatchUpClassification::Empty;
-    }
-    if !is_allowed_turn_sender(
-        allowed_bot_ids,
-        announce_bot_id,
-        msg.author_id,
-        msg.author_is_bot,
-        &msg.trimmed_text,
-    ) {
-        return CatchUpClassification::NotAllowed;
-    }
-    CatchUpClassification::Recover
-}
-
-/// #4260: max entries listed in the aggregate too-old notice before we
-/// summarize the remainder as "… 외 N건" (keep the card compact).
-const CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS: usize = 10;
-
 /// #4443: leading marker of the aggregate restart-gap notice. Shared between
 /// the notice builder and the catch-up classifiers so a reworded notice cannot
 /// silently break the self-recollection guard.
@@ -705,51 +706,8 @@ fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
     author_is_bot && text.starts_with(CATCH_UP_TOO_OLD_NOTICE_PREFIX)
 }
 
-/// #4260: one message dropped as too-old during a catch-up scan, captured for
-/// the per-channel aggregate "재시작 공백" notice (silent-loss vector 1).
-#[derive(Clone, Debug)]
-struct CatchUpTooOldDrop {
-    author_id: u64,
-    snippet: String,
-}
-
-/// Truncate a dropped message body to a compact snippet for the aggregate
-/// notice — never dump full messages into the channel.
-fn catch_up_too_old_snippet(text: &str) -> String {
-    const MAX: usize = 80;
-    let trimmed = text.trim();
-    let mut snippet: String = trimmed.chars().take(MAX).collect();
-    if trimmed.chars().count() > MAX {
-        snippet.push('…');
-    }
-    if snippet.is_empty() {
-        snippet.push_str("(빈 메시지)");
-    }
-    snippet
-}
-
-/// Build the per-channel aggregate notice for catch-up too-old drops. `None`
-/// when there is nothing to report. Aggregated (never per-message) to avoid
-/// channel spam on a long restart gap. We only prompt the user to resend — the
-/// stale messages are never auto-reprocessed (delayed risky-command replay).
-fn catch_up_too_old_notice(drops: &[CatchUpTooOldDrop]) -> Option<String> {
-    if drops.is_empty() {
-        return None;
-    }
-    let mut body = format!(
-        "{CATCH_UP_TOO_OLD_NOTICE_PREFIX} {}건이 5분 초과로 미처리되었습니다. 필요하면 다시 보내주세요:",
-        drops.len()
-    );
-    for drop in drops.iter().take(CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS) {
-        body.push_str(&format!("\n• `{}`: {}", drop.author_id, drop.snippet));
-    }
-    if drops.len() > CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS {
-        body.push_str(&format!(
-            "\n… 외 {}건",
-            drops.len() - CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS
-        ));
-    }
-    Some(body)
+fn advance_catch_up_settled_frontier(frontier: Option<u64>, message_id: u64) -> Option<u64> {
+    Some(frontier.map_or(message_id, |settled| settled.max(message_id)))
 }
 
 fn catch_up_intervention_created_at(
@@ -784,9 +742,9 @@ fn catch_up_last_item_dedup_is_checkpoint_safe(
         .is_some_and(|gap| gap <= INTERVENTION_DEDUP_WINDOW)
 }
 
-/// Startup catch-up polling: fetch messages that arrived during the restart gap.
-/// Uses saved last_message_ids to query Discord REST API for missed messages,
-/// filters out bot messages and duplicates, and inserts into intervention queue.
+/// Startup catch-up polling: fetch messages that arrived during the catch-up
+/// gap. Uses saved last_message_ids to query Discord REST API, classifies
+/// sender eligibility/age/duplicates, and enqueues only safe recoveries.
 pub(in crate::services::discord) async fn catch_up_missed_messages(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -943,6 +901,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     // defers in an unbounded, unlogged re-arm cycle).
     let mut consumed_retry_states_this_cycle: HashMap<ChannelId, CatchUpRetryState> =
         HashMap::new();
+    // Phase 2 must not bypass an incomplete unbounded Recent scan and persist a
+    // newer recovery across the same unknown lower gap.
+    let mut incomplete_recent_channels: HashSet<ChannelId> = HashSet::new();
 
     // Pace successive per-channel REST scans so a many-channel sweep doesn't
     // fire as one tight burst (see `catch_up_scan_pace`). The first eligible
@@ -1005,6 +966,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 continue;
             }
             RuntimeChannelBindingStatus::Unknown => {
+                // A transient binding-resolution failure happened before the
+                // unbounded Recent gap could be read at all. Do not let phase 2
+                // establish a newer durable frontier across that unknown lower
+                // bound in the same sweep. `After` has a precise lower bound and
+                // retains its existing independent phase-2 behavior.
+                if matches!(fetch_mode, CatchUpFetchMode::Recent) {
+                    incomplete_recent_channels.insert(channel_id);
+                }
                 if let Some(retry_state) = retry_state {
                     rearm_catch_up_retry_after_fetch_failure(shared, channel_id, retry_state);
                 }
@@ -1034,6 +1003,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 tracing::warn!(
                     "  [{ts}] ⚠ catch-up: failed to fetch messages for channel {channel_id}: {e}"
                 );
+                // The first Recent page is part of the same unbounded
+                // pagination proof as every backward page below. If it fails,
+                // phase 2 must not recover a newer last-20 item and turn the
+                // unknown lower gap into `After(newer)` in this sweep.
+                if matches!(fetch_mode, CatchUpFetchMode::Recent) {
+                    incomplete_recent_channels.insert(channel_id);
+                }
                 // #429: permanent errors — remove checkpoint to avoid retrying every restart
                 if e.contains("Missing Access") || e.contains("Unknown Channel") {
                     if let Some(path) = candidate.checkpoint_path.as_ref() {
@@ -1052,6 +1028,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // with `.before(oldest)` up to `CATCH_UP_RECENT_MAX_PAGES`, stopping as
         // soon as a page's oldest message exceeds the age window. The `After`
         // path keeps its precise single-page contract and is left untouched.
+        let mut fetch_completeness = CatchUpFetchCompleteness::Complete;
         if matches!(fetch_mode, CatchUpFetchMode::Recent) {
             let mut pages_fetched: u8 = 1;
             loop {
@@ -1064,12 +1041,21 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 let oldest_age_secs = chrono::Utc::now()
                     .signed_duration_since(*oldest_id.created_at())
                     .num_seconds();
-                if !should_fetch_older_recent_page(
+                match recent_page_decision(
                     pages_fetched,
                     Some(oldest_age_secs),
                     max_age.as_secs() as i64,
                 ) {
-                    break;
+                    RecentPageDecision::Complete => break,
+                    RecentPageDecision::IncompleteBudget => {
+                        fetch_completeness = CatchUpFetchCompleteness::Incomplete;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⚠ catch-up: Recent pagination budget exhausted for channel {channel_id}; preserving the unbounded gap"
+                        );
+                        break;
+                    }
+                    RecentPageDecision::FetchOlder => {}
                 }
                 if should_pace_before_scan(true) {
                     catch_up_scan_pace_gap().await;
@@ -1078,20 +1064,43 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     .limit(CATCH_UP_FETCH_LIMIT)
                     .before(oldest_id);
                 match api.fetch_messages(channel_id, older_request).await {
-                    Ok(older) if !older.is_empty() => {
+                    Ok(mut older) if !older.is_empty() => {
+                        // A non-advancing/overlapping REST page is not proof that
+                        // the unbounded Recent gap is complete. Keep only ids
+                        // below the requested cursor and retry on a later sweep
+                        // if the cursor did not move at all.
+                        older.retain(|message| message.id.get() < oldest_id.get());
+                        if older.is_empty() {
+                            fetch_completeness = CatchUpFetchCompleteness::Incomplete;
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ catch-up: Recent pagination cursor did not advance for channel {channel_id}; preserving the unbounded gap"
+                            );
+                            break;
+                        }
                         pages_fetched += 1;
                         messages.extend(older);
                     }
                     Ok(_) => break, // no older messages → done
                     Err(e) => {
+                        fetch_completeness = CatchUpFetchCompleteness::Incomplete;
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             "  [{ts}] ⚠ catch-up: backward page fetch failed for channel {channel_id}: {e}"
                         );
-                        break; // keep what we already have
+                        break;
                     }
                 }
             }
+        }
+
+        // A partial newest-first Recent prefix is not contiguous with the
+        // unknown lower bound. Processing it could durably checkpoint terminal
+        // noise past an unseen recoverable message, so leave the whole batch to
+        // the periodic Recent backstop instead.
+        if fetch_completeness == CatchUpFetchCompleteness::Incomplete {
+            incomplete_recent_channels.insert(channel_id);
+            continue;
         }
 
         if messages.is_empty() {
@@ -1107,17 +1116,23 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             let settings = shared.settings.read().await;
             settings.allowed_bot_ids.clone()
         };
-        let announce_bot_id = resolve_announce_bot_user_id(shared).await;
-        let mut max_recovered_id: Option<u64> = None;
+        let (announce_resolution, notify_resolution) = api.utility_bot_user_ids(shared).await;
+        let announce_bot_id = announce_resolution.user_id();
+        let notify_bot_id = notify_resolution.user_id();
+        // Newest message that this oldest-first scan has durably settled.
+        // Non-recover classifications settle immediately; Recover settles only
+        // after an accepted/safe-dedup enqueue. The current cap/defer item never
+        // enters this frontier, so persisting it cannot skip recoverable work.
+        let mut max_settled_id: Option<u64> = None;
         let mut stats = CatchUpScanStats::default();
         stats.returned = messages.len();
-        // #4260: messages dropped as too-old this scan (silent-loss vector 1),
-        // accumulated per-channel for one aggregate resend notice after the loop.
+        // #4260/#4453: actionable human TooOld drops accumulated for one
+        // aggregate resend notice. Bot TooOld rows stay internal DLQ evidence.
         let mut too_old_drops: Vec<CatchUpTooOldDrop> = Vec::new();
-        // #4260 dual r1 codex#3: newest too-old message id — lets a
-        // TooOld-only scan advance the checkpoint past permanently
-        // unprocessable messages (see the advance site below).
-        let mut max_too_old_id: Option<u64> = None;
+        // Newest actionable human TooOld id, retained only for the aggregate
+        // notice's batch-specific outbox dedupe key. Automation never owns a
+        // user-facing batch identity.
+        let mut max_actionable_too_old_id: Option<u64> = None;
 
         // Codex P2 on #1301: the 50-message fetch can exceed
         // `MAX_INTERVENTIONS_PER_CHANNEL` (30) on a long restart gap. Without
@@ -1150,14 +1165,37 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 age_secs,
                 trimmed_text: text.clone(),
             };
-            let outcome = classify_catch_up_message(
+            let outcome = match classify_catch_up_message_with_utility_resolution(
                 &view,
                 current_bot_user_id,
                 &existing_ids,
                 max_age.as_secs() as i64,
                 &allowed_bot_ids,
-                announce_bot_id,
-            );
+                announce_resolution,
+                notify_resolution,
+            ) {
+                CatchUpClassificationDecision::Determinate(outcome) => outcome,
+                CatchUpClassificationDecision::UtilityIdentityUnavailable => {
+                    let mid = msg.id.get();
+                    let retry_after = max_settled_id
+                        .or(scan_checkpoint)
+                        .unwrap_or_else(|| mid.saturating_sub(1));
+                    let retry_after = rearm_catch_up_retry_after_defer(
+                        shared,
+                        channel_id,
+                        retry_after,
+                        retry_state,
+                    );
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        message_id = mid,
+                        retry_after,
+                        "  [{ts}] 🔁 catch-up: utility bot identity unavailable; preserving checkpoint before ambiguous message"
+                    );
+                    break;
+                }
+            };
             let mid = msg.id.get();
             // Codex P2 round 2 on #1301: check the cap BEFORE recording the
             // recover, otherwise `stats.recovered` would tally a message we
@@ -1166,7 +1204,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             // the last actually-queued message — newer entries that we
             // declined are still > `after_msg` for the next pass.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
-                let retry_after = max_recovered_id
+                let retry_after = max_settled_id
                     .or(scan_checkpoint)
                     .unwrap_or_else(|| mid.saturating_sub(1));
                 let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
@@ -1180,15 +1218,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
             if outcome != CatchUpClassification::Recover {
                 if outcome == CatchUpClassification::TooOld {
-                    // #4260 silent-loss vector 1: TooOld messages were silently
-                    // dropped here. Preserve the original in the dead-letter
-                    // table (fire-and-forget detached task — a slow PG pool
-                    // must never stall the catch-up loop, dual r1 codex#1) and
-                    // remember it for the per-channel aggregate resend notice.
-                    // We do NOT auto-reprocess: a stale command replayed
-                    // minutes late is a risk, so we only ask the user to
-                    // resend.
-                    crate::db::relay_dead_letter::record_detached(
+                    // Preserve every TooOld input as detached DLQ evidence;
+                    // only semantically human senders enter the resend notice.
+                    let _ = api.record_too_old_dead_letter(
                         shared.pg_pool.as_ref(),
                         crate::db::relay_dead_letter::RelayDeadLetterRecord {
                             kind: crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_string(),
@@ -1202,19 +1234,22 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                             ),
                         },
                     );
-                    too_old_drops.push(CatchUpTooOldDrop {
-                        author_id: msg.author.id.get(),
-                        snippet: catch_up_too_old_snippet(&text),
-                    });
-                    // #4260 dual r1 codex#3: remember the newest too-old id so
-                    // a TooOld-only scan can still advance the checkpoint —
-                    // these messages can never become processable, so leaving
-                    // the cursor behind them re-fetches, re-DLQs, and (after
-                    // the dedupe TTL) re-notifies the same batch every cycle.
-                    if max_too_old_id.map(|m| mid > m).unwrap_or(true) {
-                        max_too_old_id = Some(mid);
+                    if let Some(drop) = catch_up_too_old_drop(
+                        outcome,
+                        msg.author.id.get(),
+                        msg.author.bot,
+                        &allowed_bot_ids,
+                        announce_bot_id,
+                        notify_bot_id,
+                        &text,
+                    ) {
+                        max_actionable_too_old_id = Some(
+                            max_actionable_too_old_id.map_or(mid, |actionable| actionable.max(mid)),
+                        );
+                        too_old_drops.push(drop);
                     }
                 }
+                max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 stats.record(outcome);
                 continue;
             }
@@ -1254,15 +1289,11 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     stats.record(CatchUpClassification::Recover);
                     api.cleanup_recovered_catch_up_hourglass(shared, channel_id, msg.id)
                         .await;
-                    if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
-                        max_recovered_id = Some(mid);
-                    }
+                    max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 }
                 Phase2EnqueueCommit::Duplicate => {
                     stats.record(CatchUpClassification::Duplicate);
-                    if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
-                        max_recovered_id = Some(mid);
-                    }
+                    max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 }
                 Phase2EnqueueCommit::LastItemDedup => {
                     let snapshot = mailbox_snapshot(shared, channel_id).await;
@@ -1271,12 +1302,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         msg.id,
                     ) {
                         stats.record(CatchUpClassification::Duplicate);
-                        if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
-                            max_recovered_id = Some(mid);
-                        }
+                        max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                     } else {
                         log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
-                        let retry_after = max_recovered_id
+                        let retry_after = max_settled_id
                             .or(scan_checkpoint)
                             .unwrap_or_else(|| mid.saturating_sub(1));
                         rearm_catch_up_retry_after_defer(
@@ -1290,7 +1319,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
                 Phase2EnqueueCommit::Deferred => {
                     log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
-                    let retry_after = max_recovered_id
+                    let retry_after = max_settled_id
                         .or(scan_checkpoint)
                         .unwrap_or_else(|| mid.saturating_sub(1));
                     rearm_catch_up_retry_after_defer(shared, channel_id, retry_after, retry_state);
@@ -1333,26 +1362,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             );
         }
 
-        // Advance the checkpoint past what this scan settled. #4260 dual r1
-        // codex#3: a TooOld-only scan must also advance — a too-old message can
-        // never become processable, so pinning the cursor behind it re-fetches,
-        // re-dead-letters, and (after the outbox dedupe TTL) re-notifies the
-        // same batch every cycle. Boundary care: the too-old id is only folded
-        // in when NO retry is pending for this channel (a pending retry means
-        // the loop broke early on a message we still intend to recover — its
-        // cursor must win), and because a too-old message is strictly older
-        // than any recoverable one (snowflake ids are time-ordered), taking the
-        // max with `max_recovered_id` never skips a processable message.
-        let too_old_advance = if shared.catch_up_retry_pending.contains_key(&channel_id) {
-            None
-        } else {
-            max_too_old_id
-        };
-        let checkpoint_advance = match (max_recovered_id, too_old_advance) {
-            (Some(recovered), Some(too_old)) => Some(recovered.max(too_old)),
-            (recovered, too_old) => recovered.or(too_old),
-        };
-        if let Some(newest) = checkpoint_advance {
+        // Persist the contiguous settled frontier even when a retry is pending.
+        // The current cap/defer item was deliberately not folded in, so this
+        // retires permanent skips without crossing work that still needs retry.
+        if let Some(newest) = max_settled_id {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             if retry_checkpoint.is_some()
                 && !shared.catch_up_retry_pending.contains_key(&channel_id)
@@ -1366,46 +1379,27 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
         }
 
-        // #4260: one aggregate "재시작 공백" resend notice per channel per run
-        // for the messages dropped as too-old. Fire-and-forget spawn (dual r1
-        // codex#1) via the outbox so it dedupes + retries; a delivery failure
-        // never blocks catch-up. Dual r1 codex#3: the dedupe key carries the
-        // batch identity (newest dropped id), so a NEW too-old batch within the
-        // outbox dedupe TTL still notifies, while retry re-scans of the SAME
-        // batch stay suppressed.
+        // #4260/#4453: one aggregate human-resend notice per channel/run. Bot
+        // TooOld inputs stay internal; the newest human id owns batch dedupe.
         if let Some(notice) = catch_up_too_old_notice(&too_old_drops) {
+            let batch_id = max_actionable_too_old_id.unwrap_or_default();
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 channel_id = channel_id.get(),
                 too_old = too_old_drops.len(),
                 "  [{ts}] ⚠ catch-up: dropped too-old message(s); aggregate resend notice enqueued"
             );
-            if let Some(pool) = shared.pg_pool.clone() {
-                let target = format!("channel:{channel_id}");
-                let session_key = format!(
-                    "catch_up_too_old:{channel_id}:{}",
-                    max_too_old_id.unwrap_or_default()
-                );
-                tokio::spawn(async move {
-                    if let Err(error) = crate::services::message_outbox::enqueue_outbox_pg(
-                        &pool,
-                        crate::services::message_outbox::OutboxMessage {
-                            target: &target,
-                            content: &notice,
-                            bot: "notify",
-                            source: "catch_up_too_old",
-                            reason_code: Some("catch_up.too_old"),
-                            session_key: Some(&session_key),
-                        },
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "[dlq] failed to enqueue catch-up too-old notice (best-effort): {error}"
-                        );
-                    }
-                });
-            }
+            let _ = api.enqueue_too_old_notice(
+                shared.pg_pool.clone(),
+                CatchUpTooOldOutboxRequest {
+                    target: format!("channel:{channel_id}"),
+                    content: notice,
+                    bot: "notify",
+                    source: "catch_up_too_old",
+                    reason_code: "catch_up.too_old",
+                    session_key: format!("catch_up_too_old:{channel_id}:{batch_id}"),
+                },
+            );
         }
     }
 
@@ -1426,12 +1420,17 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let settings = shared.settings.read().await;
         settings.allowed_bot_ids.clone()
     };
-    let announce_bot_id_phase2 = resolve_announce_bot_user_id(shared).await;
+    let (announce_resolution_phase2, notify_resolution_phase2) =
+        api.utility_bot_user_ids(shared).await;
 
     // Same per-channel pacing as phase 1 (see `catch_up_scan_pace`).
     let mut paced_scan_phase2 = false;
     for candidate in candidates.values() {
         let channel_id = candidate.channel_id;
+
+        if incomplete_recent_channels.contains(&channel_id) {
+            continue;
+        }
 
         {
             let settings = shared.settings.read().await;
@@ -1524,34 +1523,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 continue;
             }
             let mid = msg.id.get();
-            if !is_allowed_turn_sender(
-                &allowed_bot_ids_phase2,
-                announce_bot_id_phase2,
-                msg.author.id.get(),
-                msg.author.bot,
-                text,
-            ) {
-                stats.skipped += 1;
-                continue;
-            }
-            let is_allowed_bot = msg.author.bot
-                && (allowed_bot_ids_phase2.contains(&msg.author.id.get())
-                    || announce_bot_id_phase2.is_some_and(|id| id == msg.author.id.get()));
-            if !is_allowed_bot {
-                let settings = shared.settings.read().await;
-                if !discord_io::user_is_authorized(&settings, msg.author.id.get()) {
-                    stats.skipped += 1;
-                    continue;
-                }
-            }
-            // Skip messages older than 10 minutes (generous window for restart gap)
             let msg_age = chrono::Utc::now().signed_duration_since(*msg.id.created_at());
-            if msg_age.num_seconds() > 600 {
-                stats.skipped += 1;
-                continue;
-            }
-
-            stats.eligible += 1;
+            // These gates are final regardless of announce/notify identity.
+            // Apply them before the phase-1 counterfactual, whose actionable
+            // TooOld bit is intentionally irrelevant to phase 2.
             if existing_ids.contains(&mid) {
                 stats.duplicate += 1;
                 phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
@@ -1561,6 +1536,61 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 stats.skipped += 1;
                 continue;
             }
+            if msg_age.num_seconds() > 600 {
+                stats.skipped += 1;
+                continue;
+            }
+            let utility_view = CatchUpMessageView {
+                message_id: mid,
+                author_id: msg.author.id.get(),
+                author_is_bot: msg.author.bot,
+                is_processable_kind: true,
+                age_secs: msg_age.num_seconds(),
+                trimmed_text: text.to_string(),
+            };
+            let author_is_authorized = {
+                let settings = shared.settings.read().await;
+                discord_io::user_is_authorized(&settings, msg.author.id.get())
+            };
+            match classify_phase2_message_with_utility_resolution(
+                &utility_view,
+                current_bot_user_id,
+                &existing_ids,
+                600,
+                &allowed_bot_ids_phase2,
+                announce_resolution_phase2,
+                notify_resolution_phase2,
+                author_is_authorized,
+            ) {
+                CatchUpClassificationDecision::UtilityIdentityUnavailable => {
+                    let retry_after = phase2_retry_after_checkpoint(
+                        max_recovered_id,
+                        phase2_checkpoint,
+                        last_bot_response_id,
+                    );
+                    phase2_retry_after = rearm_catch_up_retry_after_defer(
+                        shared,
+                        channel_id,
+                        retry_after,
+                        consumed_retry_states_this_cycle.get(&channel_id).copied(),
+                    );
+                    stats.deferred += 1;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        message_id = mid,
+                        retry_after = phase2_retry_after,
+                        "  [{ts}] 🔁 catch-up phase2: utility bot identity unavailable; preserving checkpoint before ambiguous message"
+                    );
+                    break;
+                }
+                CatchUpClassificationDecision::Determinate(CatchUpClassification::Recover) => {}
+                CatchUpClassificationDecision::Determinate(_) => {
+                    stats.skipped += 1;
+                    continue;
+                }
+            }
+            stats.eligible += 1;
             debug_assert!(should_phase2_recover_message(
                 mid,
                 phase2_checkpoint,
@@ -1721,9 +1751,9 @@ mod catch_up_recovery_tests {
         CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
         CatchUpClassification, CatchUpDeps, CatchUpDiscordApi, CatchUpFetchMode,
         CatchUpMessageView, CatchUpRetryScanDecision, CatchUpRetryState, CatchUpTooOldDrop,
-        ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind, RuntimeChannelBindingStatus,
-        advance_phase2_checkpoint, arm_catch_up_retry_pending, catch_up_enqueue_accepted,
-        catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
+        ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind, RecentPageDecision,
+        RuntimeChannelBindingStatus, advance_phase2_checkpoint, arm_catch_up_retry_pending,
+        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
         catch_up_last_item_dedup_is_checkpoint_safe, catch_up_message_age_reference_time,
         catch_up_remaining_queue_capacity, catch_up_too_old_notice, catch_up_too_old_snippet,
         classify_catch_up_message, classify_phase2_enqueue_commit,
@@ -1731,9 +1761,8 @@ mod catch_up_recovery_tests {
         insert_configured_catch_up_candidate, is_restart_gap_notice,
         merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
         prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer,
-        rearm_catch_up_retry_after_fetch_failure, run_catch_up_sweep,
-        should_fetch_older_recent_page, should_pace_before_scan,
-        take_catch_up_retry_checkpoint_after_queue_drain,
+        rearm_catch_up_retry_after_fetch_failure, recent_page_decision, run_catch_up_sweep,
+        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::{
         EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
@@ -1848,6 +1877,7 @@ mod catch_up_recovery_tests {
         fetch_error: Option<&'static str>,
         messages: Vec<serenity::Message>,
         fetch_attempts: Option<Arc<AtomicUsize>>,
+        empty_after_first_fetch: bool,
         cleanup_hook:
             Option<Arc<dyn Fn(&Arc<super::super::SharedData>, ChannelId, MessageId) + Send + Sync>>,
     }
@@ -1860,6 +1890,7 @@ mod catch_up_recovery_tests {
                 fetch_error: Some("temporary test fetch failure"),
                 messages: Vec::new(),
                 fetch_attempts: None,
+                empty_after_first_fetch: false,
                 cleanup_hook: None,
             }
         }
@@ -1871,6 +1902,7 @@ mod catch_up_recovery_tests {
                 fetch_error: None,
                 messages: Vec::new(),
                 fetch_attempts: None,
+                empty_after_first_fetch: false,
                 cleanup_hook: None,
             }
         }
@@ -1894,8 +1926,13 @@ mod catch_up_recovery_tests {
             _channel_id: ChannelId,
             _request: serenity::builder::GetMessages,
         ) -> Result<Vec<serenity::Message>, String> {
-            if let Some(fetch_attempts) = &self.fetch_attempts {
-                fetch_attempts.fetch_add(1, Ordering::SeqCst);
+            let fetch_attempt = self
+                .fetch_attempts
+                .as_ref()
+                .map(|attempts| attempts.fetch_add(1, Ordering::SeqCst))
+                .unwrap_or_default();
+            if self.empty_after_first_fetch && fetch_attempt > 0 {
+                return Ok(Vec::new());
             }
             match self.fetch_error {
                 Some(error) => Err(error.to_string()),
@@ -2120,11 +2157,11 @@ mod catch_up_recovery_tests {
         let existing = HashSet::new();
 
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None, None,),
             CatchUpClassification::Recover
         );
         assert_eq!(
-            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None, None,),
             CatchUpClassification::SelfAuthored
         );
     }
@@ -2160,7 +2197,8 @@ mod catch_up_recovery_tests {
                 &existing,
                 300,
                 &[notice_bot_id],
-                None
+                None,
+                None,
             ),
             CatchUpClassification::SelfAuthored,
             "aged notice must be classified out before the TooOld drop path"
@@ -2173,7 +2211,8 @@ mod catch_up_recovery_tests {
                 &existing,
                 300,
                 &[notice_bot_id],
-                None
+                None,
+                None,
             ),
             CatchUpClassification::SelfAuthored,
             "young notice must not be recovered as a turn input either"
@@ -2201,7 +2240,15 @@ mod catch_up_recovery_tests {
             trimmed_text: "어제 '⚠️ 재시작 공백으로' 카드 왜 떴어?".to_string(),
         };
         assert_eq!(
-            classify_catch_up_message(&human, Some(current_bot_id), &existing, 300, &[], None),
+            classify_catch_up_message(
+                &human,
+                Some(current_bot_id),
+                &existing,
+                300,
+                &[],
+                None,
+                None,
+            ),
             CatchUpClassification::Recover
         );
     }
@@ -2225,7 +2272,7 @@ mod catch_up_recovery_tests {
         // Without the announce_bot_id hint the bot message is NotAllowed
         // (no marker), proving the parameter is load-bearing.
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None, None,),
             CatchUpClassification::NotAllowed
         );
         // With the announce_bot_id hint it recovers.
@@ -2237,6 +2284,7 @@ mod catch_up_recovery_tests {
                 300,
                 &[],
                 Some(announce_id),
+                None,
             ),
             CatchUpClassification::Recover
         );
@@ -2248,9 +2296,10 @@ mod catch_up_recovery_tests {
     fn recent_pagination_continues_while_within_age_window_and_under_budget() {
         // First page (pages_fetched=1) whose oldest message is still inside the
         // 300s window → a buried older user message may exist → fetch more.
-        assert!(
-            should_fetch_older_recent_page(1, Some(120), 300),
-            "in-window oldest under budget should page backward"
+        assert_eq!(
+            recent_page_decision(1, Some(120), 300),
+            RecentPageDecision::FetchOlder,
+            "in-window oldest under budget should page backward",
         );
     }
 
@@ -2258,33 +2307,37 @@ mod catch_up_recovery_tests {
     fn recent_pagination_stops_when_oldest_exceeds_age_window() {
         // The oldest message in the page is already older than the window —
         // nothing older can qualify, so stop without another fetch.
-        assert!(
-            !should_fetch_older_recent_page(1, Some(301), 300),
-            "out-of-window oldest must early-exit"
+        assert_eq!(
+            recent_page_decision(1, Some(301), 300),
+            RecentPageDecision::Complete,
+            "out-of-window oldest must prove the gap complete",
         );
     }
 
     #[test]
-    fn recent_pagination_stops_at_page_budget() {
-        // Even fully within the age window, the budget caps backward reach so a
-        // pathological channel cannot trigger unbounded fetches.
-        assert!(
-            !should_fetch_older_recent_page(CATCH_UP_RECENT_MAX_PAGES, Some(10), 300),
-            "page budget must cap backward pagination"
+    fn recent_pagination_budget_is_incomplete_not_checkpoint_safe() {
+        // The REST budget still caps backward reach, but it cannot claim that
+        // an unbounded gap is complete while the oldest row remains in-window.
+        assert_eq!(
+            recent_page_decision(CATCH_UP_RECENT_MAX_PAGES, Some(10), 300),
+            RecentPageDecision::IncompleteBudget,
+            "page budget exhaustion must preserve the unknown older gap",
         );
         // One below the budget still pages.
-        assert!(
-            should_fetch_older_recent_page(CATCH_UP_RECENT_MAX_PAGES - 1, Some(10), 300),
-            "below-budget in-window page should continue"
+        assert_eq!(
+            recent_page_decision(CATCH_UP_RECENT_MAX_PAGES - 1, Some(10), 300),
+            RecentPageDecision::FetchOlder,
+            "below-budget in-window page should continue",
         );
     }
 
     #[test]
     fn recent_pagination_stops_on_empty_page() {
         // No oldest message (empty page) → no cursor to page before → stop.
-        assert!(
-            !should_fetch_older_recent_page(1, None, 300),
-            "empty page must stop pagination"
+        assert_eq!(
+            recent_page_decision(1, None, 300),
+            RecentPageDecision::Complete,
+            "empty page proves there is no older cursor",
         );
     }
 
@@ -2449,6 +2502,7 @@ mod catch_up_recovery_tests {
             fetch_error: None,
             messages: Vec::new(),
             fetch_attempts: Some(Arc::clone(&fetch_attempts)),
+            empty_after_first_fetch: false,
             cleanup_hook: None,
         };
         run_catch_up_sweep(
@@ -2503,6 +2557,7 @@ mod catch_up_recovery_tests {
                 catch_up_test_message(channel_id, later_id, author_id, "later turn"),
             ],
             fetch_attempts: None,
+            empty_after_first_fetch: false,
             cleanup_hook: Some(Arc::new(move |_shared, _channel_id, _message_id| {
                 if cleanup_calls_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
                     set_dir_readonly(&readonly_dir, true);
@@ -2612,6 +2667,7 @@ mod catch_up_recovery_tests {
         );
         assert!(shared.last_message_ids.get(&channel_id).is_none());
 
+        let fetch_attempts = Arc::new(AtomicUsize::new(0));
         let api = TestCatchUpDiscordApi {
             current_user_id: Some(9001),
             binding_status: RuntimeChannelBindingStatus::Owned,
@@ -2622,7 +2678,8 @@ mod catch_up_recovery_tests {
                 author_id,
                 "queued after clear",
             )],
-            fetch_attempts: None,
+            fetch_attempts: Some(Arc::clone(&fetch_attempts)),
+            empty_after_first_fetch: true,
             cleanup_hook: None,
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
@@ -2676,6 +2733,7 @@ mod catch_up_recovery_tests {
                 catch_up_test_message(channel_id, resent_id, author_id, "진행해줘"),
             ],
             fetch_attempts: None,
+            empty_after_first_fetch: false,
             cleanup_hook: None,
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
@@ -2716,6 +2774,7 @@ mod catch_up_recovery_tests {
                 catch_up_test_message(channel_id, duplicate_id, author_id, "repeat turn"),
             ],
             fetch_attempts: None,
+            empty_after_first_fetch: false,
             cleanup_hook: None,
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
