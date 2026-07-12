@@ -471,6 +471,11 @@ pub(in crate::services::discord) struct InflightTurnState {
 /// self-paced / monitor / external-input TUI mirrors) suppresses the footer. So
 /// the `Managed` discriminant is now load-bearing for that footer decision —
 /// preserve this carve-out when changing how `turn_source` is assigned.
+///
+/// EXCEPTION (#4455): Codex manual rebind uses the origin only to choose the
+/// conservative timestamp ordering for prompt evidence. Managed/monitor rows
+/// are born before prompt injection; external-input/adopted rows are observed
+/// after the rollout prompt exists. Missing evidence never changes ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::services::discord) enum TurnSource {

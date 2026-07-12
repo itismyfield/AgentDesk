@@ -152,13 +152,15 @@ pub(crate) fn codex_tui_rebind_prompt_replay_start_offset(
     rollout_path: &str,
     prompt_text: &str,
 ) -> Option<u64> {
-    codex_tui_rebind_prompt_replay_evidence(rollout_path, prompt_text, None).replay_start_offset
+    codex_tui_rebind_prompt_replay_evidence(rollout_path, prompt_text, None, None)
+        .replay_start_offset
 }
 
 pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
     rollout_path: &str,
     prompt_text: &str,
     persisted_started_at: Option<&str>,
+    persisted_turn_source: Option<inflight::TurnSource>,
 ) -> CodexTuiRebindPromptReplayEvidence {
     use std::io::BufRead;
 
@@ -171,10 +173,12 @@ pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
     let mut latest_user_prompt_offset = None;
     let mut latest_matching_prompt_offset = None;
     let mut latest_matching_prompt_before_persisted_start = None;
-    let persisted_start_second_end_ms = persisted_started_at
+    let mut first_matching_prompt_after_persisted_start = None;
+    let persisted_start_second_begin_ms = persisted_started_at
         .and_then(inflight::parse_started_at_unix)
-        .and_then(|unix_secs| unix_secs.checked_mul(1_000))
-        .and_then(|unix_ms| unix_ms.checked_add(999));
+        .and_then(|unix_secs| unix_secs.checked_mul(1_000));
+    let persisted_start_second_end_ms =
+        persisted_start_second_begin_ms.and_then(|unix_ms| unix_ms.checked_add(999));
     loop {
         let mut line = Vec::new();
         let Ok(read) = reader.read_until(b'\n', &mut line) else {
@@ -210,18 +214,38 @@ pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
             ) {
                 latest_matching_prompt_before_persisted_start = Some(offset);
             }
+            if first_matching_prompt_after_persisted_start.is_none()
+                && matches!(
+                    (rollout_timestamp_ms, persisted_start_second_begin_ms),
+                    (Some(prompt_ms), Some(start_ms)) if prompt_ms >= start_ms
+                )
+            {
+                first_matching_prompt_after_persisted_start = Some(offset);
+            }
         }
     }
-    // `started_at` and Codex rollout timestamps come from the same host clock.
-    // The persisted timestamp has second precision, so its inclusive end-of-
-    // second boundary identifies the latest matching prompt that could have
-    // created this row. This preserves turn identity even when a later prompt
-    // repeats identical text or the same slash command (#4455). Legacy/missing
-    // timestamps fall back to the prior conservative content-only choice.
-    let persisted_prompt_offset =
-        latest_matching_prompt_before_persisted_start.or(latest_matching_prompt_offset);
+    // Managed/monitor rows are born before their prompt is injected, whereas
+    // external-input/adopted rows are observed after the rollout prompt exists.
+    // Anchor the first matching prompt after row birth for the former and the
+    // last matching prompt before row birth for the latter. This preserves the
+    // original turn even when a later prompt repeats identical text (#4455).
+    // If timestamps are absent or malformed, do not jump a normalized relay to
+    // a content-only guess: replay from its durable cursor with its seed intact.
+    let persisted_prompt_offset = match persisted_turn_source {
+        Some(inflight::TurnSource::Managed | inflight::TurnSource::MonitorTriggered) => {
+            first_matching_prompt_after_persisted_start
+        }
+        Some(inflight::TurnSource::ExternalInput | inflight::TurnSource::ExternalAdopted) => {
+            latest_matching_prompt_before_persisted_start
+        }
+        None => latest_matching_prompt_offset,
+    };
     CodexTuiRebindPromptReplayEvidence {
-        replay_start_offset: persisted_prompt_offset.or(latest_user_prompt_offset),
+        replay_start_offset: if persisted_turn_source.is_none() {
+            persisted_prompt_offset.or(latest_user_prompt_offset)
+        } else {
+            persisted_prompt_offset
+        },
         persisted_prompt_offset,
         latest_matching_prompt_offset,
         latest_user_prompt_offset,
@@ -604,6 +628,7 @@ mod tests {
             0,
         );
         state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        state.turn_source = inflight::TurnSource::ExternalInput;
         state.full_response = "old card body plus timeout".to_string();
         state.started_at = chrono::DateTime::parse_from_rfc3339("2026-07-11T03:38:39Z")
             .expect("fixed UTC timestamp")
@@ -651,6 +676,7 @@ mod tests {
             rollout.to_str().unwrap(),
             "initial external prompt",
             Some(&state.started_at),
+            Some(state.turn_source),
         );
         assert!(evidence.later_user_prompt_after_match());
         assert_eq!(
@@ -687,6 +713,7 @@ mod tests {
             rollout.to_str().unwrap(),
             "initial external prompt",
             Some(&state.started_at),
+            Some(state.turn_source),
         );
         assert!(
             repeated_evidence.later_user_prompt_after_match(),
@@ -701,6 +728,7 @@ mod tests {
             rollout.to_str().unwrap(),
             "missing prompt",
             Some(&state.started_at),
+            Some(state.turn_source),
         );
         assert!(
             !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), unmatched_evidence),
@@ -713,6 +741,7 @@ mod tests {
             rollout.to_str().unwrap(),
             "initial external prompt",
             Some(&state.started_at),
+            Some(state.turn_source),
         );
         assert!(
             !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), same_turn_evidence,),
@@ -723,6 +752,141 @@ mod tests {
         assert!(
             !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), evidence,),
             "raw-rollout rows already carry their own monotonic cursor and do not restore a normalized render seed"
+        );
+    }
+
+    #[test]
+    fn managed_rebind_anchors_first_matching_prompt_after_row_birth() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux = "AgentDesk-codex-adk-cdx-4455-managed";
+        let normalized_relay = crate::services::tmux_common::session_temp_path(tmux, "jsonl");
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            1_479_671_301_387_059_200,
+            Some("adk-cdx".to_string()),
+            343_742_347_365_974_026,
+            1_525_345_488_264_499_270,
+            1_525_358_225_392_664_636,
+            "repeat me".to_string(),
+            Some("provider-session".to_string()),
+            Some(tmux.to_string()),
+            Some(normalized_relay),
+            None,
+            0,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        state.turn_source = inflight::TurnSource::Managed;
+        state.started_at = chrono::DateTime::parse_from_rfc3339("2026-07-11T03:38:39Z")
+            .expect("fixed UTC timestamp")
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        let earlier_same = serde_json::json!({
+            "timestamp": "2026-07-11T03:00:00.000Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "repeat me"}], "id": "earlier"}
+        });
+        let own_prompt = serde_json::json!({
+            "timestamp": "2026-07-11T03:38:40.000Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "repeat me"}], "id": "own"}
+        });
+        let completion = serde_json::json!({
+            "timestamp": "2026-07-11T03:39:10.000Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}], "id": "assistant"}
+        });
+        let later_different = serde_json::json!({
+            "timestamp": "2026-07-11T04:21:00.000Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next turn"}], "id": "later"}
+        });
+        let later_same = serde_json::json!({
+            "timestamp": "2026-07-11T04:22:00.000Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "repeat me"}], "id": "repeated"}
+        });
+        let rollout = tmp.path().join("managed-rollout.jsonl");
+
+        std::fs::write(
+            &rollout,
+            format!("{earlier_same}\n{own_prompt}\n{completion}\n{later_different}\n"),
+        )
+        .expect("write later managed turn");
+        let evidence = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            &state.user_text,
+            Some(&state.started_at),
+            Some(state.turn_source),
+        );
+        assert!(codex_tui_rebind_crossed_provider_turn(
+            tmux,
+            Some(&state),
+            evidence
+        ));
+        let own_prompt_end = (serde_json::to_string(&earlier_same).unwrap().len()
+            + 1
+            + serde_json::to_string(&own_prompt).unwrap().len()
+            + 1) as u64;
+        assert_eq!(
+            evidence.persisted_prompt_offset,
+            Some(own_prompt_end),
+            "a managed row is born before prompt injection, so the first matching post-birth prompt owns the row"
+        );
+
+        std::fs::write(
+            &rollout,
+            format!("{earlier_same}\n{own_prompt}\n{completion}\n{later_same}\n"),
+        )
+        .expect("write repeated later managed prompt");
+        let repeated = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            &state.user_text,
+            Some(&state.started_at),
+            Some(state.turn_source),
+        );
+        assert!(
+            repeated.later_user_prompt_after_match(),
+            "the first matching prompt after row birth remains the persisted managed prompt"
+        );
+        assert_ne!(
+            repeated.persisted_prompt_offset,
+            repeated.latest_user_prompt_offset
+        );
+
+        std::fs::write(
+            &rollout,
+            format!("{earlier_same}\n{own_prompt}\n{completion}\n"),
+        )
+        .expect("write same managed turn");
+        let same_turn = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            &state.user_text,
+            Some(&state.started_at),
+            Some(state.turn_source),
+        );
+        assert!(!same_turn.later_user_prompt_after_match());
+
+        let untimed_own = serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "repeat me"}], "id": "untimed-own"}
+        });
+        std::fs::write(&rollout, format!("{earlier_same}\n{untimed_own}\n"))
+            .expect("write untimed managed prompt");
+        let untimed = codex_tui_rebind_prompt_replay_evidence(
+            rollout.to_str().unwrap(),
+            &state.user_text,
+            Some(&state.started_at),
+            Some(state.turn_source),
+        );
+        assert_eq!(untimed.persisted_prompt_offset, None);
+        assert_eq!(untimed.replay_start_offset, None);
+        assert!(
+            !codex_tui_rebind_crossed_provider_turn(tmux, Some(&state), untimed),
+            "missing prompt timestamps must preserve the seed and durable cursor instead of guessing"
         );
     }
 

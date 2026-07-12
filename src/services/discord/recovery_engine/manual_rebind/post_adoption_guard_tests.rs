@@ -182,6 +182,17 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
 #[test]
 fn crossed_codex_turn_forces_watcher_replacement_before_normal_reuse() {
     let parent = include_str!("mod.rs");
+    for required in [
+        "Some(&existing.started_at)",
+        "Some(existing.turn_source)",
+        "let already_relayed_response = if discard_restored_render_seed",
+        "let restored_turn = if discard_restored_render_seed",
+    ] {
+        assert!(
+            parent.contains(required),
+            "crossed-turn production wiring lost required guard: {required}"
+        );
+    }
     let branch = parent
         .find("let claim = if discard_restored_render_seed")
         .expect("crossed-turn watcher claim branch");

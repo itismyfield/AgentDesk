@@ -482,6 +482,7 @@ async fn rebind_inflight_for_channel_inner(
                     rollout_path,
                     &existing.user_text,
                     Some(&existing.started_at),
+                    Some(existing.turn_source),
                 )
             })
             .unwrap_or_else(CodexTuiRebindPromptReplayEvidence::default);
