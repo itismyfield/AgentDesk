@@ -1877,6 +1877,7 @@ mod catch_up_recovery_tests {
         fetch_error: Option<&'static str>,
         messages: Vec<serenity::Message>,
         fetch_attempts: Option<Arc<AtomicUsize>>,
+        empty_after_first_fetch: bool,
         cleanup_hook:
             Option<Arc<dyn Fn(&Arc<super::super::SharedData>, ChannelId, MessageId) + Send + Sync>>,
     }
@@ -1889,6 +1890,7 @@ mod catch_up_recovery_tests {
                 fetch_error: Some("temporary test fetch failure"),
                 messages: Vec::new(),
                 fetch_attempts: None,
+                empty_after_first_fetch: false,
                 cleanup_hook: None,
             }
         }
@@ -1900,6 +1902,7 @@ mod catch_up_recovery_tests {
                 fetch_error: None,
                 messages: Vec::new(),
                 fetch_attempts: None,
+                empty_after_first_fetch: false,
                 cleanup_hook: None,
             }
         }
@@ -1923,8 +1926,13 @@ mod catch_up_recovery_tests {
             _channel_id: ChannelId,
             _request: serenity::builder::GetMessages,
         ) -> Result<Vec<serenity::Message>, String> {
-            if let Some(fetch_attempts) = &self.fetch_attempts {
-                fetch_attempts.fetch_add(1, Ordering::SeqCst);
+            let fetch_attempt = self
+                .fetch_attempts
+                .as_ref()
+                .map(|attempts| attempts.fetch_add(1, Ordering::SeqCst))
+                .unwrap_or_default();
+            if self.empty_after_first_fetch && fetch_attempt > 0 {
+                return Ok(Vec::new());
             }
             match self.fetch_error {
                 Some(error) => Err(error.to_string()),
@@ -2494,6 +2502,7 @@ mod catch_up_recovery_tests {
             fetch_error: None,
             messages: Vec::new(),
             fetch_attempts: Some(Arc::clone(&fetch_attempts)),
+            empty_after_first_fetch: false,
             cleanup_hook: None,
         };
         run_catch_up_sweep(
@@ -2548,6 +2557,7 @@ mod catch_up_recovery_tests {
                 catch_up_test_message(channel_id, later_id, author_id, "later turn"),
             ],
             fetch_attempts: None,
+            empty_after_first_fetch: false,
             cleanup_hook: Some(Arc::new(move |_shared, _channel_id, _message_id| {
                 if cleanup_calls_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
                     set_dir_readonly(&readonly_dir, true);
@@ -2657,6 +2667,7 @@ mod catch_up_recovery_tests {
         );
         assert!(shared.last_message_ids.get(&channel_id).is_none());
 
+        let fetch_attempts = Arc::new(AtomicUsize::new(0));
         let api = TestCatchUpDiscordApi {
             current_user_id: Some(9001),
             binding_status: RuntimeChannelBindingStatus::Owned,
@@ -2667,7 +2678,8 @@ mod catch_up_recovery_tests {
                 author_id,
                 "queued after clear",
             )],
-            fetch_attempts: None,
+            fetch_attempts: Some(Arc::clone(&fetch_attempts)),
+            empty_after_first_fetch: true,
             cleanup_hook: None,
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
@@ -2721,6 +2733,7 @@ mod catch_up_recovery_tests {
                 catch_up_test_message(channel_id, resent_id, author_id, "진행해줘"),
             ],
             fetch_attempts: None,
+            empty_after_first_fetch: false,
             cleanup_hook: None,
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
@@ -2761,6 +2774,7 @@ mod catch_up_recovery_tests {
                 catch_up_test_message(channel_id, duplicate_id, author_id, "repeat turn"),
             ],
             fetch_attempts: None,
+            empty_after_first_fetch: false,
             cleanup_hook: None,
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
