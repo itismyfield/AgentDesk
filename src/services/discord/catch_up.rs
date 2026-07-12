@@ -614,18 +614,32 @@ const CATCH_UP_RECENT_MAX_PAGES: u8 = 4;
 /// (i.e. an older page could still hold an eligible message). `oldest_age_secs`
 /// is the age of the oldest message in the page just fetched; `None` means the
 /// page was empty (no cursor to page before → stop).
-fn should_fetch_older_recent_page(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecentPageDecision {
+    FetchOlder,
+    Complete,
+    IncompleteBudget,
+}
+
+fn recent_page_decision(
     pages_fetched: u8,
     oldest_age_secs: Option<i64>,
     max_age_secs: i64,
-) -> bool {
-    if pages_fetched >= CATCH_UP_RECENT_MAX_PAGES {
-        return false;
-    }
+) -> RecentPageDecision {
     match oldest_age_secs {
-        Some(age) => age <= max_age_secs,
-        None => false,
+        None => RecentPageDecision::Complete,
+        Some(age) if age > max_age_secs => RecentPageDecision::Complete,
+        Some(_) if pages_fetched >= CATCH_UP_RECENT_MAX_PAGES => {
+            RecentPageDecision::IncompleteBudget
+        }
+        Some(_) => RecentPageDecision::FetchOlder,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpFetchCompleteness {
+    Complete,
+    Incomplete,
 }
 
 /// Inter-channel pacing for the catch-up REST sweep.
@@ -886,6 +900,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     // defers in an unbounded, unlogged re-arm cycle).
     let mut consumed_retry_states_this_cycle: HashMap<ChannelId, CatchUpRetryState> =
         HashMap::new();
+    // Phase 2 must not bypass an incomplete unbounded Recent scan and persist a
+    // newer recovery across the same unknown lower gap.
+    let mut incomplete_recent_channels: HashSet<ChannelId> = HashSet::new();
 
     // Pace successive per-channel REST scans so a many-channel sweep doesn't
     // fire as one tight burst (see `catch_up_scan_pace`). The first eligible
@@ -995,6 +1012,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // with `.before(oldest)` up to `CATCH_UP_RECENT_MAX_PAGES`, stopping as
         // soon as a page's oldest message exceeds the age window. The `After`
         // path keeps its precise single-page contract and is left untouched.
+        let mut fetch_completeness = CatchUpFetchCompleteness::Complete;
         if matches!(fetch_mode, CatchUpFetchMode::Recent) {
             let mut pages_fetched: u8 = 1;
             loop {
@@ -1007,12 +1025,21 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 let oldest_age_secs = chrono::Utc::now()
                     .signed_duration_since(*oldest_id.created_at())
                     .num_seconds();
-                if !should_fetch_older_recent_page(
+                match recent_page_decision(
                     pages_fetched,
                     Some(oldest_age_secs),
                     max_age.as_secs() as i64,
                 ) {
-                    break;
+                    RecentPageDecision::Complete => break,
+                    RecentPageDecision::IncompleteBudget => {
+                        fetch_completeness = CatchUpFetchCompleteness::Incomplete;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⚠ catch-up: Recent pagination budget exhausted for channel {channel_id}; preserving the unbounded gap"
+                        );
+                        break;
+                    }
+                    RecentPageDecision::FetchOlder => {}
                 }
                 if should_pace_before_scan(true) {
                     catch_up_scan_pace_gap().await;
@@ -1021,20 +1048,43 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     .limit(CATCH_UP_FETCH_LIMIT)
                     .before(oldest_id);
                 match api.fetch_messages(channel_id, older_request).await {
-                    Ok(older) if !older.is_empty() => {
+                    Ok(mut older) if !older.is_empty() => {
+                        // A non-advancing/overlapping REST page is not proof that
+                        // the unbounded Recent gap is complete. Keep only ids
+                        // below the requested cursor and retry on a later sweep
+                        // if the cursor did not move at all.
+                        older.retain(|message| message.id.get() < oldest_id.get());
+                        if older.is_empty() {
+                            fetch_completeness = CatchUpFetchCompleteness::Incomplete;
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ catch-up: Recent pagination cursor did not advance for channel {channel_id}; preserving the unbounded gap"
+                            );
+                            break;
+                        }
                         pages_fetched += 1;
                         messages.extend(older);
                     }
                     Ok(_) => break, // no older messages → done
                     Err(e) => {
+                        fetch_completeness = CatchUpFetchCompleteness::Incomplete;
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             "  [{ts}] ⚠ catch-up: backward page fetch failed for channel {channel_id}: {e}"
                         );
-                        break; // keep what we already have
+                        break;
                     }
                 }
             }
+        }
+
+        // A partial newest-first Recent prefix is not contiguous with the
+        // unknown lower bound. Processing it could durably checkpoint terminal
+        // noise past an unseen recoverable message, so leave the whole batch to
+        // the periodic Recent backstop instead.
+        if fetch_completeness == CatchUpFetchCompleteness::Incomplete {
+            incomplete_recent_channels.insert(channel_id);
+            continue;
         }
 
         if messages.is_empty() {
@@ -1364,6 +1414,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     for candidate in candidates.values() {
         let channel_id = candidate.channel_id;
 
+        if incomplete_recent_channels.contains(&channel_id) {
+            continue;
+        }
+
         {
             let settings = shared.settings.read().await;
             if !catch_up_candidate_allowed_for_bot(&settings, provider, candidate) {
@@ -1456,6 +1510,22 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
             let mid = msg.id.get();
             let msg_age = chrono::Utc::now().signed_duration_since(*msg.id.created_at());
+            // These gates are final regardless of announce/notify identity.
+            // Apply them before the phase-1 counterfactual, whose actionable
+            // TooOld bit is intentionally irrelevant to phase 2.
+            if existing_ids.contains(&mid) {
+                stats.duplicate += 1;
+                phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                continue;
+            }
+            if phase2_checkpoint.is_some_and(|saved| mid <= saved) {
+                stats.skipped += 1;
+                continue;
+            }
+            if msg_age.num_seconds() > 600 {
+                stats.skipped += 1;
+                continue;
+            }
             let utility_view = CatchUpMessageView {
                 message_id: mid,
                 author_id: msg.author.id.get(),
@@ -1520,22 +1590,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     continue;
                 }
             }
-            // Skip messages older than 10 minutes (generous window for restart gap)
-            if msg_age.num_seconds() > 600 {
-                stats.skipped += 1;
-                continue;
-            }
-
             stats.eligible += 1;
-            if existing_ids.contains(&mid) {
-                stats.duplicate += 1;
-                phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
-                continue;
-            }
-            if phase2_checkpoint.is_some_and(|saved| mid <= saved) {
-                stats.skipped += 1;
-                continue;
-            }
             debug_assert!(should_phase2_recover_message(
                 mid,
                 phase2_checkpoint,
@@ -1696,9 +1751,9 @@ mod catch_up_recovery_tests {
         CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
         CatchUpClassification, CatchUpDeps, CatchUpDiscordApi, CatchUpFetchMode,
         CatchUpMessageView, CatchUpRetryScanDecision, CatchUpRetryState, CatchUpTooOldDrop,
-        ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind, RuntimeChannelBindingStatus,
-        advance_phase2_checkpoint, arm_catch_up_retry_pending, catch_up_enqueue_accepted,
-        catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
+        ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind, RecentPageDecision,
+        RuntimeChannelBindingStatus, advance_phase2_checkpoint, arm_catch_up_retry_pending,
+        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
         catch_up_last_item_dedup_is_checkpoint_safe, catch_up_message_age_reference_time,
         catch_up_remaining_queue_capacity, catch_up_too_old_notice, catch_up_too_old_snippet,
         classify_catch_up_message, classify_phase2_enqueue_commit,
@@ -1706,9 +1761,8 @@ mod catch_up_recovery_tests {
         insert_configured_catch_up_candidate, is_restart_gap_notice,
         merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
         prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer,
-        rearm_catch_up_retry_after_fetch_failure, run_catch_up_sweep,
-        should_fetch_older_recent_page, should_pace_before_scan,
-        take_catch_up_retry_checkpoint_after_queue_drain,
+        rearm_catch_up_retry_after_fetch_failure, recent_page_decision, run_catch_up_sweep,
+        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::{
         EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
@@ -2234,9 +2288,10 @@ mod catch_up_recovery_tests {
     fn recent_pagination_continues_while_within_age_window_and_under_budget() {
         // First page (pages_fetched=1) whose oldest message is still inside the
         // 300s window → a buried older user message may exist → fetch more.
-        assert!(
-            should_fetch_older_recent_page(1, Some(120), 300),
-            "in-window oldest under budget should page backward"
+        assert_eq!(
+            recent_page_decision(1, Some(120), 300),
+            RecentPageDecision::FetchOlder,
+            "in-window oldest under budget should page backward",
         );
     }
 
@@ -2244,33 +2299,37 @@ mod catch_up_recovery_tests {
     fn recent_pagination_stops_when_oldest_exceeds_age_window() {
         // The oldest message in the page is already older than the window —
         // nothing older can qualify, so stop without another fetch.
-        assert!(
-            !should_fetch_older_recent_page(1, Some(301), 300),
-            "out-of-window oldest must early-exit"
+        assert_eq!(
+            recent_page_decision(1, Some(301), 300),
+            RecentPageDecision::Complete,
+            "out-of-window oldest must prove the gap complete",
         );
     }
 
     #[test]
-    fn recent_pagination_stops_at_page_budget() {
-        // Even fully within the age window, the budget caps backward reach so a
-        // pathological channel cannot trigger unbounded fetches.
-        assert!(
-            !should_fetch_older_recent_page(CATCH_UP_RECENT_MAX_PAGES, Some(10), 300),
-            "page budget must cap backward pagination"
+    fn recent_pagination_budget_is_incomplete_not_checkpoint_safe() {
+        // The REST budget still caps backward reach, but it cannot claim that
+        // an unbounded gap is complete while the oldest row remains in-window.
+        assert_eq!(
+            recent_page_decision(CATCH_UP_RECENT_MAX_PAGES, Some(10), 300),
+            RecentPageDecision::IncompleteBudget,
+            "page budget exhaustion must preserve the unknown older gap",
         );
         // One below the budget still pages.
-        assert!(
-            should_fetch_older_recent_page(CATCH_UP_RECENT_MAX_PAGES - 1, Some(10), 300),
-            "below-budget in-window page should continue"
+        assert_eq!(
+            recent_page_decision(CATCH_UP_RECENT_MAX_PAGES - 1, Some(10), 300),
+            RecentPageDecision::FetchOlder,
+            "below-budget in-window page should continue",
         );
     }
 
     #[test]
     fn recent_pagination_stops_on_empty_page() {
         // No oldest message (empty page) → no cursor to page before → stop.
-        assert!(
-            !should_fetch_older_recent_page(1, None, 300),
-            "empty page must stop pagination"
+        assert_eq!(
+            recent_page_decision(1, None, 300),
+            RecentPageDecision::Complete,
+            "empty page proves there is no older cursor",
         );
     }
 

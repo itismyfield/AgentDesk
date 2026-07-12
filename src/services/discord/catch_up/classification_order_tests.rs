@@ -5,7 +5,7 @@
 //! terminal skips advance it, while a recoverable message blocked by capacity
 //! remains strictly beyond it for the retry.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -541,9 +541,32 @@ fn write_checkpoint(
     .expect("write last-message checkpoint");
 }
 
+fn write_role_map(root: &std::path::Path, provider: &ProviderKind, channel_id: ChannelId) {
+    let config_dir = root.join("config");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    std::fs::write(
+        config_dir.join("role_map.json"),
+        format!(
+            r#"{{
+  "byChannelId": {{
+    "{}": {{
+      "roleId": "adk-cc",
+      "promptFile": "prompt.md",
+      "provider": "{}"
+    }}
+  }}
+}}"#,
+            channel_id.get(),
+            provider.as_str(),
+        ),
+    )
+    .expect("write role map");
+}
+
 struct TestCatchUpApi {
     messages: Vec<serenity::Message>,
     phase2_messages: Option<Vec<serenity::Message>>,
+    scripted_fetches: Option<Mutex<VecDeque<Result<Vec<serenity::Message>, String>>>>,
     fetch_calls: AtomicUsize,
     outbox: Arc<Mutex<Vec<CatchUpTooOldOutboxRequest>>>,
     dead_letters: Arc<Mutex<Vec<crate::db::relay_dead_letter::RelayDeadLetterRecord>>>,
@@ -560,6 +583,7 @@ impl TestCatchUpApi {
             Self {
                 messages,
                 phase2_messages: None,
+                scripted_fetches: None,
                 fetch_calls: AtomicUsize::new(0),
                 outbox: Arc::clone(&outbox),
                 dead_letters: Arc::new(Mutex::new(Vec::new())),
@@ -601,6 +625,14 @@ impl TestCatchUpApi {
         self
     }
 
+    fn with_scripted_fetches(
+        mut self,
+        fetches: Vec<Result<Vec<serenity::Message>, String>>,
+    ) -> Self {
+        self.scripted_fetches = Some(Mutex::new(fetches.into()));
+        self
+    }
+
     fn with_outbox(mut self, outbox: Arc<Mutex<Vec<CatchUpTooOldOutboxRequest>>>) -> Self {
         self.outbox = outbox;
         self
@@ -626,6 +658,13 @@ impl CatchUpDiscordApi for TestCatchUpApi {
         _request: serenity::builder::GetMessages,
     ) -> Result<Vec<serenity::Message>, String> {
         let call = self.fetch_calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(fetches) = &self.scripted_fetches {
+            return fetches
+                .lock()
+                .expect("scripted fetch lock")
+                .pop_front()
+                .expect("scripted fetch response");
+        }
         Ok(if call > 0 {
             self.phase2_messages
                 .as_ref()
@@ -888,6 +927,97 @@ async fn unavailable_identity_retry_cap_never_settles_ambiguous_trigger() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn recent_partial_page_failure_preserves_gap_then_recovers_older_human() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_010);
+    write_role_map(root.path(), &provider, channel_id);
+
+    let newest_terminal_id = message_id_with_age(3, Duration::from_secs(30));
+    let buried_human_id = message_id_with_age(2, Duration::from_secs(120));
+    let age_boundary_bot_id = message_id_with_age(1, Duration::from_secs(360));
+    let newest_terminal = discord_message(
+        channel_id,
+        newest_terminal_id,
+        INFO_BOT_ID,
+        true,
+        "informational terminal-only page",
+    );
+    let buried_human = discord_message(
+        channel_id,
+        buried_human_id,
+        HUMAN_ID,
+        false,
+        "page 2 user request",
+    );
+    let age_boundary_bot = discord_message(
+        channel_id,
+        age_boundary_bot_id,
+        INFO_BOT_ID,
+        true,
+        "older non-actionable boundary",
+    );
+
+    let (first_api, first_outbox) = TestCatchUpApi::new(Vec::new());
+    let first_api = first_api.with_scripted_fetches(vec![
+        Ok(vec![newest_terminal.clone()]),
+        Err("transient page 2 failure".to_string()),
+        Ok(Vec::new()), // mutation-only phase-2 fallback; normally left unused
+    ]);
+    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
+
+    assert!(
+        shared.last_message_ids.get(&channel_id).is_none(),
+        "a newer terminal-only partial page must not create a durable frontier past the unknown gap"
+    );
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty(),
+        "an incomplete Recent batch is retried as a whole rather than partially committed"
+    );
+    assert!(first_outbox.lock().expect("outbox capture lock").is_empty());
+    assert!(
+        first_api
+            .dead_letters
+            .lock()
+            .expect("dead-letter capture lock")
+            .is_empty()
+    );
+    assert_eq!(
+        first_api.fetch_calls.load(Ordering::Relaxed),
+        2,
+        "phase 2 must not bypass an incomplete Recent lower gap"
+    );
+
+    let (second_api, _) = TestCatchUpApi::new(Vec::new());
+    let second_api = second_api.with_scripted_fetches(vec![
+        Ok(vec![newest_terminal]),
+        Ok(vec![buried_human, age_boundary_bot]),
+        Ok(Vec::new()), // phase-2 backstop
+    ]);
+    run_catch_up_sweep(CatchUpDeps::new(&second_api, &shared, &provider)).await;
+
+    let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
+    assert_eq!(
+        mailbox
+            .intervention_queue
+            .iter()
+            .map(|intervention| intervention.message_id)
+            .collect::<Vec<_>>(),
+        vec![buried_human_id],
+        "the next complete Recent scan must recover the human hidden behind the failed page"
+    );
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(newest_terminal_id.get()),
+        "only the complete oldest-first batch may advance the settled frontier"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn production_sweep_advances_through_mixed_terminal_aged_page() {
     let root = scoped_runtime_root();
     let shared = super::super::make_shared_data_for_tests();
@@ -1145,6 +1275,177 @@ async fn production_phase2_notify_overlap_is_blocked_before_recovery() {
             .is_empty(),
         "phase2 never turns notify output into TooOld evidence"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_aged_input_does_not_retry_when_utility_identity_is_unavailable() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_011);
+    let bot_response_id = message_id_with_age(1, Duration::from_secs(800));
+    let aged_human_id = message_id_with_age(2, Duration::from_secs(700));
+    write_checkpoint(root.path(), &provider, channel_id, bot_response_id.get());
+
+    let (api, _) = TestCatchUpApi::new(Vec::new());
+    let api = api
+        .with_utility_bot_resolutions(
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unavailable,
+        )
+        .with_phase2_messages(vec![
+            discord_message(
+                channel_id,
+                aged_human_id,
+                HUMAN_ID,
+                false,
+                "stale unanswered request",
+            ),
+            discord_message(
+                channel_id,
+                bot_response_id,
+                CURRENT_BOT_ID,
+                true,
+                "older bot response",
+            ),
+        ]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert!(
+        !shared.catch_up_retry_pending.contains_key(&channel_id),
+        "phase2 age is identity-independent and must not start an unavailable-id retry chain"
+    );
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+    assert_eq!(api.fetch_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_checkpointed_input_does_not_retry_when_utility_identity_is_unavailable() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_012);
+    let bot_response_id = message_id_with_age(1, Duration::from_secs(60));
+    let checkpointed_human_id = message_id_with_age(2, Duration::from_secs(30));
+    write_checkpoint(
+        root.path(),
+        &provider,
+        channel_id,
+        checkpointed_human_id.get(),
+    );
+    shared
+        .last_message_ids
+        .insert(channel_id, checkpointed_human_id.get());
+
+    let (api, _) = TestCatchUpApi::new(Vec::new());
+    let api = api
+        .with_utility_bot_resolutions(
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unavailable,
+        )
+        .with_phase2_messages(vec![
+            discord_message(
+                channel_id,
+                checkpointed_human_id,
+                HUMAN_ID,
+                false,
+                "already checkpointed request",
+            ),
+            discord_message(
+                channel_id,
+                bot_response_id,
+                CURRENT_BOT_ID,
+                true,
+                "previous bot response",
+            ),
+        ]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert!(
+        !shared.catch_up_retry_pending.contains_key(&channel_id),
+        "a saved phase2 checkpoint must settle before utility counterfactuals"
+    );
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+    assert_eq!(api.fetch_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_fresh_announce_unavailable_then_resolved_recovers_eventually() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_013);
+    let bot_response_id = message_id_with_age(1, Duration::from_secs(60));
+    let announce_message_id = message_id_with_age(2, Duration::from_secs(30));
+    write_checkpoint(root.path(), &provider, channel_id, bot_response_id.get());
+    let phase2_messages = vec![
+        discord_message(
+            channel_id,
+            announce_message_id,
+            ANNOUNCE_BOT_ID,
+            true,
+            "PM triage: recover this markerless trigger",
+        ),
+        discord_message(
+            channel_id,
+            bot_response_id,
+            CURRENT_BOT_ID,
+            true,
+            "previous bot response",
+        ),
+    ];
+
+    let (first_api, _) = TestCatchUpApi::new(Vec::new());
+    let first_api = first_api
+        .with_utility_bot_resolutions(
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        )
+        .with_phase2_messages(phase2_messages.clone());
+    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
+    assert!(shared.catch_up_retry_pending.contains_key(&channel_id));
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty(),
+        "fresh identity-dependent work must wait while announce identity is unavailable"
+    );
+
+    let pending_retry_channels = HashSet::from([channel_id]);
+    let (second_api, _) = TestCatchUpApi::new(Vec::new());
+    let second_api = second_api
+        .with_utility_bot_resolutions(
+            UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
+            UtilityBotUserIdResolution::Unconfigured,
+        )
+        .with_phase2_messages(phase2_messages);
+    run_catch_up_sweep(
+        CatchUpDeps::new(&second_api, &shared, &provider)
+            .with_pending_retry_channels(&pending_retry_channels),
+    )
+    .await;
+
+    assert_eq!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .iter()
+            .map(|intervention| intervention.message_id)
+            .collect::<Vec<_>>(),
+        vec![announce_message_id]
+    );
+    assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
 }
 
 #[tokio::test(flavor = "current_thread")]
