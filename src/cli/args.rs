@@ -762,16 +762,22 @@ pub(crate) enum DiscordAction {
         #[arg(long)]
         guild_id: Option<String>,
     },
-    /// Create a public thread under a parent text channel. Idempotent by
-    /// (parent, name) via list-then-create against the guild's active
-    /// threads. Not safe under concurrent invocations on the same parent.
+    /// Create a thread under a text/news channel or a post under a forum/media
+    /// channel. Cross-process safe and idempotent by (parent, normalized name)
+    /// across active and archived public threads.
     ThreadCreate {
-        /// Parent text channel id
+        /// Parent text, news, forum, or media channel id
         #[arg(long)]
         parent_channel_id: String,
         /// Thread name
         #[arg(long)]
         name: String,
+        /// Starter message required for forum/media parents (alias: --starter-message)
+        #[arg(long, alias = "starter-message")]
+        message: Option<String>,
+        /// Forum/media tag id to apply (repeat for multiple tags)
+        #[arg(long = "tag-id")]
+        tag_ids: Vec<u64>,
         /// Auto-archive duration in minutes (60, 1440, 4320, 10080)
         #[arg(long, default_value_t = 1440)]
         auto_archive_minutes: u16,
@@ -1078,5 +1084,122 @@ mod tests {
         let query = Cli::try_parse_from(["agentdesk", "query", "queue", "--json"])
             .expect("query queue --json parses");
         assert!(query.json);
+    }
+
+    #[test]
+    fn discord_thread_create_parses_optional_forum_starter_message() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "thread-create",
+            "--parent-channel-id",
+            "123",
+            "--name",
+            "release-notes",
+            "--message",
+            "Initial forum post",
+        ])
+        .expect("thread-create --message parses");
+
+        match cli.command.expect("subcommand") {
+            Commands::Discord {
+                action:
+                    DiscordAction::ThreadCreate {
+                        parent_channel_id,
+                        name,
+                        message,
+                        tag_ids,
+                        auto_archive_minutes,
+                    },
+            } => {
+                assert_eq!(parent_channel_id, "123");
+                assert_eq!(name, "release-notes");
+                assert_eq!(message.as_deref(), Some("Initial forum post"));
+                assert!(tag_ids.is_empty());
+                assert_eq!(auto_archive_minutes, 1440);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn discord_thread_create_accepts_starter_message_alias_and_text_omission() {
+        let alias = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "thread-create",
+            "--parent-channel-id",
+            "123",
+            "--name",
+            "forum-post",
+            "--starter-message",
+            "Starter",
+        ])
+        .expect("thread-create --starter-message parses");
+        let omitted = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "thread-create",
+            "--parent-channel-id",
+            "123",
+            "--name",
+            "text-thread",
+        ])
+        .expect("text thread without starter message parses");
+
+        match alias.command.expect("alias subcommand") {
+            Commands::Discord {
+                action: DiscordAction::ThreadCreate { message, .. },
+            } => assert_eq!(message.as_deref(), Some("Starter")),
+            _ => panic!("unexpected alias command"),
+        }
+        match omitted.command.expect("omitted subcommand") {
+            Commands::Discord {
+                action: DiscordAction::ThreadCreate { message, .. },
+            } => assert!(message.is_none()),
+            _ => panic!("unexpected omitted command"),
+        }
+    }
+
+    #[test]
+    fn discord_thread_create_parses_repeatable_tag_ids_and_rejects_invalid_ids() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "discord",
+            "thread-create",
+            "--parent-channel-id",
+            "123",
+            "--name",
+            "tagged-post",
+            "--message",
+            "Starter",
+            "--tag-id",
+            "41",
+            "--tag-id",
+            "42",
+        ])
+        .expect("repeatable --tag-id parses");
+
+        match cli.command.expect("subcommand") {
+            Commands::Discord {
+                action: DiscordAction::ThreadCreate { tag_ids, .. },
+            } => assert_eq!(tag_ids, vec![41, 42]),
+            _ => panic!("unexpected command"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "agentdesk",
+                "discord",
+                "thread-create",
+                "--parent-channel-id",
+                "123",
+                "--name",
+                "tagged-post",
+                "--tag-id",
+                "not-a-snowflake",
+            ])
+            .is_err()
+        );
     }
 }

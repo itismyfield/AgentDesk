@@ -452,6 +452,17 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo check --workspace --all-targets
 
+      # #4466: compile-only coverage cannot prove Win32 named-mutex ownership
+      # or cross-process blocking. This non-advisory step runs the real child
+      # process proof on the Windows runner.
+      - name: Discord thread-create cross-process lock
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo test --lib discord_thread_create -- --test-threads=1
+
       - name: cargo test (non-PG, targeted subset)
         # Windows is an advisory anti-rot lane for this Unix-only project; its
         # known test/runner flakes must not paint the PR red. See #4202/#4423.

@@ -82,6 +82,7 @@ echo "=== Inflight blind-save ratchet guard (#4259) ==="
 
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
+"$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring
 
 echo "=== PR infrastructure failure rerun classifier (#4392) ==="
 ./scripts/ci/infra-failure-rerun.sh --self-test

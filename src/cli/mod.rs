@@ -4,6 +4,8 @@ pub(crate) mod dcserver;
 pub(crate) mod dcserver_pg_bootstrap;
 pub(crate) mod direct;
 pub(crate) mod discord;
+pub(crate) mod discord_thread_create;
+pub(crate) mod discord_thread_create_lock;
 pub(crate) mod doctor;
 pub(crate) mod init;
 pub(crate) mod json_output;

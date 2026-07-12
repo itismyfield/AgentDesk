@@ -317,6 +317,10 @@ release.
 1. Confirm PR 1 and PR 2 are merged AND staged in release: `agentdesk
    discord --help` must list `category-create`, `channel-create`, and
    `thread-create`. If not, run `scripts/deploy-release.sh` first.
+   `thread-create` scans active and archived threads and serializes concurrent
+   invocations by parent/name. Forum and media parents require `--message`;
+   pass repeatable `--tag-id <ID>` values when the parent requires or accepts
+   forum tags. News parents create announcement (`NewsThread`) threads.
 2. Confirm the operator's Obsidian vault has the 6 prompt files
    (`adk-claude-pipe-e2e.prompt.md` ... `adk-e2e-orchestrator.prompt.md`)
    under `~/ObsidianVault/RemoteVault/adk-config/agents/`. Re-run

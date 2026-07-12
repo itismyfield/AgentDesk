@@ -350,10 +350,14 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             super::args::DiscordAction::ThreadCreate {
                 parent_channel_id,
                 name,
+                message,
+                tag_ids,
                 auto_archive_minutes,
             } => super::direct::run_async(super::direct::cmd_discord_thread_create(
                 &parent_channel_id,
                 &name,
+                message.as_deref(),
+                &tag_ids,
                 auto_archive_minutes,
             )),
         }),

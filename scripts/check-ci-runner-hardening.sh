@@ -67,10 +67,16 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "86234055c69ae2aaf94b10e968a466dde8761a4dc6433dd3beeb3de300f59a33",
+    # #4466 formally admits the non-advisory Windows named-mutex runtime proof.
+    "job_sha256" => "f920998e7117a748415d872640abff0dd07495f057215223e5b2b52228212906",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
+        "continue_on_error" => nil,
+        "timeout_minutes" => nil,
+      },
+      "Discord thread-create cross-process lock" => {
+        "commands" => ["cargo test --lib discord_thread_create -- --test-threads=1"],
         "continue_on_error" => nil,
         "timeout_minutes" => nil,
       },

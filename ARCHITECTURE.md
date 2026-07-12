@@ -39,6 +39,8 @@ src/
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── direct.rs
 │   ├── discord.rs
+│   ├── discord_thread_create.rs
+│   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── init.rs
 │   ├── json_output.rs

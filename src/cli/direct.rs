@@ -788,76 +788,22 @@ pub(crate) async fn cmd_discord_channel_create(
 pub(crate) async fn cmd_discord_thread_create(
     parent_channel_id: &str,
     name: &str,
+    message: Option<&str>,
+    tag_ids: &[u64],
     auto_archive_minutes: u16,
 ) -> Result<(), String> {
-    use poise::serenity_prelude as serenity;
     let state = build_app_state(true).await?;
     let http = announce_http_for_cli(&state).await?;
-
-    let parent_id = parent_channel_id
-        .parse::<u64>()
-        .map(serenity::ChannelId::new)
-        .map_err(|err| format!("invalid parent channel id {parent_channel_id:?}: {err}"))?;
-
-    let archive = match auto_archive_minutes {
-        60 => serenity::AutoArchiveDuration::OneHour,
-        1440 => serenity::AutoArchiveDuration::OneDay,
-        4320 => serenity::AutoArchiveDuration::ThreeDays,
-        10080 => serenity::AutoArchiveDuration::OneWeek,
-        other => {
-            return Err(format!(
-                "auto_archive_minutes must be 60, 1440, 4320, or 10080; got {other}"
-            ));
-        }
-    };
-
-    // Idempotency: resolve the parent's guild, list its active threads, and
-    // match by parent_id + name. Surface lookup errors instead of silently
-    // creating a duplicate when the guild query fails.
-    let channel = parent_id
-        .to_channel(&*http)
-        .await
-        .map_err(|err| format!("resolve parent channel {parent_id}: {err}"))?;
-    let guild_channel = channel
-        .guild()
-        .ok_or_else(|| format!("parent channel {parent_id} is not in a guild"))?;
-    let active = guild_channel
-        .guild_id
-        .get_active_threads(&*http)
-        .await
-        .map_err(|err| {
-            format!(
-                "list active threads in guild {}: {err}",
-                guild_channel.guild_id
-            )
-        })?;
-    for thread in active.threads {
-        if thread.parent_id == Some(parent_id) && thread.name == name {
-            print_json(&json!({
-                "id": thread.id.get().to_string(),
-                "name": thread.name,
-                "kind": "thread",
-                "parent_channel_id": parent_id.get().to_string(),
-                "created": false,
-            }));
-            return Ok(());
-        }
-    }
-
-    let builder = serenity::builder::CreateThread::new(name)
-        .kind(serenity::ChannelType::PublicThread)
-        .auto_archive_duration(archive);
-    let thread = parent_id
-        .create_thread(&*http, builder)
-        .await
-        .map_err(|err| format!("create thread {name:?} under {parent_id}: {err}"))?;
-    print_json(&json!({
-        "id": thread.id.get().to_string(),
-        "name": thread.name,
-        "kind": "thread",
-        "parent_channel_id": parent_id.get().to_string(),
-        "created": true,
-    }));
+    let result = super::discord_thread_create::create(
+        &http,
+        parent_channel_id,
+        name,
+        message,
+        tag_ids,
+        auto_archive_minutes,
+    )
+    .await?;
+    print_json(&result);
     Ok(())
 }
 
