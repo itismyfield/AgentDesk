@@ -2287,6 +2287,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 user_text_owned: state.user_text.clone(),
                 request_owner_name: String::new(),
                 role_binding,
+                memory_scope: (channel_id, state.channel_name.clone()),
                 adk_session_key,
                 adk_session_name,
                 adk_session_info: Some(adk_session_info),

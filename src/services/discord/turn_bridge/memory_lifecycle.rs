@@ -311,6 +311,7 @@ pub(in crate::services::discord) fn take_memento_reflect_request(
     provider: &ProviderKind,
     role_binding: Option<&RoleBinding>,
     channel_id: u64,
+    channel_name: Option<String>,
     reason: SessionEndReason,
 ) -> Option<ReflectRequest> {
     if memory_settings.backend != settings::MemoryBackendKind::Memento
@@ -336,11 +337,34 @@ pub(in crate::services::discord) fn take_memento_reflect_request(
         provider: provider.clone(),
         role_id: resolve_memory_role_id(role_binding),
         channel_id,
-        channel_name: session.channel_name.clone(),
+        channel_name,
         session_id,
         reason,
         transcript,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_turn_capture_request(
+    provider: &ProviderKind,
+    role_id: String,
+    memory_scope_channel_id: ChannelId,
+    memory_scope_channel_name: Option<String>,
+    session_id: String,
+    dispatch_id: Option<String>,
+    user_text: String,
+    assistant_text: String,
+) -> CaptureRequest {
+    CaptureRequest {
+        provider: provider.clone(),
+        role_id,
+        channel_id: memory_scope_channel_id.get(),
+        channel_name: memory_scope_channel_name,
+        session_id,
+        dispatch_id,
+        user_text,
+        assistant_text,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -408,4 +432,80 @@ pub(super) fn optional_metric_token_fields(usage: TokenUsage) -> (Option<u64>, O
             None
         },
     )
+}
+
+#[cfg(test)]
+mod thread_memory_scope_tests {
+    use super::*;
+
+    fn reflectable_session() -> DiscordSession {
+        DiscordSession {
+            session_id: Some("provider-session".to_string()),
+            memento_context_loaded: true,
+            memento_reflected: false,
+            current_path: Some("/tmp/thread".to_string()),
+            history: vec![
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "question".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "answer".to_string(),
+                },
+            ],
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(222),
+            channel_name: Some("thread".to_string()),
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        }
+    }
+
+    #[test]
+    fn capture_and_reflect_share_inherited_parent_scope() {
+        let provider = ProviderKind::Codex;
+        let scope_id = ChannelId::new(111);
+        let scope_name = Some("parent".to_string());
+        let capture = build_turn_capture_request(
+            &provider,
+            "project-agentdesk".to_string(),
+            scope_id,
+            scope_name.clone(),
+            "thread-session".to_string(),
+            None,
+            "question".to_string(),
+            "answer".to_string(),
+        );
+        let mut session = reflectable_session();
+        let settings = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+        let reflect = take_memento_reflect_request(
+            &mut session,
+            &settings,
+            &provider,
+            None,
+            scope_id.get(),
+            scope_name.clone(),
+            SessionEndReason::LocalSessionReset,
+        )
+        .expect("reflect request");
+
+        assert_eq!(
+            (capture.channel_id, capture.channel_name),
+            (111, scope_name.clone())
+        );
+        assert_eq!(
+            (reflect.channel_id, reflect.channel_name),
+            (111, scope_name)
+        );
+        assert_eq!(capture.session_id, "thread-session");
+        assert_eq!(reflect.session_id, "provider-session");
+    }
 }

@@ -282,12 +282,14 @@ fn take_idle_expiry_reflect_request(
     channel_id: ChannelId,
 ) -> Option<(ResolvedMemorySettings, ReflectRequest)> {
     let memory_settings = settings::memory_settings_for_binding(role_binding);
+    let channel_name = session.channel_name.clone();
     let reflect_request = super::turn_bridge::take_memento_reflect_request(
         session,
         &memory_settings,
         provider,
         role_binding,
         channel_id.get(),
+        channel_name,
         SessionEndReason::IdleExpiry,
     )?;
     Some((memory_settings, reflect_request))

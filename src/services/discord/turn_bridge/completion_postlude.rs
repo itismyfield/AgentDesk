@@ -14,6 +14,7 @@ pub(super) struct CompletionPostludeContext {
     pub(super) shared_owned: Arc<SharedData>,
     pub(super) gateway: Arc<dyn TurnGateway>,
     pub(super) channel_id: ChannelId,
+    pub(super) memory_scope: (ChannelId, Option<String>),
     pub(super) provider: ProviderKind,
     pub(super) cancel_token: Arc<crate::services::provider::CancelToken>,
     pub(super) user_msg_id: Option<MessageId>,
@@ -86,6 +87,7 @@ pub(super) async fn run_completion_postlude(
     let shared_owned = ctx.shared_owned;
     let gateway = ctx.gateway;
     let channel_id = ctx.channel_id;
+    let (memory_scope_channel_id, memory_scope_channel_name) = ctx.memory_scope;
     let provider = ctx.provider;
     let cancel_token = ctx.cancel_token;
     let user_msg_id = ctx.user_msg_id;
@@ -319,7 +321,8 @@ pub(super) async fn run_completion_postlude(
                         &capture_memory_settings,
                         &provider,
                         role_binding.as_ref(),
-                        channel_id.get(),
+                        memory_scope_channel_id.get(),
+                        memory_scope_channel_name.clone(),
                         reason,
                     );
                 }
@@ -586,18 +589,16 @@ pub(super) async fn run_completion_postlude(
         });
     }
     if should_spawn_memory_capture {
-        let capture_request = CaptureRequest {
-            provider: provider.clone(),
-            role_id: memory_role_id,
-            channel_id: channel_id.get(),
-            session_id: resolve_memory_session_id(
-                session_id_to_persist.as_deref(),
-                channel_id.get(),
-            ),
-            dispatch_id: dispatch_id.clone(),
-            user_text: user_text_owned.clone(),
-            assistant_text: full_response.clone(),
-        };
+        let capture_request = build_turn_capture_request(
+            &provider,
+            memory_role_id,
+            memory_scope_channel_id,
+            memory_scope_channel_name,
+            resolve_memory_session_id(session_id_to_persist.as_deref(), channel_id.get()),
+            dispatch_id.clone(),
+            user_text_owned.clone(),
+            full_response.clone(),
+        );
         background_memory_tasks.push(BackgroundMemoryTask {
             kind: BackgroundMemoryTaskKind::Capture,
             handle: spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request),

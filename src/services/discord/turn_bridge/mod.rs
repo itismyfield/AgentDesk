@@ -65,9 +65,7 @@ use crate::db::session_observability::{
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
-use crate::services::memory::{
-    CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
-};
+use crate::services::memory::{TokenUsage, resolve_memory_role_id, resolve_memory_session_id};
 use crate::services::observability::session_inventory::{
     format_child_inventory_progress, load_child_inventory_by_parent_key_pg,
 };
@@ -153,8 +151,9 @@ use headless_delivery::{
     is_synthetic_headless_message_id,
 };
 use memory_lifecycle::{
-    BackgroundMemoryTask, BackgroundMemoryTaskKind, observe_background_memory_tasks,
-    optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
+    BackgroundMemoryTask, BackgroundMemoryTaskKind, build_turn_capture_request,
+    observe_background_memory_tasks, optional_metric_token_fields, plan_turn_end_memory,
+    spawn_memory_capture_task,
 };
 pub(in crate::services::discord) use memory_lifecycle::{
     spawn_memory_reflect_task, take_memento_reflect_request,
@@ -213,6 +212,7 @@ pub(super) struct TurnBridgeContext {
     pub(super) user_text_owned: String,
     pub(super) request_owner_name: String,
     pub(super) role_binding: Option<RoleBinding>,
+    pub(super) memory_scope: (ChannelId, Option<String>),
     pub(super) adk_session_key: Option<String>,
     pub(super) adk_session_name: Option<String>,
     pub(super) adk_session_info: Option<String>,
@@ -248,8 +248,6 @@ pub(super) enum WatcherHandoffClaimOutcome {
     ReusedExisting,
     Spawned,
 }
-// Shared by the bridge task body below and the extracted stream_loop.rs
-// (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 pub(super) fn spawn_turn_bridge(
@@ -296,6 +294,7 @@ pub(super) fn spawn_turn_bridge(
         let user_text_owned = bridge.user_text_owned.clone();
         let request_owner_name = bridge.request_owner_name.clone();
         let role_binding = bridge.role_binding.clone();
+        let memory_scope = bridge.memory_scope.clone();
         let adk_session_key = bridge.adk_session_key.clone();
         let adk_session_name = bridge.adk_session_name.clone();
         let adk_session_info = bridge.adk_session_info.clone();
@@ -926,6 +925,7 @@ pub(super) fn spawn_turn_bridge(
                 shared_owned,
                 gateway,
                 channel_id,
+                memory_scope,
                 provider,
                 cancel_token,
                 user_msg_id,

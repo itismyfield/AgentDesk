@@ -105,6 +105,7 @@ pub(crate) struct CaptureRequest {
     pub provider: ProviderKind,
     pub role_id: String,
     pub channel_id: u64,
+    pub channel_name: Option<String>,
     pub session_id: String,
     pub dispatch_id: Option<String>,
     pub user_text: String,

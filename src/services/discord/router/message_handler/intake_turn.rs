@@ -2787,6 +2787,7 @@ pub(super) async fn handle_text_message(
             user_text_owned: user_text.to_string(),
             request_owner_name: request_owner_name.to_string(),
             role_binding: role_binding.clone(),
+            memory_scope: resolved_role.memory_scope(channel_id, &channel_name),
             adk_session_key,
             adk_session_name,
             adk_session_info: Some(adk_session_info),

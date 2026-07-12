@@ -355,6 +355,17 @@ impl ResolvedRoleBinding {
             .map(|_| self.inherited_parent_name.clone())
             .unwrap_or_else(|| channel_name.clone())
     }
+
+    pub(super) fn memory_scope(
+        &self,
+        channel_id: serenity::ChannelId,
+        channel_name: &Option<String>,
+    ) -> (serenity::ChannelId, Option<String>) {
+        (
+            self.memory_channel_id(channel_id),
+            self.memory_name(channel_name),
+        )
+    }
 }
 
 pub(super) fn resolve_role_binding_with_parents<'a>(
@@ -587,4 +598,45 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
     *session_id = None;
     *memento_context_loaded = false;
     *session_strategy_reason = "provider_channel_worktree_isolated";
+}
+
+#[cfg(test)]
+mod thread_role_tests {
+    use super::*;
+
+    fn binding(role_id: &str) -> RoleBinding {
+        RoleBinding {
+            role_id: role_id.to_string(),
+            prompt_file: format!("/tmp/{role_id}.md"),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
+            memory: settings::ResolvedMemorySettings::default(),
+        }
+    }
+
+    #[test]
+    fn direct_thread_binding_wins_and_keeps_thread_memory_scope() {
+        let thread_id = ChannelId::new(222);
+        let resolved = resolve_role_binding_with_parents(
+            Some(binding("direct-thread")),
+            [(ChannelId::new(111), Some("parent"))],
+        );
+
+        assert_eq!(
+            resolved
+                .binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
+            Some("direct-thread"),
+        );
+        assert_eq!(resolved.inherited_parent_id, None);
+        assert_eq!(resolved.memory_channel_id(thread_id), thread_id);
+        assert_eq!(
+            resolved.memory_name(&Some("thread".to_string())).as_deref(),
+            Some("thread"),
+        );
+    }
 }

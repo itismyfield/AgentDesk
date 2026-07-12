@@ -332,8 +332,12 @@ agents:
         workspace: "/tmp/agentdesk"
 "#;
 
-    fn with_temp_root_files<F>(agentdesk_yaml: Option<&str>, role_map_json: Option<&str>, f: F)
-    where
+    fn with_temp_root_files<F>(
+        agentdesk_yaml: Option<&str>,
+        role_map_json: Option<&str>,
+        org_yaml: Option<&str>,
+        f: F,
+    ) where
         F: FnOnce(),
     {
         // Serialize on the process-wide `AGENTDESK_ROOT_DIR` lock so this
@@ -352,6 +356,9 @@ agents:
         if let Some(json) = role_map_json {
             fs::write(settings_dir.join("role_map.json"), json).unwrap();
         }
+        if let Some(yaml) = org_yaml {
+            fs::write(settings_dir.join("org.yaml"), yaml).unwrap();
+        }
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
         f();
         match previous {
@@ -364,7 +371,7 @@ agents:
     where
         F: FnOnce(),
     {
-        with_temp_root_files(Some(DEFAULT_TEST_CONFIG), None, f);
+        with_temp_root_files(Some(DEFAULT_TEST_CONFIG), None, None, f);
     }
 
     fn bot_settings(provider: ProviderKind, allowed_channel_ids: Vec<u64>) -> DiscordBotSettings {
@@ -497,6 +504,7 @@ agents:
                 "        workspace: \"/tmp/agentdesk\"\n        threadInherit: false",
             )),
             None,
+            None,
             || {
                 let parent = ChannelId::new(TEXT_CHANNEL_ID);
                 assert!(resolve_role_binding(parent, Some("adk-cdx")).is_some());
@@ -522,7 +530,7 @@ agents:
   }}
 }}"#
         );
-        with_temp_root_files(None, Some(&role_map), || {
+        with_temp_root_files(None, Some(&role_map), None, || {
             let parent = ChannelId::new(TEXT_CHANNEL_ID);
             assert!(resolve_role_binding(parent, None).is_some());
             assert!(resolve_inherited_role_binding(parent, None).is_none());
@@ -532,6 +540,34 @@ agents:
             assert!(resolve_role_binding(unbound_parent, None).is_none());
             assert!(resolve_inherited_role_binding(unbound_parent, None).is_none());
             assert!(resolve_inherited_workspace(unbound_parent, None).is_none());
+        });
+    }
+
+    #[test]
+    fn org_schema_thread_inherit_false_blocks_parent_fallback() {
+        let org = format!(
+            r#"version: 1
+agents:
+  project-agentdesk:
+    display_name: AgentDesk
+    provider: codex
+    workspace: /tmp/org-workspace
+channels:
+  by_id:
+    "{TEXT_CHANNEL_ID}":
+      agent: project-agentdesk
+      threadInherit: false
+"#,
+        );
+        with_temp_root_files(None, None, Some(&org), || {
+            let parent = ChannelId::new(TEXT_CHANNEL_ID);
+            assert!(resolve_role_binding(parent, None).is_some());
+            assert_eq!(
+                resolve_workspace(parent, None).as_deref(),
+                Some("/tmp/org-workspace"),
+            );
+            assert!(resolve_inherited_role_binding(parent, None).is_none());
+            assert!(resolve_inherited_workspace(parent, None).is_none());
         });
     }
 

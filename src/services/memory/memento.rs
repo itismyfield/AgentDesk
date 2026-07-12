@@ -1837,8 +1837,12 @@ impl MemoryBackend for MementoBackend {
                     };
                 }
             };
-            let workspace =
-                self.resolve_workspace(&request.role_id, request.channel_id, None, &config);
+            let workspace = self.resolve_workspace(
+                &request.role_id,
+                request.channel_id,
+                request.channel_name.as_deref(),
+                &config,
+            );
             let Some(remember_request) = self.build_capture_remember_request(request, workspace)
             else {
                 return CaptureResult {

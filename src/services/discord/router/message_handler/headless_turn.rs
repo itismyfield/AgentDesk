@@ -1305,6 +1305,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             user_text_owned: prompt_owned,
             request_owner_name: request_owner_name.to_string(),
             role_binding,
+            memory_scope: resolved_role.memory_scope(channel_id, &channel_name),
             adk_session_key,
             adk_session_name,
             adk_session_info: Some(adk_session_info),
