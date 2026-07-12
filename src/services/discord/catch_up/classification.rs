@@ -46,3 +46,60 @@ impl CatchUpScanStats {
         }
     }
 }
+
+/// Plain inputs to the catch-up filter, decoupled from `serenity::Message` so
+/// the classification order can be tested without a Discord runtime.
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) struct CatchUpMessageView {
+    pub message_id: u64,
+    pub author_id: u64,
+    pub author_is_bot: bool,
+    pub is_processable_kind: bool,
+    pub age_secs: i64,
+    pub trimmed_text: String,
+}
+
+/// Pure phase-1 filter. Sender eligibility, including the output-only notify
+/// identity, is decided before the age gate so non-input automation cannot
+/// become recovery work or TooOld/DLQ evidence.
+pub(in crate::services::discord) fn classify_catch_up_message(
+    msg: &CatchUpMessageView,
+    bot_user_id: Option<u64>,
+    existing_ids: &std::collections::HashSet<u64>,
+    max_age_secs: i64,
+    allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
+    notify_bot_id: Option<u64>,
+) -> CatchUpClassification {
+    if !msg.is_processable_kind {
+        return CatchUpClassification::SystemKind;
+    }
+    if Some(msg.author_id) == bot_user_id {
+        return CatchUpClassification::SelfAuthored;
+    }
+    if existing_ids.contains(&msg.message_id) {
+        return CatchUpClassification::Duplicate;
+    }
+    if super::is_restart_gap_notice(msg.author_is_bot, &msg.trimmed_text) {
+        return CatchUpClassification::SelfAuthored;
+    }
+    if msg.trimmed_text.is_empty() {
+        return CatchUpClassification::Empty;
+    }
+    if Some(msg.author_id) == notify_bot_id {
+        return CatchUpClassification::NotAllowed;
+    }
+    if !super::is_allowed_turn_sender(
+        allowed_bot_ids,
+        announce_bot_id,
+        msg.author_id,
+        msg.author_is_bot,
+        &msg.trimmed_text,
+    ) {
+        return CatchUpClassification::NotAllowed;
+    }
+    if msg.age_secs > max_age_secs {
+        return CatchUpClassification::TooOld;
+    }
+    CatchUpClassification::Recover
+}

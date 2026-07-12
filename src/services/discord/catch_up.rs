@@ -95,6 +95,29 @@ trait CatchUpDiscordApi: Sync {
         channel_id: ChannelId,
         message_id: MessageId,
     );
+
+    fn enqueue_too_old_notice(
+        &self,
+        pool: Option<sqlx::PgPool>,
+        request: CatchUpTooOldOutboxRequest,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        pool.map(|pool| too_old_notice::spawn_outbox(pool, request))
+    }
+
+    fn record_too_old_dead_letter(
+        &self,
+        pool: Option<&sqlx::PgPool>,
+        record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        crate::db::relay_dead_letter::record_detached(pool, record)
+    }
+
+    async fn utility_bot_user_ids(&self, shared: &SharedData) -> (Option<u64>, Option<u64>) {
+        (
+            resolve_announce_bot_user_id(shared).await,
+            resolve_notify_bot_user_id(shared).await,
+        )
+    }
 }
 
 struct SerenityCatchUpDiscordApi<'a> {
@@ -144,18 +167,26 @@ impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
 
 mod classification;
 mod phase2;
+mod too_old_notice;
 
 #[cfg(test)]
 #[path = "catch_up/classification_order_tests.rs"]
 mod classification_order_tests;
 
-use classification::{CatchUpClassification, CatchUpScanStats};
+use classification::{
+    CatchUpClassification, CatchUpMessageView, CatchUpScanStats, classify_catch_up_message,
+};
 #[cfg(test)]
 use phase2::catch_up_enqueue_accepted;
 use phase2::{
     Phase2EnqueueCommit, Phase2RecoveryStats, advance_phase2_checkpoint,
     catch_up_remaining_queue_capacity, classify_phase2_enqueue_commit,
     log_catch_up_enqueue_not_accepted, phase2_retry_after_checkpoint,
+};
+use too_old_notice::{
+    CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS, CatchUpTooOldDrop, CatchUpTooOldOutboxRequest,
+    actionable_drop as catch_up_too_old_drop, catch_up_too_old_snippet,
+    notice as catch_up_too_old_notice,
 };
 
 pub(in crate::services::discord) fn should_trigger_catch_up_retry(queue_len: usize) -> bool {
@@ -633,71 +664,6 @@ async fn catch_up_scan_pace_gap() {
     }
 }
 
-/// Plain inputs to the catch-up filter, decoupled from `serenity::Message` so
-/// we can unit test the regression scenario without a Discord runtime.
-#[derive(Debug, Clone)]
-pub(in crate::services::discord) struct CatchUpMessageView {
-    pub message_id: u64,
-    pub author_id: u64,
-    pub author_is_bot: bool,
-    pub is_processable_kind: bool,
-    pub age_secs: i64,
-    pub trimmed_text: String,
-}
-
-/// Pure classifier for the catch-up filter pipeline. Mirrors the order of
-/// checks inside the per-message loop in [`catch_up_missed_messages`] so a
-/// regression there is caught here. Critically, this function does NOT apply
-/// any limit/page-size logic — that decision lives at the REST fetch site
-/// (see `CATCH_UP_FETCH_LIMIT`). This means a "buried user message" test must
-/// assert against the full fetched page, not a single classification call.
-pub(in crate::services::discord) fn classify_catch_up_message(
-    msg: &CatchUpMessageView,
-    bot_user_id: Option<u64>,
-    existing_ids: &std::collections::HashSet<u64>,
-    max_age_secs: i64,
-    allowed_bot_ids: &[u64],
-    announce_bot_id: Option<u64>,
-) -> CatchUpClassification {
-    if !msg.is_processable_kind {
-        return CatchUpClassification::SystemKind;
-    }
-    if Some(msg.author_id) == bot_user_id {
-        return CatchUpClassification::SelfAuthored;
-    }
-    if existing_ids.contains(&msg.message_id) {
-        return CatchUpClassification::Duplicate;
-    }
-    if is_restart_gap_notice(msg.author_is_bot, &msg.trimmed_text) {
-        // #4443: checked BEFORE TooOld so aged notices skip the drop/DLQ/
-        // re-notice path entirely (see is_restart_gap_notice).
-        return CatchUpClassification::SelfAuthored;
-    }
-    if msg.trimmed_text.is_empty() {
-        return CatchUpClassification::Empty;
-    }
-    if !is_allowed_turn_sender(
-        allowed_bot_ids,
-        announce_bot_id,
-        msg.author_id,
-        msg.author_is_bot,
-        &msg.trimmed_text,
-    ) {
-        return CatchUpClassification::NotAllowed;
-    }
-    // #4453: age is meaningful only after the message passes the same sender
-    // eligibility gate as a fresh turn. Otherwise old informational bot echoes
-    // become false loss records and resend notices despite never being eligible.
-    if msg.age_secs > max_age_secs {
-        return CatchUpClassification::TooOld;
-    }
-    CatchUpClassification::Recover
-}
-
-/// #4260: max entries listed in the aggregate too-old notice before we
-/// summarize the remainder as "… 외 N건" (keep the card compact).
-const CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS: usize = 10;
-
 /// #4443: leading marker of the aggregate restart-gap notice. Shared between
 /// the notice builder and the catch-up classifiers so a reworded notice cannot
 /// silently break the self-recollection guard.
@@ -712,66 +678,8 @@ fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
     author_is_bot && text.starts_with(CATCH_UP_TOO_OLD_NOTICE_PREFIX)
 }
 
-/// #4260: one message dropped as too-old during a catch-up scan, captured for
-/// the per-channel aggregate "재시작 공백" notice (silent-loss vector 1).
-#[derive(Clone, Debug)]
-struct CatchUpTooOldDrop {
-    author_id: u64,
-    snippet: String,
-}
-
-fn catch_up_too_old_drop(
-    outcome: CatchUpClassification,
-    author_id: u64,
-    text: &str,
-) -> Option<CatchUpTooOldDrop> {
-    (outcome == CatchUpClassification::TooOld).then(|| CatchUpTooOldDrop {
-        author_id,
-        snippet: catch_up_too_old_snippet(text),
-    })
-}
-
 fn advance_catch_up_settled_frontier(frontier: Option<u64>, message_id: u64) -> Option<u64> {
     Some(frontier.map_or(message_id, |settled| settled.max(message_id)))
-}
-
-/// Truncate a dropped message body to a compact snippet for the aggregate
-/// notice — never dump full messages into the channel.
-fn catch_up_too_old_snippet(text: &str) -> String {
-    const MAX: usize = 80;
-    let trimmed = text.trim();
-    let mut snippet: String = trimmed.chars().take(MAX).collect();
-    if trimmed.chars().count() > MAX {
-        snippet.push('…');
-    }
-    if snippet.is_empty() {
-        snippet.push_str("(빈 메시지)");
-    }
-    snippet
-}
-
-/// Build the per-channel aggregate notice for catch-up too-old drops. `None`
-/// when there is nothing to report. Aggregated (never per-message) to avoid
-/// channel spam on a long restart gap. We only prompt the user to resend — the
-/// stale messages are never auto-reprocessed (delayed risky-command replay).
-fn catch_up_too_old_notice(drops: &[CatchUpTooOldDrop]) -> Option<String> {
-    if drops.is_empty() {
-        return None;
-    }
-    let mut body = format!(
-        "{CATCH_UP_TOO_OLD_NOTICE_PREFIX} {}건이 5분 초과로 미처리되었습니다. 필요하면 다시 보내주세요:",
-        drops.len()
-    );
-    for drop in drops.iter().take(CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS) {
-        body.push_str(&format!("\n• `{}`: {}", drop.author_id, drop.snippet));
-    }
-    if drops.len() > CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS {
-        body.push_str(&format!(
-            "\n… 외 {}건",
-            drops.len() - CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS
-        ));
-    }
-    Some(body)
 }
 
 fn catch_up_intervention_created_at(
@@ -806,9 +714,9 @@ fn catch_up_last_item_dedup_is_checkpoint_safe(
         .is_some_and(|gap| gap <= INTERVENTION_DEDUP_WINDOW)
 }
 
-/// Startup catch-up polling: fetch messages that arrived during the restart gap.
-/// Uses saved last_message_ids to query Discord REST API for missed messages,
-/// filters out bot messages and duplicates, and inserts into intervention queue.
+/// Startup catch-up polling: fetch messages that arrived during the catch-up
+/// gap. Uses saved last_message_ids to query Discord REST API, classifies
+/// sender eligibility/age/duplicates, and enqueues only safe recoveries.
 pub(in crate::services::discord) async fn catch_up_missed_messages(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -1129,7 +1037,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             let settings = shared.settings.read().await;
             settings.allowed_bot_ids.clone()
         };
-        let announce_bot_id = resolve_announce_bot_user_id(shared).await;
+        let (announce_bot_id, notify_bot_id) = api.utility_bot_user_ids(shared).await;
         // Newest message that this oldest-first scan has durably settled.
         // Non-recover classifications settle immediately; Recover settles only
         // after an accepted/safe-dedup enqueue. The current cap/defer item never
@@ -1137,12 +1045,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let mut max_settled_id: Option<u64> = None;
         let mut stats = CatchUpScanStats::default();
         stats.returned = messages.len();
-        // #4260: messages dropped as too-old this scan (silent-loss vector 1),
-        // accumulated per-channel for one aggregate resend notice after the loop.
+        // #4260/#4453: actionable human TooOld drops accumulated for one
+        // aggregate resend notice. Bot TooOld rows stay internal DLQ evidence.
         let mut too_old_drops: Vec<CatchUpTooOldDrop> = Vec::new();
-        // Newest too-old message id, retained only for the aggregate notice's
-        // batch-specific outbox dedupe key.
-        let mut max_too_old_id: Option<u64> = None;
+        // Newest actionable human TooOld id, retained only for the aggregate
+        // notice's batch-specific outbox dedupe key. Automation never owns a
+        // user-facing batch identity.
+        let mut max_actionable_too_old_id: Option<u64> = None;
 
         // Codex P2 on #1301: the 50-message fetch can exceed
         // `MAX_INTERVENTIONS_PER_CHANNEL` (30) on a long restart gap. Without
@@ -1182,6 +1091,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 max_age.as_secs() as i64,
                 &allowed_bot_ids,
                 announce_bot_id,
+                notify_bot_id,
             );
             let mid = msg.id.get();
             // Codex P2 round 2 on #1301: check the cap BEFORE recording the
@@ -1204,16 +1114,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 break;
             }
             if outcome != CatchUpClassification::Recover {
-                if let Some(drop) = catch_up_too_old_drop(outcome, msg.author.id.get(), &text) {
-                    // #4260 silent-loss vector 1: TooOld messages were silently
-                    // dropped here. Preserve the original in the dead-letter
-                    // table (fire-and-forget detached task — a slow PG pool
-                    // must never stall the catch-up loop, dual r1 codex#1) and
-                    // remember it for the per-channel aggregate resend notice.
-                    // We do NOT auto-reprocess: a stale command replayed
-                    // minutes late is a risk, so we only ask the user to
-                    // resend.
-                    crate::db::relay_dead_letter::record_detached(
+                if outcome == CatchUpClassification::TooOld {
+                    // Preserve every TooOld input as detached DLQ evidence;
+                    // only semantically human senders enter the resend notice.
+                    let _ = api.record_too_old_dead_letter(
                         shared.pg_pool.as_ref(),
                         crate::db::relay_dead_letter::RelayDeadLetterRecord {
                             kind: crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_string(),
@@ -1227,9 +1131,19 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                             ),
                         },
                     );
-                    too_old_drops.push(drop);
-                    if max_too_old_id.map(|m| mid > m).unwrap_or(true) {
-                        max_too_old_id = Some(mid);
+                    if let Some(drop) = catch_up_too_old_drop(
+                        outcome,
+                        msg.author.id.get(),
+                        msg.author.bot,
+                        &allowed_bot_ids,
+                        announce_bot_id,
+                        notify_bot_id,
+                        &text,
+                    ) {
+                        max_actionable_too_old_id = Some(
+                            max_actionable_too_old_id.map_or(mid, |actionable| actionable.max(mid)),
+                        );
+                        too_old_drops.push(drop);
                     }
                 }
                 max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
@@ -1362,46 +1276,27 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
         }
 
-        // #4260: one aggregate "재시작 공백" resend notice per channel per run
-        // for the messages dropped as too-old. Fire-and-forget spawn (dual r1
-        // codex#1) via the outbox so it dedupes + retries; a delivery failure
-        // never blocks catch-up. Dual r1 codex#3: the dedupe key carries the
-        // batch identity (newest dropped id), so a NEW too-old batch within the
-        // outbox dedupe TTL still notifies, while retry re-scans of the SAME
-        // batch stay suppressed.
+        // #4260/#4453: one aggregate human-resend notice per channel/run. Bot
+        // TooOld inputs stay internal; the newest human id owns batch dedupe.
         if let Some(notice) = catch_up_too_old_notice(&too_old_drops) {
+            let batch_id = max_actionable_too_old_id.unwrap_or_default();
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 channel_id = channel_id.get(),
                 too_old = too_old_drops.len(),
                 "  [{ts}] ⚠ catch-up: dropped too-old message(s); aggregate resend notice enqueued"
             );
-            if let Some(pool) = shared.pg_pool.clone() {
-                let target = format!("channel:{channel_id}");
-                let session_key = format!(
-                    "catch_up_too_old:{channel_id}:{}",
-                    max_too_old_id.unwrap_or_default()
-                );
-                tokio::spawn(async move {
-                    if let Err(error) = crate::services::message_outbox::enqueue_outbox_pg(
-                        &pool,
-                        crate::services::message_outbox::OutboxMessage {
-                            target: &target,
-                            content: &notice,
-                            bot: "notify",
-                            source: "catch_up_too_old",
-                            reason_code: Some("catch_up.too_old"),
-                            session_key: Some(&session_key),
-                        },
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "[dlq] failed to enqueue catch-up too-old notice (best-effort): {error}"
-                        );
-                    }
-                });
-            }
+            let _ = api.enqueue_too_old_notice(
+                shared.pg_pool.clone(),
+                CatchUpTooOldOutboxRequest {
+                    target: format!("channel:{channel_id}"),
+                    content: notice,
+                    bot: "notify",
+                    source: "catch_up_too_old",
+                    reason_code: "catch_up.too_old",
+                    session_key: format!("catch_up_too_old:{channel_id}:{batch_id}"),
+                },
+            );
         }
     }
 
@@ -1422,7 +1317,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let settings = shared.settings.read().await;
         settings.allowed_bot_ids.clone()
     };
-    let announce_bot_id_phase2 = resolve_announce_bot_user_id(shared).await;
+    let (announce_bot_id_phase2, notify_bot_id_phase2) = api.utility_bot_user_ids(shared).await;
 
     // Same per-channel pacing as phase 1 (see `catch_up_scan_pace`).
     let mut paced_scan_phase2 = false;
@@ -1519,6 +1414,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 stats.skipped += 1;
                 continue;
             }
+            if Some(msg.author.id.get()) == notify_bot_id_phase2 {
+                stats.skipped += 1;
+                continue;
+            }
             let mid = msg.id.get();
             if !is_allowed_turn_sender(
                 &allowed_bot_ids_phase2,
@@ -1530,10 +1429,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 stats.skipped += 1;
                 continue;
             }
-            let is_allowed_bot = msg.author.bot
-                && (allowed_bot_ids_phase2.contains(&msg.author.id.get())
-                    || announce_bot_id_phase2.is_some_and(|id| id == msg.author.id.get()));
-            if !is_allowed_bot {
+            let is_allowed_automation = allowed_bot_ids_phase2.contains(&msg.author.id.get())
+                || announce_bot_id_phase2.is_some_and(|id| id == msg.author.id.get());
+            if !is_allowed_automation {
                 let settings = shared.settings.read().await;
                 if !discord_io::user_is_authorized(&settings, msg.author.id.get()) {
                     stats.skipped += 1;
@@ -2116,11 +2014,11 @@ mod catch_up_recovery_tests {
         let existing = HashSet::new();
 
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None, None,),
             CatchUpClassification::Recover
         );
         assert_eq!(
-            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None, None,),
             CatchUpClassification::SelfAuthored
         );
     }
@@ -2156,7 +2054,8 @@ mod catch_up_recovery_tests {
                 &existing,
                 300,
                 &[notice_bot_id],
-                None
+                None,
+                None,
             ),
             CatchUpClassification::SelfAuthored,
             "aged notice must be classified out before the TooOld drop path"
@@ -2169,7 +2068,8 @@ mod catch_up_recovery_tests {
                 &existing,
                 300,
                 &[notice_bot_id],
-                None
+                None,
+                None,
             ),
             CatchUpClassification::SelfAuthored,
             "young notice must not be recovered as a turn input either"
@@ -2197,7 +2097,15 @@ mod catch_up_recovery_tests {
             trimmed_text: "어제 '⚠️ 재시작 공백으로' 카드 왜 떴어?".to_string(),
         };
         assert_eq!(
-            classify_catch_up_message(&human, Some(current_bot_id), &existing, 300, &[], None),
+            classify_catch_up_message(
+                &human,
+                Some(current_bot_id),
+                &existing,
+                300,
+                &[],
+                None,
+                None,
+            ),
             CatchUpClassification::Recover
         );
     }
@@ -2221,7 +2129,7 @@ mod catch_up_recovery_tests {
         // Without the announce_bot_id hint the bot message is NotAllowed
         // (no marker), proving the parameter is load-bearing.
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None, None,),
             CatchUpClassification::NotAllowed
         );
         // With the announce_bot_id hint it recovers.
@@ -2233,6 +2141,7 @@ mod catch_up_recovery_tests {
                 300,
                 &[],
                 Some(announce_id),
+                None,
             ),
             CatchUpClassification::Recover
         );
