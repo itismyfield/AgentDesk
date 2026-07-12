@@ -26,6 +26,7 @@ fn build_prompt_with_optional_manifest_for(
         &[],
         "/tmp",
         ChannelId::new(1),
+        ChannelId::new(1),
         "tok",
         None,
         false,
@@ -53,6 +54,49 @@ fn test_role_binding(role_id: &str) -> RoleBinding {
         quality_feedback_injection_enabled: true,
         memory: Default::default(),
     }
+}
+
+#[test]
+fn memory_scope_channel_can_inherit_parent_without_retargeting_discord_delivery() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let binding = test_role_binding(crate::services::memory::UNBOUND_MEMORY_ROLE_ID);
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    let built = build_system_prompt_with_manifest(
+        "ctx",
+        &[],
+        "/tmp",
+        ChannelId::new(222),
+        ChannelId::new(111),
+        "tok",
+        Some(&binding),
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        None,
+        None,
+        Some(&settings),
+        true,
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        built
+            .system_prompt
+            .contains("discord-sendfile <filepath> --channel 222"),
+        "Discord delivery must stay in the actual thread",
+    );
+    assert!(
+        built.system_prompt.contains("agentdesk-channel-111"),
+        "memory scope hints must use the inherited parent channel",
+    );
+    assert!(!built.system_prompt.contains("agentdesk-channel-222"));
 }
 
 #[test]
@@ -235,6 +279,7 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
         "ctx",
         &[],
         "/tmp",
+        ChannelId::new(1),
         ChannelId::new(1),
         "tok",
         Some(&binding),
@@ -497,6 +542,7 @@ fn build_prompt_manifest_includes_recovery_context_layer() {
         "ctx",
         &[],
         "/tmp",
+        ChannelId::new(1),
         ChannelId::new(1),
         "tok",
         None,

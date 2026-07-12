@@ -301,7 +301,7 @@ pub(super) async fn handle_text_message(
         early_thread_parent
             .as_ref()
             .and_then(|(parent_id, parent_name)| {
-                resolve_role_binding(*parent_id, parent_name.as_deref())
+                settings::resolve_inherited_role_binding(*parent_id, parent_name.as_deref())
             })
     })
     .or_else(|| {
@@ -387,8 +387,7 @@ pub(super) async fn handle_text_message(
                                 .get(&parent_id)
                                 .and_then(|s| s.channel_name.clone())
                         });
-                        workspace =
-                            settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
+                        workspace = resolve_parent_workspace(parent_id, parent_ch_name.as_deref());
                         if workspace.is_some() {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
@@ -995,22 +994,20 @@ pub(super) async fn handle_text_message(
     let sanitized_input =
         ai_screen::sanitize_user_input(voice_prompt_text.as_deref().unwrap_or(user_text));
 
-    let role_binding = {
-        // For cross-channel dispatch reuse (e.g. review in implementation thread),
-        // resolve role from the override channel instead of the thread's parent.
+    let mut resolved_role =
         if let Some(override_ch) = shared.dispatch.role_overrides.get(&channel_id) {
-            let alt_ch = *override_ch;
-            resolve_role_binding(alt_ch, None)
+            // For cross-channel dispatch reuse (e.g. review in implementation thread),
+            // resolve role from the override channel instead of the thread's parent.
+            ResolvedRoleBinding::direct(resolve_role_binding(*override_ch, None))
         } else {
             let data = shared.core.lock().await;
             let ch_name = data
                 .sessions
                 .get(&channel_id)
                 .and_then(|s| s.channel_name.as_deref());
-            resolve_role_binding(channel_id, ch_name)
-        }
-    }
-    .or_else(|| {
+            resolve_thread_role(channel_id, ch_name, early_thread_parent.as_ref())
+        };
+    let role_binding = resolved_role.binding.take().or_else(|| {
         dm_default_agent
             .as_ref()
             .map(|resolved| resolved.role_binding.clone())
@@ -1693,8 +1690,8 @@ pub(super) async fn handle_text_message(
             .recall(RecallRequest {
                 provider: provider.clone(),
                 role_id: resolve_memory_role_id(role_binding.as_ref()),
-                channel_id: channel_id.get(),
-                channel_name: channel_name.clone(),
+                channel_id: resolved_role.memory_channel_id(channel_id).get(),
+                channel_name: resolved_role.memory_name(&channel_name),
                 session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
                 dispatch_profile,
                 user_text: user_text.to_string(),
@@ -1827,6 +1824,7 @@ pub(super) async fn handle_text_message(
         &channel_participants,
         &current_path,
         channel_id,
+        resolved_role.memory_channel_id(channel_id),
         token,
         role_binding.as_ref(),
         reply_to_user_message,

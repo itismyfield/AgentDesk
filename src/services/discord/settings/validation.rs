@@ -196,6 +196,37 @@ pub(crate) fn resolve_role_binding(
     resolve_role_binding_from_role_map(channel_id, channel_name)
 }
 
+fn resolve_thread_inherit(
+    parent_channel_id: ChannelId,
+    parent_channel_name: Option<&str>,
+) -> Option<bool> {
+    if let Some(enabled) =
+        agentdesk_config::resolve_thread_inherit(parent_channel_id, parent_channel_name)
+    {
+        return Some(enabled);
+    }
+    if org_schema::org_schema_exists()
+        && let Some(enabled) =
+            org_schema::resolve_thread_inherit(parent_channel_id, parent_channel_name)
+    {
+        return Some(enabled);
+    }
+    resolve_thread_inherit_from_role_map(parent_channel_id, parent_channel_name)
+}
+
+/// Resolve a Discord thread's role from its parent after a direct thread
+/// lookup has failed. The caller owns Discord channel-kind detection and
+/// supplies the already-resolved parent, keeping config resolution synchronous.
+pub(crate) fn resolve_inherited_role_binding(
+    parent_channel_id: ChannelId,
+    parent_channel_name: Option<&str>,
+) -> Option<RoleBinding> {
+    if !resolve_thread_inherit(parent_channel_id, parent_channel_name).unwrap_or(true) {
+        return None;
+    }
+    resolve_role_binding(parent_channel_id, parent_channel_name)
+}
+
 /// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel.
 /// Currently only `agentdesk_config` channels expose this field; other
 /// binding sources fall back to `None` (default 5m).
@@ -248,6 +279,18 @@ pub(crate) fn resolve_workspace(
     resolve_workspace_from_role_map(channel_id, channel_name)
 }
 
+/// Resolve a Discord thread's workspace from its parent after a direct thread
+/// lookup has failed, honoring the same `threadInherit` gate as role binding.
+pub(crate) fn resolve_inherited_workspace(
+    parent_channel_id: ChannelId,
+    parent_channel_name: Option<&str>,
+) -> Option<String> {
+    if !resolve_thread_inherit(parent_channel_id, parent_channel_name).unwrap_or(true) {
+        return None;
+    }
+    resolve_workspace(parent_channel_id, parent_channel_name)
+}
+
 pub(crate) fn has_configured_channel_binding(
     channel_id: ChannelId,
     _channel_name: Option<&str>,
@@ -272,7 +315,24 @@ mod voice_channel_guard_tests {
     // An unrelated channel that is neither in the allowlist nor a voice channel.
     const UNRELATED_CHANNEL_ID: u64 = 1111111111111111111;
 
-    fn with_temp_root<F>(f: F)
+    const DEFAULT_TEST_CONFIG: &str = r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: codex
+    voice:
+      channel_id: "1504612455916245163"
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+        prompt_file: "/tmp/project-agentdesk.md"
+        workspace: "/tmp/agentdesk"
+"#;
+
+    fn with_temp_root_files<F>(agentdesk_yaml: Option<&str>, role_map_json: Option<&str>, f: F)
     where
         F: FnOnce(),
     {
@@ -286,30 +346,25 @@ mod voice_channel_guard_tests {
         let root = temp.path().join(".adk");
         let settings_dir = root.join("config");
         fs::create_dir_all(&settings_dir).unwrap();
-        fs::write(
-            settings_dir.join("agentdesk.yaml"),
-            r#"
-server:
-  port: 8791
-agents:
-  - id: project-agentdesk
-    name: "AgentDesk"
-    provider: codex
-    voice:
-      channel_id: "1504612455916245163"
-    channels:
-      codex:
-        id: "1479671301387059200"
-        name: "adk-cdx"
-"#,
-        )
-        .unwrap();
+        if let Some(yaml) = agentdesk_yaml {
+            fs::write(settings_dir.join("agentdesk.yaml"), yaml).unwrap();
+        }
+        if let Some(json) = role_map_json {
+            fs::write(settings_dir.join("role_map.json"), json).unwrap();
+        }
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
         f();
         match previous {
             Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
         }
+    }
+
+    fn with_temp_root<F>(f: F)
+    where
+        F: FnOnce(),
+    {
+        with_temp_root_files(Some(DEFAULT_TEST_CONFIG), None, f);
     }
 
     fn bot_settings(provider: ProviderKind, allowed_channel_ids: Vec<u64>) -> DiscordBotSettings {
@@ -412,6 +467,71 @@ agents:
                 Err(BotChannelRoutingGuardFailure::ProviderMismatch),
                 "non-owning provider must stay blocked in the voice channel",
             );
+        });
+    }
+
+    #[test]
+    fn thread_inherits_parent_role_memory_and_workspace_by_default() {
+        with_temp_root(|| {
+            let parent = ChannelId::new(TEXT_CHANNEL_ID);
+            let direct = resolve_role_binding(parent, Some("adk-cdx")).expect("direct role");
+            let inherited =
+                resolve_inherited_role_binding(parent, Some("adk-cdx")).expect("inherited role");
+
+            assert_eq!(inherited.role_id, direct.role_id);
+            assert_eq!(inherited.prompt_file, direct.prompt_file);
+            assert_eq!(inherited.provider, direct.provider);
+            assert_eq!(inherited.memory, direct.memory);
+            assert_eq!(
+                resolve_inherited_workspace(parent, Some("adk-cdx")),
+                resolve_workspace(parent, Some("adk-cdx")),
+            );
+        });
+    }
+
+    #[test]
+    fn thread_inherit_false_blocks_role_and_workspace_without_changing_parent_binding() {
+        with_temp_root_files(
+            Some(&DEFAULT_TEST_CONFIG.replace(
+                "        workspace: \"/tmp/agentdesk\"",
+                "        workspace: \"/tmp/agentdesk\"\n        threadInherit: false",
+            )),
+            None,
+            || {
+                let parent = ChannelId::new(TEXT_CHANNEL_ID);
+                assert!(resolve_role_binding(parent, Some("adk-cdx")).is_some());
+                assert!(resolve_workspace(parent, Some("adk-cdx")).is_some());
+                assert!(resolve_inherited_role_binding(parent, Some("adk-cdx")).is_none());
+                assert!(resolve_inherited_workspace(parent, Some("adk-cdx")).is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn legacy_role_map_thread_inherit_false_is_honored_and_unbound_stays_unbound() {
+        let role_map = format!(
+            r#"{{
+  "byChannelId": {{
+    "{TEXT_CHANNEL_ID}": {{
+      "roleId": "project-agentdesk",
+      "promptFile": "/tmp/project-agentdesk.md",
+      "provider": "codex",
+      "workspace": "/tmp/agentdesk",
+      "threadInherit": false
+    }}
+  }}
+}}"#
+        );
+        with_temp_root_files(None, Some(&role_map), || {
+            let parent = ChannelId::new(TEXT_CHANNEL_ID);
+            assert!(resolve_role_binding(parent, None).is_some());
+            assert!(resolve_inherited_role_binding(parent, None).is_none());
+            assert!(resolve_inherited_workspace(parent, None).is_none());
+
+            let unbound_parent = ChannelId::new(UNRELATED_CHANNEL_ID);
+            assert!(resolve_role_binding(unbound_parent, None).is_none());
+            assert!(resolve_inherited_role_binding(unbound_parent, None).is_none());
+            assert!(resolve_inherited_workspace(unbound_parent, None).is_none());
         });
     }
 

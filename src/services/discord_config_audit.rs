@@ -1485,6 +1485,7 @@ mod voice_alias_precheck_tests {
             quality_feedback_injection: None,
             dispatch_profile: None,
             isolate_override: None,
+            thread_inherit: None,
             cache_ttl_minutes: None,
         }));
         AgentDef {

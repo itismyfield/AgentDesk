@@ -202,6 +202,9 @@ agents:
         name: "td-cc"
         workspace: "~/.adk/release/workspaces/ch-td"
         prompt_file: "~/.adk/release/config/agents/ch-td.prompt.md"
+        # Threads inherit this role/workspace/memory scope by default.
+        # Set false when threads under this channel must remain unbound.
+        threadInherit: true
       codex:
         id: "223456789012345678"
         name: "td-cdx"

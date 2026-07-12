@@ -76,6 +76,8 @@ pub(super) struct ChannelBinding {
     pub peer_agents: Option<bool>,
     #[serde(default)]
     pub memory: Option<MemoryConfigOverride>,
+    #[serde(default, alias = "threadInherit")]
+    pub thread_inherit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +224,15 @@ pub(super) fn resolve_role_binding(
         quality_feedback_injection_enabled: true,
         memory,
     })
+}
+
+pub(super) fn resolve_thread_inherit(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<bool> {
+    let schema = load_org_schema()?;
+    let (binding, _agent) = resolve_channel_binding(&schema, channel_id, channel_name)?;
+    Some(binding.thread_inherit.unwrap_or(true))
 }
 
 pub(super) fn resolve_workspace(

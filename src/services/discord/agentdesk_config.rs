@@ -551,6 +551,18 @@ pub(super) fn resolve_role_binding(
     resolve_voice_channel_role_binding(&config, channel_id)
 }
 
+pub(super) fn resolve_thread_inherit(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<bool> {
+    let config = load_agentdesk_config()?;
+    let (_agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
+    Some(match channel {
+        AgentChannel::Legacy(_) => true,
+        AgentChannel::Detailed(config) => config.thread_inherit.unwrap_or(true),
+    })
+}
+
 /// Resolve a role binding for a Discord voice channel declared in any agent's
 /// `voice.channel_id`. Returns `None` when no agent owns the channel.
 fn resolve_voice_channel_role_binding(

@@ -313,12 +313,97 @@ pub(super) fn resolve_headless_workspace(
     channel_id: serenity::ChannelId,
     channel_name_hint: Option<&str>,
     metadata: Option<&serde_json::Value>,
+    thread_parent: Option<&(serenity::ChannelId, Option<String>)>,
 ) -> Option<String> {
-    settings::resolve_workspace(channel_id, channel_name_hint).or_else(|| {
-        metadata_parent_channel_id(metadata)
-            .and_then(|parent_channel_id| settings::resolve_workspace(parent_channel_id, None))
-    })
+    settings::resolve_workspace(channel_id, channel_name_hint)
+        .or_else(|| {
+            metadata_parent_channel_id(metadata).and_then(|parent_channel_id| {
+                settings::resolve_inherited_workspace(parent_channel_id, None)
+            })
+        })
+        .or_else(|| {
+            thread_parent.and_then(|(parent_channel_id, parent_channel_name)| {
+                settings::resolve_inherited_workspace(
+                    *parent_channel_id,
+                    parent_channel_name.as_deref(),
+                )
+            })
+        })
 }
+
+pub(super) struct ResolvedRoleBinding {
+    pub(super) binding: Option<RoleBinding>,
+    pub(super) inherited_parent_id: Option<serenity::ChannelId>,
+    inherited_parent_name: Option<String>,
+}
+
+impl ResolvedRoleBinding {
+    pub(super) fn direct(binding: Option<RoleBinding>) -> Self {
+        Self {
+            binding,
+            inherited_parent_id: None,
+            inherited_parent_name: None,
+        }
+    }
+
+    pub(super) fn memory_channel_id(&self, channel_id: serenity::ChannelId) -> serenity::ChannelId {
+        self.inherited_parent_id.unwrap_or(channel_id)
+    }
+
+    pub(super) fn memory_name(&self, channel_name: &Option<String>) -> Option<String> {
+        self.inherited_parent_id
+            .map(|_| self.inherited_parent_name.clone())
+            .unwrap_or_else(|| channel_name.clone())
+    }
+}
+
+pub(super) fn resolve_role_binding_with_parents<'a>(
+    direct: Option<RoleBinding>,
+    parents: impl IntoIterator<Item = (serenity::ChannelId, Option<&'a str>)>,
+) -> ResolvedRoleBinding {
+    if direct.is_some() {
+        return ResolvedRoleBinding::direct(direct);
+    }
+    for (parent_id, parent_name) in parents {
+        if let Some(binding) = settings::resolve_inherited_role_binding(parent_id, parent_name) {
+            return ResolvedRoleBinding {
+                binding: Some(binding),
+                inherited_parent_id: Some(parent_id),
+                inherited_parent_name: parent_name.map(ToOwned::to_owned),
+            };
+        }
+    }
+    ResolvedRoleBinding::direct(None)
+}
+
+pub(super) fn resolve_role_binding_with_thread_parent(
+    direct: Option<RoleBinding>,
+    thread_parent: Option<&(serenity::ChannelId, Option<String>)>,
+) -> ResolvedRoleBinding {
+    let parent = thread_parent
+        .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref()))
+        .into_iter();
+    resolve_role_binding_with_parents(direct, parent)
+}
+
+pub(super) fn resolve_thread_role(
+    channel_id: serenity::ChannelId,
+    channel_name: Option<&str>,
+    thread_parent: Option<&(serenity::ChannelId, Option<String>)>,
+) -> ResolvedRoleBinding {
+    resolve_role_binding_with_thread_parent(
+        resolve_role_binding(channel_id, channel_name),
+        thread_parent,
+    )
+}
+
+pub(super) fn resolve_parent_workspace(
+    parent_id: serenity::ChannelId,
+    parent_name: Option<&str>,
+) -> Option<String> {
+    settings::resolve_inherited_workspace(parent_id, parent_name)
+}
+
 pub(super) fn native_fast_mode_override_for_turn(
     provider: &ProviderKind,
     channel_fast_mode_setting: Option<bool>,

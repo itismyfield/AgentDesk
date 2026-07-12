@@ -29,6 +29,7 @@ use super::role_map::{
     load_peer_agents as load_peer_agents_from_role_map,
     load_shared_prompt_path as load_shared_prompt_path_from_role_map,
     resolve_role_binding as resolve_role_binding_from_role_map,
+    resolve_thread_inherit as resolve_thread_inherit_from_role_map,
     resolve_workspace as resolve_workspace_from_role_map,
 };
 use super::runtime_store;
@@ -56,6 +57,7 @@ pub(super) use validation::{
     has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_dispatch_profile,
     validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
 };
+pub(crate) use validation::{resolve_inherited_role_binding, resolve_inherited_workspace};
 pub(super) use write::save_bot_settings;
 
 fn json_u64(value: &serde_json::Value) -> Option<u64> {

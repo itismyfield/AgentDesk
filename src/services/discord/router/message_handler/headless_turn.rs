@@ -219,10 +219,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     let early_role_binding = routine_role_binding
         .clone()
         .or_else(|| {
-            metadata_parent_channel_id(metadata.as_ref())
-                .and_then(|parent_channel_id| resolve_role_binding(parent_channel_id, None))
-        })
-        .or_else(|| {
             resolve_role_binding(
                 channel_id,
                 early_channel_name
@@ -232,10 +228,15 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             )
         })
         .or_else(|| {
+            metadata_parent_channel_id(metadata.as_ref()).and_then(|parent_channel_id| {
+                settings::resolve_inherited_role_binding(parent_channel_id, None)
+            })
+        })
+        .or_else(|| {
             early_thread_parent
                 .as_ref()
                 .and_then(|(parent_id, parent_name)| {
-                    resolve_role_binding(*parent_id, parent_name.as_deref())
+                    settings::resolve_inherited_role_binding(*parent_id, parent_name.as_deref())
                 })
         });
     let early_provider = early_role_binding
@@ -319,6 +320,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                 channel_id,
                 resolved_channel_name_for_session.as_deref(),
                 metadata.as_ref(),
+                early_thread_parent.as_ref(),
             )
             .ok_or_else(|| {
                 HeadlessTurnStartError::Internal(format!(
@@ -405,27 +407,24 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     };
 
     let turn_id = reservation.turn_id(channel_id);
-    let role_binding = {
+    let direct_role_binding = {
         let data = shared.core.lock().await;
         let channel_name = data
             .sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.as_deref());
-        routine_role_binding
-            .clone()
-            .or_else(|| {
-                metadata_parent_channel_id(metadata.as_ref())
-                    .and_then(|parent_channel_id| resolve_role_binding(parent_channel_id, None))
-            })
-            .or_else(|| resolve_role_binding(channel_id, channel_name))
-    }
-    .or_else(|| {
-        early_thread_parent
-            .as_ref()
-            .and_then(|(parent_id, parent_name)| {
-                resolve_role_binding(*parent_id, parent_name.as_deref())
-            })
-    });
+        resolve_role_binding(channel_id, channel_name)
+    };
+    let metadata_parent =
+        metadata_parent_channel_id(metadata.as_ref()).map(|parent_id| (parent_id, None::<&str>));
+    let actual_parent = early_thread_parent
+        .as_ref()
+        .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref()));
+    let mut resolved_role = resolve_role_binding_with_parents(
+        routine_role_binding.clone().or(direct_role_binding),
+        [metadata_parent, actual_parent].into_iter().flatten(),
+    );
+    let role_binding = resolved_role.binding.take();
     let provider = role_binding
         .as_ref()
         .and_then(|binding| binding.provider.clone())
@@ -771,8 +770,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .recall(RecallRequest {
                 provider: provider.clone(),
                 role_id: resolve_memory_role_id(role_binding.as_ref()),
-                channel_id: channel_id.get(),
-                channel_name: channel_name.clone(),
+                channel_id: resolved_role.memory_channel_id(channel_id).get(),
+                channel_name: resolved_role.memory_name(&channel_name),
                 session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
                 dispatch_profile,
                 user_text: prompt.to_string(),
@@ -889,6 +888,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         &channel_participants,
         &current_path,
         channel_id,
+        resolved_role.memory_channel_id(channel_id),
         token,
         role_binding.as_ref(),
         false,

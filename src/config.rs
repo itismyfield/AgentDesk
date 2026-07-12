@@ -562,9 +562,7 @@ impl AgentChannel {
         }
     }
 
-    /// Phase 0 of the claude-e rollout. Returns the per-channel `runtime`
-    /// override string (`pipe` / `tui` / `claude-e`) if explicitly set,
-    /// without parsing or back-compat derivation. Callers should use
+    /// Returns the raw per-channel runtime override. Callers should use
     /// `provider_hosting::resolve_runtime_mode` for the resolved value.
     pub fn runtime_mode_raw(&self) -> Option<String> {
         match self {
@@ -688,8 +686,7 @@ pub struct AgentChannelConfig {
     pub provider: Option<String>,
     #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
     pub tui_hosting: Option<bool>,
-    /// Phase 0 of the claude-e rollout. Per-channel override. Same accepted
-    /// values as `ProviderConfig::runtime`: `pipe`, `tui`, `claude-e`.
+    /// Per-channel provider runtime override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -719,6 +716,8 @@ pub struct AgentChannelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub isolate_override: Option<bool>,
+    #[serde(alias = "threadInherit", skip_serializing_if = "Option::is_none")]
+    pub thread_inherit: Option<bool>,
     /// Anthropic prompt-cache TTL bucket (#1088). Only `5` (default) or `60`
     /// minutes are valid. Any other value is treated as `None` (default 5m).
     /// When set to `60`, the Claude CLI is invoked with the extended 1h

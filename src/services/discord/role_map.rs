@@ -429,6 +429,44 @@ pub(super) fn resolve_role_binding(
     parse_role_binding(entry)
 }
 
+pub(super) fn resolve_thread_inherit(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<bool> {
+    let json = load_role_map_json()?;
+
+    if let Some(by_id) = json.get("byChannelId").and_then(|value| value.as_object()) {
+        let key = channel_id.get().to_string();
+        if let Some(entry) = by_id.get(&key) {
+            return Some(
+                entry
+                    .get("threadInherit")
+                    .or_else(|| entry.get("thread_inherit"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true),
+            );
+        }
+    }
+
+    if !fallback_enabled(&json) {
+        return None;
+    }
+
+    let cname = channel_name?;
+    let by_name = json
+        .get("byChannelName")
+        .and_then(|value| value.as_object())?;
+    let entry = by_name.get(cname)?;
+    entry_matches_channel_id(entry, channel_id).then_some(())?;
+    Some(
+        entry
+            .get("threadInherit")
+            .or_else(|| entry.get("thread_inherit"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+    )
+}
+
 pub(super) fn resolve_workspace(
     channel_id: ChannelId,
     channel_name: Option<&str>,
