@@ -15,17 +15,18 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("content", body_param("string", true, "Non-empty notification text, at most 2000 bytes.")),
             ("action_id", body_param("string", true, "Persisted 32-character lowercase hexadecimal monitor action ID.")),
             ("action", body_param("string", true, "Either alert or recovery.")),
+            ("kind", body_param("string", true, "Incident kind: STUCK, ANOMALY, or REVIEW_LONG. STUCK/ANOMALY alerts wake the operations-channel agent; recovery and REVIEW_LONG notices remain informational.")),
         ])
         .with_example(
-            json!({"body": {"target": "channel:1479671298497183835", "content": "[auto-queue monitor] STUCK: #4448", "action_id": "0123456789abcdef0123456789abcdef", "action": "alert"}}),
+            json!({"body": {"target": "channel:1479671298497183835", "content": "[auto-queue monitor] STUCK: #4448", "action_id": "0123456789abcdef0123456789abcdef", "action": "alert", "kind": "STUCK"}}),
             json!({"ok": true, "enqueued": true, "action_id": "0123456789abcdef0123456789abcdef"}),
         )
         .with_error_example(
             400,
-            json!({"body": {"target": "channel:123", "content": "alert", "action_id": "bad", "action": "alert"}}),
+            json!({"body": {"target": "channel:123", "content": "alert", "action_id": "bad", "action": "alert", "kind": "STUCK"}}),
             json!({"ok": false, "error": "action_id must be 32 lowercase hexadecimal characters"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/message-outbox/monitor-alerts -H 'Content-Type: application/json' -d '{\"target\":\"channel:1479671298497183835\",\"content\":\"[auto-queue monitor] STUCK: #4448\",\"action_id\":\"0123456789abcdef0123456789abcdef\",\"action\":\"alert\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/message-outbox/monitor-alerts -H 'Content-Type: application/json' -d '{\"target\":\"channel:1479671298497183835\",\"content\":\"[auto-queue monitor] STUCK: #4448\",\"action_id\":\"0123456789abcdef0123456789abcdef\",\"action\":\"alert\",\"kind\":\"STUCK\"}'"),
         ep(
             "GET",
             "/api/message-outbox/failed",

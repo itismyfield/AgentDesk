@@ -52,8 +52,8 @@ echo "=== message_outbox validated-insert guard (#4424) ==="
 "$PYTHON" scripts/check_message_outbox_inserts.py
 "$PYTHON" -m unittest tests.test_message_outbox_inserts
 
-echo "=== Alert dedupe/authority wiring contract (#4448) ==="
-"$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor
+echo "=== Alert dedupe/authority/routing wiring contract (#4448/#4449) ==="
+"$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 
 echo "=== State/lint hardening guard ==="
 "$PYTHON" scripts/audit_state_lint_hardening.py

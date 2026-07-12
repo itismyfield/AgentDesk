@@ -1486,7 +1486,7 @@ async fn enqueue_terminal_open_alert_pg(
         crate::services::message_outbox::OutboxMessage {
             target: &target,
             content: content.as_str(),
-            bot: "notify",
+            bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
             source: "github_sync",
             reason_code: Some(TERMINAL_OPEN_REASON_CODE),
             session_key: Some(session_key.as_str()),

@@ -6,6 +6,28 @@ use crate::services::provider::{CancelToken, cancel_requested};
 
 pub(crate) const LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS: i64 = 5 * 60;
 pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
+/// Actionable operational alerts are delivered by the announce bot first so
+/// the channel's resident AgentDesk role receives a real intake turn.  The
+/// outbox worker falls back to the notify bot only when that primary delivery
+/// fails, preserving human visibility without turning informational notices
+/// into agent work (#4449).
+pub(crate) const ACTIONABLE_OPS_ALERT_BOT: &str = "announce";
+
+pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -> bool {
+    matches!(
+        (source, reason_code),
+        ("outbox_delivery_alert", Some("outbox_delivery_failed"))
+            | ("github_sync", Some("github_sync.terminal_open_issue"))
+            | ("long_turn_watchdog", Some("long_turn_cluster"))
+            | ("relay_signal_rollup", Some("relay_signal.threshold"))
+            | ("slo_alerter", Some("slo_threshold_breach"))
+            | ("dispatch_watchdog", Some("dispatch_stuck"))
+            | ("routine-runtime", Some("routine_paused_stale"))
+            | ("auto-queue", Some("auto_queue.entry_dispatch_failed"))
+            | ("auto-queue-monitor", Some("auto_queue.monitor_stuck"))
+            | ("auto-queue-monitor", Some("auto_queue.monitor_anomaly"))
+    )
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OutboxMessage<'a> {
@@ -164,7 +186,46 @@ pub(crate) fn dedupe_key_for_message_for_test(
 
 #[cfg(test)]
 mod dedupe_key_tests {
-    use super::{dedupe_key_for_message, delivery_bot_for_target_session};
+    use super::{dedupe_key_for_message, delivery_bot_for_target_session, is_actionable_ops_alert};
+
+    #[test]
+    fn actionable_ops_alert_registry_is_exact_and_excludes_recovery_noise() {
+        for (source, reason) in [
+            ("outbox_delivery_alert", "outbox_delivery_failed"),
+            ("github_sync", "github_sync.terminal_open_issue"),
+            ("long_turn_watchdog", "long_turn_cluster"),
+            ("relay_signal_rollup", "relay_signal.threshold"),
+            ("slo_alerter", "slo_threshold_breach"),
+            ("dispatch_watchdog", "dispatch_stuck"),
+            ("routine-runtime", "routine_paused_stale"),
+            ("auto-queue", "auto_queue.entry_dispatch_failed"),
+            ("auto-queue-monitor", "auto_queue.monitor_stuck"),
+            ("auto-queue-monitor", "auto_queue.monitor_anomaly"),
+        ] {
+            assert!(
+                is_actionable_ops_alert(source, Some(reason)),
+                "missing actionable alert registration for {source}/{reason}"
+            );
+        }
+
+        for (source, reason) in [
+            ("auto-queue-monitor", "auto_queue.monitor_review_long"),
+            ("auto-queue-monitor", "auto_queue.monitor_recovery"),
+            ("routine-runtime", "routine_recovery_resumed"),
+            ("lifecycle_notifier", "runtime_started"),
+            ("catch_up", "catch_up.too_old"),
+        ] {
+            assert!(
+                !is_actionable_ops_alert(source, Some(reason)),
+                "informational notice must stay notify-only: {source}/{reason}"
+            );
+        }
+        assert!(!is_actionable_ops_alert("github_sync", None));
+        assert!(!is_actionable_ops_alert(
+            "wrong-source",
+            Some("dispatch_stuck")
+        ));
+    }
 
     #[test]
     fn reason_code_dedupe_key_ignores_content() {

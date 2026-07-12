@@ -5,6 +5,7 @@ pub mod dto;
 pub(crate) mod issue_specs;
 pub(crate) mod maintenance;
 pub(crate) mod multinode_regression;
+mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
 pub(crate) mod resource_locks;
 pub mod routes;
@@ -2233,6 +2234,14 @@ mod message_outbox_retry_tests {
         .await
         .expect("count alert rows");
         assert_eq!(alert_count, 1);
+        let (alert_bot, alert_reason): (String, Option<String>) =
+            sqlx::query_as("SELECT bot, reason_code FROM message_outbox WHERE source = $1")
+                .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
+                .fetch_one(&pool)
+                .await
+                .expect("load actionable ops alert routing");
+        assert_eq!(alert_bot, "announce");
+        assert_eq!(alert_reason.as_deref(), Some("outbox_delivery_failed"));
 
         // The alert card's OWN terminal failure must NOT even spawn a card task
         // (recursion guard short-circuits before the detached DB work).
@@ -2924,31 +2933,8 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
                 let health_registry = health_registry.clone();
                 let pg_pool = pg_pool.clone();
                 async move {
-                    let (correlation_id, semantic_event_id) = row.delivery_ids();
-                    let bot = crate::services::message_outbox::delivery_bot_for_target_session(
-                        &row.target,
-                        &row.bot,
-                        row.session_key.as_deref(),
-                    );
-                    let (status, err_text) =
-                        crate::services::discord::health::send_message_with_backends_and_delivery_options(
-                            &health_registry,
-                            Some(pg_pool.as_ref()),
-                            &row.target,
-                            &row.content,
-                            &row.source,
-                            bot.as_ref(),
-                            None,
-                            Some(crate::services::discord::health::ManualOutboundDeliveryId {
-                                correlation_id: &correlation_id,
-                                semantic_event_id: &semantic_event_id,
-                            }),
-                            crate::services::discord::health::ManualOutboundOptions {
-                                allow_unbound_internal_channel: true,
-                            },
-                        )
-                        .await;
-                    (status.to_string(), err_text)
+                    outbox_actionable_delivery::deliver(&health_registry, pg_pool.as_ref(), &row)
+                        .await
                 }
             }
         })

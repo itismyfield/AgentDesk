@@ -38,6 +38,7 @@ pub struct MonitorAlertRequest {
     content: String,
     action_id: String,
     action: String,
+    kind: String,
 }
 
 fn default_dry_run() -> bool {
@@ -87,7 +88,7 @@ fn control_allowed(state: &AppState, peer: SocketAddr) -> Result<(), Response> {
 
 fn normalized_monitor_alert(
     request: MonitorAlertRequest,
-) -> Result<(String, String, String, &'static str), &'static str> {
+) -> Result<(String, String, String, &'static str, &'static str), &'static str> {
     let target = request.target.trim();
     let channel_id = target
         .strip_prefix("channel:")
@@ -108,9 +109,21 @@ fn normalized_monitor_alert(
     {
         return Err("action_id must be 32 lowercase hexadecimal characters");
     }
-    let reason_code = match request.action.trim() {
-        "alert" => "auto_queue.monitor_alert",
-        "recovery" => "auto_queue.monitor_recovery",
+    let kind = request.kind.trim();
+    if !matches!(kind, "STUCK" | "ANOMALY" | "REVIEW_LONG") {
+        return Err("kind must be STUCK, ANOMALY, or REVIEW_LONG");
+    }
+    let (reason_code, bot) = match (request.action.trim(), kind) {
+        ("alert", "STUCK") => (
+            "auto_queue.monitor_stuck",
+            crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
+        ),
+        ("alert", "ANOMALY") => (
+            "auto_queue.monitor_anomaly",
+            crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
+        ),
+        ("alert", "REVIEW_LONG") => ("auto_queue.monitor_review_long", "notify"),
+        ("recovery", _) => ("auto_queue.monitor_recovery", "notify"),
         _ => return Err("action must be alert or recovery"),
     };
     Ok((
@@ -118,6 +131,7 @@ fn normalized_monitor_alert(
         content.to_string(),
         action_id.to_string(),
         reason_code,
+        bot,
     ))
 }
 
@@ -129,7 +143,7 @@ pub async fn enqueue_monitor_alert(
     if let Err(response) = control_allowed(&state, peer) {
         return response;
     }
-    let (target, content, action_id, reason_code) = match normalized_monitor_alert(request) {
+    let (target, content, action_id, reason_code, bot) = match normalized_monitor_alert(request) {
         Ok(request) => request,
         Err(error) => {
             return (
@@ -152,7 +166,7 @@ pub async fn enqueue_monitor_alert(
         crate::services::message_outbox::OutboxMessage {
             target: &target,
             content: &content,
-            bot: "notify",
+            bot,
             source: "auto-queue-monitor",
             reason_code: Some(reason_code),
             session_key: Some(&session_key),
@@ -270,7 +284,9 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    use super::{RedriveRequest, exact_ids, query_ids};
+    use super::{
+        MonitorAlertRequest, RedriveRequest, exact_ids, normalized_monitor_alert, query_ids,
+    };
 
     #[test]
     fn exact_id_contract_rejects_mass_and_ambiguous_inputs() {
@@ -360,7 +376,7 @@ mod tests {
             .oneshot(request(
                 "POST",
                 "/message-outbox/monitor-alerts",
-                r#"{"target":"channel:123","content":"alert","action_id":"0123456789abcdef0123456789abcdef","action":"alert"}"#,
+                r#"{"target":"channel:123","content":"alert","action_id":"0123456789abcdef0123456789abcdef","action":"alert","kind":"STUCK"}"#,
                 "127.0.0.1:8791",
             ))
             .await
@@ -373,7 +389,7 @@ mod tests {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let router = app_with_pg(crate::config::Config::default(), Some(pool.clone()));
-        let body = r#"{"target":"channel:123","content":"monitor alert","action_id":"0123456789abcdef0123456789abcdef","action":"alert"}"#;
+        let body = r#"{"target":"channel:123","content":"monitor alert","action_id":"0123456789abcdef0123456789abcdef","action":"alert","kind":"STUCK"}"#;
 
         for _ in 0..2 {
             let response = router
@@ -392,7 +408,7 @@ mod tests {
             .oneshot(request(
                 "POST",
                 "/message-outbox/monitor-alerts",
-                r#"{"target":"channel:123","content":"monitor alert","action_id":"bad","action":"alert"}"#,
+                r#"{"target":"channel:123","content":"monitor alert","action_id":"bad","action":"alert","kind":"STUCK"}"#,
                 "127.0.0.1:8791",
             ))
             .await
@@ -406,8 +422,8 @@ mod tests {
             rows,
             vec![(
                 "auto-queue-monitor".to_string(),
-                "notify".to_string(),
-                "auto_queue.monitor_alert".to_string(),
+                "announce".to_string(),
+                "auto_queue.monitor_stuck".to_string(),
                 "auto_queue_monitor:0123456789abcdef0123456789abcdef".to_string(),
                 "channel:123".to_string(),
                 "monitor alert".to_string(),
@@ -417,5 +433,39 @@ mod tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    #[test]
+    fn monitor_alert_routing_separates_actionable_and_informational_kinds() {
+        let request = |action: &str, kind: &str| MonitorAlertRequest {
+            target: "channel:123".to_string(),
+            content: "monitor fixture".to_string(),
+            action_id: "0123456789abcdef0123456789abcdef".to_string(),
+            action: action.to_string(),
+            kind: kind.to_string(),
+        };
+
+        for (kind, reason) in [
+            ("STUCK", "auto_queue.monitor_stuck"),
+            ("ANOMALY", "auto_queue.monitor_anomaly"),
+        ] {
+            let normalized = normalized_monitor_alert(request("alert", kind)).unwrap();
+            assert_eq!(normalized.3, reason);
+            assert_eq!(normalized.4, "announce");
+        }
+
+        let review = normalized_monitor_alert(request("alert", "REVIEW_LONG")).unwrap();
+        assert_eq!(review.3, "auto_queue.monitor_review_long");
+        assert_eq!(review.4, "notify");
+
+        for kind in ["STUCK", "ANOMALY", "REVIEW_LONG"] {
+            let recovery = normalized_monitor_alert(request("recovery", kind)).unwrap();
+            assert_eq!(recovery.3, "auto_queue.monitor_recovery");
+            assert_eq!(recovery.4, "notify");
+        }
+        assert_eq!(
+            normalized_monitor_alert(request("alert", "UNKNOWN")),
+            Err("kind must be STUCK, ANOMALY, or REVIEW_LONG")
+        );
     }
 }
