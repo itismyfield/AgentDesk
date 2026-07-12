@@ -492,12 +492,14 @@ src/
 │   │   │   │   ├── abandon.rs
 │   │   │   │   └── mod.rs
 │   │   │   ├── save_store/
-│   │   │   │   └── identity_gate.rs
+│   │   │   │   ├── identity_gate.rs
+│   │   │   │   └── rebind_adoption.rs
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs
 │   │   │   │   └── flake_isolation_4422.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
+│   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
@@ -559,7 +561,9 @@ src/
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── codex_tui_replay.rs
-│   │   │   │   └── mod.rs
+│   │   │   │   ├── episode_handoff.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── post_adoption_guard_tests.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
@@ -583,6 +587,9 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs
+│   │   ├── relay_recovery/
+│   │   │   └── tests/
+│   │   │       └── circuit_breaker_apply.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── notice.rs
@@ -891,7 +898,9 @@ src/
 │   │   ├── relay_recovery_auto_heal_apply.rs
 │   │   ├── relay_recovery_auto_heal_attempts.rs
 │   │   ├── relay_recovery_auto_heal_confirm.rs
+│   │   ├── relay_recovery_circuit_breaker.rs
 │   │   ├── relay_recovery_completion_footer.rs
+│   │   ├── relay_recovery_reattach_apply.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_ctrl.rs

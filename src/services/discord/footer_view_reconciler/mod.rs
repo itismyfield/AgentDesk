@@ -472,6 +472,23 @@ pub(in crate::services::discord) fn completion_footer_has_registered_target(
 }
 
 #[cfg(test)]
+pub(in crate::services::discord) fn register_completion_footer_target_for_test(
+    channel_id: ChannelId,
+    message_id: MessageId,
+    provider: &ProviderKind,
+) {
+    let _ = registry::register_completion_footer_target(
+        channel_id,
+        message_id,
+        provider,
+        chrono::Utc::now().timestamp(),
+        "test footer",
+        Some("test completion block"),
+        true,
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

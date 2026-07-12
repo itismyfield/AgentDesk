@@ -1337,9 +1337,11 @@ mod tests {
             .cancel_token
             .expect("re-adopted mailbox holds a cancel token");
 
-        // The re-adopted turn's terminal delivery commits (watcher path): the SAME
-        // `SharedData::mark_readopted_mailbox_owner_finished` the terminal-commit
-        // epilogue calls, then the durable row is cleared → the ABSENT-row shape.
+        // The re-adopted turn's terminal delivery commits (watcher path). This
+        // legacy/restart fixture uses the non-episode finish variant; automatic
+        // exact-episode recovery uses the stable-pin `_for_episode` sibling in
+        // the terminal-commit epilogue. Then the durable row is cleared → the
+        // ABSENT-row shape.
         shared.mark_readopted_mailbox_owner_finished(
             &provider,
             channel_id.get(),

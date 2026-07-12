@@ -154,10 +154,16 @@ pub(super) use self::state_extractors::save_missing_session_handoff;
 // #3834: `rebind_inflight_for_channel` is re-exported (not just re-imported) so the
 // `recovery_engine::rebind_inflight_for_channel` path stays valid for its `health`
 // caller. Its private cluster (`codex_tui_*`, `Pending*`) is not re-exported.
+#[cfg(test)]
+pub(crate) use self::manual_rebind::{
+    EpisodeAuthorityHeldBarrier, PostAdoptionClaimBarrier, install_episode_authority_held_barrier,
+    install_post_adoption_claim_barrier,
+};
 pub(crate) use self::manual_rebind::{
     rebind_inflight_for_channel, rebind_inflight_for_channel_with_minimum_start_offset,
 };
 pub(crate) use self::manual_rebind_override::ManualRebindOverrides;
+pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_inflight_under_episode_guard;
 // #3834: `reregister_active_turn_from_inflight` is re-exported (not just
 // re-imported) so the `recovery_engine::reregister_active_turn_from_inflight`
 // path stays valid for its `watchers::lifecycle` caller (via the `recovery`
@@ -433,6 +439,9 @@ pub enum RebindError {
     /// An inflight state already exists for this channel. Caller must clear
     /// it (force-kill or natural completion) before rebinding. 409.
     InflightAlreadyExists,
+    /// The exact inflight episode reserved by automatic recovery was replaced
+    /// before the lock-held rebind mutation. The replacement is untouched.
+    InflightEpisodeChanged,
     /// The tmux pane is still writing to a deleted or replaced output fd, so
     /// rebinding the pathname would silently follow the wrong file. 409.
     StaleOutputPath {
@@ -466,6 +475,9 @@ impl std::fmt::Display for RebindError {
             }
             Self::InflightAlreadyExists => {
                 write!(f, "inflight state already exists for this channel")
+            }
+            Self::InflightEpisodeChanged => {
+                write!(f, "reserved inflight episode changed before rebind")
             }
             Self::StaleOutputPath {
                 tmux_session,

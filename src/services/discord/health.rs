@@ -402,12 +402,13 @@ impl HealthRegistry {
     /// Kept on the registry (rather than exposing `SharedData` directly via
     /// an accessor) so this crate does not leak the `pub(in crate::services)`
     /// `SharedData` type across the service boundary.
-    pub(crate) async fn rebind_inflight(
+    pub(in crate::services::discord) async fn rebind_inflight(
         &self,
         provider: &crate::services::provider::ProviderKind,
         channel_id: u64,
         tmux_override: Option<String>,
         overrides: super::recovery_engine::ManualRebindOverrides,
+        expected_episode: Option<&super::inflight::InflightEpisodePin>,
     ) -> Option<Result<super::recovery_engine::RebindOutcome, super::recovery_engine::RebindError>>
     {
         // Channel-aware: multi-bot deployments register several runtimes
@@ -430,6 +431,7 @@ impl HealthRegistry {
                 channel_id,
                 tmux_override,
                 overrides,
+                expected_episode,
             )
             .await,
         )

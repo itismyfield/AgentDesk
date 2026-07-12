@@ -1385,7 +1385,7 @@ pub async fn handle_rebind_inflight<'a>(
     } = parsed;
 
     let Some(result) = registry
-        .rebind_inflight(&provider, channel_id, tmux_override, overrides)
+        .rebind_inflight(&provider, channel_id, tmux_override, overrides, None)
         .await
     else {
         // #897 counter-model review: dcserver bootstrap registers the
@@ -1457,6 +1457,7 @@ pub(super) fn rebind_error_status_and_message(
     let status = match err {
         discord::recovery_engine::RebindError::TmuxNotAlive { .. } => "404 Not Found",
         discord::recovery_engine::RebindError::InflightAlreadyExists
+        | discord::recovery_engine::RebindError::InflightEpisodeChanged
         | discord::recovery_engine::RebindError::StaleOutputPath { .. }
         | discord::recovery_engine::RebindError::RuntimeBindingUnavailable { .. } => "409 Conflict",
         discord::recovery_engine::RebindError::ChannelNotBound

@@ -143,12 +143,17 @@ pub(in crate::services::discord) fn clear_rebind_origin_inflight_state_if_matche
     provider: &ProviderKind,
     channel_id: u64,
     expected: &InflightTurnIdentity,
+    expected_turn_nonce: Option<&str>,
 ) -> GuardedClearOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedClearOutcome::Missing;
     };
     clear_rebind_origin_inflight_state_if_matches_identity_in_root(
-        &root, provider, channel_id, expected,
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_turn_nonce,
     )
 }
 
@@ -520,6 +525,7 @@ pub(super) fn clear_rebind_origin_inflight_state_if_matches_identity_in_root(
     provider: &ProviderKind,
     channel_id: u64,
     expected: &InflightTurnIdentity,
+    expected_turn_nonce: Option<&str>,
 ) -> GuardedClearOutcome {
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
@@ -537,7 +543,7 @@ pub(super) fn clear_rebind_origin_inflight_state_if_matches_identity_in_root(
     if !state.rebind_origin {
         return GuardedClearOutcome::UserMsgMismatch;
     }
-    if !expected.matches_state(&state) {
+    if !expected.matches_state(&state) || !turn_nonce_matches(expected_turn_nonce, &state) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
     log_inflight_remove(

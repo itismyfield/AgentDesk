@@ -340,11 +340,12 @@ pub(super) async fn run_terminal_commit_epilogue(
             anchor_cleanup_is_stale_for_newer_turn,
         ) && let Some(committed) = inflight_state.as_ref()
         {
-            shared.mark_readopted_mailbox_owner_finished(
+            shared.mark_readopted_mailbox_owner_finished_for_episode(
                 provider_kind,
                 channel_id.get(),
                 committed.request_owner_user_id,
                 committed.effective_finalizer_turn_id(),
+                committed,
             );
         }
         // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token

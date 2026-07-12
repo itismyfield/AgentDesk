@@ -47,8 +47,12 @@ mod auto_heal_apply;
 mod auto_heal_attempts;
 #[path = "relay_recovery_auto_heal_confirm.rs"]
 mod auto_heal_confirm;
+#[path = "relay_recovery_circuit_breaker.rs"]
+mod circuit_breaker;
 #[path = "relay_recovery_completion_footer.rs"]
 mod completion_footer;
+#[path = "relay_recovery_reattach_apply.rs"]
+mod reattach_apply;
 
 use auto_heal_apply::apply_relay_recovery_plan;
 #[cfg(test)]
@@ -1035,6 +1039,7 @@ async fn apply_relay_recovery_decision(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     decision: &RelayRecoveryDecision,
+    episode: Option<&circuit_breaker::RelayReattachEpisode>,
     source: RelayRecoveryApplySource,
 ) -> RelayRecoveryApplyResult {
     match decision.action {
@@ -1100,7 +1105,11 @@ async fn apply_relay_recovery_decision(
         }
         RelayRecoveryActionKind::ReattachWatcher => {
             let channel = ChannelId::new(decision.channel_id);
-            if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
+            // The durable automatic lane is deliberately non-destructive: its
+            // exact episode is adopted by `rebind_inflight` below.  The legacy
+            // manual lane keeps the idle-turn retirement behavior.
+            if episode.is_none()
+                && let Some(tmux_session) = decision.affected.tmux_session.as_deref()
                 && decision.evidence.unread_bytes.unwrap_or(0) == 0
                 // This branch intentionally does not route through
                 // `destructive_cancel_gate`: the snapshot readiness check is
@@ -1200,7 +1209,13 @@ async fn apply_relay_recovery_decision(
                     reattach_error: None,
                 };
             }
-            if let Some(owner_channel_id) = relay_frontier_dead_reattach_owner(decision) {
+            // Cancelling/finalizing before exact-episode rebind both destroys
+            // the reserved live authority and makes the rebind reject its own
+            // now-missing pin.  Keep this legacy destructive repair manual;
+            // bounded automatic recovery only performs the pinned adoption.
+            if episode.is_none()
+                && let Some(owner_channel_id) = relay_frontier_dead_reattach_owner(decision)
+            {
                 match relay_recovery_probe_snapshot_for_owner(
                     shared.as_ref(),
                     provider,
@@ -1356,49 +1371,7 @@ async fn apply_relay_recovery_decision(
                     }
                 }
             }
-            match registry
-                .rebind_inflight(
-                    provider,
-                    decision.channel_id,
-                    decision.affected.tmux_session.clone(),
-                    super::recovery_engine::ManualRebindOverrides::default(),
-                )
-                .await
-            {
-                Some(Ok(outcome)) => RelayRecoveryApplyResult {
-                    status: reattach_apply_status(outcome.watcher_spawned),
-                    removed_thread_proofs: 0,
-                    removed_mailbox_token: false,
-                    post_mailbox_has_cancel_token: None,
-                    post_mailbox_queue_depth: None,
-                    reattach_watcher_spawned: Some(outcome.watcher_spawned),
-                    reattach_watcher_replaced: Some(outcome.watcher_replaced),
-                    reattach_initial_offset: Some(outcome.initial_offset),
-                    reattach_error: None,
-                },
-                Some(Err(error)) => RelayRecoveryApplyResult {
-                    status: "rebind_failed",
-                    removed_thread_proofs: 0,
-                    removed_mailbox_token: false,
-                    post_mailbox_has_cancel_token: None,
-                    post_mailbox_queue_depth: None,
-                    reattach_watcher_spawned: None,
-                    reattach_watcher_replaced: None,
-                    reattach_initial_offset: None,
-                    reattach_error: Some(error.to_string()),
-                },
-                None => RelayRecoveryApplyResult {
-                    status: "provider_unavailable",
-                    removed_thread_proofs: 0,
-                    removed_mailbox_token: false,
-                    post_mailbox_has_cancel_token: None,
-                    post_mailbox_queue_depth: None,
-                    reattach_watcher_spawned: None,
-                    reattach_watcher_replaced: None,
-                    reattach_initial_offset: None,
-                    reattach_error: Some("provider unavailable".to_string()),
-                },
-            }
+            reattach_apply::apply_rebind(registry, provider, decision, episode).await
         }
         RelayRecoveryActionKind::DrainPendingQueue => {
             let channel = ChannelId::new(decision.channel_id);
@@ -1477,6 +1450,9 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
+
+    #[path = "circuit_breaker_apply.rs"]
+    mod circuit_breaker_apply;
 
     fn isolated_agentdesk_root() -> (AgentdeskRootGuard, tempfile::TempDir) {
         let temp = tempfile::TempDir::new().unwrap();
@@ -2050,6 +2026,7 @@ mod tests {
             &shared,
             &provider,
             &decision,
+            None,
             RelayRecoveryApplySource::ProbeAutoHeal,
         )
         .await;
@@ -2146,6 +2123,7 @@ mod tests {
             &shared,
             &provider,
             &decision,
+            None,
             RelayRecoveryApplySource::ProbeAutoHeal,
         )
         .await;
@@ -2333,6 +2311,7 @@ mod tests {
             &shared,
             &provider,
             &decision,
+            None,
             RelayRecoveryApplySource::ProbeAutoHeal,
         )
         .await;
@@ -2451,6 +2430,7 @@ mod tests {
             &shared,
             &provider,
             &decision,
+            None,
             RelayRecoveryApplySource::ProbeAutoHeal,
         )
         .await;
@@ -2557,6 +2537,7 @@ mod tests {
             &shared,
             &provider,
             &decision,
+            None,
             RelayRecoveryApplySource::ProbeAutoHeal,
         )
         .await;
@@ -2642,6 +2623,7 @@ mod tests {
             &shared,
             &provider,
             &decision,
+            None,
             RelayRecoveryApplySource::Manual,
         )
         .await;
@@ -2764,6 +2746,7 @@ mod tests {
             &shared,
             &provider,
             &decision,
+            None,
             RelayRecoveryApplySource::Manual,
         )
         .await;

@@ -5,7 +5,34 @@
 //! field; the ledger type, its entry, and the accessor methods live here.
 
 use super::SharedData;
+use super::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
+
+/// Stable identity of one mailbox-owning turn. Unlike the recovery episode pin,
+/// this deliberately excludes handoff authority that may advance while the same
+/// turn is still running (`current_msg_id`, session/output paths, runtime kind,
+/// and relay owner). The terminal-commit path must still be able to finish the
+/// ledger entry after those legitimate progress writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct ReadoptedMailboxTurnPin {
+    user_msg_id: u64,
+    started_at: String,
+    turn_start_offset: Option<u64>,
+    born_generation: u64,
+    turn_nonce: Option<String>,
+}
+
+impl ReadoptedMailboxTurnPin {
+    pub(in crate::services::discord) fn from_state(state: &InflightTurnState) -> Self {
+        Self {
+            user_msg_id: state.user_msg_id,
+            started_at: state.started_at.clone(),
+            turn_start_offset: state.turn_start_offset,
+            born_generation: state.born_generation,
+            turn_nonce: state.turn_nonce.clone(),
+        }
+    }
+}
 
 /// #4370: in-memory record of a mailbox slot this process re-adopted from
 /// persisted inflight state after a restart. Keyed in [`ReadoptedMailboxLedger`]
@@ -28,7 +55,7 @@ use crate::services::provider::ProviderKind;
 /// `finished` bit (#4370 R3-1 — a still-live re-adopted turn is never reclaimed
 /// even on an exact-id match), and the `>= 120s` age gate on the resulting
 /// `OwnerInflightAbsent` reason.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(in crate::services::discord) struct ReadoptedMailboxOwner {
     /// The real Discord user id that owns the re-adopted mailbox turn.
     pub owner_user_id: u64,
@@ -48,6 +75,9 @@ pub(in crate::services::discord) struct ReadoptedMailboxOwner {
     /// such a turn is `finished == false` and is refused — the invariant is now an
     /// enforced fact, not an assumption (#4370 R3-1).
     pub finished: bool,
+    /// Stable turn identity for automatic recovery readoption. Legacy/restart
+    /// callers that do not hold episode authority record `None`.
+    turn_pin: Option<ReadoptedMailboxTurnPin>,
 }
 
 /// #4370: the per-process ledger. Keyed by `(provider, channel_id)`; set at the
@@ -79,6 +109,26 @@ impl SharedData {
                 // delivery has not committed yet. The watcher terminal-commit
                 // clear stamps `finished` when it does.
                 finished: false,
+                turn_pin: None,
+            },
+        );
+    }
+
+    pub(in crate::services::discord) fn record_readopted_mailbox_owner_for_episode(
+        &self,
+        provider: &ProviderKind,
+        channel_id: u64,
+        owner_user_id: u64,
+        active_user_message_id: u64,
+        state: &InflightTurnState,
+    ) {
+        self.readopted_mailbox_ledger.entries.insert(
+            (provider.clone(), channel_id),
+            ReadoptedMailboxOwner {
+                owner_user_id,
+                active_user_message_id,
+                finished: false,
+                turn_pin: Some(ReadoptedMailboxTurnPin::from_state(state)),
             },
         );
     }
@@ -103,6 +153,31 @@ impl SharedData {
             .get_mut(&(provider.clone(), channel_id))
             && entry.owner_user_id == owner_user_id
             && entry.active_user_message_id == active_user_message_id
+            && entry.turn_pin.is_none()
+        {
+            entry.finished = true;
+        }
+    }
+
+    pub(in crate::services::discord) fn mark_readopted_mailbox_owner_finished_for_episode(
+        &self,
+        provider: &ProviderKind,
+        channel_id: u64,
+        owner_user_id: u64,
+        active_user_message_id: u64,
+        state: &InflightTurnState,
+    ) {
+        let turn_pin = ReadoptedMailboxTurnPin::from_state(state);
+        if let Some(mut entry) = self
+            .readopted_mailbox_ledger
+            .entries
+            .get_mut(&(provider.clone(), channel_id))
+            && entry.owner_user_id == owner_user_id
+            && entry.active_user_message_id == active_user_message_id
+            && entry
+                .turn_pin
+                .as_ref()
+                .is_none_or(|stored| stored == &turn_pin)
         {
             entry.finished = true;
         }
@@ -147,5 +222,17 @@ impl SharedData {
         self.readopted_mailbox_ledger
             .entries
             .remove(&(provider.clone(), channel_id));
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn readopted_mailbox_turn_pin_for_test(
+        &self,
+        provider: &ProviderKind,
+        channel_id: u64,
+    ) -> Option<ReadoptedMailboxTurnPin> {
+        self.readopted_mailbox_ledger
+            .entries
+            .get(&(provider.clone(), channel_id))
+            .and_then(|entry| entry.turn_pin.clone())
     }
 }
