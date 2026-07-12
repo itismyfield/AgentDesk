@@ -555,7 +555,7 @@
 | `services::discord::outbound::turn_output_controller` | `src/services/discord/outbound/turn_output_controller.rs` | 3467 | 1180 | 2287 | giant-file |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 686 | 424 | 262 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 941 | 573 | 368 |  |
-| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 647 | 647 | 0 |  |
+| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 654 | 654 | 0 |  |
 | `services::discord::placeholder_live_events::background_task_events` | `src/services/discord/placeholder_live_events/background_task_events.rs` | 109 | 109 | 0 |  |
 | `services::discord::placeholder_live_events::common` | `src/services/discord/placeholder_live_events/common.rs` | 226 | 226 | 0 |  |
 | `services::discord::placeholder_live_events::completion_footer` | `src/services/discord/placeholder_live_events/completion_footer.rs` | 490 | 490 | 0 |  |
@@ -565,7 +565,7 @@
 | `services::discord::placeholder_live_events::session_panel` | `src/services/discord/placeholder_live_events/session_panel.rs` | 262 | 262 | 0 |  |
 | `services::discord::placeholder_live_events::slot_rehydration` | `src/services/discord/placeholder_live_events/slot_rehydration.rs` | 525 | 447 | 78 |  |
 | `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 791 | 791 | 0 |  |
-| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 774 | 774 | 0 |  |
+| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 787 | 787 | 0 |  |
 | `services::discord::placeholder_live_events::subagent_panel` | `src/services/discord/placeholder_live_events/subagent_panel.rs` | 368 | 318 | 50 |  |
 | `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 531 | 356 | 175 |  |
 | `services::discord::placeholder_live_events::subagent_summary` | `src/services/discord/placeholder_live_events/subagent_summary.rs` | 69 | 69 | 0 |  |
