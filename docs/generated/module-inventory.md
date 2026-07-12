@@ -635,7 +635,7 @@
 | `services::discord::relay_recovery_completion_footer` | `src/services/discord/relay_recovery_completion_footer.rs` | 9 | 9 | 0 |  |
 | `services::discord::relay_recovery_reattach_apply` | `src/services/discord/relay_recovery_reattach_apply.rs` | 66 | 66 | 0 |  |
 | `services::discord::replace_outcome_policy` | `src/services/discord/replace_outcome_policy.rs` | 691 | 371 | 320 |  |
-| `services::discord::response_sanitizer` | `src/services/discord/response_sanitizer.rs` | 209 | 209 | 0 |  |
+| `services::discord::response_sanitizer` | `src/services/discord/response_sanitizer.rs` | 228 | 211 | 17 |  |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 102 | 102 | 0 |  |
 | `services::discord::restart_mode` | `src/services/discord/restart_mode.rs` | 32 | 32 | 0 |  |
 | `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 438 | 438 | 0 |  |
