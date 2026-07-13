@@ -424,6 +424,58 @@ class AuthorityFixtureTests(unittest.TestCase):
                 self.assertIsNone(result.candidate)
                 self.assertEqual(result.action, AllowedAction.NONE)
 
+    def test_all_observation_and_termination_flags_require_strict_booleans(self) -> None:
+        now = ClockStamp(6_000, "boot-strict-bool", 60)
+        proof = TerminationProof(
+            episode_key="ep-strict-bool",
+            source_id="source-strict-bool",
+            source_generation=1,
+            durable_anchor="anchor-strict-bool",
+            queue=QueueDisposition.TERMINAL,
+            termination_id="termination-strict-bool",
+            finalizer_committed=True,
+            watcher_stopped=True,
+            action_reprobe_at=now,
+        )
+        observation = Observation(
+            episode_key=proof.episode_key,
+            source_id=proof.source_id,
+            source_generation=proof.source_generation,
+            durable_anchor=proof.durable_anchor,
+            observed_at=now,
+            queue=proof.queue,
+            termination_proof=proof,
+        )
+        self.assertEqual(assess(observation).candidate, Verdict.PRODUCER_DEAD)
+
+        for field in (
+            "identity_complete",
+            "clock_valid",
+            "affirmative_termination",
+            "source_progress",
+            "delivery_progress",
+            "control_contradiction",
+            "terminal_delivery_committed",
+            "typed_idle",
+        ):
+            with self.subTest(owner="observation", field=field):
+                result = assess(replace(observation, **{field: "false"}))
+                self.assertIsNone(result.candidate)
+                self.assertEqual(result.action, AllowedAction.NONE)
+
+        for field in (
+            "finalizer_committed",
+            "watcher_stopped",
+            "identity_complete",
+            "clock_valid",
+        ):
+            with self.subTest(owner="termination_proof", field=field):
+                result = assess(
+                    replace(observation, termination_proof=replace(proof, **{field: "false"}))
+                )
+                self.assertIsNone(result.candidate)
+                self.assertEqual(result.action, AllowedAction.NONE)
+
 
 class LedgerFaultTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -620,6 +672,68 @@ class LedgerFaultTests(unittest.TestCase):
         )
         self.assertTrue(complete.changed)
         self.assertEqual(complete.record.outcome, LedgerOutcome.SUPERSEDED)
+
+    def test_replaced_continuity_without_successor_identity_cannot_supersede_or_rearm(
+        self,
+    ) -> None:
+        _, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        replaced_same_identity = settle_effect(
+            pending,
+            repair_observation(
+                pending.episode_key,
+                continuity=InflightContinuity.REPLACED,
+                source_id=pending.source_id,
+                source_generation=pending.source_generation,
+                durable_anchor="anchor-rebound-but-not-successor",
+                observed_at=now,
+            ),
+            attempt_id=pending.attempt_id,
+            delivery_proof=None,
+            now=now,
+        )
+        self.assertFalse(replaced_same_identity.changed)
+        self.assertTrue(replaced_same_identity.must_reprobe)
+        self.assertEqual(replaced_same_identity.record, pending)
+
+        reserve_now = ClockStamp(1_000_101, "boot-a", 10_101)
+        replacement_attempt = reserve_attempt(
+            replaced_same_identity.record,
+            repair_observation(
+                pending.episode_key,
+                durable_anchor=pending.durable_anchor,
+                observed_at=reserve_now,
+            ),
+            attempt_id="attempt-after-false-replacement",
+            delivery_proof=delivery_proof(
+                pending.episode_key,
+                now=reserve_now,
+                source_frontier=pending.baseline_source,
+                committed_frontier=pending.baseline_delivered,
+                durable_anchor=pending.durable_anchor,
+            ),
+            now=reserve_now,
+        )
+        self.assertFalse(replacement_attempt.changed)
+        self.assertTrue(replacement_attempt.must_reprobe)
+        self.assertEqual(replacement_attempt.record, pending)
+
+        actual_successor = settle_effect(
+            pending,
+            repair_observation(
+                pending.episode_key,
+                continuity=InflightContinuity.REPLACED,
+                source_id=pending.source_id,
+                source_generation=pending.source_generation + 1,
+                durable_anchor="anchor-successor",
+                observed_at=now,
+            ),
+            attempt_id=pending.attempt_id,
+            delivery_proof=None,
+            now=now,
+        )
+        self.assertTrue(actual_successor.changed)
+        self.assertEqual(actual_successor.record.outcome, LedgerOutcome.SUPERSEDED)
 
     def test_delivery_proof_requires_generation_and_anchor_advance(self) -> None:
         _, pending = self._reserve_and_mark()
@@ -1057,6 +1171,32 @@ class LedgerFaultTests(unittest.TestCase):
         self.assertFalse(overflow.changed)
         self.assertEqual(overflow.reason, "backoff_clock_overflow")
 
+    def test_reserve_attempt_rejects_unknown_in_memory_ledger_state(self) -> None:
+        reserved, _ = self._reserve_and_mark()
+        unknown = replace(reserved, state="future-ledger-state")
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        transition = reserve_attempt(
+            unknown,
+            repair_observation(
+                unknown.episode_key,
+                durable_anchor=unknown.durable_anchor,
+                observed_at=now,
+            ),
+            attempt_id="attempt-after-unknown-state",
+            delivery_proof=delivery_proof(
+                unknown.episode_key,
+                now=now,
+                source_frontier=unknown.baseline_source,
+                committed_frontier=unknown.baseline_delivered,
+                durable_anchor=unknown.durable_anchor,
+            ),
+            now=now,
+        )
+        self.assertFalse(transition.changed)
+        self.assertTrue(transition.must_reprobe)
+        self.assertEqual(transition.record, unknown)
+        self.assertEqual(transition.reason, "ledger_state_not_typed")
+
     def test_corrupt_future_and_legacy_ledger_fail_closed(self) -> None:
         for raw, reason in (
             ("{", "corrupt_json"),
@@ -1287,6 +1427,28 @@ class BackpressureTests(unittest.TestCase):
                         0,
                         [replace(committed[0], discord_message_ids=(invalid_id,))],
                     )
+
+    def test_commit_and_frontier_require_globally_unique_discord_message_ids(
+        self,
+    ) -> None:
+        first = SourceRange("a", 0, 3, RangeKind.ASSISTANT_TEXT, "one")
+        second = SourceRange("b", 3, 6, RangeKind.ASSISTANT_TEXT, "two")
+        plan = plan_bounded_batch(
+            [first, second],
+            start_cursor=0,
+            max_pending_items=2,
+            max_pending_bytes=10,
+        )
+        with self.assertRaisesRegex(ValueError, "globally unique"):
+            commit_dispositions(plan, {0: ["8001"], 1: ["8001"]})
+
+        committed = commit_dispositions(plan, {0: ["8001"], 1: ["8002"]})
+        duplicate_at_frontier = (
+            committed[0],
+            replace(committed[1], discord_message_ids=("8001",)),
+        )
+        with self.assertRaisesRegex(ValueError, "globally unique"):
+            advance_committed_frontier(0, duplicate_at_frontier)
 
     def test_planner_rejects_actual_duplicate_marker_without_metadata(self) -> None:
         marker = "[ADK-E2E:run:case:1:BEGIN]"
@@ -1612,6 +1774,126 @@ class EvidenceOracleTests(unittest.TestCase):
         bundle["discord_observations"][1]["raw_body"] = body
         bundle["discord_observations"][1]["normalized_body"] = body
         self.assertEqual(self.validate(bundle), [])
+
+    def test_digest_marker_summary_uses_same_canonical_body_hash_in_oracle(
+        self,
+    ) -> None:
+        ranges = []
+        cursor = 0
+        for sequence in range(1, 5):
+            marker = f"[ADK-E2E:digest-run:digest-case:{sequence}:END]"
+            entry = SourceRange(
+                f"tool-{sequence}",
+                cursor,
+                cursor + len(marker.encode("utf-8")),
+                RangeKind.TOOL_BULK,
+                marker,
+                marker,
+            )
+            ranges.append(entry)
+            cursor = entry.end
+
+        plan = plan_bounded_batch(
+            ranges,
+            start_cursor=0,
+            max_pending_items=1,
+            max_pending_bytes=250,
+        )
+        self.assertIsNone(plan.blocked_reason)
+        self.assertEqual(len(plan.dispositions), 1)
+        self.assertIn("marker_count=4", plan.dispositions[0].expected_body)
+        self.assertIn("marker_sha256=", plan.dispositions[0].expected_body)
+        committed = commit_dispositions(plan, {0: ["9001"]})
+        serialized = serialize_planned_disposition(committed[0])
+
+        source_bytes = "".join(entry.body for entry in ranges).encode("utf-8")
+        manifest = {
+            "schema_version": 1,
+            "run_id": "digest-run",
+            "case_id": "digest-case",
+            "provider": "claude",
+            "channel_id": "4254",
+            "base_sha": "a" * 40,
+            "binary_sha": "b" * 40,
+            "policy_version": "relay-target-v1",
+            "normalization_version": "discord-body-v1",
+            "actual_source_id": "source-digest",
+            "source_generation": 7,
+            "coordinate_space": "raw_utf8_bytes",
+            "source_start": 0,
+            "source_end": len(source_bytes),
+            "durable_frontier_before": 0,
+            "durable_anchor_before": "anchor-before",
+            "durable_anchor_after": "anchor-after",
+            "discord_complete": True,
+            "bot_author_id": "424254",
+            "discord_after_message_id": "9000",
+            "started_at": "2026-07-13T10:00:00Z",
+        }
+        bundle = {
+            "manifest": manifest,
+            "source_ranges": [
+                {
+                    "range_id": entry.range_id,
+                    "start": entry.start,
+                    "end": entry.end,
+                    "kind": entry.kind.value,
+                    "sha256": committed[0].source_range_sha256s[index],
+                    "marker": entry.marker,
+                    "marker_in_source": True,
+                }
+                for index, entry in enumerate(ranges)
+            ],
+            "dispositions": [serialized],
+            "discord_observations": [
+                {
+                    "message_id": "9001",
+                    "channel_id": "4254",
+                    "author_id": "424254",
+                    "observed_at": "2026-07-13T10:00:01Z",
+                    "edited_at": None,
+                    "revision_index": 0,
+                    "message_role": "relay_body",
+                    "raw_body": committed[0].expected_body,
+                    "normalized_body": committed[0].expected_body,
+                }
+            ],
+            "delivery_observation": {
+                "source_id": "source-digest",
+                "source_generation": 7,
+                "durable_anchor": "anchor-after",
+                "committed_frontier": len(source_bytes),
+            },
+            "unrelated_sessions": [
+                {
+                    "provider": "claude",
+                    "channel_id": "4255",
+                    "identity_complete": True,
+                    "observed_at": "2026-07-13T10:00:02Z",
+                    "relay_gap": False,
+                    "regression": False,
+                },
+                {
+                    "provider": "codex",
+                    "channel_id": "4256",
+                    "identity_complete": True,
+                    "observed_at": "2026-07-13T10:00:03Z",
+                    "relay_gap": False,
+                    "regression": False,
+                },
+            ],
+        }
+        self.assertEqual(
+            validate_evidence_bundle(
+                bundle,
+                pinned_manifest=manifest,
+                actual_source_id="source-digest",
+                actual_source_bytes=source_bytes,
+                discord_channel_id="4254",
+                discord_after_message_id="9000",
+            ),
+            [],
+        )
 
     def test_source_gap_is_rejected(self) -> None:
         broken = copy.deepcopy(self.good)

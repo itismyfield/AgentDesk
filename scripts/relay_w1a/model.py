@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping, Sequence
 SCHEMA_VERSION = 1
 MAX_U64 = (1 << 64) - 1
 DEFAULT_MAX_FUTURE_SKEW_MS = 300_000
+TOOL_SUMMARY_INLINE_MARKER_MAX_BYTES = 240
 MARKER_RE = re.compile(
     r"^\[ADK-E2E:(?P<run>[^:\]]+):(?P<case>[^:\]]+):"
     r"(?P<sequence>[0-9]+):(?P<edge>BEGIN|END)\]$"
@@ -129,6 +130,20 @@ def assess(observation: Observation) -> Assessment:
         return _inconclusive("continuity_not_typed")
     if not isinstance(observation.queue, QueueDisposition):
         return _inconclusive("queue_not_typed")
+    if any(
+        not isinstance(value, bool)
+        for value in (
+            observation.identity_complete,
+            observation.clock_valid,
+            observation.affirmative_termination,
+            observation.source_progress,
+            observation.delivery_progress,
+            observation.control_contradiction,
+            observation.terminal_delivery_committed,
+            observation.typed_idle,
+        )
+    ):
+        return _inconclusive("observation_bool_not_typed")
     if not observation.identity_complete or not observation.episode_key:
         return _inconclusive("missing_identity")
     if not observation.clock_valid:
@@ -155,7 +170,9 @@ def assess(observation: Observation) -> Assessment:
         proof_matches = (
             isinstance(proof.queue, QueueDisposition)
             and isinstance(observation.queue, QueueDisposition)
+            and isinstance(proof.identity_complete, bool)
             and proof.identity_complete
+            and isinstance(proof.clock_valid, bool)
             and proof.clock_valid
             and isinstance(proof.episode_key, str)
             and bool(proof.episode_key)
@@ -175,7 +192,9 @@ def assess(observation: Observation) -> Assessment:
             and _clock_stamp_well_formed(proof.action_reprobe_at)
             and isinstance(proof.termination_id, str)
             and bool(proof.termination_id)
+            and isinstance(proof.finalizer_committed, bool)
             and proof.finalizer_committed
+            and isinstance(proof.watcher_stopped, bool)
             and proof.watcher_stopped
         )
         if not proof_matches:
@@ -431,6 +450,8 @@ def reserve_attempt(
     delivery_proof: DeliveryProof,
     now: ClockStamp,
 ) -> LedgerTransition:
+    if record is not None and not isinstance(record.state, LedgerState):
+        return LedgerTransition(record, False, 0, "ledger_state_not_typed", True)
     if (
         record is not None
         and record.state in {LedgerState.RESERVED, LedgerState.EFFECT_PENDING}
@@ -582,6 +603,18 @@ def settle_effect(
         return LedgerTransition(record, False, 0, "inflight_continuity_inconclusive", True)
     if not clock_allows_transition(record.clock_stamp, now):
         return LedgerTransition(record, False, 0, "clock_fail_closed", True)
+    same_episode_source_identity = (
+        observation.episode_key == record.episode_key
+        and observation.source_id == record.source_id
+        and observation.source_generation == record.source_generation
+    )
+    if (
+        observation.continuity is InflightContinuity.REPLACED
+        and same_episode_source_identity
+    ):
+        return LedgerTransition(
+            record, False, 0, "replacement_identity_inconclusive", True
+        )
     if observation.episode_key != record.episode_key or (
         observation.continuity is InflightContinuity.REPLACED
     ):
@@ -978,11 +1011,7 @@ def plan_bounded_batch(
             if candidate_raw_bytes > source_scan_budget and prefix:
                 break
             candidate_prefix = [*prefix, candidate]
-            candidate_summary = _tool_summary(
-                candidate_prefix,
-                policy_version,
-                max_bytes=available_bytes,
-            )
+            candidate_summary = _tool_summary(candidate_prefix, policy_version)
             if len(candidate_summary.encode("utf-8")) > available_bytes:
                 break
             prefix = candidate_prefix
@@ -1031,6 +1060,7 @@ def commit_dispositions(
         ):
             raise ValueError("Discord id mapping index is invalid")
     committed: list[PlannedDisposition] = []
+    used_message_ids: set[str] = set()
     for index, disposition in enumerate(plan.dispositions):
         if not isinstance(disposition.kind, DispositionKind):
             raise ValueError("unknown disposition kind")
@@ -1050,6 +1080,9 @@ def commit_dispositions(
                 )
         elif ids:
             raise ValueError("policy omission cannot claim a Discord message")
+        if any(message_id in used_message_ids for message_id in ids):
+            raise ValueError("Discord message ids must be globally unique")
+        used_message_ids.update(ids)
         committed.append(
             replace(disposition, committed=True, discord_message_ids=ids)
         )
@@ -1090,6 +1123,7 @@ def advance_committed_frontier(
         raise ValueError("invalid current frontier")
     frontier = current
     seen_ranges: set[str] = set()
+    seen_message_ids: set[str] = set()
     pending_seen = False
     for disposition in dispositions:
         if (
@@ -1149,6 +1183,13 @@ def advance_committed_frontier(
         if any(range_id in seen_ranges for range_id in disposition.range_ids):
             raise ValueError("duplicate disposition range id")
         seen_ranges.update(disposition.range_ids)
+        if disposition.committed and disposition.kind in {
+            DispositionKind.DELIVERED,
+            DispositionKind.SUMMARIZED,
+        }:
+            if message_ids[0] in seen_message_ids:
+                raise ValueError("Discord message ids must be globally unique")
+            seen_message_ids.add(message_ids[0])
         if not disposition.committed:
             pending_seen = True
             continue
@@ -1226,9 +1267,16 @@ def _hash_ranges(ranges: Iterable[SourceRange]) -> str:
 def _tool_summary(
     ranges: Sequence[SourceRange],
     policy_version: str,
-    *,
-    max_bytes: int | None = None,
 ) -> str:
+    return _tool_summary_contract(ranges, policy_version)[0]
+
+
+def _tool_summary_contract(
+    ranges: Sequence[SourceRange],
+    policy_version: str,
+) -> tuple[str, bool]:
+    """Return the canonical summary body and whether markers use digest form."""
+
     raw_bytes = sum(len(entry.raw) for entry in ranges)
     markers = [entry.marker for entry in ranges if entry.marker]
     marker_suffix = "" if not markers else " markers=" + ",".join(markers)
@@ -1237,14 +1285,20 @@ def _tool_summary(
         f"range={ranges[0].start}:{ranges[-1].end} records={len(ranges)} "
         f"raw_bytes={raw_bytes} sha256={_hash_ranges(ranges)}{marker_suffix}]"
     )
-    if max_bytes is None or len(summary.encode("utf-8")) <= max_bytes or not markers:
-        return summary
+    if (
+        len(summary.encode("utf-8")) <= TOOL_SUMMARY_INLINE_MARKER_MAX_BYTES
+        or not markers
+    ):
+        return summary, False
     marker_digest = hashlib.sha256("\n".join(markers).encode("utf-8")).hexdigest()
     return (
-        f"[AgentDesk summary policy={policy_version} "
-        f"range={ranges[0].start}:{ranges[-1].end} records={len(ranges)} "
-        f"raw_bytes={raw_bytes} sha256={_hash_ranges(ranges)} "
-        f"marker_count={len(markers)} marker_sha256={marker_digest}]"
+        (
+            f"[AgentDesk summary policy={policy_version} "
+            f"range={ranges[0].start}:{ranges[-1].end} records={len(ranges)} "
+            f"raw_bytes={raw_bytes} sha256={_hash_ranges(ranges)} "
+            f"marker_count={len(markers)} marker_sha256={marker_digest}]"
+        ),
+        True,
     )
 
 
@@ -1529,17 +1583,9 @@ def validate_evidence_bundle(
                 errors.append("discord_revision_gap")
         final_messages[message_id] = ordered[-1]
 
-    for marker in markers:
-        marker_count = sum(
-            str(message.get("normalized_body", "")).count(marker)
-            for message in final_messages.values()
-            if message.get("message_role") == "relay_body"
-        )
-        if marker_count != 1:
-            errors.append(f"marker_count:{marker}:{marker_count}")
-
     range_owners: dict[str, int] = {}
     used_message_ids: set[str] = set()
+    digest_summary_markers: set[str] = set()
     committed_spans: list[tuple[int, int]] = []
     pending_seen = False
     for index, disposition in enumerate(dispositions):
@@ -1606,8 +1652,11 @@ def validate_evidence_bundle(
         if disposition.get("source_range_sha256s") != expected_hashes:
             errors.append("disposition_source_hashes_mismatch")
 
+        digest_marker_summary = False
         if kind is DispositionKind.SUMMARIZED:
-            expected_body = _tool_summary(entries, policy)
+            expected_body, digest_marker_summary = _tool_summary_contract(
+                entries, policy
+            )
         elif kind is DispositionKind.DELIVERED:
             expected_body = "".join(entry.body for entry in entries)
         else:
@@ -1627,6 +1676,10 @@ def validate_evidence_bundle(
         if not committed:
             pending_seen = True
             continue
+        if digest_marker_summary and source_kinds == {RangeKind.TOOL_BULK}:
+            digest_summary_markers.update(
+                entry.marker for entry in entries if entry.marker is not None
+            )
         if pending_seen:
             errors.append("committed_disposition_after_pending_suffix")
         span = (entries[0].start, entries[-1].end)
@@ -1665,6 +1718,16 @@ def validate_evidence_bundle(
                 errors.append("discord_body_hash_mismatch")
         elif ids:
             errors.append("omission_has_discord_message")
+
+    for marker in markers:
+        marker_count = sum(
+            str(message.get("normalized_body", "")).count(marker)
+            for message in final_messages.values()
+            if message.get("message_role") == "relay_body"
+        )
+        expected_marker_count = 0 if marker in digest_summary_markers else 1
+        if marker_count != expected_marker_count:
+            errors.append(f"marker_count:{marker}:{marker_count}")
 
     if set(range_owners) != set(source_by_id):
         errors.append("source_range_without_disposition")
