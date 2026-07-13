@@ -1,6 +1,7 @@
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::{self as discord, SharedData};
+use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
@@ -72,9 +73,13 @@ impl SessionEnrichment {
             .map(|binding| binding.owner_channel_id)
             .or(inflight_owner_channel_id)
             .map(|id| id.get());
-        let tmux_session = watcher_binding
-            .map(|binding| binding.tmux_session_name)
-            .or(inflight_tmux_session);
+        // The active in-flight row identifies the producer whose liveness this
+        // health snapshot classifies. A stale watcher binding must never retarget
+        // that probe to another tmux session and lend its death to this turn.
+        let tmux_session = liveness_probe_session(
+            inflight_tmux_session.as_deref(),
+            watcher_binding_tmux_session.as_deref(),
+        );
         let (last_relay_offset, last_relay_ts_ms, reconnect_count) = shared
             .tmux_relay_coords
             .get(&channel)
@@ -152,12 +157,12 @@ impl SessionEnrichment {
         match tmux_session {
             Some(name) => {
                 let probe_target = name.to_string();
-                let alive = tokio::task::spawn_blocking(move || {
-                    crate::services::platform::tmux::has_session(&probe_target)
+                let liveness = tokio::task::spawn_blocking(move || {
+                    crate::services::platform::tmux::pane_liveness(&probe_target)
                 })
                 .await
-                .unwrap_or(false);
-                Some(alive)
+                .ok()?;
+                liveness_as_alive(liveness)
             }
             None => None,
         }
@@ -178,9 +183,7 @@ impl SessionEnrichment {
     pub fn desynced(&self, live_tmux_present: bool, attached: bool) -> bool {
         let live_tmux_orphaned =
             live_tmux_present && self.inflight_state_present && !attached && self.relay_stale;
-        self.capture_lagged
-            || live_tmux_orphaned
-            || (self.tmux_session_mismatch && self.relay_stale)
+        self.capture_lagged || live_tmux_orphaned || self.tmux_session_mismatch
     }
 
     pub fn inflight_started_at(&self) -> Option<String> {
@@ -222,5 +225,40 @@ impl SessionEnrichment {
             .as_ref()
             .and_then(|state| state.dispatch_id.as_deref())
             .is_some()
+    }
+}
+
+fn liveness_probe_session(inflight: Option<&str>, watcher: Option<&str>) -> Option<String> {
+    inflight.or(watcher).map(str::to_string)
+}
+
+fn liveness_as_alive(liveness: PaneLiveness) -> Option<bool> {
+    match liveness {
+        PaneLiveness::Live => Some(true),
+        PaneLiveness::DeadOrAbsent => Some(false),
+        PaneLiveness::ProbeError => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inflight_a_alive_watcher_b_dead_mismatch_probes_a() {
+        let inflight_a_liveness = liveness_as_alive(PaneLiveness::Live);
+        let watcher_b_liveness = liveness_as_alive(PaneLiveness::DeadOrAbsent);
+        assert_eq!(
+            liveness_probe_session(Some("inflight-a"), Some("watcher-b")),
+            Some("inflight-a".to_string())
+        );
+        assert_eq!(inflight_a_liveness, Some(true));
+        assert_eq!(watcher_b_liveness, Some(false));
+    }
+
+    #[test]
+    fn only_exact_dead_or_absent_maps_to_dead() {
+        assert_eq!(liveness_as_alive(PaneLiveness::DeadOrAbsent), Some(false));
+        assert_eq!(liveness_as_alive(PaneLiveness::ProbeError), None);
     }
 }

@@ -102,10 +102,9 @@ impl StallVerdictAssessment {
     }
 }
 
-/// Pure W0 classifier. Ordering is intentional: completed idle work and the
-/// deployment restart grace are safe terminal/mitigation cases. Outside that
-/// grace, control-plane contradictions outrank producer activity because a
-/// live producer does not prove that its relay path is healthy.
+/// Pure classifier. Only an affirmative current-turn death signal may produce
+/// `ProducerDead`; silence, elapsed time, restart grace, and lack of positive
+/// evidence remain control-plane uncertainty.
 pub(super) fn classify_stall(signals: StallSignalSnapshot) -> StallVerdictAssessment {
     if signals.delivery_committed && signals.idle {
         return StallVerdictAssessment::new(
@@ -117,19 +116,23 @@ pub(super) fn classify_stall(signals: StallSignalSnapshot) -> StallVerdictAssess
         );
     }
 
-    if signals.restart_grace_active {
-        return StallVerdictAssessment::new(
-            StallVerdict::ProducerLive,
-            vec![StallVerdictReason::RestartGraceActive],
-        );
-    }
-
     let phantom_attached =
         signals.watcher_attached && matches!(signals.watcher_owns_live_relay, Some(false));
     let ownership_unknown = signals.watcher_attached && signals.watcher_owns_live_relay.is_none();
     let pretripped_token = signals.mailbox_cancel_token_present
         && matches!(signals.active_turn, RelayActiveTurn::None);
+    if signals.producer_known_dead {
+        let mut reasons = vec![StallVerdictReason::ProducerKnownDead];
+        if ownership_unknown {
+            reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
+        }
+        return StallVerdictAssessment::new(StallVerdict::ProducerDead, reasons);
+    }
+
     let mut control_plane_reasons = Vec::new();
+    if signals.restart_grace_active {
+        control_plane_reasons.push(StallVerdictReason::RestartGraceActive);
+    }
     if signals.desynced {
         control_plane_reasons.push(StallVerdictReason::Desynced);
     }
@@ -165,23 +168,18 @@ pub(super) fn classify_stall(signals: StallSignalSnapshot) -> StallVerdictAssess
     if ownership_unknown {
         live_reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
     }
-    if signals.producer_activity_recent || signals.frontier_advanced_recently {
+    if signals.producer_activity_recent {
         return StallVerdictAssessment::new(StallVerdict::ProducerLive, live_reasons);
     }
 
-    if signals.producer_known_dead {
-        let mut reasons = vec![StallVerdictReason::ProducerKnownDead];
-        if ownership_unknown {
-            reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
-        }
-        return StallVerdictAssessment::new(StallVerdict::ProducerDead, reasons);
-    }
-
     let mut reasons = vec![StallVerdictReason::NoPositiveLiveness];
+    if signals.frontier_advanced_recently {
+        reasons.push(StallVerdictReason::FrontierAdvancedRecently);
+    }
     if ownership_unknown {
         reasons.push(StallVerdictReason::WatcherLiveRelayOwnershipUnknown);
     }
-    StallVerdictAssessment::new(StallVerdict::ProducerDead, reasons)
+    StallVerdictAssessment::new(StallVerdict::ControlPlaneDesync, reasons)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -225,13 +223,14 @@ fn classify_existing_judgment_lossy(
     freshness_secs: u64,
     restart_grace_active: bool,
 ) -> Option<StallVerdictAssessment> {
+    let progress = decision.map(|decision| decision.evidence.composite_progress(freshness_secs));
     classify_runtime_signals_lossy(
         &snapshot.relay_health,
         snapshot.attached,
         snapshot.inflight_state_present,
         snapshot.inflight_terminal_delivery_committed,
-        decision.is_some_and(|decision| decision.evidence.has_positive_liveness(freshness_secs)),
-        false,
+        progress.is_some_and(|progress| progress.source_recent),
+        progress.is_some_and(|progress| progress.delivery_recent),
         restart_grace_active,
         snapshot.desynced,
     )
@@ -391,7 +390,10 @@ fn classify_runtime_signals_lossy(
         active_turn,
         watcher_attached: relay.watcher_attached,
         watcher_owns_live_relay,
-        producer_known_dead: relay.tmux_alive == Some(false),
+        producer_known_dead: live_relay_present
+            && !desynced
+            && relay.tmux_session.is_some()
+            && relay.tmux_alive == Some(false),
         delivery_committed,
         idle,
         restart_grace_active,
@@ -628,14 +630,12 @@ mod tests {
     }
 
     #[test]
-    fn deploy_restart_first_turn_window_is_producer_live() {
+    fn deploy_restart_first_turn_window_is_not_producer_proof() {
         let assessment = classify_stall(StallSignalSnapshot {
-            desynced: true,
-            mailbox_cancel_token_present: true,
             restart_grace_active: true,
             ..quiet_signals()
         });
-        assert_eq!(assessment.verdict, StallVerdict::ProducerLive);
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             assessment.reasons,
             vec![StallVerdictReason::RestartGraceActive]
@@ -702,7 +702,7 @@ mod tests {
                 },
                 StallVerdict::ControlPlaneDesync,
             ),
-            (quiet_signals(), StallVerdict::ProducerDead),
+            (quiet_signals(), StallVerdict::ControlPlaneDesync),
         ];
         for (signals, expected) in cases {
             assert_eq!(classify_stall(signals).verdict, expected);
@@ -771,6 +771,14 @@ mod tests {
         let snapshot = watcher_fixture();
 
         for evidence in evidence_cases {
+            let progress = evidence.composite_progress(
+                super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            );
+            let expected_reasons = match (progress.source_recent, progress.delivery_recent) {
+                (true, _) => "desynced,producer_activity_recent",
+                (false, true) => "desynced,frontier_advanced_recently",
+                (false, false) => "desynced",
+            };
             let decision = liveness_decision(
                 StallWatchdogLivenessAction::Defer { deferral_count: 0 },
                 evidence,
@@ -782,12 +790,12 @@ mod tests {
                 false,
             );
             assert_eq!(verdict, "control_plane_desync");
-            assert_eq!(reasons, "desynced,producer_activity_recent");
+            assert_eq!(reasons, expected_reasons);
         }
     }
 
     #[test]
-    fn judgment_log_fields_honors_restart_grace_before_desync() {
+    fn judgment_log_fields_treats_restart_grace_as_uncertainty() {
         let snapshot = watcher_fixture();
         let decision = liveness_decision(
             StallWatchdogLivenessAction::Defer { deferral_count: 0 },
@@ -804,8 +812,11 @@ mod tests {
             true,
         );
 
-        assert_eq!(verdict, "producer_live");
-        assert_eq!(reasons, "restart_grace_active");
+        assert_eq!(verdict, "control_plane_desync");
+        assert_eq!(
+            reasons,
+            "restart_grace_active,desynced,producer_activity_recent"
+        );
     }
 
     #[test]
@@ -886,7 +897,7 @@ mod tests {
         relay.pending_discord_callback_msg_id = None;
         relay.watcher_owns_live_relay = false;
         relay.desynced = false;
-        relay.last_relay_ts_ms = None;
+        relay.tmux_alive = Some(false);
         assert!(!session.inflight_state_present);
         assert!(relay.watcher_attached);
 
@@ -899,7 +910,7 @@ mod tests {
             now,
         )
         .expect("attached idle watcher remains observable");
-        assert_eq!(idle.verdict, StallVerdict::ProducerDead);
+        assert_eq!(idle.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             idle.reasons,
             vec![
@@ -918,10 +929,11 @@ mod tests {
             now,
         )
         .expect("attached just-completed watcher remains observable");
-        assert_eq!(just_completed.verdict, StallVerdict::ProducerLive);
+        assert_eq!(just_completed.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             just_completed.reasons,
             vec![
+                StallVerdictReason::NoPositiveLiveness,
                 StallVerdictReason::FrontierAdvancedRecently,
                 StallVerdictReason::WatcherLiveRelayOwnershipUnknown,
             ]
@@ -958,7 +970,7 @@ mod tests {
         )
         .expect("idle rebind-origin row remains observable");
 
-        assert_eq!(assessment.verdict, StallVerdict::ProducerDead);
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             assessment.reasons,
             vec![
@@ -1006,7 +1018,7 @@ mod tests {
         )
         .expect("idle ownerless external-input row remains observable");
 
-        assert_eq!(assessment.verdict, StallVerdict::ProducerDead);
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             assessment.reasons,
             vec![
@@ -1096,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_health_fresh_inflight_or_relay_frontier_without_contradiction_is_producer_live() {
+    fn raw_health_separates_fresh_production_from_delivery_only() {
         let freshness = super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS;
         let timestamp = fixture_updated_at_unix();
         let fresh_now = timestamp + 1;
@@ -1131,10 +1143,13 @@ mod tests {
             stale_now - super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1,
         )
         .expect("fresh relay frontier fixture");
-        assert_eq!(fresh_frontier.verdict, StallVerdict::ProducerLive);
+        assert_eq!(fresh_frontier.verdict, StallVerdict::ControlPlaneDesync);
         assert_eq!(
             fresh_frontier.reasons,
-            vec![StallVerdictReason::FrontierAdvancedRecently]
+            vec![
+                StallVerdictReason::NoPositiveLiveness,
+                StallVerdictReason::FrontierAdvancedRecently,
+            ]
         );
     }
 
@@ -1164,6 +1179,34 @@ mod tests {
                 StallVerdictReason::ProducerActivityRecent,
             ]
         );
+    }
+
+    #[test]
+    fn raw_health_inflight_a_alive_watcher_b_dead_mismatch_is_control_plane_desync() {
+        let timestamp = fixture_updated_at_unix();
+        let mut session = session_fixture(Some(FIXTURE_UPDATED_AT), true);
+        session.tmux_session = Some("inflight-a".to_string());
+        session.tmux_session_mismatch = true;
+        let mut relay = relay_fixture();
+        relay.tmux_session = session.tmux_session.clone();
+        // Model the pre-fix cross-session sample (dead watcher B). Even if a
+        // stale adapter supplies it, the identity mismatch cannot become A's
+        // affirmative death signal.
+        relay.tmux_alive = Some(false);
+        relay.desynced = session.desynced(true, true);
+
+        let assessment = classify_health_snapshot_at_lossy(
+            Some(&ProviderKind::Codex),
+            ChannelId::new(42),
+            &session,
+            &relay,
+            timestamp + 1,
+            timestamp - super::super::recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 1,
+        )
+        .expect("mismatched watcher remains observable");
+
+        assert_eq!(assessment.verdict, StallVerdict::ControlPlaneDesync);
+        assert!(assessment.reasons.contains(&StallVerdictReason::Desynced));
     }
 
     #[test]
@@ -1234,8 +1277,14 @@ mod tests {
             now - threshold as i64 + 1,
         )
         .expect("inside restart grace");
-        assert_eq!(inside.verdict, StallVerdict::ProducerLive);
-        assert_eq!(inside.reasons, vec![StallVerdictReason::RestartGraceActive]);
+        assert_eq!(inside.verdict, StallVerdict::ControlPlaneDesync);
+        assert_eq!(
+            inside.reasons,
+            vec![
+                StallVerdictReason::RestartGraceActive,
+                StallVerdictReason::Desynced
+            ]
+        );
 
         let cleanup_boundary = classify_health_snapshot_at_lossy(
             Some(&ProviderKind::Codex),

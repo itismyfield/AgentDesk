@@ -933,6 +933,32 @@ mod tests {
     }
 
     #[test]
+    fn process_watcher_lines_omits_bulk_success_and_keeps_following_assistant_text() {
+        let raw = format!("bulk-secret-{}", "x".repeat(9 * 1024));
+        let mut buffer = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": [{
+                    "type": "tool_result", "content": raw, "is_error": false
+                }]}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "relay survived"}]}
+            })
+        );
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+        assert!(!outcome.soft_terminal_candidate && buffer.is_empty());
+        assert_eq!(full_response, "relay survived");
+        assert!(tool_state.placeholder_events.is_empty());
+    }
+
+    #[test]
     fn process_watcher_lines_strips_leading_tui_no_response_before_result() {
         let mut buffer = concat!(
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"No response requested.\\n\\nreal answer\"}]},\"sessionId\":\"sess-tui\"}\n",

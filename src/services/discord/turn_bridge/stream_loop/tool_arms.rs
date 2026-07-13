@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::services::agent_protocol::TaskNotificationKind;
+use crate::services::tool_output_guard::matched_or_last_tool;
 
 use super::*;
 
@@ -369,10 +370,7 @@ pub(super) async fn handle_stream_tool_message(
             is_error,
             tool_use_id,
         } => {
-            // #3084: resolve the originating tool by id when the
-            // result carries one (pairing a delayed subagent
-            // result to its own ToolUse); otherwise fall back to
-            // FIFO order for id-less backends.
+            // Resolve delayed results by id; preserve the FIFO fallback.
             let status_tool_name = match tool_use_id.as_deref() {
                 Some(id) => pending_status_tool_results_by_id
                     .remove(id)
@@ -391,15 +389,17 @@ pub(super) async fn handle_stream_tool_message(
                     label,
                 );
             }
-            // #1084: flag oversize tool outputs + record metrics.
-            // Never mutates `content` — the agent and transcript
-            // still see the raw output; only a warn log + counters
-            // fire when thresholds are exceeded.
-            let _ = crate::services::tool_output_guard::observe(
-                last_tool_name.as_deref(),
+            let projected = crate::services::tool_output_guard::project_for_relay(
+                matched_or_last_tool(status_tool_name.as_deref(), last_tool_name.as_deref()),
                 is_error,
                 &content,
             );
+            crate::services::tool_output_guard::observe_projection(
+                matched_or_last_tool(status_tool_name.as_deref(), last_tool_name.as_deref()),
+                is_error,
+                &projected,
+            );
+            let content = projected.content.into_owned();
             if is_error {
                 record_placeholder_live_event(
                     &shared_owned,
