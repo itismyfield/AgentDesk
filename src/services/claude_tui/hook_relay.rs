@@ -1,5 +1,6 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -12,6 +13,16 @@ use crate::services::claude_tui::memento_feedback;
 const RELAY_TIMEOUT: Duration = Duration::from_secs(2);
 const STOP_RELAY_TIMEOUT: Duration = Duration::from_millis(750);
 const FAILURE_MARKER_TTL_SECS: i64 = 24 * 60 * 60;
+const FAILURE_MARKER_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER";
+
+#[cfg(test)]
+const FAILURE_MARKER_PARENT_TEST_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST";
+#[cfg(test)]
+const FAILURE_MARKER_TEST_ELAPSED_PATH_ENV: &str =
+    "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_ELAPSED_PATH";
+#[cfg(test)]
+const FAILURE_MARKER_TEST_RELEASE_PATH_ENV: &str =
+    "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct HookRelayFailureMarker {
@@ -21,6 +32,12 @@ pub(crate) struct HookRelayFailureMarker {
     pub endpoint: String,
     pub error: String,
     pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct HookRelayFailureMarkerWriteRequest {
+    marker_dir: PathBuf,
+    marker: HookRelayFailureMarker,
 }
 
 pub fn run_cli(
@@ -45,8 +62,82 @@ fn run_cli_with_name(
     session_id: &str,
     relay_name: &str,
 ) -> Result<(), String> {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    run_cli_with_io_and_transport(
+        endpoint,
+        provider,
+        event,
+        session_id,
+        relay_name,
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        &mut stderr.lock(),
+        relay_hook_event,
+        relay_hook_event_response_with_timeout,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cli_with_io_and_transport<R, W, E, Relay, RelayResponse>(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    relay_name: &str,
+    input: &mut R,
+    output: &mut W,
+    error_output: &mut E,
+    relay: Relay,
+    relay_response: RelayResponse,
+) -> Result<(), String>
+where
+    R: Read,
+    W: Write,
+    E: Write,
+    Relay: Fn(&str, &str, &str, &str, Value) -> Result<(), String>,
+    RelayResponse: Fn(&str, &str, &str, &str, Value, Duration) -> Result<Value, String>,
+{
+    run_cli_with_io_transport_and_failure_recorder(
+        endpoint,
+        provider,
+        event,
+        session_id,
+        relay_name,
+        input,
+        output,
+        error_output,
+        relay,
+        relay_response,
+        handoff_hook_relay_failure,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cli_with_io_transport_and_failure_recorder<R, W, E, Relay, RelayResponse, FailureRecorder>(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    relay_name: &str,
+    input: &mut R,
+    output: &mut W,
+    error_output: &mut E,
+    relay: Relay,
+    relay_response: RelayResponse,
+    failure_recorder: FailureRecorder,
+) -> Result<(), String>
+where
+    R: Read,
+    W: Write,
+    E: Write,
+    Relay: Fn(&str, &str, &str, &str, Value) -> Result<(), String>,
+    RelayResponse: Fn(&str, &str, &str, &str, Value, Duration) -> Result<Value, String>,
+    FailureRecorder: FnOnce(&str, &str, &str, &str, &str) -> Result<(), String>,
+{
     let mut stdin = String::new();
-    std::io::stdin()
+    input
         .read_to_string(&mut stdin)
         .map_err(|error| format!("read hook stdin: {error}"))?;
     let payload = if stdin.trim().is_empty() {
@@ -57,71 +148,92 @@ fn run_cli_with_name(
 
     let effective_session_id = relay_event_session_id(provider, session_id, &payload);
     if should_wait_for_stop_response(provider, event) {
-        let stdout = claude_stop_stdout_after_relay(
+        let relay_result = relay_response(
             endpoint,
             provider,
             event,
             &effective_session_id,
             payload,
-            relay_name,
+            STOP_RELAY_TIMEOUT,
         );
-        println!("{stdout}");
-        return Ok(());
+        let rendered_stdout = stop_stdout_from_relay_result(provider, event, &relay_result);
+        let stdout_result = write_hook_stdout(output, &rendered_stdout);
+        if let Err(error) = relay_result {
+            report_relay_failure_with_recorder(
+                error_output,
+                endpoint,
+                provider,
+                event,
+                &effective_session_id,
+                relay_name,
+                &error,
+                failure_recorder,
+            );
+        }
+        return stdout_result;
     }
 
     // Compute the hook stdout (which may carry a tool_feedback nudge for memento
     // searches) before `payload` is moved into the relay POST below.
-    let stdout = hook_stdout(provider, event, &payload);
-    if let Err(error) = relay_hook_event(endpoint, provider, event, &effective_session_id, payload)
-    {
+    let rendered_stdout = hook_stdout(provider, event, &payload);
+    let relay_result = relay(endpoint, provider, event, &effective_session_id, payload);
+    let stdout_result = write_hook_stdout(output, &rendered_stdout);
+    if let Err(error) = relay_result {
         // Provider TUI hooks must not become turn blockers. The receiver path
         // is a boundary signal optimization; provider output capture remains
         // the source of output truth.
-        eprintln!("agentdesk {relay_name} warning: {error}");
-        if let Err(marker_error) =
-            record_hook_relay_failure(endpoint, provider, event, &effective_session_id, &error)
-        {
-            eprintln!("agentdesk {relay_name} marker warning: {marker_error}");
-        }
+        report_relay_failure_with_recorder(
+            error_output,
+            endpoint,
+            provider,
+            event,
+            &effective_session_id,
+            relay_name,
+            &error,
+            failure_recorder,
+        );
     }
-    println!("{stdout}");
-    Ok(())
+    stdout_result
 }
 
 pub(super) fn should_wait_for_stop_response(provider: &str, event: &str) -> bool {
-    provider.trim().eq_ignore_ascii_case("claude")
-        && matches!(
-            event.trim().to_ascii_lowercase().as_str(),
-            "stop" | "subagentstop" | "subagent_stop"
-        )
+    if !provider.trim().eq_ignore_ascii_case("claude") {
+        return false;
+    }
+    matches!(
+        event.trim().to_ascii_lowercase().as_str(),
+        "stop" | "subagentstop" | "subagent_stop" | "userpromptsubmit" | "user_prompt_submit"
+    )
 }
 
-fn claude_stop_stdout_after_relay(
+fn write_hook_stdout<W: Write>(stdout: &mut W, rendered: &str) -> Result<(), String> {
+    writeln!(stdout, "{rendered}").map_err(|error| format!("write hook stdout: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("flush hook stdout: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_relay_failure_with_recorder<W, FailureRecorder>(
+    stderr: &mut W,
     endpoint: &str,
     provider: &str,
     event: &str,
     session_id: &str,
-    payload: Value,
     relay_name: &str,
-) -> String {
-    let relay_result = relay_hook_event_response_with_timeout(
-        endpoint,
-        provider,
-        event,
-        session_id,
-        payload,
-        STOP_RELAY_TIMEOUT,
-    );
-    let stdout = stop_stdout_from_relay_result(provider, event, &relay_result);
-    if let Err(error) = relay_result {
-        eprintln!("agentdesk {relay_name} warning: {error}");
-        if let Err(marker_error) =
-            record_hook_relay_failure(endpoint, provider, event, session_id, &error)
-        {
-            eprintln!("agentdesk {relay_name} marker warning: {marker_error}");
-        }
+    error: &str,
+    failure_recorder: FailureRecorder,
+) where
+    W: Write,
+    FailureRecorder: FnOnce(&str, &str, &str, &str, &str) -> Result<(), String>,
+{
+    let _ = writeln!(stderr, "agentdesk {relay_name} warning: {error}");
+    if let Err(marker_error) = failure_recorder(endpoint, provider, event, session_id, error) {
+        let _ = writeln!(
+            stderr,
+            "agentdesk {relay_name} marker warning: {marker_error}"
+        );
     }
-    stdout
 }
 
 fn stop_stdout_from_relay_result(
@@ -143,7 +255,9 @@ pub(super) fn stop_stdout_from_receiver_response(
     if !should_wait_for_stop_response(provider, event) {
         return hook_success_stdout(provider).to_string();
     }
-    if response.get("decision").and_then(Value::as_str) == Some("block") {
+    if canonical_hook_event_name(event) != "UserPromptSubmit"
+        && response.get("decision").and_then(Value::as_str) == Some("block")
+    {
         return json!({
             "decision": "block",
             "reason": crate::services::claude_tui::hook_output_guard::CLAUDE_HOOK_BLOCK_REASON,
@@ -155,8 +269,22 @@ pub(super) fn stop_stdout_from_receiver_response(
         .and_then(|flush| flush.get("additional_context"))
         .and_then(Value::as_str)
         .filter(|context| !context.trim().is_empty())
-        .map(|context| hook_specific_stdout("claude", "Stop", context.to_string()))
+        .map(|context| {
+            hook_specific_stdout(
+                "claude",
+                canonical_hook_event_name(event),
+                context.to_string(),
+            )
+        })
         .unwrap_or_else(|| hook_success_stdout(provider).to_string())
+}
+
+fn canonical_hook_event_name(event: &str) -> &str {
+    match event.trim().to_ascii_lowercase().as_str() {
+        "userpromptsubmit" | "user_prompt_submit" => "UserPromptSubmit",
+        "subagentstop" | "subagent_stop" => "SubagentStop",
+        _ => "Stop",
+    }
 }
 
 fn relay_event_session_id(provider: &str, command_session_id: &str, payload: &Value) -> String {
@@ -213,8 +341,9 @@ fn hook_success_stdout(provider: &str) -> &'static str {
 /// `hookSpecificOutput` block. Codex non-nudge events, including `Stop`, remain
 /// observational `{}`.
 ///
-/// Session-end feedback flushing is not implemented in the hook relay; that
-/// path is deferred to #3332 for a server-side design.
+/// Stop and UserPromptSubmit use the bounded receiver-response path above for
+/// #4308's model-owned feedback flush/retry. This function remains the local,
+/// immediate PostToolUse path and never submits feedback through a proxy.
 fn hook_stdout(provider: &str, event: &str, payload: &Value) -> String {
     let provider_key = provider.trim().to_ascii_lowercase();
     let event_is_post_tool_use = event.trim().eq_ignore_ascii_case("PostToolUse");
@@ -380,6 +509,7 @@ fn marker_component(value: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn record_hook_relay_failure(
     endpoint: &str,
     provider: &str,
@@ -387,23 +517,93 @@ fn record_hook_relay_failure(
     session_id: &str,
     error: &str,
 ) -> Result<(), String> {
+    write_hook_relay_failure_marker(prepare_hook_relay_failure_marker(
+        endpoint, provider, event, session_id, error,
+    )?)
+}
+
+fn prepare_hook_relay_failure_marker(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    error: &str,
+) -> Result<HookRelayFailureMarkerWriteRequest, String> {
     let marker_dir =
         failure_marker_dir(provider).ok_or_else(|| "runtime root is unavailable".to_string())?;
+    Ok(HookRelayFailureMarkerWriteRequest {
+        marker_dir,
+        marker: HookRelayFailureMarker {
+            provider: provider.trim().to_ascii_lowercase(),
+            event: event.to_string(),
+            session_id: session_id.to_string(),
+            endpoint: endpoint.to_string(),
+            error: error.to_string(),
+            recorded_at: Utc::now(),
+        },
+    })
+}
+
+fn handoff_hook_relay_failure(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    error: &str,
+) -> Result<(), String> {
+    let request = prepare_hook_relay_failure_marker(endpoint, provider, event, session_id, error)?;
+    let encoded = serde_json::to_string(&request)
+        .map_err(|err| format!("serialize hook relay failure marker handoff: {err}"))?;
+    let executable = std::env::current_exe()
+        .map_err(|err| format!("resolve hook relay failure marker worker: {err}"))?;
+    let mut command = Command::new(executable);
+    #[cfg(test)]
+    command.args([
+        "--ignored",
+        "--exact",
+        "services::claude_tui::hook_relay::tests::failure_marker_worker_subprocess_entry",
+    ]);
+    let child = command
+        .env(FAILURE_MARKER_WORKER_ENV, encoded)
+        // The request owns the resolved marker directory. Keeping the worker
+        // independent of later process-global env changes prevents test/runtime
+        // root drift after the handoff has succeeded.
+        .env_remove("AGENTDESK_ROOT_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("start hook relay failure marker worker: {err}"))?;
+    // Dropping a process handle does not terminate the child. Unlike a detached
+    // in-process thread, this worker survives the one-shot hook CLI's exit.
+    drop(child);
+    Ok(())
+}
+
+pub(crate) fn run_failure_marker_worker_from_env() -> Option<Result<(), String>> {
+    let encoded = std::env::var_os(FAILURE_MARKER_WORKER_ENV)?;
+    Some(
+        encoded
+            .into_string()
+            .map_err(|_| "hook relay failure marker handoff is not UTF-8".to_string())
+            .and_then(|encoded| {
+                serde_json::from_str::<HookRelayFailureMarkerWriteRequest>(&encoded)
+                    .map_err(|err| format!("parse hook relay failure marker handoff: {err}"))
+            })
+            .and_then(write_hook_relay_failure_marker),
+    )
+}
+
+fn write_hook_relay_failure_marker(
+    request: HookRelayFailureMarkerWriteRequest,
+) -> Result<(), String> {
+    let HookRelayFailureMarkerWriteRequest { marker_dir, marker } = request;
     std::fs::create_dir_all(&marker_dir)
         .map_err(|err| format!("create hook relay failure marker dir: {err}"))?;
-
-    let marker = HookRelayFailureMarker {
-        provider: provider.trim().to_ascii_lowercase(),
-        event: event.to_string(),
-        session_id: session_id.to_string(),
-        endpoint: endpoint.to_string(),
-        error: error.to_string(),
-        recorded_at: Utc::now(),
-    };
     let filename = format!(
         "{}-{}-{}-{}.json",
-        marker_component(session_id),
-        marker_component(event),
+        marker_component(&marker.session_id),
+        marker_component(&marker.event),
         marker.recorded_at.timestamp_millis(),
         uuid::Uuid::new_v4().simple()
     );
@@ -499,8 +699,99 @@ fn marker_is_stale(marker: &HookRelayFailureMarker, now: DateTime<Utc>) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::ffi::OsString;
-    use std::sync::MutexGuard;
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+
+    #[derive(Debug, Default)]
+    struct ObservableOutputState {
+        bytes: Vec<u8>,
+        flushed: bool,
+    }
+
+    #[derive(Clone)]
+    struct ObservableOutput {
+        state: Arc<Mutex<ObservableOutputState>>,
+    }
+
+    impl Write for ObservableOutput {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .bytes
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .flushed = true;
+            Ok(())
+        }
+    }
+
+    fn http_request_body_bounds(request: &[u8]) -> Option<(usize, usize)> {
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?;
+        let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })?;
+        Some((header_end + 4, content_length))
+    }
+
+    fn spawn_hook_receiver(
+        response: Value,
+    ) -> (String, mpsc::Receiver<Vec<u8>>, std::thread::JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind hook relay receiver");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("hook receiver address")
+        );
+        let (request_tx, request_rx) = mpsc::sync_channel(1);
+        let receiver = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept hook relay request");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("set hook receiver read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).expect("read hook relay request");
+                assert!(read > 0, "hook relay request ended before its body");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some((body_start, body_len)) = http_request_body_bounds(&request)
+                    && request.len() >= body_start + body_len
+                {
+                    break;
+                }
+            }
+            request_tx
+                .send(request)
+                .expect("publish captured hook relay request");
+
+            let body = response.to_string();
+            let wire_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(wire_response.as_bytes())
+                .expect("write hook receiver response");
+            socket.flush().expect("flush hook receiver response");
+        });
+        (endpoint, request_rx, receiver)
+    }
 
     /// Guard that serializes every test mutation of `AGENTDESK_ROOT_DIR`
     /// against the process-global lock shared with `credential.rs`, the
@@ -535,6 +826,42 @@ mod tests {
                 None => unsafe { std::env::remove_var(self.key) },
             }
         }
+    }
+
+    fn marker_dir_under_root(root: &Path, provider: &str) -> PathBuf {
+        root.join(failure_marker_subdir(provider))
+    }
+
+    fn published_marker_count(marker_dir: &Path) -> usize {
+        std::fs::read_dir(marker_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| is_failure_marker_path(&entry.path()))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn wait_for_published_markers(marker_dir: &Path, expected: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while published_marker_count(marker_dir) < expected && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            published_marker_count(marker_dir),
+            expected,
+            "timed out waiting for {expected} hook relay failure marker(s)"
+        );
+    }
+
+    fn wait_for_test_release(path: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(path.exists(), "timed out waiting to release marker worker");
     }
 
     #[test]
@@ -747,6 +1074,343 @@ mod tests {
         assert_eq!(
             value["hookSpecificOutput"]["additionalContext"],
             "submit memento feedback for [42]"
+        );
+    }
+
+    #[test]
+    fn claude_user_prompt_submit_uses_its_own_server_retry_context() {
+        assert!(should_wait_for_stop_response("claude", "UserPromptSubmit"));
+        let out = stop_stdout_from_receiver_response(
+            "claude",
+            "UserPromptSubmit",
+            &serde_json::json!({
+                "memento_tool_feedback_flush": {
+                    "additional_context": "retry memento feedback for [42]"
+                }
+            }),
+        );
+        let value: Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "retry memento feedback for [42]"
+        );
+    }
+
+    #[test]
+    fn claude_user_prompt_submit_cli_relays_stdin_and_emits_receiver_context() {
+        let (endpoint, request_rx, receiver) = spawn_hook_receiver(serde_json::json!({
+            "decision": "block",
+            "memento_tool_feedback_flush": {
+                "additional_context": "retry memento feedback for [42]"
+            }
+        }));
+        let prompt_payload = serde_json::json!({
+            "prompt": "keep this original user prompt",
+            "session_id": "payload-session"
+        });
+        let mut stdin = Cursor::new(prompt_payload.to_string());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        run_cli_with_io_and_transport(
+            &endpoint,
+            "claude",
+            "UserPromptSubmit",
+            "command-session",
+            "test-hook-relay",
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            relay_hook_event,
+            relay_hook_event_response_with_timeout,
+        )
+        .unwrap();
+
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("capture UserPromptSubmit request");
+        receiver.join().expect("hook receiver exits cleanly");
+        let request_head = std::str::from_utf8(&request).unwrap();
+        assert!(request_head.starts_with(
+            "POST /hooks/claude/UserPromptSubmit?session_id=command-session HTTP/1.1\r\n"
+        ));
+        let (body_start, body_len) = http_request_body_bounds(&request).unwrap();
+        let posted_payload: Value =
+            serde_json::from_slice(&request[body_start..body_start + body_len]).unwrap();
+        assert_eq!(posted_payload, prompt_payload);
+
+        let output: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(output["suppressOutput"], true);
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        assert_eq!(
+            output["hookSpecificOutput"]["additionalContext"],
+            "retry memento feedback for [42]"
+        );
+        assert!(output.get("decision").is_none());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn claude_user_prompt_submit_cli_transport_errors_keep_prompt_observational() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
+
+        for relay_error in [
+            "post hook event: timed out",
+            "parse hook receiver response: expected value",
+        ] {
+            let prompt_seen = Cell::new(false);
+            let mut stdin = Cursor::new(
+                serde_json::json!({"prompt": "keep this original user prompt"}).to_string(),
+            );
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+
+            run_cli_with_io_and_transport(
+                "http://127.0.0.1:1",
+                "claude",
+                "UserPromptSubmit",
+                "command-session",
+                "test-hook-relay",
+                &mut stdin,
+                &mut stdout,
+                &mut stderr,
+                |_, _, _, _, _| panic!("UserPromptSubmit must use response transport"),
+                |_, _, _, _, payload, timeout| {
+                    assert_eq!(timeout, STOP_RELAY_TIMEOUT);
+                    prompt_seen.set(
+                        payload.get("prompt").and_then(Value::as_str)
+                            == Some("keep this original user prompt"),
+                    );
+                    Err(relay_error.to_string())
+                },
+            )
+            .unwrap();
+
+            assert!(prompt_seen.get());
+            let output: Value = serde_json::from_slice(&stdout).unwrap();
+            assert_eq!(output, serde_json::json!({"suppressOutput": true}));
+            assert!(output.get("decision").is_none());
+            assert!(String::from_utf8(stderr).unwrap().contains(relay_error));
+        }
+
+        wait_for_published_markers(&marker_dir_under_root(temp_dir.path(), "claude"), 2);
+        let markers = drain_hook_relay_failure_markers("claude", "command-session");
+        assert_eq!(
+            markers.len(),
+            2,
+            "healthy storage must retain both failures"
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|marker| marker.error == "post hook event: timed out")
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|marker| { marker.error == "parse hook receiver response: expected value" })
+        );
+    }
+
+    fn assert_hook_command_hands_off_marker_within_latency_ceiling(
+        event: &'static str,
+        wait_for_response: bool,
+    ) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
+        let output_state = Arc::new(Mutex::new(ObservableOutputState::default()));
+        let handoff_output_state = Arc::clone(&output_state);
+        let mut stdin = Cursor::new(
+            serde_json::json!({"prompt": "keep this original user prompt"}).to_string(),
+        );
+        let mut stdout = ObservableOutput {
+            state: Arc::clone(&output_state),
+        };
+        let mut stderr = Vec::new();
+        let started = std::time::Instant::now();
+
+        run_cli_with_io_transport_and_failure_recorder(
+            "http://127.0.0.1:1",
+            "claude",
+            event,
+            "command-session",
+            "test-hook-relay",
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            move |_, _, _, _, payload| {
+                assert!(!wait_for_response, "wait path must use response transport");
+                assert_eq!(
+                    payload.get("prompt").and_then(Value::as_str),
+                    Some("keep this original user prompt")
+                );
+                Err("post hook event: timed out".to_string())
+            },
+            move |_, _, _, _, payload, timeout| {
+                assert!(wait_for_response, "non-wait path must use relay transport");
+                assert_eq!(timeout, STOP_RELAY_TIMEOUT);
+                assert_eq!(
+                    payload.get("prompt").and_then(Value::as_str),
+                    Some("keep this original user prompt")
+                );
+                Err("post hook event: timed out".to_string())
+            },
+            move |endpoint, provider, event, session_id, error| {
+                let observed = handoff_output_state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                assert!(observed.flushed, "stdout must flush before marker handoff");
+                drop(observed);
+                handoff_hook_relay_failure(endpoint, provider, event, session_id, error)
+            },
+        )
+        .unwrap();
+
+        assert!(
+            started.elapsed() < STOP_RELAY_TIMEOUT,
+            "marker handoff exceeded the hook latency ceiling"
+        );
+        {
+            let observed = output_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert!(observed.flushed, "stdout must be flushed before marker I/O");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&observed.bytes).unwrap(),
+                serde_json::json!({"suppressOutput": true})
+            );
+        }
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("post hook event: timed out")
+        );
+        wait_for_published_markers(&marker_dir_under_root(temp_dir.path(), "claude"), 1);
+    }
+
+    #[test]
+    fn claude_user_prompt_submit_hands_off_marker_within_latency_ceiling() {
+        assert_hook_command_hands_off_marker_within_latency_ceiling("UserPromptSubmit", true);
+    }
+
+    #[test]
+    fn claude_non_wait_hook_hands_off_marker_within_latency_ceiling() {
+        assert_hook_command_hands_off_marker_within_latency_ceiling("PostToolUse", false);
+    }
+
+    #[test]
+    #[ignore = "helper subprocess for durable hook relay marker writes"]
+    fn failure_marker_worker_subprocess_entry() {
+        if std::env::var_os(FAILURE_MARKER_WORKER_ENV).is_none() {
+            return;
+        }
+        if let Some(release_path) = std::env::var_os(FAILURE_MARKER_TEST_RELEASE_PATH_ENV) {
+            wait_for_test_release(Path::new(&release_path));
+        }
+        crate::run_from_args().expect("marker worker entrypoint writes durable marker");
+    }
+
+    #[test]
+    #[ignore = "helper subprocess that exits immediately after marker handoff"]
+    fn failure_marker_parent_subprocess_entry() {
+        if std::env::var_os(FAILURE_MARKER_PARENT_TEST_ENV).is_none() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        handoff_hook_relay_failure(
+            "http://127.0.0.1:1",
+            "claude",
+            "Stop",
+            "process-exit-session",
+            "post hook event: timed out",
+        )
+        .expect("parent hands marker to surviving worker");
+        std::fs::write(
+            std::env::var_os(FAILURE_MARKER_TEST_ELAPSED_PATH_ENV)
+                .expect("handoff elapsed output path"),
+            started.elapsed().as_millis().to_string(),
+        )
+        .expect("write marker handoff elapsed time");
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn failure_marker_worker_survives_parent_process_exit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let elapsed_path = temp_dir.path().join("handoff-elapsed-ms");
+        let release_path = temp_dir.path().join("release-marker-worker");
+        let marker_dir = marker_dir_under_root(temp_dir.path(), "claude");
+        let executable = std::env::current_exe().unwrap();
+        let status = Command::new(executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "services::claude_tui::hook_relay::tests::failure_marker_parent_subprocess_entry",
+            ])
+            .env("AGENTDESK_ROOT_DIR", temp_dir.path())
+            .env(FAILURE_MARKER_PARENT_TEST_ENV, "1")
+            .env(FAILURE_MARKER_TEST_ELAPSED_PATH_ENV, &elapsed_path)
+            .env(FAILURE_MARKER_TEST_RELEASE_PATH_ENV, &release_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run marker handoff parent subprocess");
+        assert!(status.success(), "marker handoff parent failed: {status}");
+
+        let elapsed_ms = std::fs::read_to_string(&elapsed_path)
+            .unwrap()
+            .parse::<u128>()
+            .unwrap();
+        assert!(
+            elapsed_ms < STOP_RELAY_TIMEOUT.as_millis(),
+            "durable marker handoff exceeded latency ceiling: {elapsed_ms}ms"
+        );
+        assert_eq!(
+            published_marker_count(&marker_dir),
+            0,
+            "marker worker must still be waiting after its parent exited"
+        );
+
+        std::fs::write(&release_path, b"release").unwrap();
+        wait_for_published_markers(&marker_dir, 1);
+        let marker_path = std::fs::read_dir(&marker_dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| is_failure_marker_path(path))
+            .expect("published marker path");
+        let marker: HookRelayFailureMarker =
+            serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+        assert_eq!(marker.session_id, "process-exit-session");
+        assert_eq!(marker.error, "post hook event: timed out");
+    }
+
+    #[test]
+    fn claude_user_prompt_submit_error_and_block_fields_fail_open_observational() {
+        assert_eq!(
+            stop_stdout_from_relay_result(
+                "claude",
+                "UserPromptSubmit",
+                &Err("post hook event: timeout".to_string()),
+            ),
+            r#"{"suppressOutput":true}"#
+        );
+        assert_eq!(
+            stop_stdout_from_receiver_response(
+                "claude",
+                "UserPromptSubmit",
+                &serde_json::json!({"decision":"block"}),
+            ),
+            r#"{"suppressOutput":true}"#
         );
     }
 

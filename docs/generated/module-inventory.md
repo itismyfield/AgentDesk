@@ -202,7 +202,7 @@
 | `kanban::transition_cleanup` | `src/kanban/transition_cleanup.rs` | 341 | 341 | 0 |  |
 | `kanban::transition_core` | `src/kanban/transition_core.rs` | 674 | 674 | 0 |  |
 | `launch` | `src/launch.rs` | 67 | 67 | 0 |  |
-| `lib` | `src/lib.rs` | 162 | 162 | 0 |  |
+| `lib` | `src/lib.rs` | 170 | 170 | 0 |  |
 | `logging` | `src/logging.rs` | 554 | 382 | 172 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 35 | 35 | 0 |  |
 | `pipeline` | `src/pipeline.rs` | 1517 | 1383 | 134 | giant-file |
@@ -386,13 +386,13 @@
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1223 | 733 | 490 |  |
 | `services::claude_tui::hook_output_guard` | `src/services/claude_tui/hook_output_guard.rs` | 157 | 157 | 0 |  |
 | `services::claude_tui::hook_registry` | `src/services/claude_tui/hook_registry.rs` | 1333 | 718 | 615 |  |
-| `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 959 | 498 | 461 |  |
-| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 1365 | 684 | 681 |  |
+| `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 1623 | 698 | 925 |  |
+| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 1394 | 713 | 681 |  |
 | `services::claude_tui::hosting` | `src/services/claude_tui/hosting/mod.rs` | 13 | 13 | 0 |  |
 | `services::claude_tui::hosting::followup_support` | `src/services/claude_tui/hosting/followup_support.rs` | 524 | 409 | 115 |  |
 | `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 750 | 693 | 57 |  |
 | `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3358 | 1932 | 1426 | giant-file |
-| `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 845 | 553 | 292 |  |
+| `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 1302 | 743 | 559 |  |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 810 | 431 | 379 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 651 | 328 | 323 |  |
@@ -936,11 +936,11 @@
 | `services::maintenance::jobs::voice_cache_sweep` | `src/services/maintenance/jobs/voice_cache_sweep.rs` | 218 | 104 | 114 |  |
 | `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 1977 | 975 | 1002 |  |
 | `services::mcp_config` | `src/services/mcp_config.rs` | 893 | 793 | 100 |  |
-| `services::memory` | `src/services/memory/mod.rs` | 268 | 268 | 0 |  |
+| `services::memory` | `src/services/memory/mod.rs` | 269 | 269 | 0 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 85 | 45 | 40 |  |
 | `services::memory::memento` | `src/services/memory/memento.rs` | 2122 | 1893 | 229 | giant-file |
 | `services::memory::memento_instructions_cache` | `src/services/memory/memento_instructions_cache.rs` | 241 | 143 | 98 |  |
-| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 884 | 776 | 108 |  |
+| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 884 | 769 | 115 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 315 | 315 | 0 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 1420 | 863 | 557 |  |
 | `services::message_outbox_recovery` | `src/services/message_outbox_recovery.rs` | 166 | 166 | 0 |  |

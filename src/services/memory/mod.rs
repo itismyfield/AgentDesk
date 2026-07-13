@@ -25,7 +25,8 @@ pub(crate) use memento_instructions_cache::{
 };
 pub(crate) use memento_throttle::{
     ForgetRatioAlarmDecision, RecallSizeBucket, memento_call_metrics_snapshot,
-    note_memento_forget_call, note_memento_recall_call, note_recall_context_size,
+    note_memento_forget_call, note_memento_recall_call, note_memento_tool_feedback_trigger,
+    note_recall_context_size,
 };
 #[cfg(test)]
 #[allow(unused_imports)]

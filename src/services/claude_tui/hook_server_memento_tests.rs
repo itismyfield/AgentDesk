@@ -44,6 +44,51 @@ async fn memento_search_then_tool_feedback_clears_pending_stop_flush() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
+                .uri("/hooks/claude/Stop?session_id=sess-feedback")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let stop_body = response_json(response).await;
+    assert_eq!(
+        stop_body["memento_tool_feedback_flush"]["search_event_ids"],
+        json!(["3332"])
+    );
+    let stop_context = stop_body["memento_tool_feedback_flush"]["additional_context"]
+        .as_str()
+        .expect("Stop additional context");
+    assert!(stop_context.contains("then stop"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/UserPromptSubmit?session_id=sess-feedback")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"retry turn"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let retry_body = response_json(response).await;
+    assert_eq!(
+        retry_body["memento_tool_feedback_flush"]["search_event_ids"],
+        json!(["3332"])
+    );
+    let retry_context = retry_body["memento_tool_feedback_flush"]["additional_context"]
+        .as_str()
+        .expect("retry additional context");
+    assert!(retry_context.contains("continue with the submitted prompt"));
+    assert!(!retry_context.contains("then stop"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
                 .uri("/hooks/claude/PostToolUse?session_id=sess-feedback")
                 .header("content-type", "application/json")
                 .body(Body::from(feedback_payload.to_string()))
@@ -90,7 +135,7 @@ async fn stop_without_pending_memento_search_stays_observational() {
 }
 
 #[tokio::test]
-async fn stop_with_pending_memento_search_flushes_once_and_clears() {
+async fn first_stop_then_next_prompt_retries_once_and_records_terminal_drop() {
     let state = HookServerState::new();
     let app = hook_receiver_router_with_state(state);
 
@@ -137,6 +182,29 @@ async fn stop_with_pending_memento_search_flushes_once_and_clears() {
     );
 
     let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/UserPromptSubmit?session_id=sess-pending")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"next turn"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response_json(response).await;
+    assert_eq!(
+        body["memento_tool_feedback_flush"]["search_event_ids"],
+        json!(["44"])
+    );
+
+    let before = crate::services::memory::memento_call_metrics_snapshot(24 * 7)
+        ["searchObservability"]["feedback_counts_by_trigger_type"]
+        ["unsubmitted_stop_flush"]
+        .as_u64()
+        .unwrap_or(0);
+    let response = app
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -149,6 +217,12 @@ async fn stop_with_pending_memento_search_flushes_once_and_clears() {
         .unwrap();
     let body = response_json(response).await;
     assert!(body.get("memento_tool_feedback_flush").is_none());
+    let after = crate::services::memory::memento_call_metrics_snapshot(24 * 7)
+        ["searchObservability"]["feedback_counts_by_trigger_type"]
+        ["unsubmitted_stop_flush"]
+        .as_u64()
+        .unwrap_or(0);
+    assert!(after >= before.saturating_add(1));
 }
 
 #[tokio::test]
@@ -177,6 +251,7 @@ async fn stop_hook_active_suppresses_memento_flush() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -190,6 +265,133 @@ async fn stop_hook_active_suppresses_memento_flush() {
     let body = response_json(response).await;
 
     assert!(body.get("memento_tool_feedback_flush").is_none());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/Stop?session_id=sess-active")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response_json(response).await;
+    assert_eq!(
+        body["memento_tool_feedback_flush"]["search_event_ids"],
+        json!(["45"])
+    );
+}
+
+#[tokio::test]
+async fn pending_retry_is_cross_session_isolated_and_session_start_clears() {
+    let app = hook_receiver_router_with_state(HookServerState::new());
+    for (session_id, search_event_id) in [("sess-a", "51"), ("sess-b", "52")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/claude/PostToolUse?session_id={session_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "tool_name": "mcp__memento__recall",
+                            "tool_response": {"_meta":{"searchEventId":search_event_id}}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    let first_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/Stop?session_id=sess-a")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response_json(first_a).await["memento_tool_feedback_flush"]["search_event_ids"],
+        json!(["51"])
+    );
+
+    let prompt_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/UserPromptSubmit?session_id=sess-b")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"unrelated"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response_json(prompt_b)
+            .await
+            .get("memento_tool_feedback_flush")
+            .is_none()
+    );
+
+    let retry_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/UserPromptSubmit?session_id=sess-a")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"same session"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response_json(retry_a).await["memento_tool_feedback_flush"]["search_event_ids"],
+        json!(["51"])
+    );
+
+    let start_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/SessionStart?session_id=sess-b")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"resume"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start_b.status(), StatusCode::ACCEPTED);
+    let stop_b = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hooks/claude/Stop?session_id=sess-b")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response_json(stop_b)
+            .await
+            .get("memento_tool_feedback_flush")
+            .is_none()
+    );
 }
 
 #[tokio::test]

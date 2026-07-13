@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast};
 
-use crate::services::claude_tui::memento_feedback::PendingMementoFeedbackTracker;
+use crate::services::claude_tui::memento_feedback::{
+    PendingMementoFeedbackTracker, PendingMementoFeedbackTransition,
+};
 
 const EVENT_BUFFER_CAPACITY: usize = 256;
 
@@ -358,22 +360,44 @@ async fn receive_hook(
         ..event.clone()
     });
     let event_name = event.kind.as_str().to_string();
-    let memento_stop_flush = match event.kind {
+    let memento_transition = match event.kind {
         HookEventKind::PostToolUse => {
             let _ = state
                 .memento_feedback
                 .observe_post_tool_use(&event.session_id, &event.payload);
-            None
+            PendingMementoFeedbackTransition::default()
         }
         HookEventKind::Stop if event.provider == "claude" => state
             .memento_feedback
-            .take_stop_flush(&event.session_id, &event.payload),
+            .advance_stop_flush(&event.session_id, &event.payload),
+        HookEventKind::UserPromptSubmit if event.provider == "claude" => state
+            .memento_feedback
+            .advance_user_prompt_submit(&event.session_id),
+        HookEventKind::SessionStart if event.provider == "claude" => {
+            state.memento_feedback.clear_session(&event.session_id);
+            PendingMementoFeedbackTransition::default()
+        }
         HookEventKind::Stop | HookEventKind::SubagentStop => {
             state.memento_feedback.clear_session(&event.session_id);
-            None
+            PendingMementoFeedbackTransition::default()
         }
-        _ => None,
+        _ => PendingMementoFeedbackTransition::default(),
     };
+    for _ in 0..memento_transition.unsubmitted_count {
+        // #4308: this is a bounded process-lifetime observation surfaced by
+        // `/api/stats/memento`, not a synthetic #4307 per-turn PG row. The
+        // hook does not own a Discord turn_id/agent_id and must not invent one.
+        // Persisting it belongs to a future hook-to-turn identity contract.
+        crate::services::memory::note_memento_tool_feedback_trigger("unsubmitted_stop_flush");
+    }
+    if memento_transition.unsubmitted_count > 0 {
+        tracing::warn!(
+            provider,
+            session_id,
+            unsubmitted_count = memento_transition.unsubmitted_count,
+            "dropped memento feedback after the one-shot Stop flush retry"
+        );
+    }
     if matches!(event.kind, HookEventKind::Unknown(_)) {
         tracing::warn!(
             provider,
@@ -382,7 +406,12 @@ async fn receive_hook(
             "unknown tui hook event accepted for provider-scoped telemetry"
         );
     }
-    let stop_flush_injected = memento_stop_flush.is_some();
+    let memento_flush_injected = memento_transition.flush.is_some();
+    let stop_flush_injected = memento_flush_injected
+        && matches!(
+            event.kind,
+            HookEventKind::Stop | HookEventKind::SubagentStop
+        );
     if should_signal_prompt_ready(&event.provider, &event.kind) && !stop_flush_injected {
         // Wake any task currently awaiting prompt readiness. `notify_waiters`
         // is edge-triggered: signals fired with no current waiters are
@@ -527,7 +556,7 @@ async fn receive_hook(
         "event": event_name,
         "session_id": session_id
     });
-    if let Some(flush) = memento_stop_flush {
+    if let Some(flush) = memento_transition.flush {
         body["memento_tool_feedback_flush"] = flush.to_json();
     }
 

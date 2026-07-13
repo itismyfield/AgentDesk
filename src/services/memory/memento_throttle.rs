@@ -722,6 +722,10 @@ fn normalize_feedback_trigger_type(trigger_type: &str) -> String {
     match trigger_type.trim().to_ascii_lowercase().as_str() {
         "automatic" | "sampled" => "automatic".to_string(),
         "manual" | "voluntary" => "voluntary".to_string(),
+        // #4308: terminal count after the model ignored both the first Stop
+        // reminder and its one permitted retry. This is an observation, not a
+        // successful manual/automatic tool_feedback call, so keep it distinct.
+        "unsubmitted_stop_flush" => "unsubmitted_stop_flush".to_string(),
         _ => "voluntary".to_string(),
     }
 }
@@ -763,28 +767,12 @@ pub(crate) fn note_recall_context_size(bucket: RecallSizeBucket, bytes: usize) {
     }
 }
 
-/// #2655: test-only state reset for the forget-ratio monitor. Avoids the
-/// removed SQLite-only feature gate so the new test module below can drain the
-/// shared sliding-window state between cases.
-#[cfg(test)]
-pub(crate) fn reset_forget_ratio_state_for_tests() {
-    with_state(|state| {
-        state.forget_ratio_observations.clear();
-        state.forget_ratio_last_alarm.clear();
-    });
-}
-
 #[cfg(test)]
 mod forget_ratio_tests {
     use super::*;
 
-    fn reset() {
-        reset_forget_ratio_state_for_tests();
-    }
-
     #[test]
     fn no_alarm_below_min_evidence() {
-        reset();
         let snapshot = note_memento_forget_call("claude:test-low-evidence");
         // single forget against zero recalls => ratio inflated, but evidence
         // count below floor, so no alarm yet.
@@ -795,7 +783,6 @@ mod forget_ratio_tests {
 
     #[test]
     fn alarm_fires_once_then_cools_down() {
-        reset();
         let scope = "claude:test-flood";
         let mut alarm_count = 0;
         let mut suppressed_count = 0;
@@ -819,7 +806,6 @@ mod forget_ratio_tests {
 
     #[test]
     fn recalls_reduce_ratio_below_threshold() {
-        reset();
         let scope = "claude:test-recalls-mix";
         // 5 recalls + 8 forgets => ratio 1.6 (below 5.0).
         for _ in 0..5 {
@@ -835,7 +821,6 @@ mod forget_ratio_tests {
 
     #[test]
     fn scope_isolation_does_not_silence_other_agents() {
-        reset();
         // Scope A floods => should alarm.
         for _ in 0..(FORGET_RATIO_MIN_FORGET_COUNT + 2) {
             note_memento_forget_call("codex:agent-a");
@@ -851,7 +836,6 @@ mod forget_ratio_tests {
 
     #[test]
     fn empty_scope_falls_back_to_default_bucket() {
-        reset();
         let snapshot = note_memento_forget_call("");
         // The empty key is normalised to a sentinel; observation still
         // increments forget_count so downstream callers see the signal.
@@ -880,5 +864,21 @@ mod forget_ratio_tests {
                     .as_u64()
                     .unwrap_or(0)
         );
+    }
+
+    #[test]
+    fn unsubmitted_stop_flush_is_exposed_in_the_seven_day_process_snapshot() {
+        let before = memento_call_metrics_snapshot(24 * 7)["searchObservability"]
+            ["feedback_counts_by_trigger_type"]["unsubmitted_stop_flush"]
+            .as_u64()
+            .unwrap_or(0);
+
+        note_memento_tool_feedback_trigger("unsubmitted_stop_flush");
+
+        let after = memento_call_metrics_snapshot(24 * 7)["searchObservability"]
+            ["feedback_counts_by_trigger_type"]["unsubmitted_stop_flush"]
+            .as_u64()
+            .unwrap_or(0);
+        assert!(after >= before.saturating_add(1));
     }
 }
