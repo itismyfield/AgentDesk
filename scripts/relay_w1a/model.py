@@ -643,24 +643,25 @@ def settle_effect(
         return LedgerTransition(record, False, 0, "inflight_continuity_inconclusive", True)
     if not clock_allows_transition(record.clock_stamp, now):
         return LedgerTransition(record, False, 0, "clock_fail_closed", True)
-    same_episode_and_source = (
-        observation.episode_key == record.episode_key
+
+    stable_identity_matches = (
+        isinstance(observation.episode_key, str)
+        and observation.episode_key == record.episode_key
+        and isinstance(observation.source_id, str)
         and observation.source_id == record.source_id
-    )
-    if (
-        observation.continuity is InflightContinuity.REPLACED
-        and same_episode_and_source
         and isinstance(observation.source_generation, int)
         and not isinstance(observation.source_generation, bool)
-        and 0 <= observation.source_generation <= MAX_U64
-        and observation.source_generation <= record.source_generation
+        and observation.source_generation == record.source_generation
+    )
+    if (
+        observation.continuity is InflightContinuity.PRESENT_STABLE
+        and not stable_identity_matches
     ):
         return LedgerTransition(
-            record, False, 0, "replacement_generation_not_advanced", True
+            record, False, 0, "continuity_identity_mismatch", True
         )
-    if observation.episode_key != record.episode_key or (
-        observation.continuity is InflightContinuity.REPLACED
-    ):
+
+    if observation.continuity is InflightContinuity.REPLACED:
         successor_identity_valid = (
             observation.identity_complete
             and observation.clock_valid
@@ -682,6 +683,13 @@ def settle_effect(
         )
         if not successor_identity_valid:
             return LedgerTransition(record, False, 0, "successor_identity_inconclusive", True)
+        if (
+            observation.source_id == record.source_id
+            and observation.source_generation <= record.source_generation
+        ):
+            return LedgerTransition(
+                record, False, 0, "replacement_generation_not_advanced", True
+            )
         settled = replace(
             record,
             state=LedgerState.SETTLED,

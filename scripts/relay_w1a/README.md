@@ -28,6 +28,12 @@ safe queue disposition, and action-time reprobe. Unknown enum values, stale or
 future clocks, impossible `u64` counters/frontiers, missing anchors, and
 unrecognized ledger states fail closed.
 
+`PRESENT_STABLE` preserves the ledger's episode, source id, and source
+generation exactly; it cannot introduce a successor identity. A successor must
+be reported as `REPLACED`, and reusing the same source id requires a strictly
+greater generation even when the episode key changes. A genuinely different
+source may start at the same valid generation.
+
 ## Oracle inputs
 
 An evidence bundle is not self-authenticating. `validate_evidence_bundle`

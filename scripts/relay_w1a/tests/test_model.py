@@ -650,7 +650,11 @@ class LedgerFaultTests(unittest.TestCase):
         now = ClockStamp(1_000_100, "boot-a", 10_100)
         incomplete = settle_effect(
             pending,
-            Observation(episode_key="ep-successor", observed_at=None),
+            Observation(
+                episode_key="ep-successor",
+                continuity=InflightContinuity.REPLACED,
+                observed_at=None,
+            ),
             attempt_id=pending.attempt_id,
             delivery_proof=None,
             now=now,
@@ -664,6 +668,7 @@ class LedgerFaultTests(unittest.TestCase):
             repair_observation(
                 "ep-successor",
                 continuity=InflightContinuity.REPLACED,
+                source_generation=pending.source_generation + 1,
                 observed_at=now,
             ),
             attempt_id=pending.attempt_id,
@@ -778,6 +783,143 @@ class LedgerFaultTests(unittest.TestCase):
         self.assertEqual(
             new_source_same_generation.record.outcome, LedgerOutcome.SUPERSEDED
         )
+
+    def test_successor_generation_and_continuity_cannot_be_laundered_by_episode(
+        self,
+    ) -> None:
+        _, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+
+        for generation in (pending.source_generation - 1, pending.source_generation):
+            with self.subTest(continuity="replaced", generation=generation):
+                stale = settle_effect(
+                    pending,
+                    repair_observation(
+                        "ep-successor",
+                        continuity=InflightContinuity.REPLACED,
+                        source_id=pending.source_id,
+                        source_generation=generation,
+                        durable_anchor="anchor-stale-successor",
+                        observed_at=now,
+                    ),
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=None,
+                    now=now,
+                )
+                self.assertFalse(stale.changed)
+                self.assertTrue(stale.must_reprobe)
+                self.assertEqual(stale.record, pending)
+                self.assertEqual(stale.reason, "replacement_generation_not_advanced")
+
+            with self.subTest(continuity="present_stable", generation=generation):
+                mismatched = settle_effect(
+                    pending,
+                    repair_observation(
+                        "ep-successor",
+                        continuity=InflightContinuity.PRESENT_STABLE,
+                        source_id=pending.source_id,
+                        source_generation=generation,
+                        durable_anchor="anchor-stable-mismatch",
+                        observed_at=now,
+                    ),
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=None,
+                    now=now,
+                )
+                self.assertFalse(mismatched.changed)
+                self.assertTrue(mismatched.must_reprobe)
+                self.assertEqual(mismatched.record, pending)
+                self.assertEqual(mismatched.reason, "continuity_identity_mismatch")
+
+        for field, value in (
+            ("source_id", "source-mismatched"),
+            ("source_generation", pending.source_generation + 1),
+        ):
+            with self.subTest(continuity="present_stable", field=field):
+                mismatched = settle_effect(
+                    pending,
+                    replace(
+                        repair_observation(
+                            pending.episode_key,
+                            continuity=InflightContinuity.PRESENT_STABLE,
+                            source_id=pending.source_id,
+                            source_generation=pending.source_generation,
+                            durable_anchor=pending.durable_anchor,
+                            observed_at=now,
+                        ),
+                        **{field: value},
+                    ),
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=None,
+                    now=now,
+                )
+                self.assertFalse(mismatched.changed)
+                self.assertTrue(mismatched.must_reprobe)
+                self.assertEqual(mismatched.record, pending)
+                self.assertEqual(mismatched.reason, "continuity_identity_mismatch")
+
+        same_source_new_generation = settle_effect(
+            pending,
+            repair_observation(
+                "ep-successor",
+                continuity=InflightContinuity.REPLACED,
+                source_id=pending.source_id,
+                source_generation=pending.source_generation + 1,
+                durable_anchor="anchor-new-generation",
+                observed_at=now,
+            ),
+            attempt_id=pending.attempt_id,
+            delivery_proof=None,
+            now=now,
+        )
+        self.assertTrue(same_source_new_generation.changed)
+        self.assertEqual(
+            same_source_new_generation.record.outcome, LedgerOutcome.SUPERSEDED
+        )
+
+        new_source_same_generation = settle_effect(
+            pending,
+            repair_observation(
+                "ep-successor",
+                continuity=InflightContinuity.REPLACED,
+                source_id="source-successor",
+                source_generation=pending.source_generation,
+                durable_anchor="anchor-new-source",
+                observed_at=now,
+            ),
+            attempt_id=pending.attempt_id,
+            delivery_proof=None,
+            now=now,
+        )
+        self.assertTrue(new_source_same_generation.changed)
+        self.assertEqual(
+            new_source_same_generation.record.outcome, LedgerOutcome.SUPERSEDED
+        )
+
+        stable_identity = settle_effect(
+            pending,
+            repair_observation(
+                pending.episode_key,
+                continuity=InflightContinuity.PRESENT_STABLE,
+                source_id=pending.source_id,
+                source_generation=pending.source_generation,
+                durable_anchor=pending.durable_anchor,
+                observed_at=now,
+            ),
+            attempt_id=pending.attempt_id,
+            delivery_proof=delivery_proof(
+                pending.episode_key,
+                now=now,
+                source_frontier=pending.baseline_source,
+                committed_frontier=pending.baseline_delivered,
+                source_id=pending.source_id,
+                source_generation=pending.source_generation,
+                durable_anchor=pending.durable_anchor,
+            ),
+            now=now,
+        )
+        self.assertTrue(stable_identity.changed)
+        self.assertEqual(stable_identity.record.outcome, LedgerOutcome.NO_PROGRESS)
 
     def test_ledger_entrypoints_reject_truthy_string_boolean_flags(self) -> None:
         reserved, pending = self._reserve_and_mark()
@@ -946,7 +1088,7 @@ class LedgerFaultTests(unittest.TestCase):
         )
         self.assertFalse(wrong_generation.changed)
         self.assertEqual(
-            wrong_generation.reason, "delivery_proof_record_identity_mismatch"
+            wrong_generation.reason, "continuity_identity_mismatch"
         )
 
     def test_delivery_proof_requires_action_time_observation_and_possible_frontier(self) -> None:
