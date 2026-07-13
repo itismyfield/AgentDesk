@@ -735,6 +735,177 @@ class LedgerFaultTests(unittest.TestCase):
         self.assertTrue(actual_successor.changed)
         self.assertEqual(actual_successor.record.outcome, LedgerOutcome.SUPERSEDED)
 
+    def test_replaced_same_source_requires_strictly_newer_generation(self) -> None:
+        _, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+
+        for generation in (pending.source_generation - 1, pending.source_generation):
+            with self.subTest(generation=generation):
+                stale = settle_effect(
+                    pending,
+                    repair_observation(
+                        pending.episode_key,
+                        continuity=InflightContinuity.REPLACED,
+                        source_id=pending.source_id,
+                        source_generation=generation,
+                        durable_anchor="anchor-stale-replacement",
+                        observed_at=now,
+                    ),
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=None,
+                    now=now,
+                )
+                self.assertFalse(stale.changed)
+                self.assertTrue(stale.must_reprobe)
+                self.assertEqual(stale.record, pending)
+                self.assertEqual(stale.reason, "replacement_generation_not_advanced")
+
+        new_source_same_generation = settle_effect(
+            pending,
+            repair_observation(
+                pending.episode_key,
+                continuity=InflightContinuity.REPLACED,
+                source_id="source-successor",
+                source_generation=pending.source_generation,
+                durable_anchor="anchor-new-source",
+                observed_at=now,
+            ),
+            attempt_id=pending.attempt_id,
+            delivery_proof=None,
+            now=now,
+        )
+        self.assertTrue(new_source_same_generation.changed)
+        self.assertEqual(
+            new_source_same_generation.record.outcome, LedgerOutcome.SUPERSEDED
+        )
+
+    def test_ledger_entrypoints_reject_truthy_string_boolean_flags(self) -> None:
+        reserved, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        boolean_fields = (
+            "identity_complete",
+            "clock_valid",
+            "affirmative_termination",
+            "source_progress",
+            "delivery_progress",
+            "control_contradiction",
+            "terminal_delivery_committed",
+            "typed_idle",
+        )
+
+        for field in boolean_fields:
+            malformed = replace(
+                repair_observation(
+                    reserved.episode_key,
+                    durable_anchor=reserved.durable_anchor,
+                    observed_at=now,
+                ),
+                **{field: "false"},
+            )
+            with self.subTest(entrypoint="reserve", field=field):
+                transition = reserve_attempt(
+                    None,
+                    malformed,
+                    attempt_id=f"malformed-reserve-{field}",
+                    delivery_proof=delivery_proof(
+                        reserved.episode_key,
+                        now=now,
+                        source_frontier=reserved.baseline_source,
+                        committed_frontier=reserved.baseline_delivered,
+                        durable_anchor=reserved.durable_anchor,
+                    ),
+                    now=now,
+                )
+                self.assertFalse(transition.changed)
+                self.assertEqual(transition.reason, "observation_bool_not_typed")
+
+            with self.subTest(entrypoint="recover", field=field):
+                transition = recover_after_crash(
+                    reserved, malformed, attempt_id=reserved.attempt_id
+                )
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, reserved)
+                self.assertEqual(transition.reason, "observation_bool_not_typed")
+
+            with self.subTest(entrypoint="settle", field=field):
+                transition = settle_effect(
+                    pending,
+                    malformed,
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=delivery_proof(
+                        pending.episode_key,
+                        now=now,
+                        source_frontier=pending.baseline_source,
+                        committed_frontier=pending.baseline_delivered,
+                        durable_anchor=pending.durable_anchor,
+                    ),
+                    now=now,
+                )
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, pending)
+                self.assertEqual(transition.reason, "observation_bool_not_typed")
+
+            successor = replace(
+                malformed,
+                episode_key="ep-successor",
+                continuity=InflightContinuity.REPLACED,
+            )
+            with self.subTest(entrypoint="successor", field=field):
+                transition = settle_effect(
+                    pending,
+                    successor,
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=None,
+                    now=now,
+                )
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, pending)
+                self.assertEqual(transition.reason, "observation_bool_not_typed")
+
+        valid_observation = repair_observation(
+            pending.episode_key,
+            durable_anchor="anchor-11",
+            observed_at=now,
+            delivery_progress=True,
+        )
+        valid_proof = delivery_proof(
+            pending.episode_key,
+            now=now,
+            source_frontier=pending.baseline_source + 1,
+            committed_frontier=pending.baseline_delivered + 1,
+            durable_anchor="anchor-11",
+        )
+        for field in ("identity_complete", "clock_valid"):
+            malformed_proof = replace(valid_proof, **{field: "false"})
+            with self.subTest(owner="delivery_proof", entrypoint="reserve", field=field):
+                transition = reserve_attempt(
+                    None,
+                    valid_observation,
+                    attempt_id=f"malformed-proof-reserve-{field}",
+                    delivery_proof=malformed_proof,
+                    now=now,
+                )
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertIsNone(transition.record)
+                self.assertEqual(transition.reason, "delivery_proof_bool_not_typed")
+
+            with self.subTest(owner="delivery_proof", entrypoint="settle", field=field):
+                transition = settle_effect(
+                    pending,
+                    valid_observation,
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=malformed_proof,
+                    now=now,
+                )
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, pending)
+                self.assertEqual(transition.reason, "delivery_proof_bool_not_typed")
+
     def test_delivery_proof_requires_generation_and_anchor_advance(self) -> None:
         _, pending = self._reserve_and_mark()
         now = ClockStamp(1_000_100, "boot-a", 10_100)
@@ -1197,6 +1368,41 @@ class LedgerFaultTests(unittest.TestCase):
         self.assertEqual(transition.record, unknown)
         self.assertEqual(transition.reason, "ledger_state_not_typed")
 
+    def test_every_ledger_transition_rejects_unknown_in_memory_state(self) -> None:
+        reserved, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        cases = (
+            mark_effect_pending(
+                replace(reserved, state="future-ledger-state"),
+                attempt_id=reserved.attempt_id,
+                now=now,
+            ),
+            recover_after_crash(
+                replace(reserved, state="future-ledger-state"),
+                repair_observation(observed_at=now),
+                attempt_id=reserved.attempt_id,
+            ),
+            settle_effect(
+                replace(pending, state="future-ledger-state"),
+                repair_observation(observed_at=now),
+                attempt_id=pending.attempt_id,
+                delivery_proof=delivery_proof(
+                    pending.episode_key,
+                    now=now,
+                    source_frontier=pending.baseline_source,
+                    committed_frontier=pending.baseline_delivered,
+                    durable_anchor=pending.durable_anchor,
+                ),
+                now=now,
+            ),
+        )
+        for transition in cases:
+            with self.subTest(reason=transition.reason):
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.reason, "ledger_state_not_typed")
+                self.assertEqual(transition.record.state, "future-ledger-state")
+
     def test_corrupt_future_and_legacy_ledger_fail_closed(self) -> None:
         for raw, reason in (
             ("{", "corrupt_json"),
@@ -1428,7 +1634,7 @@ class BackpressureTests(unittest.TestCase):
                         [replace(committed[0], discord_message_ids=(invalid_id,))],
                     )
 
-    def test_commit_and_frontier_require_globally_unique_discord_message_ids(
+    def test_commit_and_frontier_require_call_local_unique_discord_message_ids(
         self,
     ) -> None:
         first = SourceRange("a", 0, 3, RangeKind.ASSISTANT_TEXT, "one")
@@ -1439,7 +1645,7 @@ class BackpressureTests(unittest.TestCase):
             max_pending_items=2,
             max_pending_bytes=10,
         )
-        with self.assertRaisesRegex(ValueError, "globally unique"):
+        with self.assertRaisesRegex(ValueError, "within this call"):
             commit_dispositions(plan, {0: ["8001"], 1: ["8001"]})
 
         committed = commit_dispositions(plan, {0: ["8001"], 1: ["8002"]})
@@ -1447,8 +1653,29 @@ class BackpressureTests(unittest.TestCase):
             committed[0],
             replace(committed[1], discord_message_ids=("8001",)),
         )
-        with self.assertRaisesRegex(ValueError, "globally unique"):
+        with self.assertRaisesRegex(ValueError, "within this call"):
             advance_committed_frontier(0, duplicate_at_frontier)
+
+        first_call = commit_dispositions(
+            plan_bounded_batch(
+                [first],
+                start_cursor=0,
+                max_pending_items=1,
+                max_pending_bytes=10,
+            ),
+            {0: ["8001"]},
+        )
+        second_call = commit_dispositions(
+            plan_bounded_batch(
+                [second],
+                start_cursor=3,
+                max_pending_items=1,
+                max_pending_bytes=10,
+            ),
+            {0: ["8001"]},
+        )
+        self.assertEqual(advance_committed_frontier(0, first_call), 3)
+        self.assertEqual(advance_committed_frontier(3, second_call), 6)
 
     def test_planner_rejects_actual_duplicate_marker_without_metadata(self) -> None:
         marker = "[ADK-E2E:run:case:1:BEGIN]"
@@ -1778,20 +2005,42 @@ class EvidenceOracleTests(unittest.TestCase):
     def test_digest_marker_summary_uses_same_canonical_body_hash_in_oracle(
         self,
     ) -> None:
-        ranges = []
-        cursor = 0
-        for sequence in range(1, 5):
-            marker = f"[ADK-E2E:digest-run:digest-case:{sequence}:END]"
-            entry = SourceRange(
-                f"tool-{sequence}",
-                cursor,
-                cursor + len(marker.encode("utf-8")),
+        marker_bodies = (
+            "[ADK-E2E:digest-run:digest-case:1:END]",
+            "[ADK-E2E:digest-run:digest-case:2:END]",
+            "[ADK-E2E:digest-run:digest-case:3:END]",
+            "[ADK-E2E:digest-run:digest-case:4:END]",
+        )
+        known_range_hashes = (
+            "2e1deeb9a23bec7319c8800d1166f63be13a4345e55821445cfef533912b553c",
+            "c6be45012e36b7574e253b751fbc502841cc682310e82f5c16f66a5248db4504",
+            "41c06d50529d089890853f4d2f5889bc17e010b9fdba2da1d4b16f3b14aa32d6",
+            "31f4744e42be27747eebc78a28428990b78c6cb56593b2cfb7d2ac314b175f47",
+        )
+        known_source_hash = (
+            "ff9c1a1c9bd087f22bc8d08bce0de8b0c8b90ec0b48e5accfbde8a05f5343af9"
+        )
+        known_summary_body = (
+            "[AgentDesk summary policy=relay-target-v1 range=0:152 records=4 "
+            "raw_bytes=152 sha256="
+            "ff9c1a1c9bd087f22bc8d08bce0de8b0c8b90ec0b48e5accfbde8a05f5343af9 "
+            "marker_count=4 marker_sha256="
+            "83be784e890bcc521902c432be51b925b0d09de2c5b17ff3e320ed73d5cc72c6]"
+        )
+        known_summary_body_hash = (
+            "f5397ff500e88323635498fbe5c9bbf1dce90a3684846aae6a401281b43e380a"
+        )
+        ranges = [
+            SourceRange(
+                f"tool-{index}",
+                (index - 1) * 38,
+                index * 38,
                 RangeKind.TOOL_BULK,
                 marker,
                 marker,
             )
-            ranges.append(entry)
-            cursor = entry.end
+            for index, marker in enumerate(marker_bodies, start=1)
+        ]
 
         plan = plan_bounded_batch(
             ranges,
@@ -1801,10 +2050,16 @@ class EvidenceOracleTests(unittest.TestCase):
         )
         self.assertIsNone(plan.blocked_reason)
         self.assertEqual(len(plan.dispositions), 1)
-        self.assertIn("marker_count=4", plan.dispositions[0].expected_body)
-        self.assertIn("marker_sha256=", plan.dispositions[0].expected_body)
+        self.assertEqual(plan.dispositions[0].expected_body, known_summary_body)
+        self.assertEqual(plan.dispositions[0].source_sha256, known_source_hash)
+        self.assertEqual(
+            plan.dispositions[0].source_range_sha256s, known_range_hashes
+        )
         committed = commit_dispositions(plan, {0: ["9001"]})
         serialized = serialize_planned_disposition(committed[0])
+        self.assertEqual(
+            serialized["expected_body_sha256"], known_summary_body_hash
+        )
 
         source_bytes = "".join(entry.body for entry in ranges).encode("utf-8")
         manifest = {
@@ -1838,13 +2093,24 @@ class EvidenceOracleTests(unittest.TestCase):
                     "start": entry.start,
                     "end": entry.end,
                     "kind": entry.kind.value,
-                    "sha256": committed[0].source_range_sha256s[index],
+                    "sha256": known_range_hashes[index],
                     "marker": entry.marker,
                     "marker_in_source": True,
                 }
                 for index, entry in enumerate(ranges)
             ],
-            "dispositions": [serialized],
+            "dispositions": [
+                {
+                    "range_ids": ["tool-1", "tool-2", "tool-3", "tool-4"],
+                    "kind": "summarized",
+                    "policy_reason": "relay-target-v1:tool_bulk_overflow",
+                    "source_sha256": known_source_hash,
+                    "source_range_sha256s": list(known_range_hashes),
+                    "discord_message_ids": ["9001"],
+                    "expected_body_sha256": known_summary_body_hash,
+                    "committed": True,
+                }
+            ],
             "discord_observations": [
                 {
                     "message_id": "9001",
@@ -1854,8 +2120,8 @@ class EvidenceOracleTests(unittest.TestCase):
                     "edited_at": None,
                     "revision_index": 0,
                     "message_role": "relay_body",
-                    "raw_body": committed[0].expected_body,
-                    "normalized_body": committed[0].expected_body,
+                    "raw_body": known_summary_body,
+                    "normalized_body": known_summary_body,
                 }
             ],
             "delivery_observation": {

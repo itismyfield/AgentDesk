@@ -123,13 +123,15 @@ class Assessment:
     may_spend_automatic_action: bool
 
 
-def assess(observation: Observation) -> Assessment:
-    """Return the fail-closed authoritative assessment for one observation."""
+def _observation_contract_error(observation: Observation) -> str | None:
+    """Validate typed fields shared by every observation-consuming entrypoint."""
 
+    if not isinstance(observation, Observation):
+        return "observation_not_typed"
     if not isinstance(observation.continuity, InflightContinuity):
-        return _inconclusive("continuity_not_typed")
+        return "continuity_not_typed"
     if not isinstance(observation.queue, QueueDisposition):
-        return _inconclusive("queue_not_typed")
+        return "queue_not_typed"
     if any(
         not isinstance(value, bool)
         for value in (
@@ -143,7 +145,16 @@ def assess(observation: Observation) -> Assessment:
             observation.typed_idle,
         )
     ):
-        return _inconclusive("observation_bool_not_typed")
+        return "observation_bool_not_typed"
+    return None
+
+
+def assess(observation: Observation) -> Assessment:
+    """Return the fail-closed authoritative assessment for one observation."""
+
+    contract_error = _observation_contract_error(observation)
+    if contract_error is not None:
+        return _inconclusive(contract_error)
     if not observation.identity_complete or not observation.episode_key:
         return _inconclusive("missing_identity")
     if not observation.clock_valid:
@@ -363,6 +374,14 @@ class LedgerTransition:
     must_reprobe: bool = False
 
 
+def _unknown_ledger_state_transition(
+    record: LedgerRecord | None,
+) -> LedgerTransition | None:
+    if record is not None and not isinstance(record.state, LedgerState):
+        return LedgerTransition(record, False, 0, "ledger_state_not_typed", True)
+    return None
+
+
 def _delivery_proof_error(
     proof: DeliveryProof | None,
     observation: Observation,
@@ -372,6 +391,12 @@ def _delivery_proof_error(
 ) -> str | None:
     if proof is None:
         return "delivery_proof_required"
+    if not isinstance(proof, DeliveryProof):
+        return "delivery_proof_malformed"
+    if not isinstance(proof.identity_complete, bool) or not isinstance(
+        proof.clock_valid, bool
+    ):
+        return "delivery_proof_bool_not_typed"
     if (
         not isinstance(proof.queue, QueueDisposition)
         or not isinstance(observation.queue, QueueDisposition)
@@ -450,8 +475,9 @@ def reserve_attempt(
     delivery_proof: DeliveryProof,
     now: ClockStamp,
 ) -> LedgerTransition:
-    if record is not None and not isinstance(record.state, LedgerState):
-        return LedgerTransition(record, False, 0, "ledger_state_not_typed", True)
+    unknown_state = _unknown_ledger_state_transition(record)
+    if unknown_state is not None:
+        return unknown_state
     if (
         record is not None
         and record.state in {LedgerState.RESERVED, LedgerState.EFFECT_PENDING}
@@ -533,6 +559,9 @@ def reserve_attempt(
 def mark_effect_pending(
     record: LedgerRecord, *, attempt_id: str, now: ClockStamp
 ) -> LedgerTransition:
+    unknown_state = _unknown_ledger_state_transition(record)
+    if unknown_state is not None:
+        return unknown_state
     if attempt_id != record.attempt_id:
         return LedgerTransition(record, False, 0, "attempt_cas_mismatch", True)
     if record.state is not LedgerState.RESERVED:
@@ -556,9 +585,16 @@ def recover_after_crash(
     *,
     attempt_id: str | None = None,
 ) -> LedgerTransition:
+    unknown_state = _unknown_ledger_state_transition(record)
+    if unknown_state is not None:
+        return unknown_state
     if attempt_id != record.attempt_id:
         return LedgerTransition(record, False, 0, "attempt_cas_mismatch", True)
     if record.state is LedgerState.RESERVED:
+        if observation is not None:
+            contract_error = _observation_contract_error(observation)
+            if contract_error is not None:
+                return LedgerTransition(record, False, 0, contract_error, True)
         if (
             observation is None
             or observation.episode_key != record.episode_key
@@ -590,12 +626,16 @@ def settle_effect(
     now: ClockStamp,
     backoff_ms: int = 600_000,
 ) -> LedgerTransition:
+    unknown_state = _unknown_ledger_state_transition(record)
+    if unknown_state is not None:
+        return unknown_state
     if attempt_id != record.attempt_id:
         return LedgerTransition(record, False, 0, "attempt_cas_mismatch", True)
     if record.state is not LedgerState.EFFECT_PENDING:
         return LedgerTransition(record, False, 0, "not_effect_pending")
-    if not isinstance(observation.continuity, InflightContinuity):
-        return LedgerTransition(record, False, 0, "continuity_not_typed", True)
+    contract_error = _observation_contract_error(observation)
+    if contract_error is not None:
+        return LedgerTransition(record, False, 0, contract_error, True)
     if observation.continuity in {
         InflightContinuity.MISSING,
         InflightContinuity.REAPPEARED_SAME,
@@ -603,17 +643,20 @@ def settle_effect(
         return LedgerTransition(record, False, 0, "inflight_continuity_inconclusive", True)
     if not clock_allows_transition(record.clock_stamp, now):
         return LedgerTransition(record, False, 0, "clock_fail_closed", True)
-    same_episode_source_identity = (
+    same_episode_and_source = (
         observation.episode_key == record.episode_key
         and observation.source_id == record.source_id
-        and observation.source_generation == record.source_generation
     )
     if (
         observation.continuity is InflightContinuity.REPLACED
-        and same_episode_source_identity
+        and same_episode_and_source
+        and isinstance(observation.source_generation, int)
+        and not isinstance(observation.source_generation, bool)
+        and 0 <= observation.source_generation <= MAX_U64
+        and observation.source_generation <= record.source_generation
     ):
         return LedgerTransition(
-            record, False, 0, "replacement_identity_inconclusive", True
+            record, False, 0, "replacement_generation_not_advanced", True
         )
     if observation.episode_key != record.episode_key or (
         observation.continuity is InflightContinuity.REPLACED
@@ -1049,6 +1092,8 @@ def commit_dispositions(
     plan: BatchPlan,
     discord_ids: Mapping[int, Sequence[str]],
 ) -> tuple[PlannedDisposition, ...]:
+    """Commit a plan, enforcing Discord id uniqueness within this call only."""
+
     if not isinstance(discord_ids, Mapping):
         raise ValueError("Discord ids must be an index mapping")
     for index in discord_ids:
@@ -1081,7 +1126,7 @@ def commit_dispositions(
         elif ids:
             raise ValueError("policy omission cannot claim a Discord message")
         if any(message_id in used_message_ids for message_id in ids):
-            raise ValueError("Discord message ids must be globally unique")
+            raise ValueError("Discord message ids must be unique within this call")
         used_message_ids.update(ids)
         committed.append(
             replace(disposition, committed=True, discord_message_ids=ids)
@@ -1114,6 +1159,8 @@ def serialize_planned_disposition(disposition: PlannedDisposition) -> dict[str, 
 def advance_committed_frontier(
     current: int, dispositions: Sequence[PlannedDisposition]
 ) -> int:
+    """Advance one supplied sequence; id uniqueness is scoped to this call."""
+
     if (
         isinstance(current, bool)
         or not isinstance(current, int)
@@ -1188,7 +1235,7 @@ def advance_committed_frontier(
             DispositionKind.SUMMARIZED,
         }:
             if message_ids[0] in seen_message_ids:
-                raise ValueError("Discord message ids must be globally unique")
+                raise ValueError("Discord message ids must be unique within this call")
             seen_message_ids.add(message_ids[0])
         if not disposition.committed:
             pending_seen = True

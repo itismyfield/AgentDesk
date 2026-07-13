@@ -48,6 +48,13 @@ Discord evidence ids remain typed decimal strings; arbitrary values are never
 coerced. Marker uniqueness is derived from actual source bytes independently of
 nullable range metadata.
 
+`commit_dispositions` and `advance_committed_frontier` are side-effect-free, so
+their Discord message-id uniqueness checks cover only the dispositions supplied
+in that call. They do not claim process-global or durable uniqueness. Cross-batch
+reconciliation must provide the evidence oracle with every disposition and
+Discord observation in the externally pinned audit extent; the oracle rejects a
+message id reused anywhere in that extent.
+
 ## Fixtures and tests
 
 `fixtures/incidents.json` contains the authority matrix, executable ledger and
