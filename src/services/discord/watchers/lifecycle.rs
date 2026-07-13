@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::settings;
 
 #[path = "lifecycle/activity.rs"]
 mod activity;
@@ -2154,21 +2153,21 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         let (is_dm, live_child_name, thread_parent) =
             super::super::session_runtime::resolve_live_channel_routing_metadata(http, *channel_id)
                 .await;
-        // Resolve thread parent so validation uses the same semantics
-        // as normal message routing (router.rs).
-        if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
-            &settings_snapshot,
-            &provider,
-            *channel_id,
-            live_child_name.as_deref(),
-            thread_parent
-                .as_ref()
-                .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
-            is_dm,
-        ) {
+        let routing_status =
+            super::super::session_runtime::classify_live_bot_channel_routing_status(
+                &settings_snapshot,
+                &provider,
+                *channel_id,
+                is_dm,
+                live_child_name.as_deref(),
+                thread_parent
+                    .as_ref()
+                    .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
+            );
+        if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ⏭ watcher skip for {} — {reason} for channel {}",
+                "  [{ts}] ⏭ watcher skip for {} — {routing_status:?} routing for channel {}",
                 session_name,
                 channel_id
             );

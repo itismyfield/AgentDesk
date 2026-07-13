@@ -7,6 +7,7 @@
 //! stable. Moved verbatim except for module-local path qualification required by
 //! the new child-module boundary.
 
+use super::live_routing::validate_recovery_no_event_routing;
 use super::recovery_memory_scope::resolve_recovery_memory_scope;
 use super::terminal_watcher::restart_report_watcher_start;
 use super::*;
@@ -233,10 +234,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             memory_scope_channel_id.get(),
             memory_scope_channel_name.clone(),
         );
-        let is_dm = matches!(
-            channel_id.to_channel(http).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        );
+        let (is_dm, live_child_name, thread_parent) =
+            super::session_runtime::resolve_live_channel_routing_metadata(http, channel_id).await;
         let restart_report_exists =
             super::restart_report::load_restart_report(provider, state.channel_id).is_some();
         // #3562: derive the turn identity and agent role so the recovery_fired
@@ -640,37 +639,31 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             let session_alive = tmux_name
                 .as_deref()
                 .map_or(false, tmux_session_alive_with_retry);
-            // Derive channel_name from tmux session name if not in inflight state.
             // Validate before mutating restart-report state so other same-provider
             // bots do not log/clear reports for channels they do not own.
-            let effective_channel_name = state.channel_name.clone().or_else(|| {
-                tmux_name.as_deref().and_then(|name| {
-                    crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
-                        .map(|(_, ch)| ch)
-                })
-            });
-            let thread_parent = super::resolve_thread_parent(http, channel_id).await;
-            if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
+            if let Err(reason) = validate_recovery_no_event_routing(
                 &settings_snapshot,
                 provider,
                 channel_id,
-                effective_channel_name.as_deref(),
+                is_dm,
+                live_child_name.as_deref(),
                 thread_parent
                     .as_ref()
                     .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
-                is_dm,
             ) {
                 // #3869: orphan→finalize, else preserve (`false` ⇒ suppress expected-skip logs).
-                routing_orphan::route_recovery_skip(
-                    http,
-                    shared,
-                    provider,
-                    &state,
-                    tmux_name.as_deref(),
-                    reason,
-                    false,
-                )
-                .await;
+                if let Some(reason) = reason {
+                    routing_orphan::route_recovery_skip(
+                        http,
+                        shared,
+                        provider,
+                        &state,
+                        tmux_name.as_deref(),
+                        reason,
+                        false,
+                    )
+                    .await;
+                }
                 continue;
             }
 
@@ -689,30 +682,29 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                             .map(|(_, ch)| ch)
                     })
                 });
-                // Resolve thread parent so validation uses the same semantics
-                // as normal message routing (router.rs).
-                let thread_parent = super::resolve_thread_parent(http, channel_id).await;
-                if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
+                if let Err(reason) = validate_recovery_no_event_routing(
                     &settings_snapshot,
                     provider,
                     channel_id,
-                    effective_channel_name.as_deref(),
+                    is_dm,
+                    live_child_name.as_deref(),
                     thread_parent
                         .as_ref()
                         .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
-                    is_dm,
                 ) {
                     // #3869: orphan→finalize, else preserve (`true` ⇒ log skips).
-                    routing_orphan::route_recovery_skip(
-                        http,
-                        shared,
-                        provider,
-                        &state,
-                        tmux_name.as_deref(),
-                        reason,
-                        true,
-                    )
-                    .await;
+                    if let Some(reason) = reason {
+                        routing_orphan::route_recovery_skip(
+                            http,
+                            shared,
+                            provider,
+                            &state,
+                            tmux_name.as_deref(),
+                            reason,
+                            true,
+                        )
+                        .await;
+                    }
                     continue;
                 }
                 {
@@ -884,29 +876,28 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     .map(|(_, ch)| ch)
             })
         });
-        // Resolve thread parent so validation uses the same semantics
-        // as normal message routing (router.rs).
-        let thread_parent = super::resolve_thread_parent(http, channel_id).await;
-        if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
+        if let Err(reason) = validate_recovery_no_event_routing(
             &settings_snapshot,
             provider,
             channel_id,
-            channel_name.as_deref(),
+            is_dm,
+            live_child_name.as_deref(),
             thread_parent
                 .as_ref()
                 .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
-            is_dm,
         ) {
-            routing_orphan::route_recovery_skip(
-                http,
-                shared,
-                provider,
-                &state,
-                tmux_session_name.as_deref(),
-                reason,
-                true,
-            )
-            .await;
+            if let Some(reason) = reason {
+                routing_orphan::route_recovery_skip(
+                    http,
+                    shared,
+                    provider,
+                    &state,
+                    tmux_session_name.as_deref(),
+                    reason,
+                    true,
+                )
+                .await;
+            }
             continue;
         }
         let (fallback_output, fallback_input) = tmux_session_name
@@ -2394,10 +2385,36 @@ mod tests {
             .expect("production recovery source");
         assert_eq!(
             production
-                .matches("settings::validate_bot_channel_routing_with_thread_parent(")
+                .matches("validate_recovery_no_event_routing(")
                 .count(),
             3,
-            "all restart routing gates must preserve child authority and threadInherit"
+            "all restart routing gates must preserve unknown metadata and child authority"
+        );
+        let helper = include_str!("live_routing.rs");
+        assert_eq!(
+            helper
+                .matches("settings::validate_bot_channel_routing_with_thread_parent(")
+                .count(),
+            1,
+            "one metadata snapshot must drive one validator call"
+        );
+        assert!(helper.contains("if !is_dm && live_child_name.is_none()"));
+        assert!(helper.contains("Err(reason) if reason.orphans_inflight_on_restart()"));
+        assert_eq!(
+            production
+                .matches("resolve_live_channel_routing_metadata(http, channel_id)")
+                .count(),
+            1,
+            "one live Discord snapshot must feed every routing gate for a recovered row"
+        );
+        assert_eq!(
+            production.matches("live_child_name.as_deref(),").count(),
+            3,
+            "persisted/tmux names must never become routing authority"
+        );
+        assert!(
+            !production.contains("resolve_thread_parent(http, channel_id)"),
+            "a second parent lookup could race the authoritative child snapshot"
         );
         assert!(
             !production.contains("validate_bot_channel_routing_with_provider_channel("),

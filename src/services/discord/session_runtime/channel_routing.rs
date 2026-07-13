@@ -107,15 +107,9 @@ pub(in crate::services::discord) async fn validate_live_channel_routing_with_dm_
     channel_id: serenity::model::id::ChannelId,
     is_dm_hint: Option<bool>,
 ) -> Result<(), settings::BotChannelRoutingGuardFailure> {
-    let is_dm = match is_dm_hint {
-        Some(is_dm) => is_dm,
-        None => matches!(
-            channel_id.to_channel(&ctx.http).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        ),
-    };
-    let (channel_name, _) = resolve_channel_category(&ctx.http, Some(&ctx.cache), channel_id).await;
-    let thread_parent = resolve_thread_parent(&ctx.http, channel_id).await;
+    let (live_is_dm, channel_name, thread_parent) =
+        resolve_live_channel_routing_metadata(&ctx.http, channel_id).await;
+    let is_dm = is_dm_hint.unwrap_or(live_is_dm);
     settings::validate_bot_channel_routing_with_thread_parent(
         settings,
         provider,
@@ -153,6 +147,53 @@ pub(in crate::services::discord) enum RuntimeChannelBindingStatus {
     Owned,
     Unowned,
     Unknown,
+}
+
+pub(in crate::services::discord) fn classify_live_bot_channel_routing_status(
+    settings_snapshot: &DiscordBotSettings,
+    provider: &ProviderKind,
+    channel_id: serenity::model::id::ChannelId,
+    is_dm: bool,
+    live_child_name: Option<&str>,
+    thread_parent: Option<(serenity::model::id::ChannelId, Option<&str>)>,
+) -> RuntimeChannelBindingStatus {
+    if !is_dm && live_child_name.is_none() {
+        return RuntimeChannelBindingStatus::Unknown;
+    }
+    match settings::validate_bot_channel_routing_with_thread_parent(
+        settings_snapshot,
+        provider,
+        channel_id,
+        live_child_name,
+        thread_parent,
+        is_dm,
+    ) {
+        Ok(()) => RuntimeChannelBindingStatus::Owned,
+        Err(reason) if !reason.orphans_inflight_on_restart() => {
+            RuntimeChannelBindingStatus::Unknown
+        }
+        Err(_) => RuntimeChannelBindingStatus::Unowned,
+    }
+}
+
+pub(in crate::services::discord) async fn resolve_live_bot_channel_routing_status(
+    http: &Arc<serenity::Http>,
+    settings_snapshot: &DiscordBotSettings,
+    provider: &ProviderKind,
+    channel_id: serenity::model::id::ChannelId,
+) -> RuntimeChannelBindingStatus {
+    let (is_dm, live_child_name, thread_parent) =
+        resolve_live_channel_routing_metadata(http, channel_id).await;
+    classify_live_bot_channel_routing_status(
+        settings_snapshot,
+        provider,
+        channel_id,
+        is_dm,
+        live_child_name.as_deref(),
+        thread_parent
+            .as_ref()
+            .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
+    )
 }
 
 fn classify_runtime_channel_binding_status(

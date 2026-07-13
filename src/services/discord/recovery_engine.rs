@@ -36,6 +36,8 @@ use self::status_panel_completion_producer::*;
 // #3479 r8: behavior-preserving extraction of pure clusters into leaf modules.
 #[path = "recovery_engine/jsonl_extract.rs"]
 mod jsonl_extract;
+#[path = "recovery_engine/live_routing.rs"]
+mod live_routing;
 #[path = "recovery_engine/output_path_detect.rs"]
 mod output_path_detect;
 #[path = "recovery_engine/phase_policy.rs"]

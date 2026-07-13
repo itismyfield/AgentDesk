@@ -2,6 +2,64 @@ use super::*;
 
 static ORPHAN_INFLIGHT_LOCK_SWEEP_ONCE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
+async fn cached_live_bot_routing_status(
+    cache: &mut std::collections::HashMap<serenity::ChannelId, RuntimeChannelBindingStatus>,
+    http: &Arc<serenity::Http>,
+    settings_snapshot: &DiscordBotSettings,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> RuntimeChannelBindingStatus {
+    if let Some(status) = cache.get(&channel_id) {
+        return *status;
+    }
+    let status = super::super::session_runtime::resolve_live_bot_channel_routing_status(
+        http,
+        settings_snapshot,
+        provider,
+        channel_id,
+    )
+    .await;
+    cache.insert(channel_id, status);
+    status
+}
+
+fn clear_unowned_pending_queue_artifact(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: serenity::ChannelId,
+) -> Result<(), String> {
+    crate::services::turn_orchestrator::save_channel_queue(
+        provider,
+        token_hash,
+        channel_id,
+        &[],
+        None,
+    )
+}
+
+fn clear_unowned_pending_dispatch_artifact(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: serenity::ChannelId,
+) -> Result<(), String> {
+    crate::services::turn_orchestrator::remove_channel_pending_dispatch_marker(
+        provider, token_hash, channel_id,
+    )
+}
+
+fn account_unowned_cleanup_result(
+    result: &Result<(), String>,
+    item_count: usize,
+    cleared_unowned: &mut usize,
+    cleanup_failed_unowned: &mut usize,
+) {
+    if result.is_ok() {
+        *cleared_unowned += item_count;
+    } else {
+        *cleanup_failed_unowned += item_count;
+    }
+}
+
 /// Restore inflight turns FIRST, then flush restart reports (leader-only).
 /// Recovery skips channels that have a pending restart report, so the report
 /// must still be on disk when recovery runs. After recovery completes, the
@@ -55,20 +113,34 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                 load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
             let restored_dispatch_markers =
                 load_pending_dispatch_markers(&provider_for_restore, &shared_for_tmux2.token_hash);
-            let allowed_bot_ids_for_restore: Vec<u64> = {
-                let settings = shared_for_tmux2.settings.read().await;
-                settings.allowed_bot_ids.clone()
-            };
+            let settings_snapshot_for_restore = shared_for_tmux2.settings.read().await.clone();
+            let allowed_bot_ids_for_restore = settings_snapshot_for_restore.allowed_bot_ids.clone();
+            let mut live_routing_status_cache = std::collections::HashMap::new();
             let announce_bot_id_for_restore =
                 super::resolve_announce_bot_user_id(&shared_for_tmux2).await;
             // P1-1: Restore dispatch_role_overrides from queue snapshots
             for (thread_channel_id, alt_channel_id) in &restored_overrides {
-                if !matches!(
-                    resolve_runtime_channel_binding_status(&http_for_tmux, *thread_channel_id)
-                        .await,
-                    RuntimeChannelBindingStatus::Owned
-                ) {
-                    continue;
+                match cached_live_bot_routing_status(
+                    &mut live_routing_status_cache,
+                    &http_for_tmux,
+                    &settings_snapshot_for_restore,
+                    &provider_for_restore,
+                    *thread_channel_id,
+                )
+                .await
+                {
+                    RuntimeChannelBindingStatus::Owned => {}
+                    RuntimeChannelBindingStatus::Unknown => continue,
+                    RuntimeChannelBindingStatus::Unowned => {
+                        if let Err(error) = clear_unowned_pending_queue_artifact(
+                            &provider_for_restore,
+                            &shared_for_tmux2.token_hash,
+                            *thread_channel_id,
+                        ) {
+                            tracing::warn!(channel_id = thread_channel_id.get(), %error, "failed to clear genuinely unowned pending queue artifact");
+                        }
+                        continue;
+                    }
                 }
                 shared_for_tmux2
                     .dispatch
@@ -79,11 +151,27 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                 let Some(alt_channel_id) = marker.restored_override else {
                     continue;
                 };
-                if !matches!(
-                    resolve_runtime_channel_binding_status(&http_for_tmux, marker.channel_id).await,
-                    RuntimeChannelBindingStatus::Owned
-                ) {
-                    continue;
+                match cached_live_bot_routing_status(
+                    &mut live_routing_status_cache,
+                    &http_for_tmux,
+                    &settings_snapshot_for_restore,
+                    &provider_for_restore,
+                    marker.channel_id,
+                )
+                .await
+                {
+                    RuntimeChannelBindingStatus::Owned => {}
+                    RuntimeChannelBindingStatus::Unknown => continue,
+                    RuntimeChannelBindingStatus::Unowned => {
+                        if let Err(error) = clear_unowned_pending_dispatch_artifact(
+                            &provider_for_restore,
+                            &shared_for_tmux2.token_hash,
+                            marker.channel_id,
+                        ) {
+                            tracing::warn!(channel_id = marker.channel_id.get(), %error, "failed to clear genuinely unowned pending dispatch artifact");
+                        }
+                        continue;
+                    }
                 }
                 shared_for_tmux2
                     .dispatch
@@ -99,17 +187,44 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             }
             if !restored_queues.is_empty() {
                 let mut added = 0usize;
-                let mut skipped_unowned = 0usize;
+                let mut preserved_unknown = 0usize;
+                let mut cleared_unowned = 0usize;
+                let mut cleanup_failed_unowned = 0usize;
                 let mut skipped_sender = 0usize;
                 let mut skipped_duplicate = 0usize;
                 let mut skipped_persist_error = 0usize;
                 for (channel_id, items) in restored_queues {
-                    if !matches!(
-                        resolve_runtime_channel_binding_status(&http_for_tmux, channel_id).await,
-                        RuntimeChannelBindingStatus::Owned
-                    ) {
-                        skipped_unowned += items.len();
-                        continue;
+                    match cached_live_bot_routing_status(
+                        &mut live_routing_status_cache,
+                        &http_for_tmux,
+                        &settings_snapshot_for_restore,
+                        &provider_for_restore,
+                        channel_id,
+                    )
+                    .await
+                    {
+                        RuntimeChannelBindingStatus::Owned => {}
+                        RuntimeChannelBindingStatus::Unknown => {
+                            preserved_unknown += items.len();
+                            continue;
+                        }
+                        RuntimeChannelBindingStatus::Unowned => {
+                            let cleanup_result = clear_unowned_pending_queue_artifact(
+                                &provider_for_restore,
+                                &shared_for_tmux2.token_hash,
+                                channel_id,
+                            );
+                            account_unowned_cleanup_result(
+                                &cleanup_result,
+                                items.len(),
+                                &mut cleared_unowned,
+                                &mut cleanup_failed_unowned,
+                            );
+                            if let Err(error) = cleanup_result {
+                                tracing::warn!(channel_id = channel_id.get(), %error, "failed to clear genuinely unowned pending queue artifact");
+                            }
+                            continue;
+                        }
                     }
                     // #3864: the sender filter is stateless, so it stays
                     // out-of-actor; collect the allowed items here. The merge
@@ -158,11 +273,15 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                         skipped_duplicate += allowed_count - result.absorbed;
                     }
                 }
-                let skipped =
-                    skipped_unowned + skipped_sender + skipped_duplicate + skipped_persist_error;
+                let skipped = preserved_unknown
+                    + cleared_unowned
+                    + cleanup_failed_unowned
+                    + skipped_sender
+                    + skipped_duplicate
+                    + skipped_persist_error;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate}, persist_error={skipped_persist_error})"
+                    "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: preserved_unknown={preserved_unknown}, cleared_unowned={cleared_unowned}, cleanup_failed_unowned={cleanup_failed_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate}, persist_error={skipped_persist_error})"
                 );
             }
             // #3641: orphan `.json.lock` sidecars are invisible to the `.json`
@@ -201,18 +320,44 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
 
             if !restored_dispatch_markers.is_empty() {
                 let mut added = 0usize;
-                let mut skipped_unowned = 0usize;
+                let mut preserved_unknown = 0usize;
+                let mut cleared_unowned = 0usize;
+                let mut cleanup_failed_unowned = 0usize;
                 let mut skipped_sender = 0usize;
                 let mut skipped_duplicate = 0usize;
                 let mut skipped_persist_error = 0usize;
                 for marker in restored_dispatch_markers {
-                    if !matches!(
-                        resolve_runtime_channel_binding_status(&http_for_tmux, marker.channel_id)
-                            .await,
-                        RuntimeChannelBindingStatus::Owned
-                    ) {
-                        skipped_unowned += 1;
-                        continue;
+                    match cached_live_bot_routing_status(
+                        &mut live_routing_status_cache,
+                        &http_for_tmux,
+                        &settings_snapshot_for_restore,
+                        &provider_for_restore,
+                        marker.channel_id,
+                    )
+                    .await
+                    {
+                        RuntimeChannelBindingStatus::Owned => {}
+                        RuntimeChannelBindingStatus::Unknown => {
+                            preserved_unknown += 1;
+                            continue;
+                        }
+                        RuntimeChannelBindingStatus::Unowned => {
+                            let cleanup_result = clear_unowned_pending_dispatch_artifact(
+                                &provider_for_restore,
+                                &shared_for_tmux2.token_hash,
+                                marker.channel_id,
+                            );
+                            account_unowned_cleanup_result(
+                                &cleanup_result,
+                                1,
+                                &mut cleared_unowned,
+                                &mut cleanup_failed_unowned,
+                            );
+                            if let Err(error) = cleanup_result {
+                                tracing::warn!(channel_id = marker.channel_id.get(), %error, "failed to clear genuinely unowned pending dispatch artifact");
+                            }
+                            continue;
+                        }
                     }
                     if !super::is_allowed_turn_sender(
                         &allowed_bot_ids_for_restore,
@@ -245,11 +390,15 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                         added += result.absorbed;
                     }
                 }
-                let skipped =
-                    skipped_unowned + skipped_sender + skipped_duplicate + skipped_persist_error;
+                let skipped = preserved_unknown
+                    + cleared_unowned
+                    + cleanup_failed_unowned
+                    + skipped_sender
+                    + skipped_duplicate
+                    + skipped_persist_error;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 📋 FLUSH: restored {added} pending dispatch marker item(s) from disk after inflight recovery (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate_or_active={skipped_duplicate}, persist_error={skipped_persist_error})"
+                    "  [{ts}] 📋 FLUSH: restored {added} pending dispatch marker item(s) from disk after inflight recovery (skipped {skipped}: preserved_unknown={preserved_unknown}, cleared_unowned={cleared_unowned}, cleanup_failed_unowned={cleanup_failed_unowned}, sender={skipped_sender}, duplicate_or_active={skipped_duplicate}, persist_error={skipped_persist_error})"
                 );
             }
 
@@ -266,10 +415,40 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                 );
             if !restored_queued_placeholders.is_empty() {
                 let live_queue_ids = collect_live_queue_message_ids(&shared_for_tmux2).await;
-                let filter_outcome = filter_restored_queued_placeholders(
-                    restored_queued_placeholders,
-                    &live_queue_ids,
-                );
+                let mut owned_placeholders = std::collections::HashMap::new();
+                let mut unowned_stale_cards = Vec::new();
+                let mut unowned_channels = std::collections::HashSet::new();
+                for (key @ (channel_id, user_msg_id), placeholder_msg_id) in
+                    restored_queued_placeholders
+                {
+                    match cached_live_bot_routing_status(
+                        &mut live_routing_status_cache,
+                        &http_for_tmux,
+                        &settings_snapshot_for_restore,
+                        &provider_for_restore,
+                        channel_id,
+                    )
+                    .await
+                    {
+                        RuntimeChannelBindingStatus::Owned => {
+                            owned_placeholders.insert(key, placeholder_msg_id);
+                        }
+                        RuntimeChannelBindingStatus::Unknown => {
+                            // A sibling bot or transient metadata failure owns
+                            // the durable mapping. Leave it disk-only: this bot
+                            // must neither hydrate nor classify/delete the card.
+                        }
+                        RuntimeChannelBindingStatus::Unowned => {
+                            unowned_channels.insert(channel_id);
+                            unowned_stale_cards.push((channel_id, user_msg_id, placeholder_msg_id));
+                        }
+                    }
+                }
+                let mut filter_outcome =
+                    filter_restored_queued_placeholders(owned_placeholders, &live_queue_ids);
+                filter_outcome.stale_count += unowned_stale_cards.len();
+                filter_outcome.channels_with_stale.extend(unowned_channels);
+                filter_outcome.stale_cards.extend(unowned_stale_cards);
                 for (key, placeholder_msg_id) in &filter_outcome.live {
                     shared_for_tmux2
                         .queued
@@ -413,3 +592,7 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "recovery_flush/routing_authority_tests.rs"]
+mod routing_authority_tests;

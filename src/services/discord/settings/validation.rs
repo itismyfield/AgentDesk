@@ -853,11 +853,12 @@ channels:
         ] {
             assert_eq!(
                 source
-                    .matches("settings::validate_bot_channel_routing_with_thread_parent(")
+                    .matches("classify_live_bot_channel_routing_status(")
                     .count(),
                 1,
-                "each recovery intake must use the child-aware thread routing gate exactly once"
+                "each no-event recovery intake must use the tri-state routing gate exactly once"
             );
+            assert!(!source.contains("settings::validate_bot_channel_routing_with_thread_parent("));
             assert!(
                 !source.contains("validate_bot_channel_routing_with_provider_channel("),
                 "parent-flattening validation must not remain in watcher restore or manual rebind"
@@ -878,14 +879,34 @@ channels:
         assert!(!watcher.contains("pname.unwrap_or_else(|| channel_name.clone())"));
         assert_eq!(watcher.matches("live_child_name.as_deref(),").count(), 1);
         assert!(!watcher.contains("Some(&channel_name),\n            thread_parent"));
+        assert_eq!(
+            watcher
+                .matches(
+                    "if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {",
+                )
+                .count(),
+            1,
+            "watcher restore must admit only proven Owned routing"
+        );
         let rebind = include_str!("../recovery_engine/manual_rebind/mod.rs");
         assert!(!rebind.contains("pname.or(channel_name.clone())"));
         assert_eq!(rebind.matches("live_child_name.as_deref(),").count(), 1);
         assert!(!rebind.contains("channel_name.as_deref(),\n        thread_parent"));
+        assert!(rebind.contains(".unwrap_or((false, None, None))"));
+        assert_eq!(
+            rebind
+                .matches(
+                    "if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {",
+                )
+                .count(),
+            1,
+            "manual rebind timeout/unknown metadata must not bypass the Owned-only gate"
+        );
 
         let metadata = include_str!("../session_runtime/channel_routing.rs");
         assert!(metadata.contains("return (false, None, None)"));
         assert!(metadata.contains("Some((parent_id, parent_name))"));
+        assert!(metadata.contains("if !is_dm && live_child_name.is_none()"));
     }
 
     #[test]

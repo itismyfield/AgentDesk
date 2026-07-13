@@ -207,7 +207,7 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2072 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2071 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
@@ -1197,7 +1197,7 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine/restore_inflight.rs` (2323 production
+  - `src/services/discord/recovery_engine/restore_inflight.rs` (2314 production
     lines; tracked #3834 follow-up giant after the r2 behavior-preserving split.
     Owns the restart-path inflight scan: retry-aware tmux liveness probes,
     `finish_recovered_turn_mailbox`, live output-path detection,
@@ -1219,7 +1219,7 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (988 prod lines
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (986 prod lines
     after #4455; remains below the giant threshold. Keeps the manual rebind entrypoints,
     rollback carrier, session refresh, active-turn re-registration hook, and
     watcher claim/spawn path. #4465's durable automatic lane performs the

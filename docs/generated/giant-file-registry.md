@@ -15,13 +15,13 @@
 | `src/server/maintenance.rs` | 1119 | server-runtime | 2026-10-31 | #3909 |
 | `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
-| `src/services/discord/catch_up.rs` | 1746 | discord-relay | 2026-10-31 | #3405 |
+| `src/services/discord/catch_up.rs` | 1769 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2561 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1374 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1180 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1020 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/recovery_engine/restore_inflight.rs` | 2323 | discord-relay | 2026-10-31 | #3834 |
+| `src/services/discord/recovery_engine/restore_inflight.rs` | 2314 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1444 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1541 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2822 | discord-relay | 2026-10-31 | #3837 |
@@ -34,7 +34,7 @@
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/turn_view_reconciler.rs` | 2213 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2905 | voice-runtime | 2026-08-31 | #3405 |
-| `src/services/discord/watchers/lifecycle.rs` | 2072 | discord-relay | 2026-10-31 | #3840 |
+| `src/services/discord/watchers/lifecycle.rs` | 2071 | discord-relay | 2026-10-31 | #3840 |
 | `src/services/tmux_common.rs` | 1099 | discord-relay | 2026-10-31 | #3924 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 

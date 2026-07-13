@@ -582,6 +582,7 @@ src/
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
 │   │   │   ├── jsonl_extract.rs
+│   │   │   ├── live_routing.rs
 │   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── manual_rebind_override.rs
 │   │   │   ├── output_path_detect.rs
@@ -646,6 +647,8 @@ src/
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
+│   │   │   ├── recovery_flush/
+│   │   │   │   └── routing_authority_tests.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_lease.rs
 │   │   │   ├── gateway_lease_tests.rs

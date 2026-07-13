@@ -80,6 +80,8 @@ trait CatchUpDiscordApi: Sync {
 
     async fn resolve_runtime_channel_binding_status(
         &self,
+        settings: &DiscordBotSettings,
+        provider: &ProviderKind,
         channel_id: ChannelId,
     ) -> RuntimeChannelBindingStatus;
 
@@ -148,9 +150,14 @@ impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
 
     async fn resolve_runtime_channel_binding_status(
         &self,
+        settings: &DiscordBotSettings,
+        provider: &ProviderKind,
         channel_id: ChannelId,
     ) -> RuntimeChannelBindingStatus {
-        resolve_runtime_channel_binding_status(self.http, channel_id).await
+        super::session_runtime::resolve_live_bot_channel_routing_status(
+            self.http, settings, provider, channel_id,
+        )
+        .await
     }
 
     async fn fetch_messages(
@@ -483,23 +490,26 @@ fn catch_up_candidate_allowed_for_bot(
     provider: &ProviderKind,
     candidate: &CatchUpChannelCandidate,
 ) -> bool {
-    if candidate.disk_checkpoint.is_some() {
-        return settings::bot_settings_allow_channel(
-            settings,
-            provider,
-            candidate.channel_id,
-            false,
-        );
+    // This synchronous prefilter has no Discord thread-parent metadata.  A
+    // candidate with no direct child binding may be an inherited thread, so
+    // defer its authoritative decision to the async live metadata gate below.
+    // Directly-bound candidates remain cheap to reject for sibling/utility bots.
+    if settings::resolve_role_binding(candidate.channel_id, candidate.fallback_name.as_deref())
+        .is_none()
+    {
+        return true;
     }
 
-    settings::validate_bot_channel_routing(
+    match settings::validate_bot_channel_routing(
         settings,
         provider,
         candidate.channel_id,
         candidate.fallback_name.as_deref(),
         false,
-    )
-    .is_ok()
+    ) {
+        Ok(()) | Err(settings::BotChannelRoutingGuardFailure::ProviderMismatch) => true,
+        Err(_) => false,
+    }
 }
 
 fn collect_catch_up_channel_candidates(
@@ -947,7 +957,12 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let fetch_mode = catch_up_fetch_mode_for_scan(candidate, live_checkpoint, retry_checkpoint);
         let scan_checkpoint = fetch_mode.checkpoint();
 
-        match api.resolve_runtime_channel_binding_status(channel_id).await {
+        let live_routing_status = {
+            let settings = shared.settings.read().await.clone();
+            api.resolve_runtime_channel_binding_status(&settings, provider, channel_id)
+                .await
+        };
+        match live_routing_status {
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1424,6 +1439,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         api.utility_bot_user_ids(shared).await;
 
     // Same per-channel pacing as phase 1 (see `catch_up_scan_pace`).
+    // Re-resolve live routing for phase 2 instead of reusing phase 1's snapshot:
+    // a binding may legitimately change while a long sweep is running.  Each
+    // phase gets one internally consistent child+parent metadata fetch.
     let mut paced_scan_phase2 = false;
     for candidate in candidates.values() {
         let channel_id = candidate.channel_id;
@@ -1444,7 +1462,12 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         }
         paced_scan_phase2 = true;
 
-        match api.resolve_runtime_channel_binding_status(channel_id).await {
+        let live_routing_status = {
+            let settings = shared.settings.read().await.clone();
+            api.resolve_runtime_channel_binding_status(&settings, provider, channel_id)
+                .await
+        };
+        match live_routing_status {
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned | RuntimeChannelBindingStatus::Unknown => continue,
         }
@@ -1753,7 +1776,8 @@ mod catch_up_recovery_tests {
         CatchUpMessageView, CatchUpRetryScanDecision, CatchUpRetryState, CatchUpTooOldDrop,
         ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind, RecentPageDecision,
         RuntimeChannelBindingStatus, advance_phase2_checkpoint, arm_catch_up_retry_pending,
-        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
+        catch_up_candidate_allowed_for_bot, catch_up_enqueue_accepted,
+        catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
         catch_up_last_item_dedup_is_checkpoint_safe, catch_up_message_age_reference_time,
         catch_up_remaining_queue_capacity, catch_up_too_old_notice, catch_up_too_old_snippet,
         classify_catch_up_message, classify_phase2_enqueue_commit,
@@ -1764,6 +1788,8 @@ mod catch_up_recovery_tests {
         rearm_catch_up_retry_after_fetch_failure, recent_page_decision, run_catch_up_sweep,
         should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
+    use crate::services::discord::DiscordBotSettings;
+    use crate::services::discord::session_runtime::classify_live_bot_channel_routing_status;
     use crate::services::turn_orchestrator::{
         EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
     };
@@ -1894,18 +1920,6 @@ mod catch_up_recovery_tests {
                 cleanup_hook: None,
             }
         }
-
-        fn unknown_binding() -> Self {
-            Self {
-                current_user_id: Some(9001),
-                binding_status: RuntimeChannelBindingStatus::Unknown,
-                fetch_error: None,
-                messages: Vec::new(),
-                fetch_attempts: None,
-                empty_after_first_fetch: false,
-                cleanup_hook: None,
-            }
-        }
     }
 
     #[async_trait::async_trait]
@@ -1916,6 +1930,8 @@ mod catch_up_recovery_tests {
 
         async fn resolve_runtime_channel_binding_status(
             &self,
+            _settings: &DiscordBotSettings,
+            _provider: &ProviderKind,
             _channel_id: ChannelId,
         ) -> RuntimeChannelBindingStatus {
             self.binding_status
@@ -2120,6 +2136,242 @@ mod catch_up_recovery_tests {
         assert_eq!(
             catch_up_fetch_mode_for_scan(candidate, Some(1504812094456070175), None),
             CatchUpFetchMode::After(1504812094456070175)
+        );
+    }
+
+    const ROUTING_CHILD_ID: u64 = 15_046_124_559_162_459;
+    const ROUTING_PARENT_ID: u64 = 14_796_713_013_870_592;
+
+    fn routing_bot_settings(
+        provider: ProviderKind,
+        allowed_channel_ids: Vec<u64>,
+    ) -> DiscordBotSettings {
+        DiscordBotSettings {
+            provider,
+            allowed_channel_ids,
+            agent: Some("project-agentdesk".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn write_routing_role_map(root: &std::path::Path, thread_inherit: bool, child: bool) {
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).expect("create routing config");
+        let child = if child {
+            format!(
+                r#",
+    "{ROUTING_CHILD_ID}": {{
+      "roleId": "review-agent",
+      "promptFile": "/tmp/review-agent.md",
+      "provider": "claude"
+    }}"#
+            )
+        } else {
+            String::new()
+        };
+        std::fs::write(
+            config.join("role_map.json"),
+            format!(
+                r#"{{
+  "byChannelId": {{
+    "{ROUTING_PARENT_ID}": {{
+      "roleId": "project-agentdesk",
+      "promptFile": "/tmp/project-agentdesk.md",
+      "provider": "codex",
+      "threadInherit": {thread_inherit}
+    }}{child}
+  }}
+}}"#
+            ),
+        )
+        .expect("write routing role map");
+    }
+
+    #[test]
+    fn catch_up_live_routing_preserves_inherited_and_direct_child_authority() {
+        let root = scoped_runtime_root();
+        write_routing_role_map(root.path(), true, false);
+        let parent = Some((ChannelId::new(ROUTING_PARENT_ID), Some("adk-cdx")));
+        let codex = routing_bot_settings(ProviderKind::Codex, vec![ROUTING_PARENT_ID]);
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &codex,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("child-thread"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Owned
+        );
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &codex,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("child-thread"),
+                Some((ChannelId::new(ROUTING_PARENT_ID), None)),
+            ),
+            RuntimeChannelBindingStatus::Owned,
+            "known parent ID remains authoritative without a parent name"
+        );
+
+        write_routing_role_map(root.path(), true, true);
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &codex,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("review-thread"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Unknown,
+            "the parent bot must preserve/skip a directly owned child"
+        );
+        let mut child_bot = routing_bot_settings(ProviderKind::Claude, vec![ROUTING_CHILD_ID]);
+        child_bot.agent = Some("review-agent".to_string());
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &child_bot,
+                &ProviderKind::Claude,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("review-thread"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Owned
+        );
+    }
+
+    #[test]
+    fn catch_up_live_routing_preserves_unknown_and_siblings_but_cleans_genuine_mismatch() {
+        let root = scoped_runtime_root();
+        write_routing_role_map(root.path(), true, false);
+        let parent = Some((ChannelId::new(ROUTING_PARENT_ID), Some("adk-cdx")));
+        let owner = routing_bot_settings(ProviderKind::Codex, vec![ROUTING_PARENT_ID]);
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &owner,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                None,
+                None,
+            ),
+            RuntimeChannelBindingStatus::Unknown
+        );
+
+        let sibling_allowlist = routing_bot_settings(ProviderKind::Codex, vec![ROUTING_CHILD_ID]);
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &sibling_allowlist,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("child-thread"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Unknown
+        );
+        let mut sibling_agent = routing_bot_settings(ProviderKind::Codex, vec![ROUTING_PARENT_ID]);
+        sibling_agent.agent = Some("review-agent".to_string());
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &sibling_agent,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("child-thread"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Unknown
+        );
+
+        let mut wrong_provider =
+            routing_bot_settings(ProviderKind::Claude, vec![ROUTING_PARENT_ID]);
+        wrong_provider.agent = Some("project-agentdesk".to_string());
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &wrong_provider,
+                &ProviderKind::Claude,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("child-thread"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Unowned
+        );
+
+        write_routing_role_map(root.path(), false, false);
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &owner,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("child-thread"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Unknown,
+            "opt-out may still have a child-allowlisted sibling owner"
+        );
+        let mut child_allowlist_sibling =
+            routing_bot_settings(ProviderKind::Codex, vec![ROUTING_CHILD_ID]);
+        child_allowlist_sibling.agent = None;
+        assert_eq!(
+            classify_live_bot_channel_routing_status(
+                &child_allowlist_sibling,
+                &ProviderKind::Codex,
+                ChannelId::new(ROUTING_CHILD_ID),
+                false,
+                Some("adk-cdx"),
+                parent,
+            ),
+            RuntimeChannelBindingStatus::Owned,
+            "a child-only allowlist can own an opted-out thread without a role binding"
+        );
+    }
+
+    #[test]
+    fn catch_up_sync_prefilter_defers_unbound_threads_to_live_routing() {
+        let root = scoped_runtime_root();
+        write_routing_role_map(root.path(), true, false);
+        let parent_bot = routing_bot_settings(ProviderKind::Codex, vec![ROUTING_PARENT_ID]);
+        let inherited_candidate = CatchUpChannelCandidate {
+            channel_id: ChannelId::new(ROUTING_CHILD_ID),
+            fallback_name: None,
+            checkpoint_path: Some(root.path().join("inherited.txt")),
+            disk_checkpoint: Some(42),
+        };
+        assert!(
+            catch_up_candidate_allowed_for_bot(
+                &parent_bot,
+                &ProviderKind::Codex,
+                &inherited_candidate
+            ),
+            "sync filtering has no parent proof and must defer inherited authority to live metadata"
+        );
+
+        write_routing_role_map(root.path(), true, true);
+        assert!(
+            !catch_up_candidate_allowed_for_bot(
+                &parent_bot,
+                &ProviderKind::Codex,
+                &inherited_candidate
+            ),
+            "a known direct child binding remains a decisive sibling prefilter"
+        );
+        let mut wrong_provider = routing_bot_settings(ProviderKind::Codex, vec![ROUTING_CHILD_ID]);
+        wrong_provider.agent = Some("review-agent".to_string());
+        assert!(
+            catch_up_candidate_allowed_for_bot(
+                &wrong_provider,
+                &ProviderKind::Codex,
+                &inherited_candidate
+            ),
+            "genuine provider mismatch must reach the live gate so its checkpoint can be cleaned"
         );
     }
 
@@ -2885,14 +3137,19 @@ mod catch_up_recovery_tests {
             armed_at,
         };
         let retry_checkpoints = HashMap::from([(channel_id, retry_state)]);
+        let fetch_attempts = Arc::new(AtomicUsize::new(0));
+        let api = TestCatchUpDiscordApi {
+            current_user_id: Some(9001),
+            binding_status: RuntimeChannelBindingStatus::Unknown,
+            fetch_error: None,
+            messages: Vec::new(),
+            fetch_attempts: Some(Arc::clone(&fetch_attempts)),
+            empty_after_first_fetch: false,
+            cleanup_hook: None,
+        };
 
         run_catch_up_sweep(
-            CatchUpDeps::new(
-                &TestCatchUpDiscordApi::unknown_binding(),
-                &shared,
-                &provider,
-            )
-            .with_retry_checkpoints(&retry_checkpoints),
+            CatchUpDeps::new(&api, &shared, &provider).with_retry_checkpoints(&retry_checkpoints),
         )
         .await;
 
@@ -2903,6 +3160,20 @@ mod catch_up_recovery_tests {
         assert_eq!(pending.checkpoint, checkpoint);
         assert_eq!(pending.fetch_failures, 2);
         assert_eq!(pending.armed_at, armed_at);
+        assert_eq!(
+            fetch_attempts.load(Ordering::SeqCst),
+            0,
+            "unknown live routing must block both phase-1 and phase-2 fetches"
+        );
+        assert!(
+            root.path()
+                .join("runtime")
+                .join("last_message")
+                .join(provider.as_str())
+                .join(format!("{}.txt", channel_id.get()))
+                .exists(),
+            "unknown live routing must preserve the durable checkpoint"
+        );
     }
 
     #[test]

@@ -18,7 +18,6 @@
 use super::manual_rebind_output_path::saved_output_path_for_rebind_resolution;
 use super::manual_rebind_override::upsert_rebind_session_id_override;
 use super::*;
-use crate::services::discord::settings;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
@@ -395,18 +394,17 @@ async fn rebind_inflight_for_channel_inner(
     )
     .await
     .unwrap_or((false, None, None));
-    if settings::validate_bot_channel_routing_with_thread_parent(
+    let routing_status = super::super::session_runtime::classify_live_bot_channel_routing_status(
         &settings_snapshot,
         provider,
         discord_channel_id,
+        is_dm,
         live_child_name.as_deref(),
         thread_parent
             .as_ref()
             .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
-        is_dm,
-    )
-    .is_err()
-    {
+    );
+    if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {
         return Err(RebindError::ChannelNotBound);
     }
 
