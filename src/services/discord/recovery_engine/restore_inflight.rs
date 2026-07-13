@@ -7,6 +7,7 @@
 //! stable. Moved verbatim except for module-local path qualification required by
 //! the new child-module boundary.
 
+use super::recovery_memory_scope::resolve_recovery_memory_scope;
 use super::terminal_watcher::restart_report_watcher_start;
 use super::*;
 
@@ -163,7 +164,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
     let settings_snapshot = shared.settings.read().await.clone();
 
-    for state in states {
+    for mut state in states {
         // #897 round-4 High: rebind_origin inflights are synthetic
         // placeholders owned by `/api/inflight/rebind` and do NOT carry
         // a real user message, dispatch context, or placeholder Discord
@@ -218,6 +219,20 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             clear_inflight_state(provider, state.channel_id);
             continue;
         }
+        let Some((memory_scope_channel_id, memory_scope_channel_name)) =
+            resolve_recovery_memory_scope(http, &state).await
+        else {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ recovery: Discord channel relation unresolved for channel {}; preserving inflight without starting a child-scoped recovery",
+                state.channel_id
+            );
+            continue;
+        };
+        state.set_memory_scope(
+            memory_scope_channel_id.get(),
+            memory_scope_channel_name.clone(),
+        );
         let is_dm = matches!(
             channel_id.to_channel(http).await,
             Ok(serenity::model::channel::Channel::Private(_))
@@ -634,18 +649,15 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         .map(|(_, ch)| ch)
                 })
             });
-            let (allowlist_channel_id, provider_channel_name) =
-                if let Some((pid, pname)) = super::resolve_thread_parent(http, channel_id).await {
-                    (pid, pname.or(effective_channel_name.clone()))
-                } else {
-                    (channel_id, effective_channel_name.clone())
-                };
-            if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
+            let thread_parent = super::resolve_thread_parent(http, channel_id).await;
+            if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
                 &settings_snapshot,
                 provider,
-                allowlist_channel_id,
+                channel_id,
                 effective_channel_name.as_deref(),
-                provider_channel_name.as_deref(),
+                thread_parent
+                    .as_ref()
+                    .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
                 is_dm,
             ) {
                 // #3869: orphan→finalize, else preserve (`false` ⇒ suppress expected-skip logs).
@@ -679,19 +691,15 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 });
                 // Resolve thread parent so validation uses the same semantics
                 // as normal message routing (router.rs).
-                let (allowlist_channel_id, provider_channel_name) = if let Some((pid, pname)) =
-                    super::resolve_thread_parent(http, channel_id).await
-                {
-                    (pid, pname.or(effective_channel_name.clone()))
-                } else {
-                    (channel_id, effective_channel_name.clone())
-                };
-                if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
+                let thread_parent = super::resolve_thread_parent(http, channel_id).await;
+                if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
                     &settings_snapshot,
                     provider,
-                    allowlist_channel_id,
+                    channel_id,
                     effective_channel_name.as_deref(),
-                    provider_channel_name.as_deref(),
+                    thread_parent
+                        .as_ref()
+                        .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
                     is_dm,
                 ) {
                     // #3869: orphan→finalize, else preserve (`true` ⇒ log skips).
@@ -878,18 +886,15 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         });
         // Resolve thread parent so validation uses the same semantics
         // as normal message routing (router.rs).
-        let (allowlist_channel_id, provider_channel_name) =
-            if let Some((pid, pname)) = super::resolve_thread_parent(http, channel_id).await {
-                (pid, pname.or(channel_name.clone()))
-            } else {
-                (channel_id, channel_name.clone())
-            };
-        if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
+        let thread_parent = super::resolve_thread_parent(http, channel_id).await;
+        if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
             &settings_snapshot,
             provider,
-            allowlist_channel_id,
+            channel_id,
             channel_name.as_deref(),
-            provider_channel_name.as_deref(),
+            thread_parent
+                .as_ref()
+                .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
             is_dm,
         ) {
             routing_orphan::route_recovery_skip(
@@ -2148,8 +2153,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             channel_name.as_deref(),
             recovery_adk_cwd.as_deref(),
         );
-        let (memory_scope_channel_id, memory_scope_channel_name) = state.resolved_memory_scope();
-        let memory_scope_channel_id = ChannelId::new(memory_scope_channel_id);
         let role_binding = resolve_inflight_role_binding(&state);
         let adk_thread_channel_id = adk_session_name
             .as_deref()
@@ -2264,10 +2267,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             lookup_turn_finished_dispatch_kind(recovery_dispatch_id.as_deref()).await;
         // Backfill session_key/dispatch_id on inflight state for long-turn detection ([L]).
         let mut state = state;
-        state.set_memory_scope(
-            memory_scope_channel_id.get(),
-            memory_scope_channel_name.clone(),
-        );
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
         // #3166: read the real configured thresholds (e.g.
@@ -2328,6 +2327,84 @@ mod tests {
         self, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn recovery_stamps_scope_before_role_status_and_bridge_then_bridge_persists_it() {
+        let source = include_str!("restore_inflight.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production recovery source");
+        let resolve = production
+            .find("resolve_recovery_memory_scope(http, &state).await")
+            .expect("recovery scope resolution");
+        let stamp = production[resolve..]
+            .find("state.set_memory_scope(")
+            .map(|offset| resolve + offset)
+            .expect("resolved scope stamp");
+        let role_positions = production
+            .match_indices("resolve_inflight_role_binding(&state)")
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        assert!(!role_positions.is_empty());
+        let status = production[stamp..]
+            .find("post_adk_session_status(")
+            .map(|offset| stamp + offset)
+            .expect("recovery status publication");
+        let bridge = production[stamp..]
+            .find("spawn_turn_bridge(")
+            .map(|offset| stamp + offset)
+            .expect("recovery TurnBridge startup");
+        let restart_report = production
+            .find("load_restart_report(provider, state.channel_id)")
+            .expect("restart-report recovery branch");
+        assert!(resolve < stamp && stamp < restart_report && stamp < status && stamp < bridge);
+        assert!(
+            role_positions.iter().all(|position| *position > stamp),
+            "every recovery role lookup must consume the stamped scope"
+        );
+        assert_eq!(
+            production.matches("state.set_memory_scope(").count(),
+            1,
+            "scope must be stamped once at the recovery-loop authority boundary"
+        );
+        assert!(
+            production[bridge..]
+                .contains("memory_scope: (memory_scope_channel_id, memory_scope_channel_name)")
+        );
+        assert!(production[bridge..].contains("inflight_state: state"));
+
+        let bridge_source = include_str!("../turn_bridge/mod.rs");
+        let clone = bridge_source
+            .find("let mut inflight_state = bridge.inflight_state.clone();")
+            .expect("bridge clones stamped recovery inflight");
+        let save = bridge_source[clone..]
+            .find("save_inflight_state(&inflight_state)")
+            .map(|offset| clone + offset)
+            .expect("bridge persists cloned inflight before streaming");
+        assert!(clone < save);
+    }
+
+    #[test]
+    fn restart_routing_never_flattens_typed_threads_to_parent_authority() {
+        let source = include_str!("restore_inflight.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production recovery source");
+        assert_eq!(
+            production
+                .matches("settings::validate_bot_channel_routing_with_thread_parent(")
+                .count(),
+            3,
+            "all restart routing gates must preserve child authority and threadInherit"
+        );
+        assert!(
+            !production.contains("validate_bot_channel_routing_with_provider_channel("),
+            "restore must not flatten a typed thread to parent before validation"
+        );
+        assert!(!production.contains("let (allowlist_channel_id, provider_channel_name)"));
+    }
 
     #[test]
     fn restore_rollout_output_path_patch_preserves_concurrent_relay_fields() {

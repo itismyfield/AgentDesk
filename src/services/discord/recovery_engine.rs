@@ -64,6 +64,8 @@ mod manual_rebind;
 mod manual_rebind_output_path;
 #[path = "recovery_engine/manual_rebind_override.rs"]
 mod manual_rebind_override;
+#[path = "recovery_engine/recovery_memory_scope.rs"]
+mod recovery_memory_scope;
 #[path = "recovery_engine/routing_orphan.rs"] // #3869 routing-orphan finalize
 mod routing_orphan;
 #[path = "recovery_engine/terminal_text_idempotency.rs"]

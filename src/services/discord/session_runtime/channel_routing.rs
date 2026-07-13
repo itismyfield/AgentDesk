@@ -115,19 +115,15 @@ pub(in crate::services::discord) async fn validate_live_channel_routing_with_dm_
         ),
     };
     let (channel_name, _) = resolve_channel_category(&ctx.http, Some(&ctx.cache), channel_id).await;
-    let (allowlist_channel_id, provider_channel_name) = if let Some((parent_id, parent_name)) =
-        resolve_thread_parent(&ctx.http, channel_id).await
-    {
-        (parent_id, parent_name.or(channel_name.clone()))
-    } else {
-        (channel_id, channel_name.clone())
-    };
-    validate_bot_channel_routing_with_provider_channel(
+    let thread_parent = resolve_thread_parent(&ctx.http, channel_id).await;
+    settings::validate_bot_channel_routing_with_thread_parent(
         settings,
         provider,
-        allowlist_channel_id,
+        channel_id,
         channel_name.as_deref(),
-        provider_channel_name.as_deref(),
+        thread_parent
+            .as_ref()
+            .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
         is_dm,
     )
 }
@@ -159,6 +155,21 @@ pub(in crate::services::discord) enum RuntimeChannelBindingStatus {
     Unknown,
 }
 
+fn classify_runtime_channel_binding_status(
+    direct_child_bound: bool,
+    is_thread: bool,
+    inherited_parent_bound: bool,
+    thread_inheritance_enabled: bool,
+) -> RuntimeChannelBindingStatus {
+    if direct_child_bound {
+        RuntimeChannelBindingStatus::Owned
+    } else if is_thread && inherited_parent_bound && thread_inheritance_enabled {
+        RuntimeChannelBindingStatus::Owned
+    } else {
+        RuntimeChannelBindingStatus::Unowned
+    }
+}
+
 pub(in crate::services::discord) async fn resolve_runtime_channel_binding_status(
     http: &Arc<serenity::Http>,
     channel_id: serenity::model::id::ChannelId,
@@ -174,6 +185,8 @@ pub(in crate::services::discord) async fn resolve_runtime_channel_binding_status
     match channel {
         serenity::model::channel::Channel::Private(_) => RuntimeChannelBindingStatus::Owned,
         serenity::model::channel::Channel::Guild(gc) => {
+            let direct_child_bound =
+                settings::resolve_role_binding(channel_id, Some(&gc.name)).is_some();
             if crate::utils::discord::is_thread_channel_type(gc.kind) {
                 let Some(parent_id) = gc.parent_id else {
                     return RuntimeChannelBindingStatus::Unowned;
@@ -185,18 +198,51 @@ pub(in crate::services::discord) async fn resolve_runtime_channel_binding_status
                     Ok(_) => None,
                     Err(_) => None,
                 };
-                if settings::has_configured_channel_binding(parent_id, parent_name.as_deref()) {
-                    RuntimeChannelBindingStatus::Owned
-                } else {
-                    RuntimeChannelBindingStatus::Unowned
-                }
-            } else if settings::has_configured_channel_binding(channel_id, Some(&gc.name)) {
-                RuntimeChannelBindingStatus::Owned
+                classify_runtime_channel_binding_status(
+                    direct_child_bound,
+                    true,
+                    settings::has_configured_channel_binding(parent_id, parent_name.as_deref()),
+                    settings::thread_inheritance_enabled(parent_id, parent_name.as_deref()),
+                )
             } else {
-                RuntimeChannelBindingStatus::Unowned
+                classify_runtime_channel_binding_status(direct_child_bound, false, false, false)
             }
         }
         _ => RuntimeChannelBindingStatus::Unowned,
+    }
+}
+
+#[cfg(test)]
+mod routing_authority_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_binding_status_matrix_preserves_child_then_inherited_parent_authority() {
+        assert_eq!(
+            classify_runtime_channel_binding_status(true, true, false, false),
+            RuntimeChannelBindingStatus::Owned,
+            "direct child binding remains authoritative even when parent inheritance is off"
+        );
+        assert_eq!(
+            classify_runtime_channel_binding_status(false, true, true, true),
+            RuntimeChannelBindingStatus::Owned,
+            "unbound typed thread inherits an enabled parent"
+        );
+        assert_eq!(
+            classify_runtime_channel_binding_status(false, true, true, false),
+            RuntimeChannelBindingStatus::Unowned,
+            "threadInherit=false blocks parent authority"
+        );
+        assert_eq!(
+            classify_runtime_channel_binding_status(false, true, false, true),
+            RuntimeChannelBindingStatus::Unowned,
+            "an enabled but unbound parent cannot create authority"
+        );
+        assert_eq!(
+            classify_runtime_channel_binding_status(false, false, true, true),
+            RuntimeChannelBindingStatus::Unowned,
+            "non-thread channels never inherit a parent"
+        );
     }
 }
 

@@ -587,6 +587,7 @@ src/
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
+│   │   │   ├── recovery_memory_scope.rs
 │   │   │   ├── restore_inflight.rs
 │   │   │   ├── restore_persist_outcome.rs
 │   │   │   ├── routing_orphan.rs

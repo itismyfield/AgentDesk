@@ -21,7 +21,7 @@
 | `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1180 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1020 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/recovery_engine/restore_inflight.rs` | 2324 | discord-relay | 2026-10-31 | #3834 |
+| `src/services/discord/recovery_engine/restore_inflight.rs` | 2323 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1444 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1541 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2822 | discord-relay | 2026-10-31 | #3837 |

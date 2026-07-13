@@ -1197,7 +1197,7 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine/restore_inflight.rs` (2335 production
+  - `src/services/discord/recovery_engine/restore_inflight.rs` (2323 production
     lines; tracked #3834 follow-up giant after the r2 behavior-preserving split.
     Owns the restart-path inflight scan: retry-aware tmux liveness probes,
     `finish_recovered_turn_mailbox`, live output-path detection,
@@ -1205,6 +1205,9 @@
     retry handoff. #4111's codex rollout fallback output-path persist site moved
     here verbatim; the #4117 session-retry signal path moved here while the
     recovery-context take helper remains in `turn_bridge/recovery_text.rs`.
+    #4317 moved legacy recovery memory-scope classification into the sub-1000
+    `recovery_engine/recovery_memory_scope.rs` child while keeping the restart
+    scan's persisted-scope stamp and bridge handoff here.
     Further work should split internal scan/session-retry helpers out of this
     child before adding behavior.)
   - `src/services/discord/recovery_engine.rs` (417 prod lines after #3834 r2;

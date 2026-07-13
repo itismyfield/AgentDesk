@@ -162,6 +162,56 @@ pub(crate) fn validate_bot_channel_routing_with_provider_channel(
     Ok(())
 }
 
+/// Validate a live Discord channel without letting a thread's parent erase an
+/// authoritative direct child binding.
+///
+/// A directly-bound thread is its own routing scope.  Only an unbound thread
+/// may fall back to its typed Discord parent, and that fallback must honor the
+/// parent's `threadInherit` policy.  When inheritance is disabled we validate
+/// the child identity, which predictably rejects bots that only own the parent
+/// instead of accidentally accepting the wrong bot through that parent.
+pub(crate) fn validate_bot_channel_routing_with_thread_parent(
+    settings: &DiscordBotSettings,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+    thread_parent: Option<(ChannelId, Option<&str>)>,
+    is_dm: bool,
+) -> Result<(), BotChannelRoutingGuardFailure> {
+    if is_dm || resolve_role_binding(channel_id, channel_name).is_some() {
+        return validate_bot_channel_routing_with_provider_channel(
+            settings,
+            provider,
+            channel_id,
+            channel_name,
+            channel_name,
+            is_dm,
+        );
+    }
+
+    if let Some((parent_id, parent_name)) = thread_parent
+        && thread_inheritance_enabled(parent_id, parent_name)
+    {
+        return validate_bot_channel_routing_with_provider_channel(
+            settings,
+            provider,
+            parent_id,
+            parent_name,
+            parent_name,
+            is_dm,
+        );
+    }
+
+    validate_bot_channel_routing_with_provider_channel(
+        settings,
+        provider,
+        channel_id,
+        channel_name,
+        channel_name,
+        is_dm,
+    )
+}
+
 fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind> {
     if org_schema::org_schema_exists() {
         if let Some(provider) = org_schema::lookup_suffix_provider(channel_name) {
@@ -321,6 +371,7 @@ mod voice_channel_guard_tests {
     const TEXT_CHANNEL_ID: u64 = 1479671301387059200;
     // An unrelated channel that is neither in the allowlist nor a voice channel.
     const UNRELATED_CHANNEL_ID: u64 = 1111111111111111111;
+    const THREAD_CHANNEL_ID: u64 = 1504612455916245999;
 
     const DEFAULT_TEST_CONFIG: &str = r#"
 server:
@@ -575,6 +626,222 @@ channels:
             );
             assert!(resolve_inherited_role_binding(parent, None).is_none());
             assert!(resolve_inherited_workspace(parent, None).is_none());
+        });
+    }
+
+    fn routing_role_map(thread_inherit: bool, include_child: bool) -> String {
+        let child = if include_child {
+            format!(
+                r#",
+    "{THREAD_CHANNEL_ID}": {{
+      "roleId": "review-agent",
+      "promptFile": "/tmp/review-agent.md",
+      "provider": "claude"
+    }}"#
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            r#"{{
+  "byChannelId": {{
+    "{TEXT_CHANNEL_ID}": {{
+      "roleId": "project-agentdesk",
+      "promptFile": "/tmp/project-agentdesk.md",
+      "provider": "codex",
+      "threadInherit": {thread_inherit}
+    }}{child}
+  }}
+}}"#
+        )
+    }
+
+    #[test]
+    fn live_thread_routing_prefers_direct_child_binding_over_parent() {
+        let role_map = routing_role_map(true, true);
+        with_temp_root_files(None, Some(&role_map), None, || {
+            let parent = Some((ChannelId::new(TEXT_CHANNEL_ID), Some("adk-cdx")));
+            let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &codex,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("review-thread"),
+                    parent,
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::ChannelNotAllowed),
+                "the parent-owning bot must not accept a directly bound child"
+            );
+
+            let mut claude = bot_settings(ProviderKind::Claude, vec![THREAD_CHANNEL_ID]);
+            claude.agent = Some("review-agent".to_string());
+            assert!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &claude,
+                    &ProviderKind::Claude,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("review-thread"),
+                    parent,
+                    false,
+                )
+                .is_ok(),
+                "the directly bound child bot must retain authority"
+            );
+        });
+    }
+
+    #[test]
+    fn live_thread_routing_uses_parent_only_when_inheritance_is_enabled() {
+        let inherited = routing_role_map(true, false);
+        with_temp_root_files(None, Some(&inherited), None, || {
+            let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
+            assert!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &codex,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-thread"),
+                    Some((ChannelId::new(TEXT_CHANNEL_ID), Some("adk-cdx"))),
+                    false,
+                )
+                .is_ok()
+            );
+            let child_only = bot_settings(ProviderKind::Codex, vec![THREAD_CHANNEL_ID]);
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &child_only,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-thread"),
+                    Some((ChannelId::new(TEXT_CHANNEL_ID), Some("adk-cdx"))),
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::ChannelNotAllowed),
+                "an inherited thread uses parent allowlist authority, not a child-only allowlist"
+            );
+        });
+
+        let opted_out = routing_role_map(false, false);
+        with_temp_root_files(None, Some(&opted_out), None, || {
+            let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &codex,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-thread"),
+                    Some((ChannelId::new(TEXT_CHANNEL_ID), Some("adk-cdx"))),
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::ChannelNotAllowed),
+                "threadInherit=false must prevent parent allowlist authority"
+            );
+        });
+    }
+
+    #[test]
+    fn inherited_parent_still_rejects_wrong_agent_and_wrong_provider() {
+        let role_map = routing_role_map(true, false);
+        with_temp_root_files(None, Some(&role_map), None, || {
+            let parent = Some((ChannelId::new(TEXT_CHANNEL_ID), Some("adk-cdx")));
+
+            let mut wrong_agent = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
+            wrong_agent.agent = Some("review-agent".to_string());
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &wrong_agent,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-thread"),
+                    parent,
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::AgentMismatch)
+            );
+
+            let mut wrong_provider = bot_settings(ProviderKind::Claude, vec![TEXT_CHANNEL_ID]);
+            wrong_provider.agent = Some("project-agentdesk".to_string());
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &wrong_provider,
+                    &ProviderKind::Claude,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-thread"),
+                    parent,
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::ProviderMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn id_bound_parent_routes_without_name_and_never_borrows_child_name() {
+        let role_map = routing_role_map(true, false);
+        with_temp_root_files(None, Some(&role_map), None, || {
+            let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
+            assert!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &codex,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-name-must-not-be-parent-name"),
+                    Some((ChannelId::new(TEXT_CHANNEL_ID), None)),
+                    false,
+                )
+                .is_ok(),
+                "an ID-bound parent remains routable when Discord cannot provide its name"
+            );
+
+            let mut claude = bot_settings(ProviderKind::Claude, vec![TEXT_CHANNEL_ID]);
+            claude.agent = Some("project-agentdesk".to_string());
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &claude,
+                    &ProviderKind::Claude,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-name-must-not-be-parent-name"),
+                    Some((ChannelId::new(TEXT_CHANNEL_ID), None)),
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::ProviderMismatch),
+                "the child thread name must not contaminate parent provider resolution"
+            );
+        });
+    }
+
+    #[test]
+    fn missing_parent_name_cannot_adopt_a_child_named_binding() {
+        let role_map = format!(
+            r#"{{
+  "fallbackByChannelName": {{"enabled": true}},
+  "byChannelName": {{
+    "child-alias": {{
+      "channelId": "{TEXT_CHANNEL_ID}",
+      "roleId": "project-agentdesk",
+      "promptFile": "/tmp/project-agentdesk.md",
+      "provider": "codex"
+    }}
+  }}
+}}"#
+        );
+        with_temp_root_files(None, Some(&role_map), None, || {
+            let mut codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
+            codex.agent = None;
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &codex,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("child-alias"),
+                    Some((ChannelId::new(TEXT_CHANNEL_ID), None)),
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::ProviderMismatch),
+                "a child name must not become the missing parent binding/provider identity"
+            );
         });
     }
 

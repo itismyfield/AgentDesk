@@ -56,6 +56,7 @@ pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
     has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_dispatch_profile,
     validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
+    validate_bot_channel_routing_with_thread_parent,
 };
 pub(crate) use validation::{
     resolve_inherited_role_binding, resolve_inherited_workspace, thread_inheritance_enabled,
