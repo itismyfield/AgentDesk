@@ -499,7 +499,7 @@
 | `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1289 | 423 | 866 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1384 | 627 | 757 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 360 | 266 | 94 |  |
-| `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 585 | 426 | 159 |  |
+| `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 915 | 530 | 385 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2586 | 1374 | 1212 | giant-file |
 | `services::discord::idle_recap::context_display` | `src/services/discord/idle_recap/context_display.rs` | 154 | 154 | 0 |  |
 | `services::discord::idle_recap::relay_integrity` | `src/services/discord/idle_recap/relay_integrity.rs` | 213 | 160 | 53 |  |

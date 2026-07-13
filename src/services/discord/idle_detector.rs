@@ -167,6 +167,28 @@ pub(crate) fn should_register_system_detected_idle(inflight: Option<&InflightWai
     }
 }
 
+fn classify_idle_with_snapshot(
+    classification: IdleClassification,
+    inflight_state: Option<super::inflight::InflightTurnState>,
+) -> (
+    IdleClassification,
+    Option<super::inflight::InflightTurnState>,
+) {
+    let signals = inflight_state.as_ref().map(|state| InflightWaitSignals {
+        terminal_delivery_committed: state.terminal_delivery_committed,
+        task_notification_kind_present: state.task_notification_kind.is_some(),
+        long_running_placeholder_active: state.long_running_placeholder_active,
+    });
+    let effective = if classification == IdleClassification::Idle
+        && !should_register_system_detected_idle(signals.as_ref())
+    {
+        IdleClassification::ActiveAndFresh
+    } else {
+        classification
+    };
+    (effective, inflight_state)
+}
+
 /// Spawn the per-provider background task. Cheap to call multiple times
 /// because each provider has its own `SharedData`. The task lives for the
 /// remainder of the dcserver process.
@@ -226,26 +248,16 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
         // Downgrading to `ActiveAndFresh` (rather than just skipping) also
         // CLEARS a banner that was registered while the turn was hung but has
         // since transitioned into a committed/background wait.
-        let effective = if classification == IdleClassification::Idle {
-            let signals =
-                super::inflight::load_inflight_state(provider, channel_id.get()).map(|state| {
-                    InflightWaitSignals {
-                        terminal_delivery_committed: state.terminal_delivery_committed,
-                        task_notification_kind_present: state.task_notification_kind.is_some(),
-                        long_running_placeholder_active: state.long_running_placeholder_active,
-                    }
-                });
-            if should_register_system_detected_idle(signals.as_ref()) {
-                IdleClassification::Idle
-            } else {
-                IdleClassification::ActiveAndFresh
-            }
+        let inflight_state = if classification == IdleClassification::Idle {
+            super::inflight::load_inflight_state(provider, channel_id.get())
         } else {
-            classification
+            None
         };
+        let (effective, inflight_state) =
+            classify_idle_with_snapshot(classification, inflight_state);
         apply_classification(channel_id, effective, health_registry.as_ref()).await;
         if effective == IdleClassification::Idle {
-            spawn_idle_expiry_reflect_if_needed(shared, provider, channel_id).await;
+            spawn_idle_expiry_reflect_if_needed(shared, provider, channel_id, inflight_state).await;
         }
     }
 }
@@ -254,6 +266,7 @@ async fn spawn_idle_expiry_reflect_if_needed(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    inflight_state: Option<super::inflight::InflightTurnState>,
 ) {
     let session_channel_name = {
         let data = shared.core.lock().await;
@@ -261,9 +274,20 @@ async fn spawn_idle_expiry_reflect_if_needed(
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
     };
-    let inflight_state = super::inflight::load_inflight_state(provider, channel_id.get());
-    let (memory_scope_channel_id, memory_scope_channel_name) =
-        resolve_idle_memory_scope(inflight_state.as_ref(), channel_id, session_channel_name);
+    let Some((memory_scope_channel_id, memory_scope_channel_name)) = resolve_idle_memory_scope(
+        shared,
+        inflight_state.as_ref(),
+        channel_id,
+        session_channel_name,
+    )
+    .await
+    else {
+        tracing::debug!(
+            "idle-detector: unresolved memory scope for channel {}; skipping idle reflect",
+            channel_id.get()
+        );
+        return;
+    };
     let role_binding = settings::resolve_role_binding(
         memory_scope_channel_id,
         memory_scope_channel_name.as_deref(),
@@ -287,15 +311,95 @@ async fn spawn_idle_expiry_reflect_if_needed(
     super::turn_bridge::spawn_memory_reflect_task(channel_id, memory_settings, reflect_request);
 }
 
-fn resolve_idle_memory_scope(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdleDiscordChannelRelation {
+    NonThread,
+    Thread {
+        parent_id: ChannelId,
+        parent_name: Option<String>,
+    },
+    Unresolved,
+}
+
+async fn resolve_idle_memory_scope(
+    shared: &SharedData,
     inflight_state: Option<&super::inflight::InflightTurnState>,
     channel_id: ChannelId,
     channel_name: Option<String>,
-) -> (ChannelId, Option<String>) {
-    inflight_state
-        .map(|state| state.resolved_memory_scope())
-        .map(|(scope_id, scope_name)| (ChannelId::new(scope_id), scope_name))
-        .unwrap_or((channel_id, channel_name))
+) -> Option<(ChannelId, Option<String>)> {
+    if let Some(scope) = persisted_idle_memory_scope(inflight_state) {
+        return Some(scope);
+    }
+    if settings::resolve_role_binding(channel_id, channel_name.as_deref()).is_some() {
+        return Some((channel_id, channel_name));
+    }
+    let http = shared.serenity_http_or_token_fallback()?;
+    let relation = resolve_idle_discord_channel_relation(&http, channel_id).await;
+    resolve_no_inflight_idle_scope(channel_id, channel_name, relation)
+}
+
+fn persisted_idle_memory_scope(
+    inflight_state: Option<&super::inflight::InflightTurnState>,
+) -> Option<(ChannelId, Option<String>)> {
+    inflight_state.and_then(|state| {
+        state.memory_scope_channel_id.map(|scope_id| {
+            (
+                ChannelId::new(scope_id),
+                state.memory_scope_channel_name.clone(),
+            )
+        })
+    })
+}
+
+async fn resolve_idle_discord_channel_relation(
+    http: &Arc<poise::serenity_prelude::Http>,
+    channel_id: ChannelId,
+) -> IdleDiscordChannelRelation {
+    let Ok(channel) = channel_id.to_channel(http).await else {
+        return IdleDiscordChannelRelation::Unresolved;
+    };
+    let poise::serenity_prelude::Channel::Guild(channel) = channel else {
+        return IdleDiscordChannelRelation::NonThread;
+    };
+    if !crate::utils::discord::is_thread_channel_type(channel.kind) {
+        return IdleDiscordChannelRelation::NonThread;
+    }
+    let Some(parent_id) = channel.parent_id else {
+        return IdleDiscordChannelRelation::Unresolved;
+    };
+    let Ok(poise::serenity_prelude::Channel::Guild(parent)) = parent_id.to_channel(http).await
+    else {
+        return IdleDiscordChannelRelation::Unresolved;
+    };
+    IdleDiscordChannelRelation::Thread {
+        parent_id,
+        parent_name: Some(parent.name),
+    }
+}
+
+fn resolve_no_inflight_idle_scope(
+    channel_id: ChannelId,
+    channel_name: Option<String>,
+    relation: IdleDiscordChannelRelation,
+) -> Option<(ChannelId, Option<String>)> {
+    if settings::resolve_role_binding(channel_id, channel_name.as_deref()).is_some() {
+        return Some((channel_id, channel_name));
+    }
+    match relation {
+        IdleDiscordChannelRelation::NonThread => Some((channel_id, channel_name)),
+        IdleDiscordChannelRelation::Thread {
+            parent_id,
+            parent_name,
+        } => {
+            if settings::resolve_inherited_role_binding(parent_id, parent_name.as_deref()).is_some()
+            {
+                Some((parent_id, parent_name))
+            } else {
+                Some((channel_id, channel_name))
+            }
+        }
+        IdleDiscordChannelRelation::Unresolved => None,
+    }
 }
 
 fn take_idle_expiry_reflect_request(
@@ -498,17 +602,8 @@ mod tests {
         assert_eq!(result, IdleClassification::Idle);
     }
 
-    #[test]
-    fn idle_scope_uses_persisted_parent_inflight_scope() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let temp = tempfile::TempDir::new().expect("runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            temp.path(),
-        );
-        let mut state = super::super::inflight::InflightTurnState::new(
+    fn inflight_without_persisted_scope() -> super::super::inflight::InflightTurnState {
+        super::super::inflight::InflightTurnState::new(
             ProviderKind::Codex,
             222,
             Some("thread".to_string()),
@@ -521,17 +616,252 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+    }
+
+    fn inflight_with_parent_scope() -> super::super::inflight::InflightTurnState {
+        let mut state = inflight_without_persisted_scope();
         state.set_memory_scope(111, Some("parent".to_string()));
+        state
+    }
+
+    #[test]
+    fn idle_scope_carries_first_parent_snapshot_when_later_lookup_would_be_absent() {
+        let state = inflight_with_parent_scope();
+        let (effective, first_snapshot) =
+            classify_idle_with_snapshot(IdleClassification::Idle, Some(state));
+        assert_eq!(effective, IdleClassification::Idle);
 
         assert_eq!(
-            resolve_idle_memory_scope(
-                Some(&state),
-                ChannelId::new(222),
-                Some("thread".to_string()),
-            ),
-            (ChannelId::new(111), Some("parent".to_string()))
+            persisted_idle_memory_scope(first_snapshot.as_ref()),
+            Some((ChannelId::new(111), Some("parent".to_string()))),
+            "the first inflight snapshot must survive classification and avoid any HTTP/reload fallback"
         );
+    }
+
+    #[test]
+    fn idle_pass_has_exactly_one_inflight_load_site() {
+        let source = include_str!("idle_detector.rs");
+        let load_call = ["load_inflight_", "state(provider, channel_id.get())"].concat();
+        assert_eq!(
+            source.matches(&load_call).count(),
+            1,
+            "idle classification and reflect must share one exact inflight snapshot"
+        );
+    }
+
+    #[test]
+    fn no_inflight_scope_uses_exact_shared_runtime_http() {
+        let source = include_str!("idle_detector.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        let exact_runtime_http = ["shared.serenity_http_", "or_token_fallback()"].concat();
+        let ambiguous_provider_lookup = ["health::resolve_", "bot_http"].concat();
+        assert!(
+            production.contains(&exact_runtime_http),
+            "no-inflight scope lookup must use the exact SharedData bot runtime"
+        );
+        assert!(
+            !production.contains(&ambiguous_provider_lookup),
+            "provider-name registry lookup can select a different same-provider bot"
+        );
+    }
+
+    #[test]
+    fn current_intake_rows_persist_resolved_memory_scope_before_save() {
+        for source in [
+            include_str!("router/message_handler/intake_turn.rs"),
+            include_str!("router/message_handler/headless_turn.rs"),
+        ] {
+            let construct = source
+                .find("let mut inflight_state = InflightTurnState::new(")
+                .expect("current intake constructs inflight state");
+            let stamp = source[construct..]
+                .find("resolved_role.stamp_inflight(&mut inflight_state")
+                .map(|offset| construct + offset)
+                .expect("current intake stamps resolved memory scope");
+            let save = source[stamp..]
+                .find("save_inflight_state(&inflight_state)")
+                .map(|offset| stamp + offset)
+                .expect("current intake persists inflight state");
+            assert!(construct < stamp && stamp < save);
+        }
+    }
+
+    fn with_idle_scope_config(yaml: &str, test: impl FnOnce()) {
+        let root = tempfile::tempdir().expect("temp AgentDesk root");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(config_dir.join("agentdesk.yaml"), yaml).expect("write AgentDesk config");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        test();
+    }
+
+    const CHILD_ID: u64 = 1479671301387059299;
+    const PARENT_ID: u64 = 1479671301387059200;
+
+    fn thread_relation() -> IdleDiscordChannelRelation {
+        IdleDiscordChannelRelation::Thread {
+            parent_id: ChannelId::new(PARENT_ID),
+            parent_name: Some("adk-cdx".to_string()),
+        }
+    }
+
+    #[test]
+    fn no_inflight_thread_uses_authoritative_inherited_parent_scope() {
+        with_idle_scope_config(
+            &format!(
+                r#"server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "{PARENT_ID}"
+        name: adk-cdx
+"#
+            ),
+            || {
+                assert_eq!(
+                    resolve_no_inflight_idle_scope(
+                        ChannelId::new(CHILD_ID),
+                        Some("thread".to_string()),
+                        thread_relation(),
+                    ),
+                    Some((ChannelId::new(PARENT_ID), Some("adk-cdx".to_string())))
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn legacy_inflight_without_persisted_scope_re_resolves_typed_parent() {
+        with_idle_scope_config(
+            &format!(
+                r#"server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "{PARENT_ID}"
+        name: adk-cdx
+"#
+            ),
+            || {
+                let legacy = inflight_without_persisted_scope();
+                assert_eq!(
+                    persisted_idle_memory_scope(Some(&legacy)),
+                    None,
+                    "serde-default legacy rows must not make child scope authoritative"
+                );
+                assert_eq!(
+                    resolve_no_inflight_idle_scope(
+                        ChannelId::new(CHILD_ID),
+                        Some("thread".to_string()),
+                        thread_relation(),
+                    ),
+                    Some((ChannelId::new(PARENT_ID), Some("adk-cdx".to_string())))
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn no_inflight_direct_child_binding_takes_precedence() {
+        with_idle_scope_config(
+            &format!(
+                r#"server:
+  port: 8791
+agents:
+  - id: direct-child
+    name: Direct Child
+    provider: codex
+    channels:
+      codex:
+        id: "{CHILD_ID}"
+        name: dispatch-child
+"#
+            ),
+            || {
+                assert_eq!(
+                    resolve_no_inflight_idle_scope(
+                        ChannelId::new(CHILD_ID),
+                        Some("dispatch-child".to_string()),
+                        thread_relation(),
+                    ),
+                    Some((ChannelId::new(CHILD_ID), Some("dispatch-child".to_string())))
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn no_inflight_parent_opt_out_keeps_child_scope() {
+        with_idle_scope_config(
+            &format!(
+                r#"server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "{PARENT_ID}"
+        name: adk-cdx
+        threadInherit: false
+"#
+            ),
+            || {
+                assert_eq!(
+                    resolve_no_inflight_idle_scope(
+                        ChannelId::new(CHILD_ID),
+                        Some("thread".to_string()),
+                        thread_relation(),
+                    ),
+                    Some((ChannelId::new(CHILD_ID), Some("thread".to_string())))
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn no_inflight_resolution_failure_is_fail_closed() {
+        with_idle_scope_config("server:\n  port: 8791\nagents: []\n", || {
+            assert_eq!(
+                resolve_no_inflight_idle_scope(
+                    ChannelId::new(CHILD_ID),
+                    Some("possible-thread".to_string()),
+                    IdleDiscordChannelRelation::Unresolved,
+                ),
+                None,
+                "unknown Discord channel type must never default to child memory scope"
+            );
+        });
+    }
+
+    #[test]
+    fn no_inflight_confirmed_non_thread_preserves_child_scope() {
+        with_idle_scope_config("server:\n  port: 8791\nagents: []\n", || {
+            assert_eq!(
+                resolve_no_inflight_idle_scope(
+                    ChannelId::new(CHILD_ID),
+                    Some("regular-channel".to_string()),
+                    IdleDiscordChannelRelation::NonThread,
+                ),
+                Some((
+                    ChannelId::new(CHILD_ID),
+                    Some("regular-channel".to_string())
+                ))
+            );
+        });
     }
 
     #[test]
