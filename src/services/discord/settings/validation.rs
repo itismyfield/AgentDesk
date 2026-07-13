@@ -214,6 +214,13 @@ fn resolve_thread_inherit(
     resolve_thread_inherit_from_role_map(parent_channel_id, parent_channel_name)
 }
 
+pub(crate) fn thread_inheritance_enabled(
+    parent_channel_id: ChannelId,
+    parent_channel_name: Option<&str>,
+) -> bool {
+    resolve_thread_inherit(parent_channel_id, parent_channel_name).unwrap_or(true)
+}
+
 /// Resolve a Discord thread's role from its parent after a direct thread
 /// lookup has failed. The caller owns Discord channel-kind detection and
 /// supplies the already-resolved parent, keeping config resolution synchronous.
@@ -221,7 +228,7 @@ pub(crate) fn resolve_inherited_role_binding(
     parent_channel_id: ChannelId,
     parent_channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
-    if !resolve_thread_inherit(parent_channel_id, parent_channel_name).unwrap_or(true) {
+    if !thread_inheritance_enabled(parent_channel_id, parent_channel_name) {
         return None;
     }
     resolve_role_binding(parent_channel_id, parent_channel_name)
@@ -285,7 +292,7 @@ pub(crate) fn resolve_inherited_workspace(
     parent_channel_id: ChannelId,
     parent_channel_name: Option<&str>,
 ) -> Option<String> {
-    if !resolve_thread_inherit(parent_channel_id, parent_channel_name).unwrap_or(true) {
+    if !thread_inheritance_enabled(parent_channel_id, parent_channel_name) {
         return None;
     }
     resolve_workspace(parent_channel_id, parent_channel_name)

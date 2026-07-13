@@ -589,10 +589,15 @@ pub(in crate::services::discord) async fn handle_event(
             let user_name = &new_message.author.name;
             let channel_id = new_message.channel_id;
             let is_dm = new_message.guild_id.is_none();
-            let effective_channel_id = resolve_thread_parent(&ctx.http, channel_id)
-                .await
-                .map(|(parent_id, _)| parent_id)
+            let thread_parent = resolve_thread_parent(&ctx.http, channel_id).await;
+            let effective_channel_id = thread_parent
+                .as_ref()
+                .map(|(parent_id, _)| *parent_id)
                 .unwrap_or(channel_id);
+            let thread_bootstrap_path_source = ThreadBootstrapPathSource::ParentDerived(
+                effective_channel_id,
+                thread_parent.as_ref().and_then(|(_, name)| name.as_deref()),
+            );
             let settings_snapshot = { data.shared.settings.read().await.clone() };
             // #2266: resolve the voice-transcript payload ONCE at the
             // intake-gate so queue commits can classify voice messages and
@@ -787,10 +792,6 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            // Handle file attachments — download regardless of session state.
-            // For thread messages, bootstrap the thread session before saving so
-            // upload context attaches to the eventual turn instead of being
-            // dropped while only the parent session exists.
             let upload_records = if !new_message.attachments.is_empty() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -816,6 +817,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 &data.shared,
                                 channel_id,
                                 &path,
+                                thread_bootstrap_path_source,
                                 &ctx.http,
                                 Some(&ctx.cache),
                             )
@@ -889,7 +891,6 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            // Auto-restore session (for threads, fall back to parent channel's session)
             auto_restore_session_with_dm_hint(
                 &data.shared,
                 channel_id,
@@ -898,14 +899,12 @@ pub(in crate::services::discord) async fn handle_event(
             )
             .await;
             if effective_channel_id != channel_id {
-                // Thread: if no session found for thread, try to bootstrap from parent
                 let needs_parent = {
                     let d = data.shared.core.lock().await;
                     !d.sessions.contains_key(&channel_id)
                 };
                 if needs_parent {
                     auto_restore_session(&data.shared, effective_channel_id, ctx).await;
-                    // Clone parent session's path for the thread
                     let parent_path = {
                         let d = data.shared.core.lock().await;
                         d.sessions
@@ -917,6 +916,7 @@ pub(in crate::services::discord) async fn handle_event(
                             &data.shared,
                             channel_id,
                             &path,
+                            thread_bootstrap_path_source,
                             &ctx.http,
                             Some(&ctx.cache),
                         )

@@ -668,6 +668,7 @@ src/
 │   │   ├── session_runtime/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
+│   │   │   ├── thread_bootstrap.rs
 │   │   │   └── worktree.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs

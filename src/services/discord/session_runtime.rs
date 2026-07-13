@@ -4,6 +4,8 @@ use super::*;
 mod channel_routing;
 #[path = "session_runtime/restore_cwd.rs"]
 mod restore_cwd;
+#[path = "session_runtime/thread_bootstrap.rs"]
+mod thread_bootstrap;
 #[path = "session_runtime/worktree.rs"]
 mod worktree;
 
@@ -22,6 +24,7 @@ use self::restore_cwd::{
 pub(super) use self::restore_cwd::{
     db_cwd_is_reusable_worktree, select_restored_session_path, session_path_is_usable,
 };
+pub(super) use self::thread_bootstrap::{ThreadBootstrapPathSource, bootstrap_thread_session};
 pub(super) use self::worktree::{
     WorktreeInfo, cleanup_git_worktree, create_git_worktree, detect_worktree_conflict,
     resolve_reusable_worktree,
@@ -364,138 +367,6 @@ pub(super) async fn auto_restore_session_force(
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}] ↻ Auto-restored session: {last_path}");
     }
-}
-
-/// Create a lightweight session for a thread, bootstrapped from the parent channel's path.
-/// The session's `channel_name` uses `{parent_channel}-t{thread_id}` so the derived
-/// tmux session name stays short and unique instead of using the full thread title.
-pub(super) async fn bootstrap_thread_session(
-    shared: &Arc<SharedData>,
-    thread_channel_id: ChannelId,
-    parent_path: &str,
-    http: &Arc<serenity::http::Http>,
-    cache: Option<&Arc<serenity::cache::Cache>>,
-) -> bool {
-    let (thread_title, cat_name) = resolve_channel_category(http, cache, thread_channel_id).await;
-    let provider_kind = shared.settings.read().await.provider.clone();
-    // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
-    let parent_info = resolve_thread_parent(http, thread_channel_id).await;
-    let ch_name = if let Some((parent_id, parent_name)) = parent_info {
-        let parent = parent_name.unwrap_or_else(|| format!("{parent_id}"));
-        Some(synthetic_thread_channel_name(&parent, thread_channel_id))
-    } else {
-        // Not a thread (shouldn't happen here) — fall back to resolved name
-        thread_title
-    };
-    let mut data = shared.core.lock().await;
-    if data.sessions.contains_key(&thread_channel_id) {
-        return false;
-    }
-
-    // Session ID comes from DB (sessions.claude_session_id), not from file.
-    let session = data
-        .sessions
-        .entry(thread_channel_id)
-        .or_insert_with(|| DiscordSession {
-            session_id: None,
-            memento_context_loaded: false,
-            memento_reflected: false,
-            current_path: None,
-            history: Vec::new(),
-            pending_uploads: Vec::new(),
-            cleared: false,
-            channel_id: Some(thread_channel_id.get()),
-            channel_name: ch_name,
-            category_name: cat_name,
-            remote_profile_name: None,
-            last_active: tokio::time::Instant::now(),
-            worktree: None,
-            born_generation: runtime_store::load_generation(),
-        });
-    // Prefer restoring the worktree persisted for this thread session across a
-    // dcserver restart. The in-memory `sessions` map is cleared on restart, so
-    // without this lookup a new thread message would create a brand-new worktree
-    // and drop the provider session fingerprint / recovery context tied to the
-    // previous worktree path (#3011). Mirror the DB cwd lookup used by
-    // `auto_restore_session_force`, and only create a fresh worktree when the
-    // stored path is absent or no longer a usable git worktree on disk.
-    let ch = session
-        .channel_name
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let restored_worktree = resolve_reusable_worktree(
-        shared.pg_pool.as_ref(),
-        &shared.token_hash,
-        &provider_kind,
-        &ch,
-        thread_channel_id.get(),
-        parent_path,
-    );
-    // Only honor the restore when a branch is recoverable. A detached / unknown
-    // branch would yield no `WorktreeInfo`, so in that case fall through to
-    // create a fresh, well-formed worktree instead.
-    if let Some(wt_info) = restored_worktree {
-        let base_commit = crate::services::platform::git_head_commit(&wt_info.original_path);
-        let restored_path = wt_info.worktree_path.clone();
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ↻ Restored thread worktree: {} (branch: {})",
-            wt_info.worktree_path,
-            wt_info.branch_name
-        );
-        sync_inflight_worktree_context(
-            &provider_kind,
-            thread_channel_id.get(),
-            Some(wt_info.worktree_path.clone()),
-            Some(wt_info.branch_name.clone()),
-            base_commit,
-        );
-        session.worktree = Some(wt_info);
-        session.current_path = Some(restored_path.clone());
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}] ↻ Bootstrapped thread session: {restored_path}");
-        return true;
-    }
-
-    // Always create a worktree for thread sessions to isolate concurrent work.
-    let effective_path = {
-        let provider_str = shared.settings.read().await.provider.as_str().to_string();
-        match create_git_worktree(parent_path, &ch, &provider_str) {
-            Ok((wt_path, branch)) => {
-                let base_commit = crate::services::platform::git_head_commit(parent_path);
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🌿 Thread worktree created: {} (branch: {})",
-                    wt_path,
-                    branch
-                );
-                session.worktree = Some(WorktreeInfo {
-                    original_path: parent_path.to_string(),
-                    worktree_path: wt_path.clone(),
-                    branch_name: branch.clone(),
-                });
-                sync_inflight_worktree_context(
-                    &provider_kind,
-                    thread_channel_id.get(),
-                    Some(wt_path.clone()),
-                    Some(branch),
-                    base_commit,
-                );
-                wt_path
-            }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ Thread worktree creation failed: {e}, falling back to parent path"
-                );
-                parent_path.to_string()
-            }
-        }
-    };
-    session.current_path = Some(effective_path.clone());
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
-    true
 }
 
 #[cfg(test)]

@@ -612,19 +612,11 @@ pub(super) async fn handle_text_message(
         None
     };
 
-    // ── Dispatch thread auto-creation ──────────────────────────────
-    // When a dispatch message arrives, create a Discord thread for
-    // isolated context.  All subsequent agent output goes to the thread.
-    // Skip if already inside a thread (threads cannot nest).
-    // Thread reuse: if the card already has an active_thread_id, redirect
-    // to the existing thread instead of creating a new one.
+    // Dispatches reuse/create an isolated thread unless already inside one.
     let is_already_thread = super::super::super::resolve_thread_parent(http, channel_id)
         .await
         .is_some();
-    // #259: Fetch dispatch metadata once before thread creation so we can extract
-    // worktree_path for both thread bootstrap and the subsequent session CWD override.
-    // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
-    // All dispatch types now inject worktree_path into context via resolve_card_worktree().
+    // #259: cache metadata so card worktrees outrank parent CWD for dispatch sessions.
     let mut dispatch_type_str = dispatch_info_cached
         .as_ref()
         .and_then(|info| info.dispatch_type.clone());
@@ -644,11 +636,6 @@ pub(super) async fn handle_text_message(
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
     }
-    // #762: when the dispatch pins an external target_repo but emits no
-    // worktree_path (e.g. refresh fell back without a usable path), resolve
-    // the repo's configured directory first instead of dropping straight into
-    // the default AgentDesk repo. Otherwise external-repo reviews silently
-    // execute in the wrong repo.
     let dispatch_target_repo_path =
         resolve_dispatch_target_repo_dir(dispatch_target_repo.as_deref());
     let dispatch_default_path = dispatch_target_repo_path
@@ -661,6 +648,17 @@ pub(super) async fn handle_text_message(
     let mut dispatch_effective_path = dispatch_worktree_path
         .clone()
         .unwrap_or_else(|| dispatch_default_path.clone());
+    let dispatch_bootstrap_path_source =
+        if dispatch_worktree_path.is_some() || dispatch_target_repo_path.is_some() {
+            ThreadBootstrapPathSource::ExplicitDispatch
+        } else {
+            ThreadBootstrapPathSource::ParentDerived(
+                channel_id,
+                early_channel_name
+                    .as_deref()
+                    .or(early_resolved_channel_name.as_deref()),
+            )
+        };
     if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
         if let (Some(stale_path), Some(did)) = (
@@ -765,6 +763,7 @@ pub(super) async fn handle_text_message(
                                 shared,
                                 tid,
                                 &dispatch_effective_path,
+                                dispatch_bootstrap_path_source,
                                 http,
                                 cache,
                             )
@@ -831,6 +830,7 @@ pub(super) async fn handle_text_message(
                                     shared,
                                     thread.id,
                                     &dispatch_effective_path,
+                                    dispatch_bootstrap_path_source,
                                     http,
                                     cache,
                                 )

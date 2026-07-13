@@ -57,7 +57,9 @@ pub(super) use validation::{
     has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_dispatch_profile,
     validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
 };
-pub(crate) use validation::{resolve_inherited_role_binding, resolve_inherited_workspace};
+pub(crate) use validation::{
+    resolve_inherited_role_binding, resolve_inherited_workspace, thread_inheritance_enabled,
+};
 pub(super) use write::save_bot_settings;
 
 fn json_u64(value: &serde_json::Value) -> Option<u64> {
