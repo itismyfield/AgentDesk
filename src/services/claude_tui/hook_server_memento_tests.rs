@@ -3,6 +3,9 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use super::hook_server::relay_receipts::{
+    RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
+};
 use super::hook_server::{HookServerState, hook_receiver_router_with_state};
 
 async fn response_json(response: axum::response::Response) -> Value {
@@ -447,4 +450,98 @@ async fn codex_stop_clears_pending_memento_search_without_flush() {
         .unwrap();
     let body = response_json(response).await;
     assert!(body.get("memento_tool_feedback_flush").is_none());
+}
+
+#[tokio::test]
+async fn stale_relay_stop_emits_no_ephemeral_signal_and_does_not_advance_memento() {
+    use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+
+    let session = "stale-relay-stop";
+    let state = HookServerState::new();
+    let mut events = state.subscribe();
+    let app = hook_receiver_router_with_state(state);
+    let key = RegistryKey::new("claude", Some(session), None).unwrap();
+    let _ = global().claim_once(key.clone());
+
+    let search = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/hooks/claude/PostToolUse?session_id={session}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "tool_name":"mcp__memento__recall",
+                        "tool_response":{"_meta":{"searchEventId":"84308"}}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(search.status(), StatusCode::ACCEPTED);
+    let primed = events.recv().await.unwrap();
+    assert_eq!(primed.kind.as_str(), "post_tool_use");
+    let _ = global().claim_once(key.clone());
+
+    let now = chrono::Utc::now();
+    let stale = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/hooks/claude/Stop?session_id={session}"))
+                .header("content-type", "application/json")
+                .header(RELAY_REQUEST_ID_HEADER, uuid::Uuid::new_v4().to_string())
+                .header(
+                    RELAY_PUBLISHED_AT_HEADER,
+                    (now - chrono::Duration::hours(2)).to_rfc3339(),
+                )
+                .header(
+                    RELAY_DEADLINE_HEADER,
+                    (now - chrono::Duration::hours(1)).to_rfc3339(),
+                )
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::GONE);
+    assert!(
+        events.try_recv().is_err(),
+        "stale Stop must not reach the broadcast signal boundary"
+    );
+    assert!(
+        global()
+            .claim_once(key)
+            .iter()
+            .all(|event| event.kind.as_str() != "stop"),
+        "stale Stop must not reach the registry signal boundary"
+    );
+
+    let fresh = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/hooks/claude/Stop?session_id={session}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let fresh = response_json(fresh).await;
+    assert_eq!(
+        fresh["memento_tool_feedback_flush"]["search_event_ids"],
+        json!(["84308"]),
+        "fresh legacy Stop must still observe the first unadvanced memento stage"
+    );
+    assert!(
+        fresh["memento_tool_feedback_flush"]["additional_context"]
+            .as_str()
+            .unwrap()
+            .contains("then stop")
+    );
 }

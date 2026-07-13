@@ -377,6 +377,10 @@ src/
 │   │   ├── process.rs
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
+│   │   ├── hook_relay/
+│   │   │   └── ordered_queue.rs
+│   │   ├── hook_server/
+│   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── mod.rs
