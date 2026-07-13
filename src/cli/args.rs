@@ -961,7 +961,152 @@ pub(crate) fn parse() -> ParseOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{Parser, error::ErrorKind};
+    use clap::{CommandFactory, Parser, error::ErrorKind};
+
+    #[test]
+    fn top_level_command_name_snapshot_preserves_public_cli_surface() {
+        let mut command = Cli::command();
+        command.build();
+        let actual = command
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .collect::<Vec<_>>();
+        let expected = vec![
+            "dcserver",
+            "init",
+            "reconfigure",
+            "emit-launchd-plist",
+            "restart-dcserver",
+            "discord-sendfile",
+            "discord-sendmessage",
+            "discord-senddm",
+            "send",
+            "send-to-agent",
+            "review-verdict",
+            "review-decision",
+            "review-recover-target",
+            "docs",
+            "auto-queue",
+            "force-kill",
+            "github-sync",
+            "monitoring",
+            "intake-outbox",
+            "discord",
+            "card",
+            "cherry-merge",
+            #[cfg(unix)]
+            "tmux-wrapper",
+            #[cfg(unix)]
+            "codex-tmux-wrapper",
+            #[cfg(unix)]
+            "qwen-tmux-wrapper",
+            "claude-hook-relay",
+            "codex-hook-relay",
+            "reset-tmux",
+            "ismcptool",
+            "addmcptool",
+            "install-memento-session-hook",
+            "status",
+            "cards",
+            "dispatch",
+            "resume",
+            "advance",
+            "queue",
+            "query",
+            "phase",
+            "deploy",
+            "agents",
+            "diag",
+            "config",
+            "api",
+            "terminations",
+            "doctor",
+            "migrate",
+            "provider-cli",
+            "show",
+            "health",
+            "machine-compare",
+            "activity",
+            "help",
+        ];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn clap_help_and_version_remain_successful_authoritative_outputs() {
+        for flag in ["-h", "--help"] {
+            let Err(error) = Cli::try_parse_from(["agentdesk", flag]) else {
+                panic!("{flag} must render help instead of running a command");
+            };
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+            assert_eq!(error.exit_code(), 0);
+            let rendered = error.to_string();
+            assert!(rendered.contains("AI agent orchestration platform"));
+            assert!(rendered.contains("Usage: agentdesk"));
+            assert!(rendered.contains("Commands:"));
+            assert!(rendered.contains("discord-sendmessage"));
+            assert!(rendered.contains("provider-cli"));
+        }
+
+        let Err(error) = Cli::try_parse_from(["agentdesk", "help"]) else {
+            panic!("help subcommand must render help instead of running a command");
+        };
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        assert_eq!(error.exit_code(), 0);
+
+        for flag in ["-V", "--version"] {
+            let Err(error) = Cli::try_parse_from(["agentdesk", flag]) else {
+                panic!("{flag} must render version instead of running a command");
+            };
+            assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+            assert_eq!(error.exit_code(), 0);
+            assert_eq!(
+                error.to_string().trim(),
+                format!("agentdesk {}", env!("CARGO_PKG_VERSION"))
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_launchd_and_provider_value_aliases_still_parse() {
+        let legacy = rewrite_legacy_args(vec![
+            "agentdesk".to_string(),
+            "--emit-launchd-plist".to_string(),
+            "--flavor".to_string(),
+            "release".to_string(),
+        ]);
+        let canonical = vec![
+            "agentdesk".to_string(),
+            "emit-launchd-plist".to_string(),
+            "--flavor".to_string(),
+            "release".to_string(),
+        ];
+        assert_eq!(legacy, canonical);
+        assert!(matches!(
+            Cli::try_parse_from(legacy)
+                .expect("legacy launchd spelling should parse")
+                .command,
+            Some(Commands::EmitLaunchdPlist(_))
+        ));
+
+        let provider_alias = Cli::try_parse_from([
+            "agentdesk",
+            "restart-dcserver",
+            "--report-channel-id",
+            "42",
+            "--report-provider",
+            "open-code",
+        ])
+        .expect("open-code provider alias should parse");
+        assert!(matches!(
+            provider_alias.command,
+            Some(Commands::RestartDcserver {
+                report_provider: Some(ReportProvider::OpenCode),
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn send_to_agent_requires_expect_reply() {

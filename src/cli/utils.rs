@@ -1,58 +1,3 @@
-#![allow(dead_code)]
-
-use super::VERSION;
-
-pub fn print_help() {
-    println!("AgentDesk {} - AI agent orchestration platform", VERSION);
-    println!();
-    println!("USAGE:");
-    println!("    agentdesk <COMMAND>");
-    println!();
-    println!("COMMANDS:");
-    println!("    -h, --help              Print help information");
-    println!("    -v, --version           Print version information");
-    println!(
-        "    dcserver [TOKEN]        Start Discord bot server(s); without TOKEN uses configured Discord bots"
-    );
-    println!(
-        "    restart-dcserver [--report-channel-id <ID> --report-provider <claude|codex|gemini|opencode|qwen> [--report-message-id <ID>]]"
-    );
-    println!("    discord-sendfile <PATH> --channel <ID> --key <HASH>");
-    println!("    discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");
-    println!("    discord-senddm --user <ID> --message <TEXT> [--key <HASH>]");
-    println!(
-        "    send-to-agent --from <AGENT> --to <AGENT> --message <TEXT> --expect-reply <true|false> [--channel-kind cc|cdx] [--no-prefix]"
-    );
-    println!("    reset-tmux              Kill all AgentDesk-* tmux sessions");
-    println!(
-        "    ismcptool <TOOL>...     Check if MCP tool(s) are registered in .claude/settings.json (CWD)"
-    );
-    println!(
-        "    addmcptool <TOOL>...    Add MCP tool permission(s) to .claude/settings.json (CWD)"
-    );
-    println!();
-}
-
-pub fn print_version() {
-    println!("AgentDesk {}", VERSION);
-}
-
-pub fn handle_base64(encoded: &str) {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    match BASE64.decode(encoded) {
-        Ok(decoded) => {
-            if let Ok(text) = String::from_utf8(decoded) {
-                print!("{}", text);
-            } else {
-                std::process::exit(1);
-            }
-        }
-        Err(_) => {
-            std::process::exit(1);
-        }
-    }
-}
-
 pub fn handle_ismcptool(tool_names: &[String]) {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
@@ -453,22 +398,6 @@ fn clean_agentdesk_tmp_files() -> usize {
         }
     }
     count
-}
-
-pub fn migrate_config_dir() {
-    if let Some(home) = dirs::home_dir() {
-        let old_dir = home.join(".cokacdir");
-        let new_dir = home.join(".adk");
-        if old_dir.exists() && !new_dir.exists() {
-            if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
-                eprintln!("Warning: failed to migrate ~/.cokacdir to ~/.adk: {}", e);
-            }
-        }
-    }
-}
-
-pub fn print_goodbye_message() {
-    println!("AgentDesk process ended.");
 }
 
 #[cfg(test)]
