@@ -648,17 +648,16 @@ pub(super) async fn handle_text_message(
     let mut dispatch_effective_path = dispatch_worktree_path
         .clone()
         .unwrap_or_else(|| dispatch_default_path.clone());
-    let dispatch_bootstrap_path_source =
-        if dispatch_worktree_path.is_some() || dispatch_target_repo_path.is_some() {
-            ThreadBootstrapPathSource::ExplicitDispatch
-        } else {
-            ThreadBootstrapPathSource::ParentDerived(
-                channel_id,
-                early_channel_name
-                    .as_deref()
-                    .or(early_resolved_channel_name.as_deref()),
-            )
-        };
+    let original_channel_name = early_channel_name
+        .as_deref()
+        .or(early_resolved_channel_name.as_deref());
+    let dispatch_has_explicit_path =
+        dispatch_worktree_path.is_some() || dispatch_target_repo_path.is_some();
+    let dispatch_bootstrap_path_source = if dispatch_has_explicit_path {
+        ThreadBootstrapPathSource::ExplicitDispatch
+    } else {
+        ThreadBootstrapPathSource::ParentDerived(channel_id, original_channel_name)
+    };
     if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
         if let (Some(stale_path), Some(did)) = (
@@ -908,6 +907,8 @@ pub(super) async fn handle_text_message(
             original_channel_id,
             channel_id,
             (session_id, memento_context_loaded, current_path),
+            original_channel_name,
+            dispatch_has_explicit_path.then_some(dispatch_effective_path.as_str()),
         )
     };
     let mut session_strategy_reason = if session_id.is_some() {
@@ -920,19 +921,7 @@ pub(super) async fn handle_text_message(
         "no_runtime_provider_session"
     };
 
-    // #259: Override current_path with the pre-computed dispatch worktree path.
-    // Also update the in-memory session so the worktree sticks for subsequent turns.
-    //
-    // #762 (B): Reused threads (where `bootstrap_thread_session` returned
-    // early because the thread already had a session) carry their existing
-    // `session.current_path`. Without this branch, a review dispatch that
-    // pins only `target_repo` (no `worktree_path`, e.g. because the
-    // external-repo worktree was cleaned up but `target_repo` still
-    // resolves to the external repo root) would re-execute inside the
-    // previous repo — the prompt and `adk_cwd` would both be built from
-    // the stale path. Propagate `dispatch_effective_path` into the
-    // session whenever it differs from the current path, regardless of
-    // whether `worktree_path` was supplied.
+    // #259/#762: Pin dispatch worktree/target-repo CWD over stale reused-session paths.
     let mut current_path = if dispatch_session_path_should_update(
         dispatch_id_for_thread.is_some(),
         dispatch_type_str.as_deref(),

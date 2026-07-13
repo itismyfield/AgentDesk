@@ -472,12 +472,159 @@ pub(super) fn session_runtime_state_after_redirect(
     original_channel_id: ChannelId,
     effective_channel_id: ChannelId,
     original_state: (Option<String>, bool, String),
+    original_channel_name: Option<&str>,
+    explicit_dispatch_path: Option<&str>,
 ) -> (Option<String>, bool, String) {
     if effective_channel_id == original_channel_id {
         return original_state;
     }
 
-    load_session_runtime_state(sessions, effective_channel_id).unwrap_or(original_state)
+    let redirected_state = load_session_runtime_state(sessions, effective_channel_id);
+    select_fresh_redirect_runtime_state(
+        original_state,
+        redirected_state,
+        settings::thread_inheritance_enabled(original_channel_id, original_channel_name),
+        fresh_redirect_runtime_path(explicit_dispatch_path),
+    )
+}
+
+fn select_fresh_redirect_runtime_state(
+    original_state: (Option<String>, bool, String),
+    redirected_state: Option<(Option<String>, bool, String)>,
+    inherit_parent_runtime: bool,
+    isolated_path: String,
+) -> (Option<String>, bool, String) {
+    if let Some(redirected_state) = redirected_state {
+        redirected_state
+    } else if inherit_parent_runtime {
+        original_state
+    } else {
+        (None, false, isolated_path)
+    }
+}
+
+fn fresh_redirect_runtime_path(explicit_dispatch_path: Option<&str>) -> String {
+    explicit_dispatch_path
+        .map(str::to_owned)
+        .or_else(|| {
+            crate::services::platform::resolve_repo_dir()
+                .filter(|path| std::path::Path::new(path).is_dir())
+        })
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| ".".to_string())
+}
+
+#[cfg(test)]
+mod redirect_runtime_tests {
+    use super::*;
+
+    const PARENT_ID: u64 = 1479671301387059200;
+
+    fn parent_state() -> (Option<String>, bool, String) {
+        (
+            Some("parent-provider-session".to_string()),
+            true,
+            "/tmp/parent-workspace".to_string(),
+        )
+    }
+
+    #[test]
+    fn fresh_redirect_parent_opt_out_clears_parent_runtime_tuple() {
+        assert_eq!(
+            select_fresh_redirect_runtime_state(
+                parent_state(),
+                None,
+                false,
+                "/tmp/isolated-runtime".to_string(),
+            ),
+            (None, false, "/tmp/isolated-runtime".to_string()),
+            "fresh child must not inherit the parent's provider session, memento state, or path"
+        );
+    }
+
+    #[test]
+    fn existing_child_runtime_wins_even_when_parent_opted_out() {
+        let child_state = (
+            Some("child-provider-session".to_string()),
+            true,
+            "/tmp/child-workspace".to_string(),
+        );
+        assert_eq!(
+            select_fresh_redirect_runtime_state(
+                parent_state(),
+                Some(child_state.clone()),
+                false,
+                "/tmp/isolated-runtime".to_string(),
+            ),
+            child_state
+        );
+    }
+
+    #[test]
+    fn parent_runtime_remains_the_legacy_fallback_when_inheritance_is_enabled() {
+        assert_eq!(
+            select_fresh_redirect_runtime_state(
+                parent_state(),
+                None,
+                true,
+                "/tmp/isolated-runtime".to_string(),
+            ),
+            parent_state()
+        );
+    }
+
+    #[test]
+    fn explicit_dispatch_path_is_the_isolated_fresh_child_path() {
+        assert_eq!(
+            fresh_redirect_runtime_path(Some("/tmp/dispatch-worktree")),
+            "/tmp/dispatch-worktree"
+        );
+    }
+
+    #[test]
+    fn live_redirect_policy_honors_parent_thread_inherit_opt_out() {
+        let root = tempfile::tempdir().expect("temp AgentDesk root");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("agentdesk.yaml"),
+            format!(
+                r#"server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "{PARENT_ID}"
+        name: adk-cdx
+        workspace: /tmp/parent-workspace
+        threadInherit: false
+"#
+            ),
+        )
+        .expect("write AgentDesk config");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let mut sessions = std::collections::HashMap::new();
+
+        assert_eq!(
+            session_runtime_state_after_redirect(
+                &mut sessions,
+                ChannelId::new(PARENT_ID),
+                ChannelId::new(PARENT_ID + 1),
+                parent_state(),
+                Some("adk-cdx"),
+                Some("/tmp/dispatch-worktree"),
+            ),
+            (None, false, "/tmp/dispatch-worktree".to_string()),
+            "the production redirect selector must apply the authoritative threadInherit policy"
+        );
+    }
 }
 
 pub(in crate::services::discord) async fn release_mailbox_after_placeholder_post_failure(
