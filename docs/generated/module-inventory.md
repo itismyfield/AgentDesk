@@ -56,7 +56,7 @@
 | `app_state` | `src/app_state.rs` | 47 | 47 | 0 |  |
 | `bootstrap` | `src/bootstrap.rs` | 93 | 93 | 0 |  |
 | `cli` | `src/cli/mod.rs` | 25 | 25 | 0 |  |
-| `cli::args` | `src/cli/args.rs` | 1350 | 960 | 390 |  |
+| `cli::args` | `src/cli/args.rs` | 1523 | 971 | 552 |  |
 | `cli::client` | `src/cli/client.rs` | 2732 | 2474 | 258 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1667 | 1667 | 0 | giant-file |
 | `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 913 | 455 | 458 |  |
@@ -553,7 +553,7 @@
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 161 | 161 | 0 |  |
 | `services::discord::outbound::send_api` | `src/services/discord/outbound/send_api.rs` | 591 | 295 | 296 |  |
 | `services::discord::outbound::send_gate` | `src/services/discord/outbound/send_gate.rs` | 555 | 349 | 206 |  |
-| `services::discord::outbound::send_target` | `src/services/discord/outbound/send_target.rs` | 193 | 144 | 49 |  |
+| `services::discord::outbound::send_target` | `src/services/discord/outbound/send_target.rs` | 263 | 153 | 110 |  |
 | `services::discord::outbound::send_to_agent` | `src/services/discord/outbound/send_to_agent.rs` | 157 | 93 | 64 |  |
 | `services::discord::outbound::serenity_reference` | `src/services/discord/outbound/serenity_reference.rs` | 149 | 149 | 0 |  |
 | `services::discord::outbound::source_registry` | `src/services/discord/outbound/source_registry.rs` | 247 | 159 | 88 |  |

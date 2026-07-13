@@ -5,6 +5,12 @@
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
+/// Canonical public contract for the routed `send` target grammar.
+///
+/// CLI help and resolver errors share this text so they cannot advertise
+/// prefixes that the parser does not implement.
+pub(crate) const SEND_TARGET_CONTRACT: &str = "Target must be channel:<id>, channel:<name>, or agent:<roleId>; bare channel IDs/names are accepted for compatibility.";
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SendTargetResolutionError {
     BadRequest(&'static str),
@@ -26,9 +32,7 @@ fn parse_agent_target(target: &str) -> Result<Option<&str>, SendTargetResolution
     };
     let agent_id = agent_id_raw.trim();
     if agent_id.is_empty() {
-        return Err(SendTargetResolutionError::BadRequest(
-            "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
-        ));
+        return Err(SendTargetResolutionError::BadRequest(SEND_TARGET_CONTRACT));
     }
     Ok(Some(agent_id))
 }
@@ -118,10 +122,15 @@ pub(super) async fn routine_thread_parent_hint(
 }
 
 fn resolve_channel_target(target: &str) -> Result<u64, SendTargetResolutionError> {
-    let channel_target = target.strip_prefix("channel:").unwrap_or(target);
-    parse_channel_target_value(channel_target).ok_or(SendTargetResolutionError::BadRequest(
-        "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
-    ))
+    let channel_target = match target.strip_prefix("channel:") {
+        Some(channel_target) => channel_target,
+        None if target.contains(':') => {
+            return Err(SendTargetResolutionError::BadRequest(SEND_TARGET_CONTRACT));
+        }
+        None => target,
+    };
+    parse_channel_target_value(channel_target)
+        .ok_or(SendTargetResolutionError::BadRequest(SEND_TARGET_CONTRACT))
 }
 
 pub(super) async fn resolve_send_target_channel_id_with_backends(
@@ -148,7 +157,10 @@ mod send_target_parse_tests {
     //! branches (`parse_channel_target_value` / `parse_agent_target`) before
     //! the health.rs directory decomposition.
 
-    use super::{SendTargetResolutionError, parse_agent_target, parse_channel_target_value};
+    use super::{
+        SEND_TARGET_CONTRACT, SendTargetResolutionError, parse_agent_target,
+        parse_channel_target_value, resolve_channel_target,
+    };
 
     #[test]
     fn numeric_channel_target_parses_after_trimming() {
@@ -177,9 +189,7 @@ mod send_target_parse_tests {
     fn agent_target_with_empty_id_is_bad_request() {
         assert_eq!(
             parse_agent_target("agent:   "),
-            Err(SendTargetResolutionError::BadRequest(
-                "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
-            ))
+            Err(SendTargetResolutionError::BadRequest(SEND_TARGET_CONTRACT))
         );
     }
 
@@ -189,5 +199,65 @@ mod send_target_parse_tests {
             parse_agent_target("agent: backend-dev "),
             Ok(Some("backend-dev"))
         );
+    }
+
+    #[test]
+    fn published_target_contract_matches_parser_prefixes() {
+        let root_result = tempfile::tempdir();
+        assert!(
+            root_result.is_ok(),
+            "create temporary AgentDesk root for target contract test: {:?}",
+            root_result.as_ref().err()
+        );
+        let Some(root) = root_result.ok() else {
+            return;
+        };
+        let _root_guard = crate::config::set_agentdesk_root_for_test(root.path());
+        let config_dir = root.path().join("config");
+        assert!(
+            std::fs::create_dir_all(&config_dir).is_ok(),
+            "create target contract test config directory"
+        );
+        assert!(
+            std::fs::write(
+                config_dir.join("role_map.json"),
+                serde_json::json!({
+                    "byChannelName": {
+                        "supported-alias": { "channelId": "4225000" },
+                        "user:4225": { "channelId": "4225001" },
+                        "role:backend-dev": { "channelId": "4225002" }
+                    },
+                    "byChannelId": {}
+                })
+                .to_string(),
+            )
+            .is_ok(),
+            "write alias-collision role map"
+        );
+
+        assert_eq!(resolve_channel_target("channel:123"), Ok(123));
+        assert_eq!(resolve_channel_target("123"), Ok(123));
+        assert_eq!(
+            resolve_channel_target("channel:supported-alias"),
+            Ok(4225000)
+        );
+        assert_eq!(resolve_channel_target("supported-alias"), Ok(4225000));
+        assert_eq!(
+            parse_agent_target("agent:backend-dev"),
+            Ok(Some("backend-dev"))
+        );
+
+        for unsupported in ["user:4225", "role:backend-dev"] {
+            assert_eq!(
+                resolve_channel_target(unsupported),
+                Err(SendTargetResolutionError::BadRequest(SEND_TARGET_CONTRACT)),
+                "unsupported target prefix must not be advertised: {unsupported}"
+            );
+        }
+        assert!(SEND_TARGET_CONTRACT.contains("channel:<id>"));
+        assert!(SEND_TARGET_CONTRACT.contains("channel:<name>"));
+        assert!(SEND_TARGET_CONTRACT.contains("agent:<roleId>"));
+        assert!(!SEND_TARGET_CONTRACT.contains("user:<id>"));
+        assert!(!SEND_TARGET_CONTRACT.contains("role:<name>"));
     }
 }

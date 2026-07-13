@@ -497,7 +497,7 @@ mod handle_send_contract_tests {
         assert_eq!(body["ok"], false);
         assert_eq!(
             body["error"],
-            "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)"
+            super::super::send_target::SEND_TARGET_CONTRACT
         );
     }
 

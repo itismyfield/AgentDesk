@@ -39,7 +39,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         report_message_id: Option<u64>,
     },
-    /// Send a file to a Discord channel
+    /// Deprecated: send a file to a Discord channel
+    #[command(
+        after_help = "Deprecated compatibility command. The routed `send` command does not currently accept file attachments, so keep using this command until an attachment-capable replacement is available."
+    )]
     DiscordSendfile {
         /// File path to send
         path: String,
@@ -50,7 +53,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         key: String,
     },
-    /// Send a message to a Discord channel
+    /// Deprecated: send a message to a Discord channel
+    #[command(
+        after_help = "Deprecated compatibility command. With `--key`, this command selects that one configured bot token; without `--key`, it tries configured bot tokens sequentially until one succeeds. For a role-mapped channel with a configured bot runtime, migrate to `agentdesk send --target channel:<id> --content <TEXT>`. Routed `send` instead requires role-map authorization and selects one `--bot` runtime (default: announce), so it does not preserve this command's token selection or sequential fallback. Keep using this compatibility command when those routing requirements do not match the current delivery."
+    )]
     DiscordSendmessage {
         /// Discord channel ID
         #[arg(long)]
@@ -58,11 +64,14 @@ pub(crate) enum Commands {
         /// Message text
         #[arg(long)]
         message: String,
-        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN env or configured Discord bots)
+        /// Authentication key hash (optional; without it, configured bot tokens are tried sequentially until one succeeds)
         #[arg(long)]
         key: Option<String>,
     },
-    /// Send a direct message to a Discord user
+    /// Deprecated: send a direct message to a Discord user
+    #[command(
+        after_help = "Deprecated compatibility command. With `--key`, this command selects that one configured bot token; without `--key`, it tries configured bot tokens sequentially until one succeeds. Routed `send` instead requires a role-map-authorized channel or agent target and selects one configured `--bot` runtime (default: announce); it does not preserve this token fallback, target a Discord user, or create a DM. Keep using this command until a supported replacement is available."
+    )]
     DiscordSenddm {
         /// Discord user ID
         #[arg(long)]
@@ -70,14 +79,16 @@ pub(crate) enum Commands {
         /// Message text
         #[arg(long)]
         message: String,
-        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN env or configured Discord bots)
+        /// Authentication key hash (optional; without it, configured bot tokens are tried sequentially until one succeeds)
         #[arg(long)]
         key: Option<String>,
     },
     /// Send a routed Discord message without HTTP server dependency
     Send {
-        /// Target route such as channel:<id>, user:<id>, role:<name>
-        #[arg(long)]
+        #[arg(
+            long,
+            help = crate::services::discord::outbound::send_target::SEND_TARGET_CONTRACT
+        )]
         target: String,
         /// Source label recorded in the send envelope
         #[arg(long)]
@@ -1066,6 +1077,168 @@ mod tests {
                 format!("agentdesk {}", env!("CARGO_PKG_VERSION"))
             );
         }
+    }
+
+    #[test]
+    fn legacy_flat_discord_send_commands_still_parse_unchanged() {
+        let file = Cli::try_parse_from([
+            "agentdesk",
+            "discord-sendfile",
+            "/tmp/report.txt",
+            "--channel",
+            "42",
+            "--key",
+            "key-hash",
+        ])
+        .expect("legacy file send should still parse");
+        assert!(matches!(
+            file.command,
+            Some(Commands::DiscordSendfile {
+                path,
+                channel: 42,
+                key,
+            }) if path == "/tmp/report.txt" && key == "key-hash"
+        ));
+
+        let channel = Cli::try_parse_from([
+            "agentdesk",
+            "discord-sendmessage",
+            "--channel",
+            "42",
+            "--message",
+            "hello channel",
+        ])
+        .expect("legacy channel send should still parse");
+        assert!(matches!(
+            channel.command,
+            Some(Commands::DiscordSendmessage {
+                channel: 42,
+                message,
+                key: None,
+            }) if message == "hello channel"
+        ));
+
+        let dm = Cli::try_parse_from([
+            "agentdesk",
+            "discord-senddm",
+            "--user",
+            "43",
+            "--message",
+            "hello user",
+        ])
+        .expect("legacy DM send should still parse");
+        assert!(matches!(
+            dm.command,
+            Some(Commands::DiscordSenddm {
+                user: 43,
+                message,
+                key: None,
+            }) if message == "hello user"
+        ));
+    }
+
+    #[test]
+    fn legacy_flat_discord_send_help_matches_routed_send_contract() {
+        fn help_for(command: &str) -> String {
+            let Err(error) = Cli::try_parse_from(["agentdesk", command, "--help"]) else {
+                panic!("{command} --help must render help instead of running the command");
+            };
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{command}");
+            assert_eq!(error.exit_code(), 0, "{command}");
+            error.to_string()
+        }
+
+        fn assert_legacy_token_contract(help: &str, command: &str) -> String {
+            let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            for required in [
+                "With `--key`",
+                "one configured bot token",
+                "without `--key`",
+                "configured bot tokens",
+                "sequentially until one succeeds",
+            ] {
+                assert!(
+                    help.contains(required),
+                    "{command} help must disclose {required}: {help}"
+                );
+            }
+            assert!(
+                !help.contains("AGENTDESK_TOKEN"),
+                "{command} must not claim an environment-token fallback it does not implement: {help}"
+            );
+            help
+        }
+
+        let command = Cli::command();
+        let send_target_help = command
+            .find_subcommand("send")
+            .expect("send subcommand")
+            .get_arguments()
+            .find(|argument| argument.get_id().as_str() == "target")
+            .and_then(|argument| argument.get_help())
+            .map(ToString::to_string);
+        assert_eq!(
+            send_target_help.as_deref(),
+            Some(crate::services::discord::outbound::send_target::SEND_TARGET_CONTRACT),
+            "Clap target help must be sourced from the resolver-owned contract"
+        );
+
+        let send = help_for("send");
+        for supported_route in ["channel:<id>", "channel:<name>", "agent:<roleId>"] {
+            assert!(
+                send.contains(supported_route),
+                "routed send help must advertise {supported_route}: {send}"
+            );
+        }
+        assert!(
+            !send.contains("user:<id>"),
+            "unsupported user route: {send}"
+        );
+        assert!(
+            !send.contains("role:<name>"),
+            "unsupported role route: {send}"
+        );
+
+        let channel = help_for("discord-sendmessage");
+        assert!(channel.contains("Deprecated"), "{channel}");
+        let channel_contract = assert_legacy_token_contract(&channel, "discord-sendmessage");
+        assert!(
+            channel_contract.contains("selects one `--bot` runtime")
+                && channel_contract.contains("does not preserve")
+                && channel_contract.contains("sequential fallback"),
+            "routed send must remain explicitly non-equivalent to legacy token fallback: {channel_contract}"
+        );
+        for migration_token in ["agentdesk", "channel:<id>", "--content"] {
+            assert!(
+                channel.contains(migration_token),
+                "channel migration must include {migration_token}: {channel}"
+            );
+        }
+        for required_caveat in ["role-map", "--bot", "--key", "compatibility"] {
+            assert!(
+                channel.contains(required_caveat),
+                "channel migration must disclose {required_caveat}: {channel}"
+            );
+        }
+
+        let dm = help_for("discord-senddm");
+        assert!(dm.contains("Deprecated"), "{dm}");
+        let dm_contract = assert_legacy_token_contract(&dm, "discord-senddm");
+        assert!(
+            dm_contract.contains("selects one configured `--bot` runtime")
+                && dm_contract.contains("does not preserve this token fallback"),
+            "routed send must not be presented as a DM token-fallback replacement: {dm_contract}"
+        );
+        for unsupported_or_gated in ["role-map", "--bot", "--key", "DM", "compatibility"] {
+            assert!(
+                dm.contains(unsupported_or_gated),
+                "DM compatibility help must disclose {unsupported_or_gated}: {dm}"
+            );
+        }
+
+        let file = help_for("discord-sendfile");
+        assert!(file.contains("Deprecated"), "{file}");
+        assert!(file.contains("attachments"), "{file}");
     }
 
     #[test]
