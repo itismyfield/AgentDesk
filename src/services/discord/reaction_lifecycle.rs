@@ -162,12 +162,7 @@ async fn thread_parent_channel_from_http(
     channel_id: ChannelId,
 ) -> Option<ChannelId> {
     let channel = channel_id.to_channel(http).await.ok()?.guild()?;
-    let is_thread = matches!(
-        channel.kind,
-        serenity::ChannelType::NewsThread
-            | serenity::ChannelType::PublicThread
-            | serenity::ChannelType::PrivateThread
-    );
+    let is_thread = crate::utils::discord::is_thread_channel_type(channel.kind);
     is_thread.then_some(channel.parent_id).flatten()
 }
 

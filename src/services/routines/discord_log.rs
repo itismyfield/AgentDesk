@@ -876,11 +876,7 @@ async fn validate_routine_thread(
         .map_err(|error| anyhow!("fetch saved routine thread {}: {error}", thread_id.get()))?;
     match channel {
         poise::serenity_prelude::Channel::Guild(channel)
-            if matches!(
-                channel.kind,
-                poise::serenity_prelude::ChannelType::PublicThread
-                    | poise::serenity_prelude::ChannelType::PrivateThread
-            ) =>
+            if crate::utils::discord::is_thread_channel_type(channel.kind) =>
         {
             Ok(resolved.bot)
         }

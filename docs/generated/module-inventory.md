@@ -242,7 +242,7 @@
 | `server::routes::cluster` | `src/server/routes/cluster.rs` | 451 | 451 | 0 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 | 180 | 0 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 | 300 | 0 |  |
-| `server::routes::discord` | `src/server/routes/discord.rs` | 410 | 353 | 57 |  |
+| `server::routes::discord` | `src/server/routes/discord.rs` | 416 | 353 | 63 |  |
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 138 | 138 | 0 |  |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 29 | 29 | 0 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 1071 | 773 | 298 |  |
@@ -593,7 +593,7 @@
 | `services::discord::queue_reactions` | `src/services/discord/queue_reactions.rs` | 35 | 25 | 10 |  |
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 251 | 251 | 0 |  |
 | `services::discord::reaction_cleanup` | `src/services/discord/reaction_cleanup.rs` | 49 | 24 | 25 |  |
-| `services::discord::reaction_lifecycle` | `src/services/discord/reaction_lifecycle.rs` | 363 | 321 | 42 |  |
+| `services::discord::reaction_lifecycle` | `src/services/discord/reaction_lifecycle.rs` | 358 | 316 | 42 |  |
 | `services::discord::readopted_mailbox_ledger` | `src/services/discord/readopted_mailbox_ledger.rs` | 238 | 238 | 0 |  |
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 517 | 461 | 56 |  |
 | `services::discord::recovery_engine::analytics_transcript` | `src/services/discord/recovery_engine/analytics_transcript.rs` | 110 | 110 | 0 |  |
@@ -698,7 +698,7 @@
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 75 | 75 | 0 |  |
 | `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 803 | 503 | 300 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1027 | 501 | 526 |  |
-| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 235 | 235 | 0 |  |
+| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 226 | 226 | 0 |  |
 | `services::discord::session_runtime::restore_cwd` | `src/services/discord/session_runtime/restore_cwd.rs` | 353 | 353 | 0 |  |
 | `services::discord::session_runtime::worktree` | `src/services/discord/session_runtime/worktree.rs` | 601 | 601 | 0 |  |
 | `services::discord::settings` | `src/services/discord/settings.rs` | 347 | 347 | 0 |  |
@@ -1014,8 +1014,8 @@
 | `services::review_decision::worktree_stale` | `src/services/review_decision/worktree_stale.rs` | 728 | 553 | 175 |  |
 | `services::routines` | `src/services/routines/mod.rs` | 33 | 33 | 0 |  |
 | `services::routines::action` | `src/services/routines/action.rs` | 365 | 237 | 128 |  |
-| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2504 | 2021 | 483 | giant-file |
-| `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 2051 | 1593 | 458 | giant-file |
+| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2500 | 2017 | 483 | giant-file |
+| `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 2047 | 1589 | 458 | giant-file |
 | `services::routines::fresh_session_reaper` | `src/services/routines/fresh_session_reaper.rs` | 395 | 215 | 180 |  |
 | `services::routines::loader` | `src/services/routines/loader.rs` | 2313 | 670 | 1643 |  |
 | `services::routines::migrated` | `src/services/routines/migrated.rs` | 1257 | 854 | 403 |  |
@@ -1062,7 +1062,7 @@
 | `utils::api` | `src/utils/api.rs` | 55 | 33 | 22 |  |
 | `utils::async_bridge` | `src/utils/async_bridge.rs` | 288 | 213 | 75 |  |
 | `utils::auth` | `src/utils/auth.rs` | 40 | 20 | 20 |  |
-| `utils::discord` | `src/utils/discord.rs` | 24 | 11 | 13 |  |
+| `utils::discord` | `src/utils/discord.rs` | 57 | 20 | 37 |  |
 | `utils::format` | `src/utils/format.rs` | 106 | 106 | 0 |  |
 | `utils::github_links` | `src/utils/github_links.rs` | 154 | 109 | 45 |  |
 | `utils::loopback_url` | `src/utils/loopback_url.rs` | 58 | 28 | 30 |  |

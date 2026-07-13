@@ -174,32 +174,26 @@ pub(in crate::services::discord) async fn resolve_runtime_channel_binding_status
     match channel {
         serenity::model::channel::Channel::Private(_) => RuntimeChannelBindingStatus::Owned,
         serenity::model::channel::Channel::Guild(gc) => {
-            use poise::serenity_prelude::ChannelType;
-            match gc.kind {
-                ChannelType::PublicThread | ChannelType::PrivateThread => {
-                    let Some(parent_id) = gc.parent_id else {
-                        return RuntimeChannelBindingStatus::Unowned;
-                    };
-                    let parent_name = match parent_id.to_channel(http).await {
-                        Ok(serenity::model::channel::Channel::Guild(parent)) => {
-                            Some(parent.name.clone())
-                        }
-                        Ok(_) => None,
-                        Err(_) => None,
-                    };
-                    if settings::has_configured_channel_binding(parent_id, parent_name.as_deref()) {
-                        RuntimeChannelBindingStatus::Owned
-                    } else {
-                        RuntimeChannelBindingStatus::Unowned
+            if crate::utils::discord::is_thread_channel_type(gc.kind) {
+                let Some(parent_id) = gc.parent_id else {
+                    return RuntimeChannelBindingStatus::Unowned;
+                };
+                let parent_name = match parent_id.to_channel(http).await {
+                    Ok(serenity::model::channel::Channel::Guild(parent)) => {
+                        Some(parent.name.clone())
                     }
+                    Ok(_) => None,
+                    Err(_) => None,
+                };
+                if settings::has_configured_channel_binding(parent_id, parent_name.as_deref()) {
+                    RuntimeChannelBindingStatus::Owned
+                } else {
+                    RuntimeChannelBindingStatus::Unowned
                 }
-                _ => {
-                    if settings::has_configured_channel_binding(channel_id, Some(&gc.name)) {
-                        RuntimeChannelBindingStatus::Owned
-                    } else {
-                        RuntimeChannelBindingStatus::Unowned
-                    }
-                }
+            } else if settings::has_configured_channel_binding(channel_id, Some(&gc.name)) {
+                RuntimeChannelBindingStatus::Owned
+            } else {
+                RuntimeChannelBindingStatus::Unowned
             }
         }
         _ => RuntimeChannelBindingStatus::Unowned,
@@ -216,20 +210,17 @@ pub(in crate::services::discord) async fn resolve_thread_parent(
     let serenity::model::channel::Channel::Guild(gc) = channel else {
         return None;
     };
-    use poise::serenity_prelude::ChannelType;
-    match gc.kind {
-        ChannelType::PublicThread | ChannelType::PrivateThread => {
-            let parent_id = gc.parent_id?;
-            let parent_name = if let Ok(parent_ch) = parent_id.to_channel(http).await {
-                match parent_ch {
-                    serenity::model::channel::Channel::Guild(pg) => Some(pg.name.clone()),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            Some((parent_id, parent_name))
-        }
-        _ => None,
+    if !crate::utils::discord::is_thread_channel_type(gc.kind) {
+        return None;
     }
+    let parent_id = gc.parent_id?;
+    let parent_name = if let Ok(parent_ch) = parent_id.to_channel(http).await {
+        match parent_ch {
+            serenity::model::channel::Channel::Guild(pg) => Some(pg.name.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Some((parent_id, parent_name))
 }

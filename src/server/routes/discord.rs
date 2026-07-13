@@ -386,15 +386,21 @@ mod tests {
     }
 
     #[test]
-    fn thread_parent_id_extracts_discord_thread_parent() {
-        let payload = json!({
-            "id": "222",
-            "parent_id": "111",
-            "type": 11,
-            "name": "thread"
-        });
+    fn thread_parent_id_extracts_all_discord_thread_types() {
+        for channel_type in [10, 11, 12] {
+            let payload = json!({
+                "id": "222",
+                "parent_id": "111",
+                "type": channel_type,
+                "name": "thread"
+            });
 
-        assert_eq!(thread_parent_id(&payload).map(|id| id.get()), Some(111));
+            assert_eq!(
+                thread_parent_id(&payload).map(|id| id.get()),
+                Some(111),
+                "Discord channel type {channel_type} should be treated as a thread"
+            );
+        }
     }
 
     #[test]

@@ -103,8 +103,8 @@
 | `src/services/platform/binary_resolver.rs` | 1381 |
 | `src/services/provider.rs` | 1647 |
 | `src/services/qwen.rs` | 2198 |
-| `src/services/routines/agent_executor.rs` | 2021 |
-| `src/services/routines/discord_log.rs` | 1593 |
+| `src/services/routines/agent_executor.rs` | 2017 |
+| `src/services/routines/discord_log.rs` | 1589 |
 | `src/services/routines/store.rs` | 3505 |
 | `src/services/settings.rs` | 1067 |
 | `src/services/tui_prompt_dedupe.rs` | 1966 |
