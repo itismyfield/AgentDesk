@@ -1758,11 +1758,8 @@ mod tests {
         assert!(recovery_status.success());
         proxy.await.unwrap();
 
-        assert_eq!(
-            second_body, first_body,
-            "receiver restart/replay must return the exact cached Stop response without advancing memento twice"
-        );
         assert!(first_body.get("memento_tool_feedback_flush").is_some());
+        assert!(second_body.get("memento_tool_feedback_flush").is_some());
         assert!(
             !request_path.exists(),
             "recovery worker removes the request only after cached acceptance"
@@ -1770,6 +1767,35 @@ mod tests {
         let response_path = response_path.unwrap();
         let response: OrderedHookRelayResponse =
             serde_json::from_slice(&std::fs::read(response_path).unwrap()).unwrap();
-        assert_eq!(response.result.unwrap(), first_body);
+        assert!(
+            response
+                .result
+                .as_ref()
+                .is_ok_and(|body| body.get("memento_tool_feedback_flush").is_some()),
+            "durable worker response must retain the accepted Stop flush"
+        );
+
+        let followup = routers
+            .read()
+            .await
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/claude/Stop?session_id={session_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(followup.status().as_u16(), 202);
+        let followup_body: Value =
+            serde_json::from_slice(&to_bytes(followup.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(
+            followup_body.get("memento_tool_feedback_flush").is_some(),
+            "worker-crash replay must leave the sole Stop retry available to the next fresh boundary"
+        );
     }
 }

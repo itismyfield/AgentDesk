@@ -387,7 +387,7 @@
 | `services::claude_tui::hook_output_guard` | `src/services/claude_tui/hook_output_guard.rs` | 157 | 157 | 0 |  |
 | `services::claude_tui::hook_registry` | `src/services/claude_tui/hook_registry.rs` | 1333 | 718 | 615 |  |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 2085 | 806 | 1279 |  |
-| `services::claude_tui::hook_relay::ordered_queue` | `src/services/claude_tui/hook_relay/ordered_queue.rs` | 1775 | 891 | 884 |  |
+| `services::claude_tui::hook_relay::ordered_queue` | `src/services/claude_tui/hook_relay/ordered_queue.rs` | 1801 | 891 | 910 |  |
 | `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 1453 | 772 | 681 |  |
 | `services::claude_tui::hook_server::relay_receipts` | `src/services/claude_tui/hook_server/relay_receipts.rs` | 346 | 290 | 56 |  |
 | `services::claude_tui::hosting` | `src/services/claude_tui/hosting/mod.rs` | 13 | 13 | 0 |  |
