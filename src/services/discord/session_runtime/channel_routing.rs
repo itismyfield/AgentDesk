@@ -159,6 +159,14 @@ pub(in crate::services::discord) enum RuntimeChannelBindingStatus {
     Unknown,
 }
 
+fn is_actual_thread_kind(kind: poise::serenity_prelude::ChannelType) -> bool {
+    use poise::serenity_prelude::ChannelType;
+    matches!(
+        kind,
+        ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
+    )
+}
+
 pub(in crate::services::discord) async fn resolve_runtime_channel_binding_status(
     http: &Arc<serenity::Http>,
     channel_id: serenity::model::id::ChannelId,
@@ -173,35 +181,32 @@ pub(in crate::services::discord) async fn resolve_runtime_channel_binding_status
 
     match channel {
         serenity::model::channel::Channel::Private(_) => RuntimeChannelBindingStatus::Owned,
-        serenity::model::channel::Channel::Guild(gc) => {
-            use poise::serenity_prelude::ChannelType;
-            match gc.kind {
-                ChannelType::PublicThread | ChannelType::PrivateThread => {
-                    let Some(parent_id) = gc.parent_id else {
-                        return RuntimeChannelBindingStatus::Unowned;
-                    };
-                    let parent_name = match parent_id.to_channel(http).await {
-                        Ok(serenity::model::channel::Channel::Guild(parent)) => {
-                            Some(parent.name.clone())
-                        }
-                        Ok(_) => None,
-                        Err(_) => None,
-                    };
-                    if settings::has_configured_channel_binding(parent_id, parent_name.as_deref()) {
-                        RuntimeChannelBindingStatus::Owned
-                    } else {
-                        RuntimeChannelBindingStatus::Unowned
+        serenity::model::channel::Channel::Guild(gc) => match gc.kind {
+            kind if is_actual_thread_kind(kind) => {
+                let Some(parent_id) = gc.parent_id else {
+                    return RuntimeChannelBindingStatus::Unowned;
+                };
+                let parent_name = match parent_id.to_channel(http).await {
+                    Ok(serenity::model::channel::Channel::Guild(parent)) => {
+                        Some(parent.name.clone())
                     }
-                }
-                _ => {
-                    if settings::has_configured_channel_binding(channel_id, Some(&gc.name)) {
-                        RuntimeChannelBindingStatus::Owned
-                    } else {
-                        RuntimeChannelBindingStatus::Unowned
-                    }
+                    Ok(_) => None,
+                    Err(_) => None,
+                };
+                if settings::has_configured_channel_binding(parent_id, parent_name.as_deref()) {
+                    RuntimeChannelBindingStatus::Owned
+                } else {
+                    RuntimeChannelBindingStatus::Unowned
                 }
             }
-        }
+            _ => {
+                if settings::has_configured_channel_binding(channel_id, Some(&gc.name)) {
+                    RuntimeChannelBindingStatus::Owned
+                } else {
+                    RuntimeChannelBindingStatus::Unowned
+                }
+            }
+        },
         _ => RuntimeChannelBindingStatus::Unowned,
     }
 }
@@ -216,9 +221,8 @@ pub(in crate::services::discord) async fn resolve_thread_parent(
     let serenity::model::channel::Channel::Guild(gc) = channel else {
         return None;
     };
-    use poise::serenity_prelude::ChannelType;
     match gc.kind {
-        ChannelType::PublicThread | ChannelType::PrivateThread => {
+        kind if is_actual_thread_kind(kind) => {
             let parent_id = gc.parent_id?;
             let parent_name = if let Ok(parent_ch) = parent_id.to_channel(http).await {
                 match parent_ch {
@@ -231,5 +235,19 @@ pub(in crate::services::discord) async fn resolve_thread_parent(
             Some((parent_id, parent_name))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_actual_thread_kind;
+    use poise::serenity_prelude::ChannelType;
+
+    #[test]
+    fn actual_thread_classification_includes_news_threads() {
+        assert!(is_actual_thread_kind(ChannelType::PublicThread));
+        assert!(is_actual_thread_kind(ChannelType::PrivateThread));
+        assert!(is_actual_thread_kind(ChannelType::NewsThread));
+        assert!(!is_actual_thread_kind(ChannelType::Text));
     }
 }

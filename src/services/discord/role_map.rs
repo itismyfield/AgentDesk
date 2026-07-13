@@ -405,6 +405,29 @@ fn entry_matches_channel_id(entry: &serde_json::Value, channel_id: ChannelId) ->
     }
 }
 
+pub(super) fn thread_inheritance_enabled(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> bool {
+    let Some(json) = load_role_map_json() else {
+        return true;
+    };
+    let by_id = json.get("byChannelId").and_then(|value| value.as_object());
+    let entry = by_id
+        .and_then(|entries| entries.get(&channel_id.get().to_string()))
+        .or_else(|| {
+            fallback_enabled(&json)
+                .then_some(())
+                .and_then(|()| channel_name)
+                .and_then(|name| json.get("byChannelName")?.as_object()?.get(name))
+                .filter(|entry| entry_matches_channel_id(entry, channel_id))
+        });
+    entry
+        .and_then(|entry| entry.get("threadInherit"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
 pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,

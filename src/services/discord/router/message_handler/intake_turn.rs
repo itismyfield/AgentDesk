@@ -291,19 +291,14 @@ pub(super) async fn handle_text_message(
     } else {
         None
     };
-    let early_role_binding = resolve_role_binding(
+    let early_role_binding = resolve_thread_role_binding(
         channel_id,
         early_channel_name
             .as_deref()
             .or(early_resolved_channel_name.as_deref()),
+        early_thread_parent.as_ref(),
     )
-    .or_else(|| {
-        early_thread_parent
-            .as_ref()
-            .and_then(|(parent_id, parent_name)| {
-                resolve_role_binding(*parent_id, parent_name.as_deref())
-            })
-    })
+    .role_binding
     .or_else(|| {
         dm_default_agent
             .as_ref()
@@ -375,27 +370,26 @@ pub(super) async fn handle_text_message(
                         .and_then(|s| s.channel_name.clone())
                 };
                 let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
-                // Fallback: if this is a thread, try resolving workspace from parent channel
-                if workspace.is_none() {
-                    if let Some((parent_id, parent_name)) =
-                        super::super::super::resolve_thread_parent(http, channel_id).await
-                    {
-                        // Use parent name from Discord API first, fall back to session map
-                        let parent_ch_name = parent_name.or_else(|| {
-                            let data = shared.core.try_lock().ok()?;
-                            data.sessions
-                                .get(&parent_id)
-                                .and_then(|s| s.channel_name.clone())
-                        });
-                        workspace =
-                            settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
-                        if workspace.is_some() {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 🧵 Thread auto-start: resolved workspace from parent channel {}",
-                                parent_id
-                            );
-                        }
+                if workspace.is_none()
+                    && let Some((parent_id, parent_name)) = early_thread_parent.as_ref()
+                {
+                    let parent_ch_name = parent_name.clone().or_else(|| {
+                        let data = shared.core.try_lock().ok()?;
+                        data.sessions
+                            .get(parent_id)
+                            .and_then(|session| session.channel_name.clone())
+                    });
+                    workspace = resolve_thread_workspace(
+                        channel_id,
+                        ch_name.as_deref(),
+                        Some(&(*parent_id, parent_ch_name)),
+                    );
+                    if workspace.is_some() {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 🧵 Thread auto-start: inherited workspace from parent channel {}",
+                            parent_id
+                        );
                     }
                 }
                 if workspace.is_none()
@@ -858,6 +852,8 @@ pub(super) async fn handle_text_message(
     } else {
         channel_id
     };
+    let final_thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;
+    let mut authoritative = dispatch_worktree_path.is_some() || dispatch_target_repo_path.is_some();
     if dispatch_should_recover_session_worktree(
         dispatch_id_for_thread.is_some(),
         dispatch_type_str.as_deref(),
@@ -872,6 +868,7 @@ pub(super) async fn handle_text_message(
                 .filter(|path| std::path::Path::new(path).is_dir())
         };
         if let Some(worktree_path) = session_worktree_path {
+            authoritative = true;
             if dispatch_effective_path != worktree_path {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -921,24 +918,22 @@ pub(super) async fn handle_text_message(
         "no_runtime_provider_session"
     };
 
-    // #259: Override current_path with the pre-computed dispatch worktree path.
-    // Also update the in-memory session so the worktree sticks for subsequent turns.
-    //
-    // #762 (B): Reused threads (where `bootstrap_thread_session` returned
-    // early because the thread already had a session) carry their existing
-    // `session.current_path`. Without this branch, a review dispatch that
-    // pins only `target_repo` (no `worktree_path`, e.g. because the
-    // external-repo worktree was cleaned up but `target_repo` still
-    // resolves to the external repo root) would re-execute inside the
-    // previous repo — the prompt and `adk_cwd` would both be built from
-    // the stale path. Propagate `dispatch_effective_path` into the
-    // session whenever it differs from the current path, regardless of
-    // whether `worktree_path` was supplied.
+    // #259/#762: Keep runtime/session CWD aligned with the selected dispatch path.
+    // This also corrects reused threads whose cached path differs from target_repo.
+    // Inherited workspace applies only without an authoritative dispatch CWD;
+    // the existing update block persists that selection for later turns.
+    let final_workspace = apply_final_thread_workspace(
+        shared,
+        channel_id,
+        final_thread_parent.as_ref(),
+        (&mut dispatch_effective_path, authoritative),
+    )
+    .await;
     let mut current_path = if dispatch_session_path_should_update(
         dispatch_id_for_thread.is_some(),
         dispatch_type_str.as_deref(),
         dispatch_worktree_path.is_some(),
-        bootstrapped_fresh_thread_session,
+        bootstrapped_fresh_thread_session && !final_workspace,
         &current_path,
         &dispatch_effective_path,
     ) {
@@ -995,26 +990,30 @@ pub(super) async fn handle_text_message(
     let sanitized_input =
         ai_screen::sanitize_user_input(voice_prompt_text.as_deref().unwrap_or(user_text));
 
-    let role_binding = {
+    let mut resolved_role_binding = {
         // For cross-channel dispatch reuse (e.g. review in implementation thread),
         // resolve role from the override channel instead of the thread's parent.
         if let Some(override_ch) = shared.dispatch.role_overrides.get(&channel_id) {
             let alt_ch = *override_ch;
-            resolve_role_binding(alt_ch, None)
+            ResolvedThreadRoleBinding::direct(resolve_role_binding(alt_ch, None))
         } else {
             let data = shared.core.lock().await;
             let ch_name = data
                 .sessions
                 .get(&channel_id)
                 .and_then(|s| s.channel_name.as_deref());
-            resolve_role_binding(channel_id, ch_name)
+            resolve_thread_role_binding(channel_id, ch_name, final_thread_parent.as_ref())
         }
-    }
-    .or_else(|| {
-        dm_default_agent
+    };
+    if resolved_role_binding.role_binding.is_none() {
+        resolved_role_binding.role_binding = dm_default_agent
             .as_ref()
-            .map(|resolved| resolved.role_binding.clone())
-    });
+            .map(|resolved| resolved.role_binding.clone());
+    }
+    let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
+    let memory_channel_id = memory_scope_channel_id.get();
+    let memory_channel_name = resolved_role_binding.memory_channel_name(None);
+    let role_binding = resolved_role_binding.role_binding;
 
     // For cross-channel dispatch reuse, override the provider so the turn
     // executes via the counter-model CLI (e.g. Codex reviews Claude's work).
@@ -1125,8 +1124,8 @@ pub(super) async fn handle_text_message(
         }
     }
 
-    let thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;
-    let fast_mode_channel_id = effective_fast_mode_channel_id(channel_id, thread_parent.clone());
+    let fast_mode_channel_id =
+        effective_fast_mode_channel_id(channel_id, final_thread_parent.clone());
     super::super::super::commands::reset_provider_session_if_pending(
         http,
         shared,
@@ -1693,9 +1692,9 @@ pub(super) async fn handle_text_message(
             .recall(RecallRequest {
                 provider: provider.clone(),
                 role_id: resolve_memory_role_id(role_binding.as_ref()),
-                channel_id: channel_id.get(),
-                channel_name: channel_name.clone(),
-                session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+                channel_id: memory_channel_id,
+                channel_name: memory_channel_name.clone().or(channel_name.clone()),
+                session_id: resolve_memory_session_id(session_id.as_deref(), memory_channel_id),
                 dispatch_profile,
                 user_text: user_text.to_string(),
                 mode: memento_recall_gate.mode,
@@ -1827,6 +1826,7 @@ pub(super) async fn handle_text_message(
         &channel_participants,
         &current_path,
         channel_id,
+        memory_scope_channel_id,
         token,
         role_binding.as_ref(),
         reply_to_user_message,
@@ -2462,7 +2462,7 @@ pub(super) async fn handle_text_message(
     }
 
     let (logical_channel_id, thread_id, thread_title) =
-        if let Some((parent_id, _parent_name)) = thread_parent {
+        if let Some((parent_id, _parent_name)) = final_thread_parent {
             let (live_thread_title, _) =
                 super::super::super::resolve_channel_category(http, cache, channel_id).await;
             (parent_id.get(), Some(channel_id.get()), live_thread_title)
