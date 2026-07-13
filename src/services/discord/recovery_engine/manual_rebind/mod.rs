@@ -18,6 +18,7 @@
 use super::manual_rebind_output_path::saved_output_path_for_rebind_resolution;
 use super::manual_rebind_override::upsert_rebind_session_id_override;
 use super::*;
+use crate::services::discord::settings;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
@@ -385,33 +386,23 @@ async fn rebind_inflight_for_channel_inner(
     // mirroring what `restore_inflight_turns` requires for watcher revival.
     let settings_snapshot = shared.settings.read().await.clone();
     let channel_lookup_timeout = std::time::Duration::from_secs(5);
-    let is_dm = matches!(
-        tokio::time::timeout(channel_lookup_timeout, discord_channel_id.to_channel(http)).await,
-        Ok(Ok(serenity::model::channel::Channel::Private(_)))
-    );
-    let (allowlist_channel_id, provider_channel_name) = match tokio::time::timeout(
+    let (is_dm, live_child_name, thread_parent) = tokio::time::timeout(
         channel_lookup_timeout,
-        super::resolve_thread_parent(http, discord_channel_id),
+        super::super::session_runtime::resolve_live_channel_routing_metadata(
+            http,
+            discord_channel_id,
+        ),
     )
     .await
-    {
-        Ok(Some((pid, pname))) => (pid, pname.or(channel_name.clone())),
-        Ok(None) => (discord_channel_id, channel_name.clone()),
-        Err(_) => {
-            tracing::warn!(
-                channel_id,
-                provider = provider.as_str(),
-                "rebind channel metadata lookup timed out; falling back to direct channel validation",
-            );
-            (discord_channel_id, channel_name.clone())
-        }
-    };
-    if validate_bot_channel_routing_with_provider_channel(
+    .unwrap_or((false, None, None));
+    if settings::validate_bot_channel_routing_with_thread_parent(
         &settings_snapshot,
         provider,
-        allowlist_channel_id,
-        channel_name.as_deref(),
-        provider_channel_name.as_deref(),
+        discord_channel_id,
+        live_child_name.as_deref(),
+        thread_parent
+            .as_ref()
+            .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
         is_dm,
     )
     .is_err()

@@ -367,13 +367,20 @@ async fn resolve_idle_discord_channel_relation(
     let Some(parent_id) = channel.parent_id else {
         return IdleDiscordChannelRelation::Unresolved;
     };
-    let Ok(poise::serenity_prelude::Channel::Guild(parent)) = parent_id.to_channel(http).await
-    else {
-        return IdleDiscordChannelRelation::Unresolved;
+    let parent_name = match parent_id.to_channel(http).await {
+        Ok(poise::serenity_prelude::Channel::Guild(parent)) => Some(parent.name),
+        _ => None,
     };
+    idle_thread_relation(parent_id, parent_name)
+}
+
+fn idle_thread_relation(
+    parent_id: ChannelId,
+    parent_name: Option<String>,
+) -> IdleDiscordChannelRelation {
     IdleDiscordChannelRelation::Thread {
         parent_id,
-        parent_name: Some(parent.name),
+        parent_name,
     }
 }
 
@@ -627,16 +634,18 @@ mod tests {
 
     #[test]
     fn idle_scope_carries_first_parent_snapshot_when_later_lookup_would_be_absent() {
-        let state = inflight_with_parent_scope();
-        let (effective, first_snapshot) =
-            classify_idle_with_snapshot(IdleClassification::Idle, Some(state));
-        assert_eq!(effective, IdleClassification::Idle);
+        with_idle_scope_config("server:\n  port: 8791\nagents: []\n", || {
+            let state = inflight_with_parent_scope();
+            let (effective, first_snapshot) =
+                classify_idle_with_snapshot(IdleClassification::Idle, Some(state));
+            assert_eq!(effective, IdleClassification::Idle);
 
-        assert_eq!(
-            persisted_idle_memory_scope(first_snapshot.as_ref()),
-            Some((ChannelId::new(111), Some("parent".to_string()))),
-            "the first inflight snapshot must survive classification and avoid any HTTP/reload fallback"
-        );
+            assert_eq!(
+                persisted_idle_memory_scope(first_snapshot.as_ref()),
+                Some((ChannelId::new(111), Some("parent".to_string()))),
+                "the first inflight snapshot must survive classification and avoid any HTTP/reload fallback"
+            );
+        });
     }
 
     #[test]
@@ -699,14 +708,20 @@ mod tests {
         test();
     }
 
+    fn with_idle_scope_role_map(json: &str, test: impl FnOnce()) {
+        let root = tempfile::tempdir().expect("temp AgentDesk root");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(config_dir.join("role_map.json"), json).expect("write role map");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        test();
+    }
+
     const CHILD_ID: u64 = 1479671301387059299;
     const PARENT_ID: u64 = 1479671301387059200;
 
     fn thread_relation() -> IdleDiscordChannelRelation {
-        IdleDiscordChannelRelation::Thread {
-            parent_id: ChannelId::new(PARENT_ID),
-            parent_name: Some("adk-cdx".to_string()),
-        }
+        idle_thread_relation(ChannelId::new(PARENT_ID), Some("adk-cdx".to_string()))
     }
 
     #[test]
@@ -829,6 +844,76 @@ agents:
                     Some((ChannelId::new(CHILD_ID), Some("thread".to_string())))
                 );
             },
+        );
+    }
+
+    #[test]
+    fn no_inflight_known_parent_without_name_uses_id_and_never_borrows_child_name() {
+        with_idle_scope_config(
+            &format!(
+                r#"server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "{PARENT_ID}"
+        name: adk-cdx
+"#
+            ),
+            || {
+                assert_eq!(
+                    resolve_no_inflight_idle_scope(
+                        ChannelId::new(CHILD_ID),
+                        Some("child-thread".to_string()),
+                        idle_thread_relation(ChannelId::new(PARENT_ID), None),
+                    ),
+                    Some((ChannelId::new(PARENT_ID), None))
+                );
+            },
+        );
+
+        let role_map = format!(
+            r#"{{
+  "fallbackByChannelName": {{"enabled": true}},
+  "byChannelName": {{
+    "child-alias": {{
+      "channelId": "{PARENT_ID}",
+      "roleId": "project-agentdesk",
+      "promptFile": "/tmp/project-agentdesk.md",
+      "provider": "codex"
+    }}
+  }}
+}}"#
+        );
+        with_idle_scope_role_map(&role_map, || {
+            assert_eq!(
+                resolve_no_inflight_idle_scope(
+                    ChannelId::new(CHILD_ID),
+                    Some("child-alias".to_string()),
+                    idle_thread_relation(ChannelId::new(PARENT_ID), None),
+                ),
+                Some((ChannelId::new(CHILD_ID), Some("child-alias".to_string())))
+            );
+        });
+    }
+
+    #[test]
+    fn idle_async_relation_wires_known_parent_through_name_optional_constructor() {
+        let source = include_str!("idle_detector.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(production.contains("idle_thread_relation(parent_id, parent_name)"));
+        assert_eq!(
+            idle_thread_relation(ChannelId::new(PARENT_ID), None),
+            IdleDiscordChannelRelation::Thread {
+                parent_id: ChannelId::new(PARENT_ID),
+                parent_name: None,
+            }
         );
     }
 

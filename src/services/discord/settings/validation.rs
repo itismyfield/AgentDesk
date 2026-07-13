@@ -845,6 +845,128 @@ channels:
         });
     }
 
+    #[test]
+    fn watcher_restore_and_manual_rebind_preserve_child_thread_authority() {
+        for source in [
+            include_str!("../watchers/lifecycle.rs"),
+            include_str!("../recovery_engine/manual_rebind/mod.rs"),
+        ] {
+            assert_eq!(
+                source
+                    .matches("settings::validate_bot_channel_routing_with_thread_parent(")
+                    .count(),
+                1,
+                "each recovery intake must use the child-aware thread routing gate exactly once"
+            );
+            assert!(
+                !source.contains("validate_bot_channel_routing_with_provider_channel("),
+                "parent-flattening validation must not remain in watcher restore or manual rebind"
+            );
+            assert!(
+                !source.contains("resolve_thread_parent("),
+                "child metadata must be fetched once; a second lookup could outrank an unseen direct child binding"
+            );
+            assert_eq!(
+                source
+                    .matches("resolve_live_channel_routing_metadata(")
+                    .count(),
+                1
+            );
+        }
+
+        let watcher = include_str!("../watchers/lifecycle.rs");
+        assert!(!watcher.contains("pname.unwrap_or_else(|| channel_name.clone())"));
+        assert_eq!(watcher.matches("live_child_name.as_deref(),").count(), 1);
+        assert!(!watcher.contains("Some(&channel_name),\n            thread_parent"));
+        let rebind = include_str!("../recovery_engine/manual_rebind/mod.rs");
+        assert!(!rebind.contains("pname.or(channel_name.clone())"));
+        assert_eq!(rebind.matches("live_child_name.as_deref(),").count(), 1);
+        assert!(!rebind.contains("channel_name.as_deref(),\n        thread_parent"));
+
+        let metadata = include_str!("../session_runtime/channel_routing.rs");
+        assert!(metadata.contains("return (false, None, None)"));
+        assert!(metadata.contains("Some((parent_id, parent_name))"));
+    }
+
+    #[test]
+    fn live_child_name_binding_wins_but_synthetic_tmux_name_has_no_authority() {
+        let role_map = format!(
+            r#"{{
+  "fallbackByChannelName": {{"enabled": true}},
+  "byChannelId": {{
+    "{TEXT_CHANNEL_ID}": {{
+      "roleId": "project-agentdesk",
+      "promptFile": "/tmp/project-agentdesk.md",
+      "provider": "codex"
+    }}
+  }},
+  "byChannelName": {{
+    "live-child": {{
+      "channelId": "{THREAD_CHANNEL_ID}",
+      "roleId": "review-agent",
+      "promptFile": "/tmp/review-agent.md",
+      "provider": "claude"
+    }}
+  }}
+}}"#
+        );
+        with_temp_root_files(None, Some(&role_map), None, || {
+            let mut claude = bot_settings(ProviderKind::Claude, vec![THREAD_CHANNEL_ID]);
+            claude.agent = Some("review-agent".to_string());
+            let parent = Some((ChannelId::new(TEXT_CHANNEL_ID), Some("adk-cdx")));
+            assert!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &claude,
+                    &ProviderKind::Claude,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("live-child"),
+                    parent,
+                    false,
+                )
+                .is_ok(),
+                "the actual Discord child name may establish direct child authority"
+            );
+            assert!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &claude,
+                    &ProviderKind::Claude,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    Some("adk-cdx-t1504612455916245999"),
+                    parent,
+                    false,
+                )
+                .is_err(),
+                "a synthetic tmux/session name must not establish child authority"
+            );
+            assert!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &claude,
+                    &ProviderKind::Claude,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    None,
+                    parent,
+                    false,
+                )
+                .is_err(),
+                "failed live child lookup must fail closed for name-only bindings"
+            );
+
+            let codex_parent = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
+            assert_eq!(
+                validate_bot_channel_routing_with_thread_parent(
+                    &codex_parent,
+                    &ProviderKind::Codex,
+                    ChannelId::new(THREAD_CHANNEL_ID),
+                    None,
+                    None,
+                    false,
+                ),
+                Err(BotChannelRoutingGuardFailure::ChannelNotAllowed),
+                "unresolved child metadata must not enable a second parent fallback"
+            );
+        });
+    }
+
     // #3869: the restart recovery engine (`recovery_engine::restore_inflight_turns`)
     // used to `continue` on EVERY routing-validation failure, silently stranding
     // an in-flight row whose channel was re-routed while dcserver was down until

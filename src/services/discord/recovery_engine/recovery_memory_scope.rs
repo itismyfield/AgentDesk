@@ -54,13 +54,20 @@ async fn resolve_recovery_discord_channel_relation(
     let Some(parent_id) = channel.parent_id else {
         return RecoveryDiscordChannelRelation::Unresolved;
     };
-    let Ok(serenity::model::channel::Channel::Guild(parent)) = parent_id.to_channel(http).await
-    else {
-        return RecoveryDiscordChannelRelation::Unresolved;
+    let parent_name = match parent_id.to_channel(http).await {
+        Ok(serenity::model::channel::Channel::Guild(parent)) => Some(parent.name),
+        _ => None,
     };
+    recovery_thread_relation(parent_id, parent_name)
+}
+
+fn recovery_thread_relation(
+    parent_id: ChannelId,
+    parent_name: Option<String>,
+) -> RecoveryDiscordChannelRelation {
     RecoveryDiscordChannelRelation::Thread {
         parent_id,
-        parent_name: Some(parent.name),
+        parent_name,
     }
 }
 
@@ -122,11 +129,17 @@ mod tests {
         test();
     }
 
+    fn with_recovery_scope_role_map(json: &str, test: impl FnOnce()) {
+        let root = tempfile::tempdir().expect("temp AgentDesk root");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(config_dir.join("role_map.json"), json).expect("write role map");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        test();
+    }
+
     fn parent_relation() -> RecoveryDiscordChannelRelation {
-        RecoveryDiscordChannelRelation::Thread {
-            parent_id: ChannelId::new(PARENT_ID),
-            parent_name: Some("adk-cdx".to_string()),
-        }
+        recovery_thread_relation(ChannelId::new(PARENT_ID), Some("adk-cdx".to_string()))
     }
 
     #[test]
@@ -214,6 +227,68 @@ mod tests {
                     ))
                 );
             },
+        );
+    }
+
+    #[test]
+    fn known_thread_parent_without_name_uses_id_binding_and_never_borrows_child_name() {
+        with_recovery_scope_config(
+            &format!(
+                "server:\n  port: 8791\nagents:\n  - id: project-agentdesk\n    name: AgentDesk\n    provider: codex\n    channels:\n      codex:\n        id: \"{PARENT_ID}\"\n        name: adk-cdx\n"
+            ),
+            || {
+                assert_eq!(
+                    resolve_legacy_recovery_memory_scope(
+                        ChannelId::new(CHILD_ID),
+                        Some("child-thread".to_string()),
+                        recovery_thread_relation(ChannelId::new(PARENT_ID), None),
+                    ),
+                    Some((ChannelId::new(PARENT_ID), None)),
+                    "known parent ID remains authoritative when only its name lookup fails"
+                );
+            },
+        );
+
+        let role_map = format!(
+            r#"{{
+  "fallbackByChannelName": {{"enabled": true}},
+  "byChannelName": {{
+    "child-alias": {{
+      "channelId": "{PARENT_ID}",
+      "roleId": "project-agentdesk",
+      "promptFile": "/tmp/project-agentdesk.md",
+      "provider": "codex"
+    }}
+  }}
+}}"#
+        );
+        with_recovery_scope_role_map(&role_map, || {
+            assert_eq!(
+                resolve_legacy_recovery_memory_scope(
+                    ChannelId::new(CHILD_ID),
+                    Some("child-alias".to_string()),
+                    recovery_thread_relation(ChannelId::new(PARENT_ID), None),
+                ),
+                Some((ChannelId::new(CHILD_ID), Some("child-alias".to_string()))),
+                "a missing parent name must not be replaced by the child thread name"
+            );
+        });
+    }
+
+    #[test]
+    fn async_relation_wires_known_parent_through_name_optional_constructor() {
+        let source = include_str!("recovery_memory_scope.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(production.contains("recovery_thread_relation(parent_id, parent_name)"));
+        assert_eq!(
+            recovery_thread_relation(ChannelId::new(PARENT_ID), None),
+            RecoveryDiscordChannelRelation::Thread {
+                parent_id: ChannelId::new(PARENT_ID),
+                parent_name: None,
+            }
         );
     }
 }

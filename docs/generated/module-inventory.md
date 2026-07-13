@@ -499,7 +499,7 @@
 | `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1289 | 423 | 866 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1384 | 627 | 757 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 360 | 266 | 94 |  |
-| `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 915 | 530 | 385 |  |
+| `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 1000 | 537 | 463 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2586 | 1374 | 1212 | giant-file |
 | `services::discord::idle_recap::context_display` | `src/services/discord/idle_recap/context_display.rs` | 154 | 154 | 0 |  |
 | `services::discord::idle_recap::relay_integrity` | `src/services/discord/idle_recap/relay_integrity.rs` | 213 | 160 | 53 |  |
@@ -600,7 +600,7 @@
 | `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 814 | 312 | 502 |  |
 | `services::discord::recovery_engine::crash_resume_guard` | `src/services/discord/recovery_engine/crash_resume_guard.rs` | 368 | 176 | 192 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
-| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1423 | 997 | 426 |  |
+| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1414 | 988 | 426 |  |
 | `services::discord::recovery_engine::manual_rebind::adoption` | `src/services/discord/recovery_engine/manual_rebind/adoption.rs` | 304 | 95 | 209 |  |
 | `services::discord::recovery_engine::manual_rebind::codex_tui_replay` | `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs` | 1362 | 363 | 999 |  |
 | `services::discord::recovery_engine::manual_rebind::episode_handoff` | `src/services/discord/recovery_engine/manual_rebind/episode_handoff.rs` | 154 | 154 | 0 |  |
@@ -611,7 +611,7 @@
 | `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 370 | 179 | 191 |  |
 | `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 2154 | 980 | 1174 |  |
 | `services::discord::recovery_engine::rebind_runtime::codex_relay_generation` | `src/services/discord/recovery_engine/rebind_runtime/codex_relay_generation.rs` | 89 | 89 | 0 |  |
-| `services::discord::recovery_engine::recovery_memory_scope` | `src/services/discord/recovery_engine/recovery_memory_scope.rs` | 219 | 91 | 128 |  |
+| `services::discord::recovery_engine::recovery_memory_scope` | `src/services/discord/recovery_engine/recovery_memory_scope.rs` | 294 | 98 | 196 |  |
 | `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2470 | 2323 | 147 | giant-file |
 | `services::discord::recovery_engine::restore_persist_outcome` | `src/services/discord/recovery_engine/restore_persist_outcome.rs` | 102 | 102 | 0 |  |
 | `services::discord::recovery_engine::routing_orphan` | `src/services/discord/recovery_engine/routing_orphan.rs` | 218 | 146 | 72 |  |
@@ -699,7 +699,7 @@
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 75 | 75 | 0 |  |
 | `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 803 | 503 | 300 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 898 | 372 | 526 |  |
-| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 272 | 239 | 33 |  |
+| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 306 | 273 | 33 |  |
 | `services::discord::session_runtime::restore_cwd` | `src/services/discord/session_runtime/restore_cwd.rs` | 353 | 353 | 0 |  |
 | `services::discord::session_runtime::thread_bootstrap` | `src/services/discord/session_runtime/thread_bootstrap.rs` | 243 | 158 | 85 |  |
 | `services::discord::session_runtime::worktree` | `src/services/discord/session_runtime/worktree.rs` | 601 | 601 | 0 |  |
@@ -707,7 +707,7 @@
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 539 | 506 | 33 |  |
 | `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 152 | 152 | 0 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 449 | 449 | 0 |  |
-| `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 950 | 358 | 592 |  |
+| `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 1072 | 358 | 714 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 386 | 386 | 0 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 81 | 81 | 0 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 749 | 678 | 71 |  |
@@ -889,7 +889,7 @@
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 163 | 138 | 25 |  |
 | `services::discord::voice_sensitivity` | `src/services/discord/voice_sensitivity.rs` | 113 | 113 | 0 |  |
 | `services::discord::watchers::codex_tui_restore` | `src/services/discord/watchers/codex_tui_restore.rs` | 178 | 146 | 32 |  |
-| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2903 | 2077 | 826 | giant-file |
+| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2898 | 2072 | 826 | giant-file |
 | `services::discord::watchers::lifecycle::activity` | `src/services/discord/watchers/lifecycle/activity.rs` | 212 | 212 | 0 |  |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 363 | 212 | 151 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1601 | 1288 | 313 | giant-file |

@@ -207,7 +207,7 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2077 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2072 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
@@ -1219,7 +1219,7 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (995 prod lines
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (988 prod lines
     after #4455; remains below the giant threshold. Keeps the manual rebind entrypoints,
     rollback carrier, session refresh, active-turn re-registration hook, and
     watcher claim/spawn path. #4465's durable automatic lane performs the

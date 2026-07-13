@@ -270,3 +270,37 @@ pub(in crate::services::discord) async fn resolve_thread_parent(
     };
     Some((parent_id, parent_name))
 }
+
+pub(in crate::services::discord) async fn resolve_live_channel_routing_metadata(
+    http: &Arc<serenity::Http>,
+    channel_id: serenity::model::id::ChannelId,
+) -> (
+    bool,
+    Option<String>,
+    Option<(serenity::model::id::ChannelId, Option<String>)>,
+) {
+    let Ok(channel) = channel_id.to_channel(http).await else {
+        return (false, None, None);
+    };
+    match channel {
+        serenity::model::channel::Channel::Private(_) => (true, None, None),
+        serenity::model::channel::Channel::Guild(channel) => {
+            let child_name = Some(channel.name);
+            let thread_parent = if crate::utils::discord::is_thread_channel_type(channel.kind) {
+                if let Some(parent_id) = channel.parent_id {
+                    let parent_name = match parent_id.to_channel(http).await {
+                        Ok(serenity::model::channel::Channel::Guild(parent)) => Some(parent.name),
+                        _ => None,
+                    };
+                    Some((parent_id, parent_name))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (false, child_name, thread_parent)
+        }
+        _ => (false, None, None),
+    }
+}

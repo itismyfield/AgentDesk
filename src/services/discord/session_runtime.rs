@@ -12,9 +12,9 @@ mod worktree;
 use self::channel_routing::choose_restore_channel_name;
 pub(super) use self::channel_routing::{
     RuntimeChannelBindingStatus, provider_handles_channel, resolve_channel_category,
-    resolve_is_dm_channel, resolve_runtime_channel_binding_status, resolve_thread_parent,
-    synthetic_thread_channel_name, validate_live_channel_routing,
-    validate_live_channel_routing_with_dm_hint,
+    resolve_is_dm_channel, resolve_live_channel_routing_metadata,
+    resolve_runtime_channel_binding_status, resolve_thread_parent, synthetic_thread_channel_name,
+    validate_live_channel_routing, validate_live_channel_routing_with_dm_hint,
 };
 #[cfg(test)]
 use self::restore_cwd::restore_thread_worktree_path_from_db;

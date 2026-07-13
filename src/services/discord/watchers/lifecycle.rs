@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::settings;
 
 #[path = "lifecycle/activity.rs"]
 mod activity;
@@ -2150,25 +2151,19 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
         // #148: Do NOT register in owned_sessions yet — QUARANTINE check below may
         // skip this session. Registering early blocks new session creation for the channel.
-        let is_dm = matches!(
-            channel_id.to_channel(http.as_ref()).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        );
+        let (is_dm, live_child_name, thread_parent) =
+            super::super::session_runtime::resolve_live_channel_routing_metadata(http, *channel_id)
+                .await;
         // Resolve thread parent so validation uses the same semantics
         // as normal message routing (router.rs).
-        let (allowlist_channel_id, provider_channel_name) = if let Some((pid, pname)) =
-            super::super::resolve_thread_parent(http, *channel_id).await
-        {
-            (pid, pname.unwrap_or_else(|| channel_name.clone()))
-        } else {
-            (*channel_id, channel_name.clone())
-        };
-        if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
+        if let Err(reason) = settings::validate_bot_channel_routing_with_thread_parent(
             &settings_snapshot,
             &provider,
-            allowlist_channel_id,
-            Some(&channel_name),
-            Some(&provider_channel_name),
+            *channel_id,
+            live_child_name.as_deref(),
+            thread_parent
+                .as_ref()
+                .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
