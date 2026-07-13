@@ -419,7 +419,8 @@ fn entry_is_pinned_to_channel_id(entry: &serde_json::Value, channel_id: ChannelI
 
 /// Resolve only a name-indexed role-map entry that is explicitly pinned to the
 /// live Discord channel ID. Unpinned same-name fallbacks are discovery hints,
-/// not runtime ownership authority (#4317).
+/// not runtime ownership authority (#4317). A flag-only entry is retained as a
+/// policy signal, but finalization still refuses to turn it into ownership.
 pub(super) fn resolve_id_pinned_name_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
@@ -457,7 +458,7 @@ pub(super) fn resolve_id_pinned_name_binding(
             .or_else(|| entry.get("thread_inherit"))
             .and_then(|value| value.as_bool()),
     };
-    payload.owns_scope().then_some(payload)
+    payload.has_strict_signal().then_some(payload)
 }
 
 pub(super) fn resolve_role_binding(

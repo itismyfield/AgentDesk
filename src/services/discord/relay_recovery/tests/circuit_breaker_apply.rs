@@ -136,6 +136,23 @@ async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_wat
         return;
     }
     let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(4_465_002);
+    let config_dir = root_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("create strict binding fixture directory");
+    std::fs::write(
+        config_dir.join("role_map.json"),
+        serde_json::json!({
+            "byChannelId": {
+                channel.get().to_string(): {
+                    "roleId": "relay-recovery-claude",
+                    "promptFile": "/tmp/relay-recovery-claude.md",
+                    "provider": "claude",
+                },
+            },
+        })
+        .to_string(),
+    )
+    .expect("install exact channel-ID binding fixture");
     let (registry, shared) = registry_with_shared(provider.clone()).await;
     registry
         .register_http(
@@ -143,7 +160,6 @@ async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_wat
             Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
         )
         .await;
-    let channel = ChannelId::new(4_465_002);
     let user_message = MessageId::new(4_465_102);
     let response_message = MessageId::new(4_465_202);
     let tmux_session = format!("AgentDesk-claude-e2e4465-{}-cc", std::process::id());
@@ -318,5 +334,49 @@ async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_wat
     assert!(Arc::ptr_eq(
         mailbox.cancel_token.as_ref().expect("live token retained"),
         &token,
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unbound_synthetic_tmux_name_cannot_authorize_manual_rebind() {
+    let _guard = auto_heal_test_lock().lock().await;
+    let (_root_guard, _root_dir) = isolated_agentdesk_root();
+    if !crate::services::platform::tmux::is_available() {
+        eprintln!("skipping #4317 unbound manual-rebind proof: tmux unavailable");
+        return;
+    }
+
+    let provider = ProviderKind::Claude;
+    let (_registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(4_465_099);
+    let tmux_session = format!(
+        "AgentDesk-claude-runtime-name-t{}-{}-cc",
+        channel.get(),
+        std::process::id()
+    );
+    let created = crate::services::platform::tmux::create_session(&tmux_session, None, "sleep 60")
+        .expect("create tmux session");
+    assert!(created.status.success());
+    let http = Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
+
+    let result = super::super::super::recovery_engine::rebind_inflight_for_channel(
+        &http,
+        &shared,
+        &provider,
+        channel.get(),
+        Some(tmux_session.clone()),
+        super::super::super::recovery_engine::ManualRebindOverrides::default(),
+        None,
+    )
+    .await;
+    let _ = crate::services::platform::tmux::kill_session(
+        &tmux_session,
+        "#4317 unbound manual-rebind cleanup",
+    );
+
+    assert!(matches!(
+        result,
+        Err(super::super::super::recovery_engine::RebindError::ChannelNotBound)
     ));
 }

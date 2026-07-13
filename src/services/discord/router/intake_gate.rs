@@ -5,6 +5,7 @@ use super::intake_queue_transaction::{
     IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest, SoftInterventionSpec,
     commit_soft_intervention_transaction,
 };
+use crate::services::discord::session_runtime::session_path_is_usable;
 
 mod busy_duplicate_notice;
 mod component_events;
@@ -70,20 +71,24 @@ async fn append_pending_uploads(
     }
 }
 
+fn runtime_session_path_is_usable(path: Option<&str>) -> bool {
+    path.is_some_and(session_path_is_usable)
+}
+
 fn session_has_usable_path(session: Option<&DiscordSession>) -> bool {
-    session
-        .and_then(|session| session.current_path.as_deref())
-        .is_some_and(|path| !path.trim().is_empty())
+    runtime_session_path_is_usable(session.and_then(|session| session.current_path.as_deref()))
 }
 
 async fn has_direct_runtime_session(
     data: &Data,
     channel_id: serenity::ChannelId,
     effective_channel_id: serenity::ChannelId,
+    allow_effective_parent_escape: bool,
 ) -> bool {
     let core = data.shared.core.lock().await;
     session_has_usable_path(core.sessions.get(&channel_id))
-        || (effective_channel_id != channel_id
+        || (allow_effective_parent_escape
+            && effective_channel_id != channel_id
             && session_has_usable_path(core.sessions.get(&effective_channel_id)))
 }
 
@@ -93,21 +98,171 @@ async fn can_route_unbound_direct_session(
     channel_id: serenity::ChannelId,
     effective_channel_id: serenity::ChannelId,
     is_dm: bool,
+    binding: &RuntimeChannelBindingResolution,
 ) -> bool {
-    if has_direct_runtime_session(data, channel_id, effective_channel_id).await {
+    let allow_effective_parent_escape =
+        binding.parent_bootstrap_disposition() == ParentBootstrapDisposition::DenyUnowned;
+    if has_direct_runtime_session(
+        data,
+        channel_id,
+        effective_channel_id,
+        allow_effective_parent_escape,
+    )
+    .await
+    {
         return true;
     }
 
-    // Use the `_force` variant: standard `auto_restore_session_*` early-returns
-    // for unbound channels, but here we have already classified this as the
-    // legitimate agentless-direct case and want disk/DB restoration to run so
-    // the in-memory session is recreated after a dcserver restart.
-    auto_restore_session_force(&data.shared, channel_id, ctx, Some(is_dm)).await;
-    if effective_channel_id != channel_id {
-        auto_restore_session_force(&data.shared, effective_channel_id, ctx, None).await;
+    // Resolve once more immediately before mutation. Standard auto-restore
+    // rejects unowned channels, while this narrow agentless-direct escape may
+    // restore only from exact channel-scoped persistence evidence.
+    let restored_binding =
+        resolve_runtime_channel_binding_resolution_with_dm_hint(&ctx.http, channel_id, Some(is_dm))
+            .await;
+    if restored_binding.status() != RuntimeChannelBindingStatus::Unowned {
+        return false;
+    }
+    auto_restore_session_from_resolution(
+        &data.shared,
+        channel_id,
+        ctx,
+        Some(is_dm),
+        &restored_binding,
+    )
+    .await;
+    if allow_effective_parent_escape && effective_channel_id != channel_id {
+        let restored_parent = resolve_runtime_channel_binding_resolution_with_dm_hint(
+            &ctx.http,
+            effective_channel_id,
+            None,
+        )
+        .await;
+        if restored_parent.status() != RuntimeChannelBindingStatus::Unowned {
+            return false;
+        }
+        auto_restore_session_from_resolution(
+            &data.shared,
+            effective_channel_id,
+            ctx,
+            None,
+            &restored_parent,
+        )
+        .await;
     }
 
-    has_direct_runtime_session(data, channel_id, effective_channel_id).await
+    has_direct_runtime_session(
+        data,
+        channel_id,
+        effective_channel_id,
+        allow_effective_parent_escape,
+    )
+    .await
+}
+
+fn restore_barrier_allows(
+    status: RuntimeChannelBindingStatus,
+    direct_session_escape_approved: bool,
+    voice_routing_bypass: bool,
+    owned_by_bot: bool,
+) -> bool {
+    if voice_routing_bypass {
+        true
+    } else if direct_session_escape_approved {
+        status == RuntimeChannelBindingStatus::Unowned
+    } else {
+        owned_by_bot
+    }
+}
+
+/// Restore the live child from one fresh typed binding snapshot, then apply the
+/// same parent-bootstrap barrier for attachment and normal turns.
+async fn restore_and_bootstrap_runtime_session(
+    data: &Data,
+    ctx: &serenity::Context,
+    channel_id: serenity::ChannelId,
+    is_dm: bool,
+    direct_session_escape_approved: bool,
+    voice_routing_bypass: bool,
+    settings_snapshot: &DiscordBotSettings,
+    provider: &ProviderKind,
+) -> bool {
+    let resolution =
+        resolve_runtime_channel_binding_resolution_with_dm_hint(&ctx.http, channel_id, Some(is_dm))
+            .await;
+
+    let owned_by_bot = runtime_channel_binding_owned_by_bot(
+        settings_snapshot,
+        provider,
+        &resolution,
+        resolution.is_direct_message(),
+    );
+    let resolution_admitted = restore_barrier_allows(
+        resolution.status(),
+        direct_session_escape_approved,
+        voice_routing_bypass,
+        owned_by_bot,
+    );
+    if !resolution_admitted {
+        return false;
+    }
+    if resolution.status() == RuntimeChannelBindingStatus::Owned
+        || (direct_session_escape_approved
+            && resolution.status() == RuntimeChannelBindingStatus::Unowned)
+        || voice_routing_bypass
+    {
+        auto_restore_session_from_resolution(
+            &data.shared,
+            channel_id,
+            ctx,
+            Some(is_dm),
+            &resolution,
+        )
+        .await;
+    }
+
+    let needs_child = {
+        let core = data.shared.core.lock().await;
+        !core.sessions.contains_key(&channel_id)
+    };
+    if !needs_child {
+        return true;
+    }
+
+    let disposition = resolution
+        .parent_bootstrap_disposition_with_direct_session_escape(direct_session_escape_approved);
+    let Some((parent_id, _)) = resolution.thread_parent_tuple() else {
+        return true;
+    };
+    if !matches!(
+        disposition,
+        ParentBootstrapDisposition::InheritedBinding
+            | ParentBootstrapDisposition::DirectSessionEscape
+    ) {
+        return true;
+    }
+
+    auto_restore_session(&data.shared, parent_id, ctx).await;
+    let parent_path = {
+        let core = data.shared.core.lock().await;
+        core.sessions
+            .get(&parent_id)
+            .and_then(|session| session.current_path.clone())
+    };
+    if let Some(path) = parent_path {
+        bootstrap_thread_session(
+            &data.shared,
+            channel_id,
+            &path,
+            ThreadBootstrapPathSource::ParentDerived {
+                parent_id,
+                disposition,
+            },
+            &ctx.http,
+            Some(&ctx.cache),
+        )
+        .await;
+    }
+    true
 }
 
 async fn resolve_voice_transcript_announcement_for_intake(
@@ -592,15 +747,6 @@ pub(in crate::services::discord) async fn handle_event(
             let user_name = &new_message.author.name;
             let channel_id = new_message.channel_id;
             let is_dm = new_message.guild_id.is_none();
-            let thread_parent = resolve_thread_parent(&ctx.http, channel_id).await;
-            let effective_channel_id = thread_parent
-                .as_ref()
-                .map(|(parent_id, _)| *parent_id)
-                .unwrap_or(channel_id);
-            let thread_bootstrap_path_source = ThreadBootstrapPathSource::ParentDerived(
-                effective_channel_id,
-                thread_parent.as_ref().and_then(|(_, name)| name.as_deref()),
-            );
             let settings_snapshot = { data.shared.settings.read().await.clone() };
             // #2266: resolve the voice-transcript payload ONCE at the
             // intake-gate so queue commits can classify voice messages and
@@ -622,24 +768,42 @@ pub(in crate::services::discord) async fn handle_event(
             )
             .await;
             let is_voice_transcript_announcement = resolved_voice_announcement.is_some();
-            if !is_voice_transcript_announcement
-                && validate_live_channel_routing_with_dm_hint(
-                    ctx,
-                    &data.provider,
-                    &settings_snapshot,
-                    channel_id,
-                    Some(is_dm),
-                )
-                .await
-                .is_err()
-            {
-                return Ok(());
-            }
             let runtime_binding = if !is_dm && !is_voice_transcript_announcement {
                 Some(resolve_runtime_channel_binding_resolution(&ctx.http, channel_id).await)
             } else {
                 None
             };
+            let effective_channel_id = runtime_binding
+                .as_ref()
+                .and_then(RuntimeChannelBindingResolution::thread_parent_tuple)
+                .map(|(parent_id, _)| parent_id)
+                .unwrap_or(channel_id);
+            if !is_voice_transcript_announcement {
+                let routing_result = if let Some(resolution) = runtime_binding.as_ref() {
+                    validate_runtime_channel_binding_for_bot(
+                        &settings_snapshot,
+                        &data.provider,
+                        resolution,
+                        false,
+                    )
+                } else {
+                    validate_live_channel_routing_with_dm_hint(
+                        ctx,
+                        &data.provider,
+                        &settings_snapshot,
+                        channel_id,
+                        Some(is_dm),
+                    )
+                    .await
+                };
+                let unowned_may_prove_direct_session_escape =
+                    runtime_binding.as_ref().is_some_and(|resolution| {
+                        resolution.status() == RuntimeChannelBindingStatus::Unowned
+                    });
+                if routing_result.is_err() && !unowned_may_prove_direct_session_escape {
+                    return Ok(());
+                }
+            }
             let mention_authority_channel_id = runtime_binding
                 .as_ref()
                 .map(|resolution| resolution.authority_channel_id())
@@ -675,8 +839,10 @@ pub(in crate::services::discord) async fn handle_event(
             {
                 return Ok(());
             }
+            let mut direct_session_escape_approved = false;
             if !is_dm && !is_voice_transcript_announcement {
                 match runtime_binding
+                    .as_ref()
                     .expect("non-DM non-voice binding resolution")
                     .status()
                 {
@@ -688,9 +854,13 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             effective_channel_id,
                             is_dm,
+                            runtime_binding
+                                .as_ref()
+                                .expect("unowned runtime binding resolution"),
                         )
                         .await
                         {
+                            direct_session_escape_approved = true;
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 "  [{ts}] ↪ BINDING-GUARD: allowing unbound channel {} (effective {}) because a direct session exists",
@@ -812,32 +982,19 @@ pub(in crate::services::discord) async fn handle_event(
                     "  [{ts}] ◀ [{user_name}] Upload: {} file(s)",
                     new_message.attachments.len()
                 );
-                auto_restore_session_with_dm_hint(&data.shared, channel_id, ctx, Some(is_dm)).await;
-                if effective_channel_id != channel_id {
-                    let needs_parent = {
-                        let d = data.shared.core.lock().await;
-                        !d.sessions.contains_key(&channel_id)
-                    };
-                    if needs_parent {
-                        auto_restore_session(&data.shared, effective_channel_id, ctx).await;
-                        let parent_path = {
-                            let d = data.shared.core.lock().await;
-                            d.sessions
-                                .get(&effective_channel_id)
-                                .and_then(|s| s.current_path.clone())
-                        };
-                        if let Some(path) = parent_path {
-                            bootstrap_thread_session(
-                                &data.shared,
-                                channel_id,
-                                &path,
-                                thread_bootstrap_path_source,
-                                &ctx.http,
-                                Some(&ctx.cache),
-                            )
-                            .await;
-                        }
-                    }
+                if !restore_and_bootstrap_runtime_session(
+                    data,
+                    ctx,
+                    channel_id,
+                    is_dm,
+                    direct_session_escape_approved,
+                    is_voice_transcript_announcement,
+                    &settings_snapshot,
+                    &data.provider,
+                )
+                .await
+                {
+                    return Ok(());
                 }
                 super::message_handler::handle_file_upload(ctx, new_message, &data.shared).await?
             } else {
@@ -905,38 +1062,19 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            auto_restore_session_with_dm_hint(
-                &data.shared,
-                channel_id,
+            if !restore_and_bootstrap_runtime_session(
+                data,
                 ctx,
-                Some(new_message.guild_id.is_none()),
+                channel_id,
+                new_message.guild_id.is_none(),
+                direct_session_escape_approved,
+                is_voice_transcript_announcement,
+                &settings_snapshot,
+                &data.provider,
             )
-            .await;
-            if effective_channel_id != channel_id {
-                let needs_parent = {
-                    let d = data.shared.core.lock().await;
-                    !d.sessions.contains_key(&channel_id)
-                };
-                if needs_parent {
-                    auto_restore_session(&data.shared, effective_channel_id, ctx).await;
-                    let parent_path = {
-                        let d = data.shared.core.lock().await;
-                        d.sessions
-                            .get(&effective_channel_id)
-                            .and_then(|s| s.current_path.clone())
-                    };
-                    if let Some(path) = parent_path {
-                        bootstrap_thread_session(
-                            &data.shared,
-                            channel_id,
-                            &path,
-                            thread_bootstrap_path_source,
-                            &ctx.http,
-                            Some(&ctx.cache),
-                        )
-                        .await;
-                    }
-                }
+            .await
+            {
+                return Ok(());
             }
 
             // ── Intake-level dedup guard ──────────────────────────────────
@@ -1589,5 +1727,64 @@ mod reply_context_tests {
         assert!(should_start_attachment_only_turn("<@123456789>   ", 1));
         assert!(!should_start_attachment_only_turn("please inspect", 1));
         assert!(!should_start_attachment_only_turn("", 0));
+    }
+}
+
+#[cfg(test)]
+mod runtime_binding_gate_order_tests {
+    use super::{
+        RuntimeChannelBindingStatus, restore_barrier_allows, runtime_session_path_is_usable,
+    };
+
+    #[test]
+    fn direct_session_escape_rejects_nonblank_but_deleted_paths() {
+        let root = tempfile::tempdir().expect("temporary runtime path");
+        let live_path = root.path().join("live");
+        std::fs::create_dir_all(&live_path).expect("create live path");
+        let live_path = live_path.to_string_lossy().into_owned();
+
+        assert!(runtime_session_path_is_usable(Some(&live_path)));
+        std::fs::remove_dir(&live_path).expect("delete stale path");
+        assert!(
+            !runtime_session_path_is_usable(Some(&live_path)),
+            "a stale nonblank cwd must not prove the unowned direct-session escape"
+        );
+        assert!(!runtime_session_path_is_usable(Some("   ")));
+        assert!(!runtime_session_path_is_usable(None));
+    }
+
+    #[test]
+    fn upload_and_normal_restore_barrier_reject_stale_escape_resolutions() {
+        for status in [
+            RuntimeChannelBindingStatus::Owned,
+            RuntimeChannelBindingStatus::Unknown,
+        ] {
+            assert!(
+                !restore_barrier_allows(status, true, false, true),
+                "a previously approved unowned escape cannot consume {status:?}"
+            );
+        }
+        assert!(restore_barrier_allows(
+            RuntimeChannelBindingStatus::Unowned,
+            true,
+            false,
+            false,
+        ));
+        assert!(restore_barrier_allows(
+            RuntimeChannelBindingStatus::Owned,
+            false,
+            false,
+            true,
+        ));
+        assert!(!restore_barrier_allows(
+            RuntimeChannelBindingStatus::Owned,
+            false,
+            false,
+            false,
+        ));
+        assert!(
+            restore_barrier_allows(RuntimeChannelBindingStatus::Unknown, false, true, false,),
+            "voice routing retains its pre-existing generic-binding bypass"
+        );
     }
 }

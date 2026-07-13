@@ -1,8 +1,11 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::services::discord) enum ThreadBootstrapPathSource<'a> {
-    ParentDerived(ChannelId, Option<&'a str>),
+pub(in crate::services::discord) enum ThreadBootstrapPathSource {
+    ParentDerived {
+        parent_id: ChannelId,
+        disposition: ParentBootstrapDisposition,
+    },
     ExplicitDispatch,
 }
 
@@ -13,18 +16,32 @@ enum ThreadBootstrapPlan<'a> {
     Bootstrap(&'a str),
 }
 
+fn parent_source_matches(
+    source: ThreadBootstrapPathSource,
+    actual_parent_id: Option<ChannelId>,
+) -> bool {
+    match source {
+        ThreadBootstrapPathSource::ParentDerived { parent_id, .. } => {
+            actual_parent_id == Some(parent_id)
+        }
+        ThreadBootstrapPathSource::ExplicitDispatch => true,
+    }
+}
+
 fn plan_thread_bootstrap<'a>(
     child_session_exists: bool,
-    source: ThreadBootstrapPathSource<'_>,
+    source: ThreadBootstrapPathSource,
     path: &'a str,
 ) -> ThreadBootstrapPlan<'a> {
     if child_session_exists {
         return ThreadBootstrapPlan::PreserveExisting;
     }
     let allowed = match source {
-        ThreadBootstrapPathSource::ParentDerived(parent_id, parent_name) => {
-            settings::thread_inheritance_enabled(parent_id, parent_name)
-        }
+        ThreadBootstrapPathSource::ParentDerived { disposition, .. } => matches!(
+            disposition,
+            ParentBootstrapDisposition::InheritedBinding
+                | ParentBootstrapDisposition::DirectSessionEscape
+        ),
         ThreadBootstrapPathSource::ExplicitDispatch => true,
     };
     if allowed {
@@ -39,13 +56,27 @@ pub(in crate::services::discord) async fn bootstrap_thread_session(
     shared: &Arc<SharedData>,
     thread_channel_id: ChannelId,
     parent_path: &str,
-    path_source: ThreadBootstrapPathSource<'_>,
+    path_source: ThreadBootstrapPathSource,
     http: &Arc<serenity::http::Http>,
     cache: Option<&Arc<serenity::cache::Cache>>,
 ) -> bool {
     let (thread_title, cat_name) = resolve_channel_category(http, cache, thread_channel_id).await;
     let provider_kind = shared.settings.read().await.provider.clone();
     let parent_info = resolve_thread_parent(http, thread_channel_id).await;
+    let actual_parent_id = parent_info.as_ref().map(|(actual_id, _)| *actual_id);
+    if !parent_source_matches(path_source, actual_parent_id) {
+        let expected_parent_id = match path_source {
+            ThreadBootstrapPathSource::ParentDerived { parent_id, .. } => Some(parent_id.get()),
+            ThreadBootstrapPathSource::ExplicitDispatch => None,
+        };
+        tracing::warn!(
+            thread_channel_id = thread_channel_id.get(),
+            expected_parent_id = ?expected_parent_id,
+            actual_parent_id = ?actual_parent_id.map(|parent_id| parent_id.get()),
+            "refusing parent-derived thread bootstrap from a mismatched parent"
+        );
+        return false;
+    }
     let ch_name = if let Some((parent_id, parent_name)) = parent_info {
         let parent = parent_name.unwrap_or_else(|| format!("{parent_id}"));
         Some(synthetic_thread_channel_name(&parent, thread_channel_id))
@@ -192,11 +223,13 @@ agents:
     #[test]
     fn fresh_child_respects_parent_opt_out_but_explicit_dispatch_path_is_authoritative() {
         with_thread_inherit_disabled(|| {
-            let parent = ChannelId::new(PARENT_ID);
             assert_eq!(
                 plan_thread_bootstrap(
                     false,
-                    ThreadBootstrapPathSource::ParentDerived(parent, Some("adk-cdx")),
+                    ThreadBootstrapPathSource::ParentDerived {
+                        parent_id: ChannelId::new(PARENT_ID),
+                        disposition: ParentBootstrapDisposition::DenyUnowned,
+                    },
                     "/tmp/parent-workspace",
                 ),
                 ThreadBootstrapPlan::SkipInherited,
@@ -214,7 +247,10 @@ agents:
             assert_eq!(
                 plan_thread_bootstrap(
                     true,
-                    ThreadBootstrapPathSource::ParentDerived(parent, Some("adk-cdx")),
+                    ThreadBootstrapPathSource::ParentDerived {
+                        parent_id: ChannelId::new(PARENT_ID),
+                        disposition: ParentBootstrapDisposition::InheritedBinding,
+                    },
                     "/tmp/parent-workspace",
                 ),
                 ThreadBootstrapPlan::PreserveExisting,
@@ -224,20 +260,104 @@ agents:
     }
 
     #[test]
+    fn typed_parent_barrier_matrix_is_enforced_before_bootstrap_side_effects() {
+        for disposition in [
+            ParentBootstrapDisposition::DenyDirect,
+            ParentBootstrapDisposition::DenyOptedOut,
+            ParentBootstrapDisposition::DenyUnowned,
+            ParentBootstrapDisposition::DenyUnknown,
+        ] {
+            assert_eq!(
+                plan_thread_bootstrap(
+                    false,
+                    ThreadBootstrapPathSource::ParentDerived {
+                        parent_id: ChannelId::new(PARENT_ID),
+                        disposition,
+                    },
+                    "/tmp/parent-workspace",
+                ),
+                ThreadBootstrapPlan::SkipInherited,
+                "{disposition:?} must block role-only/workspace-only/both and fail-closed paths"
+            );
+        }
+
+        for disposition in [
+            ParentBootstrapDisposition::InheritedBinding,
+            ParentBootstrapDisposition::DirectSessionEscape,
+        ] {
+            assert_eq!(
+                plan_thread_bootstrap(
+                    false,
+                    ThreadBootstrapPathSource::ParentDerived {
+                        parent_id: ChannelId::new(PARENT_ID),
+                        disposition,
+                    },
+                    "/tmp/parent-workspace",
+                ),
+                ThreadBootstrapPlan::Bootstrap("/tmp/parent-workspace"),
+                "{disposition:?} is an explicit typed bootstrap grant"
+            );
+        }
+
+        assert_eq!(
+            plan_thread_bootstrap(
+                false,
+                ThreadBootstrapPathSource::ExplicitDispatch,
+                "/tmp/dispatch-worktree",
+            ),
+            ThreadBootstrapPlan::Bootstrap("/tmp/dispatch-worktree"),
+            "explicit dispatch paths remain authoritative"
+        );
+    }
+
+    #[test]
+    fn parent_derived_path_is_coupled_to_the_selected_thread_parent() {
+        let source = ThreadBootstrapPathSource::ParentDerived {
+            parent_id: ChannelId::new(PARENT_ID),
+            disposition: ParentBootstrapDisposition::InheritedBinding,
+        };
+        assert!(parent_source_matches(
+            source,
+            Some(ChannelId::new(PARENT_ID)),
+        ));
+        assert!(!parent_source_matches(
+            source,
+            Some(ChannelId::new(PARENT_ID + 1)),
+        ));
+        assert!(!parent_source_matches(source, None));
+        assert!(parent_source_matches(
+            ThreadBootstrapPathSource::ExplicitDispatch,
+            Some(ChannelId::new(PARENT_ID + 1)),
+        ));
+    }
+
+    #[test]
     fn all_live_parent_bootstrap_callsites_supply_authority_source() {
         let gate = include_str!("../router/intake_gate.rs");
         let turn = include_str!("../router/message_handler/intake_turn.rs");
-        assert_eq!(gate.matches("bootstrap_thread_session(").count(), 2);
+        assert_eq!(gate.matches("bootstrap_thread_session(").count(), 1);
         assert_eq!(turn.matches("bootstrap_thread_session(").count(), 2);
         assert_eq!(
-            gate.matches("thread_bootstrap_path_source,").count(),
-            2,
-            "attachment and normal intake bootstraps must share the parent-derived source"
+            gate.matches("restore_and_bootstrap_runtime_session(")
+                .count(),
+            3,
+            "one shared typed barrier plus attachment and normal intake callsites must remain"
         );
         assert_eq!(
-            turn.matches("dispatch_bootstrap_path_source,").count(),
-            2,
-            "dispatch reuse and create bootstraps must share dispatch path authority"
+            turn.matches("ThreadBootstrapPathSource::ParentDerived {")
+                .count(),
+            1,
+            "a reused non-explicit dispatch must classify the selected target child"
+        );
+        assert!(
+            turn.contains("parent_session_path.or(captured_parent_workspace)"),
+            "a reused dispatch must source its path from the selected parent authority"
+        );
+        assert!(
+            turn.matches("ThreadBootstrapPathSource::ExplicitDispatch")
+                .count()
+                >= 2,
+            "explicitly pathed and newly created dispatch threads remain authoritative"
         );
     }
 }

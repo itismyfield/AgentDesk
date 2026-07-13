@@ -2150,21 +2150,19 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
         // #148: Do NOT register in owned_sessions yet — QUARANTINE check below may
         // skip this session. Registering early blocks new session creation for the channel.
-        let (is_dm, live_child_name, thread_parent) =
-            super::super::session_runtime::resolve_live_channel_routing_metadata(http, *channel_id)
-                .await;
-        let routing_status =
-            super::super::session_runtime::classify_live_bot_channel_routing_status(
-                &settings_snapshot,
-                &provider,
-                *channel_id,
-                is_dm,
-                live_child_name.as_deref(),
-                thread_parent
-                    .as_ref()
-                    .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
-            );
-        if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {
+        let binding = super::super::session_runtime::resolve_runtime_channel_binding_resolution(
+            http,
+            *channel_id,
+        )
+        .await;
+        let routing_status = binding.status();
+        let owned_by_provider = super::super::session_runtime::runtime_channel_binding_owned_by_bot(
+            &settings_snapshot,
+            &provider,
+            &binding,
+            binding.is_direct_message(),
+        );
+        if !owned_by_provider {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — {routing_status:?} routing for channel {}",

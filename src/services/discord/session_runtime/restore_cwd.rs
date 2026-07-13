@@ -186,7 +186,7 @@ async fn resolve_cwd_for_session_key(
 /// Resolve a channel's persisted `sessions.cwd` for restart restore, scoped to
 /// the unique Discord `channel_id` (with the #3216 safe legacy fallback).
 ///
-/// Backs the `db_cwd` lookup in [`auto_restore_session_force`], which installs
+/// Backs the `db_cwd` lookup in [`auto_restore_session_from_resolution`], which installs
 /// the resolved path into `session.current_path`. See
 /// [`resolve_cwd_for_session_key`] for the channel-scoping / legacy-fallback
 /// semantics.
@@ -296,7 +296,7 @@ pub(super) fn correct_session_cwd_to_tmux(
 }
 
 /// Look up the persisted worktree path for a thread session from the `sessions`
-/// DB table, mirroring the restore lookup in [`auto_restore_session_force`].
+/// DB table, mirroring the restore lookup in [`auto_restore_session_from_resolution`].
 ///
 /// After a dcserver restart the in-memory `sessions` map is empty, so without
 /// this lookup a new thread message would create a brand-new worktree and drop

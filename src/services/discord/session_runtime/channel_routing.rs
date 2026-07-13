@@ -149,6 +149,20 @@ pub(in crate::services::discord) enum RuntimeChannelBindingStatus {
     Unknown,
 }
 
+/// Whether a missing child session may be created from a parent path.
+///
+/// Denial variants remain distinct so an unavailable metadata lookup cannot be
+/// mistaken for the narrowly approved legacy unowned-session escape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum ParentBootstrapDisposition {
+    InheritedBinding,
+    DirectSessionEscape,
+    DenyDirect,
+    DenyOptedOut,
+    DenyUnowned,
+    DenyUnknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) struct RuntimeChannelIdentity {
     channel_id: serenity::model::id::ChannelId,
@@ -218,11 +232,14 @@ pub(in crate::services::discord) struct RuntimeChannelBindingResolution {
     live_child: RuntimeChannelIdentity,
     parent: Option<RuntimeChannelIdentity>,
     authority: Option<RuntimeBindingAuthority>,
+    parent_inheritance_opted_out: bool,
     metadata_state: RuntimeMetadataState,
 }
 
 impl RuntimeChannelBindingResolution {
-    fn direct_message(channel_id: serenity::model::id::ChannelId) -> Self {
+    pub(in crate::services::discord) fn direct_message(
+        channel_id: serenity::model::id::ChannelId,
+    ) -> Self {
         let identity = RuntimeChannelIdentity::new(channel_id, None);
         Self {
             live_child: identity.clone(),
@@ -235,6 +252,7 @@ impl RuntimeChannelBindingResolution {
                     thread_inherit: true,
                 },
             }),
+            parent_inheritance_opted_out: false,
             metadata_state: RuntimeMetadataState::DirectMessage,
         }
     }
@@ -277,6 +295,86 @@ impl RuntimeChannelBindingResolution {
     pub(in crate::services::discord) fn authority(&self) -> Option<&RuntimeBindingAuthority> {
         self.authority.as_ref()
     }
+
+    pub(in crate::services::discord) fn configured_workspace(&self) -> Option<&str> {
+        self.authority()
+            .and_then(|authority| authority.payload().workspace.as_deref())
+    }
+
+    pub(in crate::services::discord) fn thread_parent_tuple(
+        &self,
+    ) -> Option<(serenity::model::id::ChannelId, Option<&str>)> {
+        self.parent()
+            .map(|parent| (parent.channel_id(), parent.channel_name()))
+    }
+
+    pub(in crate::services::discord) fn is_direct_message(&self) -> bool {
+        self.metadata_state == RuntimeMetadataState::DirectMessage
+    }
+
+    pub(in crate::services::discord) fn parent_bootstrap_disposition(
+        &self,
+    ) -> ParentBootstrapDisposition {
+        match self.authority() {
+            Some(RuntimeBindingAuthority::Direct { .. }) => ParentBootstrapDisposition::DenyDirect,
+            Some(RuntimeBindingAuthority::InheritedParent { .. }) => {
+                ParentBootstrapDisposition::InheritedBinding
+            }
+            None if self.parent_inheritance_opted_out => ParentBootstrapDisposition::DenyOptedOut,
+            None if self.status() == RuntimeChannelBindingStatus::Unknown => {
+                ParentBootstrapDisposition::DenyUnknown
+            }
+            None => ParentBootstrapDisposition::DenyUnowned,
+        }
+    }
+
+    pub(in crate::services::discord) fn parent_bootstrap_disposition_with_direct_session_escape(
+        &self,
+        direct_session_escape_approved: bool,
+    ) -> ParentBootstrapDisposition {
+        let disposition = self.parent_bootstrap_disposition();
+        if direct_session_escape_approved && disposition == ParentBootstrapDisposition::DenyUnowned
+        {
+            ParentBootstrapDisposition::DirectSessionEscape
+        } else {
+            disposition
+        }
+    }
+}
+
+pub(in crate::services::discord) fn validate_runtime_channel_binding_for_bot(
+    settings_snapshot: &DiscordBotSettings,
+    provider: &ProviderKind,
+    resolution: &RuntimeChannelBindingResolution,
+    is_dm: bool,
+) -> Result<(), settings::BotChannelRoutingGuardFailure> {
+    if resolution.status() != RuntimeChannelBindingStatus::Owned {
+        return Err(settings::BotChannelRoutingGuardFailure::ChannelNotAllowed);
+    }
+    let identity = resolution
+        .authority_identity()
+        .unwrap_or_else(|| resolution.live_child());
+    let role_binding = resolution
+        .authority()
+        .and_then(|authority| authority.payload().role.as_ref());
+    settings::validate_bot_channel_routing_with_captured_binding(
+        settings_snapshot,
+        provider,
+        identity.channel_id(),
+        identity.channel_name(),
+        identity.channel_name(),
+        is_dm,
+        role_binding,
+    )
+}
+
+pub(in crate::services::discord) fn runtime_channel_binding_owned_by_bot(
+    settings_snapshot: &DiscordBotSettings,
+    provider: &ProviderKind,
+    resolution: &RuntimeChannelBindingResolution,
+    is_dm: bool,
+) -> bool {
+    validate_runtime_channel_binding_for_bot(settings_snapshot, provider, resolution, is_dm).is_ok()
 }
 
 pub(in crate::services::discord) fn classify_live_bot_channel_routing_status(
@@ -346,7 +444,7 @@ fn classify_runtime_channel_binding_from_captured_metadata(
     direct_payload: Option<settings::ConfiguredBindingPayload>,
     thread_parent: Option<(
         RuntimeChannelIdentity,
-        Option<settings::ConfiguredBindingPayload>,
+        settings::RuntimeConfiguredBindingDecision,
     )>,
     metadata_state: RuntimeMetadataState,
 ) -> RuntimeChannelBindingResolution {
@@ -357,12 +455,17 @@ fn classify_runtime_channel_binding_from_captured_metadata(
             live_child,
             parent,
             authority: Some(RuntimeBindingAuthority::Direct { identity, payload }),
+            parent_inheritance_opted_out: false,
             metadata_state,
         };
     }
 
-    let authority = thread_parent.and_then(|(identity, payload)| {
-        payload
+    let parent_inheritance_opted_out = thread_parent
+        .as_ref()
+        .is_some_and(|(_, decision)| decision.thread_inherit == Some(false));
+    let authority = thread_parent.and_then(|(identity, decision)| {
+        decision
+            .payload
             .filter(|payload| payload.thread_inherit)
             .map(|payload| RuntimeBindingAuthority::InheritedParent { identity, payload })
     });
@@ -370,6 +473,7 @@ fn classify_runtime_channel_binding_from_captured_metadata(
         live_child,
         parent,
         authority,
+        parent_inheritance_opted_out,
         metadata_state,
     }
 }
@@ -383,7 +487,7 @@ fn classify_runtime_channel_binding_from_live_metadata(
     let parent = thread_parent.map(|(parent_id, parent_name)| {
         (
             RuntimeChannelIdentity::new(parent_id, parent_name.map(ToOwned::to_owned)),
-            settings::resolve_runtime_configured_binding(parent_id, parent_name),
+            settings::resolve_runtime_configured_binding_decision(parent_id, parent_name),
         )
     });
     classify_runtime_channel_binding_from_captured_metadata(
@@ -446,15 +550,11 @@ async fn resolve_runtime_channel_binding_resolution_with_lookup(
     lookup: &impl RuntimeChannelMetadataLookup,
     channel_id: serenity::model::id::ChannelId,
 ) -> RuntimeChannelBindingResolution {
-    // Capture strict identity authority before the metadata await. The live
-    // name may only fill missing fields from an exact same-ID pinned entry.
-    let strict_id_candidate = settings::resolve_runtime_strict_configured_binding(channel_id);
     let Ok(channel) = lookup.lookup_channel(channel_id).await else {
-        let direct_payload = settings::merge_runtime_configured_binding_with_pinned_name(
-            channel_id,
-            None,
-            strict_id_candidate,
-        );
+        // Resolve the complete payload only after the metadata await. Mixing a
+        // pre-await strict role with a post-await pinned workspace would create
+        // an authority payload which never existed in one config generation.
+        let direct_payload = settings::resolve_runtime_configured_binding(channel_id, None);
         return classify_runtime_channel_binding_from_captured_metadata(
             RuntimeChannelIdentity::new(channel_id, None),
             direct_payload,
@@ -473,11 +573,8 @@ async fn resolve_runtime_channel_binding_resolution_with_lookup(
             parent_id,
         } => {
             let live_child = RuntimeChannelIdentity::new(channel_id, Some(name.clone()));
-            let direct_payload = settings::merge_runtime_configured_binding_with_pinned_name(
-                channel_id,
-                Some(&name),
-                strict_id_candidate,
-            );
+            let direct_payload =
+                settings::resolve_runtime_configured_binding(channel_id, Some(&name));
             if direct_payload.is_some() {
                 return classify_runtime_channel_binding_from_captured_metadata(
                     live_child,
@@ -502,28 +599,36 @@ async fn resolve_runtime_channel_binding_resolution_with_lookup(
                     RuntimeMetadataState::Complete,
                 );
             };
-
-            // The parent ID is itself authoritative metadata. Snapshot its
-            // strict config before awaiting the optional live parent name.
-            let strict_parent_candidate =
-                settings::resolve_runtime_strict_configured_binding(parent_id);
             let (parent_name, parent_lookup_complete) = match lookup.lookup_channel(parent_id).await
             {
                 Ok(RuntimeChannelMetadata::Guild { name, .. }) => (Some(name), true),
                 Ok(_) => (None, true),
                 Err(()) => (None, false),
             };
-            let parent_payload = settings::merge_runtime_configured_binding_with_pinned_name(
+
+            // Re-check direct authority after the parent await. A live config
+            // reload may have bound the child while metadata was in flight; a
+            // parent must never outrank that new direct barrier.
+            let direct_payload =
+                settings::resolve_runtime_configured_binding(channel_id, Some(&name));
+            if direct_payload.is_some() {
+                return classify_runtime_channel_binding_from_captured_metadata(
+                    live_child,
+                    direct_payload,
+                    None,
+                    RuntimeMetadataState::Complete,
+                );
+            }
+            let parent_decision = settings::resolve_runtime_configured_binding_decision(
                 parent_id,
                 parent_name.as_deref(),
-                strict_parent_candidate,
             );
             classify_runtime_channel_binding_from_captured_metadata(
                 live_child,
                 None,
                 Some((
                     RuntimeChannelIdentity::new(parent_id, parent_name),
-                    parent_payload,
+                    parent_decision,
                 )),
                 if parent_lookup_complete {
                     RuntimeMetadataState::Complete
@@ -533,11 +638,7 @@ async fn resolve_runtime_channel_binding_resolution_with_lookup(
             )
         }
         RuntimeChannelMetadata::Other => {
-            let direct_payload = settings::merge_runtime_configured_binding_with_pinned_name(
-                channel_id,
-                None,
-                strict_id_candidate,
-            );
+            let direct_payload = settings::resolve_runtime_configured_binding(channel_id, None);
             classify_runtime_channel_binding_from_captured_metadata(
                 RuntimeChannelIdentity::new(channel_id, None),
                 direct_payload,

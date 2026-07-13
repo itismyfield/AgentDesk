@@ -11,12 +11,14 @@ mod worktree;
 
 use self::channel_routing::choose_restore_channel_name;
 pub(super) use self::channel_routing::{
-    RuntimeBindingAuthority, RuntimeChannelBindingResolution, RuntimeChannelBindingStatus,
-    RuntimeChannelIdentity, classify_live_bot_channel_routing_status, provider_handles_channel,
-    resolve_channel_category, resolve_is_dm_channel, resolve_live_bot_channel_routing_status,
-    resolve_live_channel_routing_metadata, resolve_runtime_channel_binding_resolution,
-    resolve_runtime_channel_binding_status, resolve_thread_parent, synthetic_thread_channel_name,
+    ParentBootstrapDisposition, RuntimeBindingAuthority, RuntimeChannelBindingResolution,
+    RuntimeChannelBindingStatus, RuntimeChannelIdentity, classify_live_bot_channel_routing_status,
+    provider_handles_channel, resolve_channel_category, resolve_is_dm_channel,
+    resolve_live_bot_channel_routing_status, resolve_live_channel_routing_metadata,
+    resolve_runtime_channel_binding_resolution, resolve_runtime_channel_binding_status,
+    resolve_thread_parent, runtime_channel_binding_owned_by_bot, synthetic_thread_channel_name,
     validate_live_channel_routing, validate_live_channel_routing_with_dm_hint,
+    validate_runtime_channel_binding_for_bot,
 };
 #[cfg(test)]
 use self::restore_cwd::restore_thread_worktree_path_from_db;
@@ -111,13 +113,44 @@ pub(super) fn restored_memento_context_loaded(
     previous_loaded && previous_session_id == next_session_id && next_session_id.is_some()
 }
 
+pub(in crate::services::discord) fn apply_trusted_dm_hint(
+    resolution: RuntimeChannelBindingResolution,
+    channel_id: ChannelId,
+    dm_hint: Option<bool>,
+) -> RuntimeChannelBindingResolution {
+    if dm_hint == Some(true) && resolution.status() == RuntimeChannelBindingStatus::Unknown {
+        RuntimeChannelBindingResolution::direct_message(channel_id)
+    } else {
+        resolution
+    }
+}
+
+pub(in crate::services::discord) async fn resolve_runtime_channel_binding_resolution_with_dm_hint(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    dm_hint: Option<bool>,
+) -> RuntimeChannelBindingResolution {
+    apply_trusted_dm_hint(
+        resolve_runtime_channel_binding_resolution(http, channel_id).await,
+        channel_id,
+        dm_hint,
+    )
+}
+
+fn captured_restore_allows_db_source(
+    status: RuntimeChannelBindingStatus,
+    channel_scoped: bool,
+) -> bool {
+    status == RuntimeChannelBindingStatus::Owned || channel_scoped
+}
+
 /// Auto-restore session from bot_settings.json if not in memory
 pub(super) async fn auto_restore_session(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
-) {
-    auto_restore_session_with_dm_hint(shared, channel_id, serenity_ctx, None).await;
+) -> RuntimeChannelBindingResolution {
+    auto_restore_session_with_dm_hint(shared, channel_id, serenity_ctx, None).await
 }
 
 pub(super) async fn auto_restore_session_with_dm_hint(
@@ -125,35 +158,42 @@ pub(super) async fn auto_restore_session_with_dm_hint(
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
     dm_hint: Option<bool>,
-) {
-    if matches!(
-        resolve_runtime_channel_binding_status(&serenity_ctx.http, channel_id).await,
-        RuntimeChannelBindingStatus::Unowned
-    ) {
-        return;
+) -> RuntimeChannelBindingResolution {
+    let resolution = resolve_runtime_channel_binding_resolution_with_dm_hint(
+        &serenity_ctx.http,
+        channel_id,
+        dm_hint,
+    )
+    .await;
+    if resolution.status() == RuntimeChannelBindingStatus::Owned {
+        auto_restore_session_from_resolution(
+            shared,
+            channel_id,
+            serenity_ctx,
+            dm_hint,
+            &resolution,
+        )
+        .await;
     }
-
-    auto_restore_session_force(shared, channel_id, serenity_ctx, dm_hint).await;
+    resolution
 }
 
-/// Same as [`auto_restore_session_with_dm_hint`] but skips the
-/// `RuntimeChannelBindingStatus::Unowned` early-return. Intended for callers
-/// that have already decided an unbound channel deserves restoration —
-/// e.g. the BINDING-GUARD's `can_route_unbound_direct_session` path which
-/// only proceeds when persistent state already names a workspace for that
-/// channel. Without this escape hatch the BINDING-GUARD's restoration step
-/// silently no-ops on unowned channels and the channel stops responding
-/// after a dcserver restart drops the in-memory session map (#1190 followup,
-/// agentless direct sessions regression observed 2026-04-26).
-pub(super) async fn auto_restore_session_force(
+/// Apply one already-admitted immutable binding snapshot. Callers which perform
+/// bot ownership or unowned-escape admission must do so before invoking this
+/// function so a newer cross-bot payload cannot mutate the session first.
+pub(in crate::services::discord) async fn auto_restore_session_from_resolution(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
     dm_hint: Option<bool>,
+    resolution: &RuntimeChannelBindingResolution,
 ) {
-    // Resolve channel/category before taking the lock for mutation
-    let (live_ch_name, cat_name) =
+    // Category/runtime-key metadata is deliberately type-separated from the
+    // captured binding resolution. It may choose display/session identity, but
+    // never role, workspace, provider, or memory authority (#4317).
+    let (_, cat_name) =
         resolve_channel_category(&serenity_ctx.http, Some(&serenity_ctx.cache), channel_id).await;
+    let runtime_thread_parent = resolve_thread_parent(&serenity_ctx.http, channel_id).await;
     let existing_channel_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -162,21 +202,19 @@ pub(super) async fn auto_restore_session_force(
     };
     let restore_ch_name = choose_restore_channel_name(
         existing_channel_name.as_deref(),
-        live_ch_name.as_deref(),
-        resolve_thread_parent(&serenity_ctx.http, channel_id).await,
+        resolution.live_child().channel_name(),
+        runtime_thread_parent,
         channel_id,
     );
-    let is_dm = matches!(
-        channel_id.to_channel(&serenity_ctx.http).await.ok(),
-        Some(serenity::Channel::Private(_))
-    );
-    let is_dm = resolve_is_dm_channel(dm_hint, is_dm);
+    let is_dm = resolve_is_dm_channel(dm_hint, resolution.is_direct_message());
 
     // Read settings first to get provider and runtime restore metadata.
     let (last_path, provider) = {
         let settings = shared.settings.read().await;
         let provider = settings.provider.clone();
-        let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref())
+        let configured_path = resolution
+            .configured_workspace()
+            .map(ToOwned::to_owned)
             .or_else(|| {
                 if is_dm {
                     super::agentdesk_config::resolve_dm_default_agent(&provider)
@@ -216,7 +254,10 @@ pub(super) async fn auto_restore_session_force(
         // Only a usable path is honored for install into `session.current_path`.
         let mut db_cwd: Option<String> = restored_cwd
             .map(|r| r.path)
-            .filter(|p| !p.is_empty() && session_path_is_usable(p));
+            .filter(|p| !p.is_empty() && session_path_is_usable(p))
+            .filter(|_| {
+                captured_restore_allows_db_source(resolution.status(), db_cwd_channel_scoped)
+            });
 
         // #3216 GAP 2: reconcile the DB cwd against the live tmux pane. The live
         // pane is the source of truth for where the session actually runs; if the
@@ -224,7 +265,9 @@ pub(super) async fn auto_restore_session_force(
         // relaunch `--resume` against a transcript-less path. When a live tmux
         // session exists and its pane cwd is a real managed/usable worktree that
         // DIFFERS from the DB cwd, adopt the tmux cwd AND correct the DB row.
-        if let Some(ch) = restore_ch_name.as_ref() {
+        if let Some(ch) = restore_ch_name.as_ref()
+            && captured_restore_allows_db_source(resolution.status(), db_cwd_channel_scoped)
+        {
             let tmux_name = provider.build_tmux_session_name(ch);
             let tmux_cwd = crate::services::platform::tmux::pane_current_path(&tmux_name);
             let tmux_cwd_is_managed = tmux_cwd
@@ -311,7 +354,8 @@ pub(super) async fn auto_restore_session_force(
         session.channel_name = restore_ch_name.clone();
         session.category_name = cat_name.clone();
         session.remote_profile_name = None;
-        if session.current_path.is_some() || last_path.is_none() {
+        let current_path_is_usable = session.validated_path(channel_id).is_some();
+        if current_path_is_usable || last_path.is_none() {
             // A pre-existing session (e.g. inserted by restart watcher
             // registration with `current_path` from `sessions.cwd` but
             // `worktree: None`) hits this early return before the insertion
@@ -368,6 +412,26 @@ pub(super) async fn auto_restore_session_force(
         *shared.skills_cache.write().await = new_skills;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}] ↻ Auto-restored session: {last_path}");
+    }
+}
+
+#[cfg(test)]
+mod binding_restore_policy_tests {
+    use super::*;
+
+    #[test]
+    fn nonowned_restore_accepts_only_exact_channel_scoped_db_evidence() {
+        for status in [
+            RuntimeChannelBindingStatus::Unowned,
+            RuntimeChannelBindingStatus::Unknown,
+        ] {
+            assert!(!captured_restore_allows_db_source(status, false));
+            assert!(captured_restore_allows_db_source(status, true));
+        }
+        assert!(captured_restore_allows_db_source(
+            RuntimeChannelBindingStatus::Owned,
+            false,
+        ));
     }
 }
 
@@ -648,7 +712,7 @@ mod worktree_reuse_channel_isolation_tests {
         pg_db.drop().await;
     }
 
-    // ---- P0-a: `auto_restore_session_force` restart restore (db_cwd) ----
+    // ---- P0-a: captured-resolution restart restore (db_cwd) ----
     //
     // `restore_session_cwd_from_db` backs the restart-restore `db_cwd` lookup
     // that installs into `session.current_path`. It must be channel-scoped for

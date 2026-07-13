@@ -316,6 +316,16 @@ fn direct_role_workspace_and_combined_payloads_are_one_child_authority() {
                 assert_eq!(payload.role.is_some(), expect_role, "{label}");
                 assert_eq!(payload.workspace.is_some(), expect_workspace, "{label}");
                 assert_eq!(
+                    resolution.configured_workspace(),
+                    expect_workspace.then_some("/tmp/direct-child"),
+                    "{label} restore must use only the direct child's captured workspace"
+                );
+                assert_eq!(
+                    resolution.parent_bootstrap_disposition(),
+                    ParentBootstrapDisposition::DenyDirect,
+                    "{label} direct authority must block parent bootstrap"
+                );
+                assert_eq!(
                     resolution
                         .authority_identity()
                         .and_then(RuntimeChannelIdentity::channel_name),
@@ -369,9 +379,23 @@ fn inherited_parent_payload_is_selected_only_as_one_complete_parent_authority() 
                             .channel_id(),
                         serenity::ChannelId::new(PARENT_ID)
                     );
+                    assert_eq!(resolution.configured_workspace(), Some("/tmp/parent"));
+                    assert_eq!(
+                        resolution.parent_bootstrap_disposition(),
+                        ParentBootstrapDisposition::InheritedBinding
+                    );
                 } else {
                     assert_eq!(resolution.status(), RuntimeChannelBindingStatus::Unowned);
                     assert!(resolution.authority().is_none());
+                    assert_eq!(
+                        resolution.parent_bootstrap_disposition(),
+                        ParentBootstrapDisposition::DenyOptedOut
+                    );
+                    assert_eq!(
+                        resolution.parent_bootstrap_disposition_with_direct_session_escape(true),
+                        ParentBootstrapDisposition::DenyOptedOut,
+                        "explicit threadInherit=false cannot be upgraded by the legacy escape"
+                    );
                 }
             },
         );
@@ -738,9 +762,17 @@ fn strict_thread_only_signal_can_precede_but_cannot_create_runtime_scope() {
                 .is_none(),
                 "a thread flag alone cannot establish runtime ownership"
             );
+            let resolution = classify_thread("unbound-child", PARENT_NAME);
+            assert_eq!(resolution.status(), RuntimeChannelBindingStatus::Unowned);
             assert_eq!(
-                classify_thread("unbound-child", PARENT_NAME).status(),
-                RuntimeChannelBindingStatus::Unowned
+                resolution.parent_bootstrap_disposition(),
+                ParentBootstrapDisposition::DenyOptedOut,
+                "a strict flag-only opt-out must survive after ownership finalization"
+            );
+            assert_eq!(
+                resolution.parent_bootstrap_disposition_with_direct_session_escape(true),
+                ParentBootstrapDisposition::DenyOptedOut,
+                "the legacy direct-session escape cannot erase an explicit false"
             );
         },
     );
@@ -763,6 +795,12 @@ fn strict_thread_only_signal_can_precede_but_cannot_create_runtime_scope() {
                 )
                 .is_none(),
                 "an exact pinned flag-only entry is not ownership authority"
+            );
+            let resolution = classify_thread("unbound-child", PARENT_NAME);
+            assert_eq!(
+                resolution.parent_bootstrap_disposition_with_direct_session_escape(true),
+                ParentBootstrapDisposition::DenyOptedOut,
+                "an exact-ID-pinned flag-only opt-out remains a non-owning deny policy"
             );
         },
     );
@@ -878,6 +916,11 @@ fn strict_id_survives_missing_metadata_while_name_only_fails_closed() {
             );
             assert_eq!(resolution.status(), RuntimeChannelBindingStatus::Owned);
             assert_eq!(
+                resolution.parent_bootstrap_disposition(),
+                ParentBootstrapDisposition::DenyDirect,
+                "strict-ID direct authority remains owned but never inherits a parent"
+            );
+            assert_eq!(
                 resolution
                     .authority_identity()
                     .and_then(RuntimeChannelIdentity::channel_name),
@@ -911,8 +954,187 @@ fn strict_id_survives_missing_metadata_while_name_only_fails_closed() {
             );
             assert_eq!(resolution.status(), RuntimeChannelBindingStatus::Unknown);
             assert!(resolution.authority().is_none());
+            assert_eq!(
+                resolution.parent_bootstrap_disposition(),
+                ParentBootstrapDisposition::DenyUnknown,
+                "metadata failure without strict-ID authority must fail closed"
+            );
         },
     );
+}
+
+#[test]
+fn direct_restore_uses_actual_binding_workspace_but_keeps_synthetic_runtime_name() {
+    let mut child = json!({
+        "channelId": CHILD_ID.to_string(),
+        "workspace": "/tmp/direct-child-workspace",
+    });
+    child["threadInherit"] = json!(true);
+    with_role_map(
+        json!({
+            "fallbackByChannelName": {"enabled": true},
+            "byChannelName": {CHILD_NAME: child},
+        }),
+        || {
+            let resolution = classify_thread(CHILD_NAME, PARENT_NAME);
+            let expected_runtime_name = format!("{PARENT_NAME}-t{CHILD_ID}");
+            assert_eq!(
+                resolution.configured_workspace(),
+                Some("/tmp/direct-child-workspace"),
+                "restore policy must read the actual live child payload"
+            );
+            assert_eq!(
+                choose_restore_channel_name(
+                    None,
+                    resolution.live_child().channel_name(),
+                    Some((
+                        serenity::ChannelId::new(PARENT_ID),
+                        Some(PARENT_NAME.to_string()),
+                    )),
+                    serenity::ChannelId::new(CHILD_ID),
+                )
+                .as_deref(),
+                Some(expected_runtime_name.as_str()),
+                "tmux/DB/session identity must remain the synthetic runtime key"
+            );
+        },
+    );
+}
+
+#[test]
+fn watcher_and_manual_recovery_admission_use_captured_authority_and_fail_closed() {
+    let child_id = serenity::ChannelId::new(CHILD_ID);
+    let parent_id = serenity::ChannelId::new(PARENT_ID);
+    let provider = ProviderKind::Codex;
+
+    with_role_map(
+        json!({
+            "byChannelId": {
+                CHILD_ID.to_string(): role_binding("direct-child", "codex"),
+                PARENT_ID.to_string(): role_binding("parent-agent", "codex"),
+            },
+        }),
+        || {
+            let direct = classify_thread(CHILD_NAME, PARENT_NAME);
+            let child_settings = DiscordBotSettings {
+                allowed_channel_ids: vec![CHILD_ID],
+                ..Default::default()
+            };
+            assert!(
+                validate_runtime_channel_binding_for_bot(
+                    &child_settings,
+                    &provider,
+                    &direct,
+                    false,
+                )
+                .is_ok()
+            );
+            assert!(runtime_channel_binding_owned_by_bot(
+                &child_settings,
+                &provider,
+                &direct,
+                false,
+            ));
+            let parent_only_settings = DiscordBotSettings {
+                allowed_channel_ids: vec![PARENT_ID],
+                ..Default::default()
+            };
+            assert_eq!(
+                validate_runtime_channel_binding_for_bot(
+                    &parent_only_settings,
+                    &provider,
+                    &direct,
+                    false,
+                ),
+                Err(settings::BotChannelRoutingGuardFailure::ChannelNotAllowed),
+                "direct authority must validate the child, never the parent"
+            );
+            assert!(!runtime_channel_binding_owned_by_bot(
+                &parent_only_settings,
+                &provider,
+                &direct,
+                false,
+            ));
+        },
+    );
+
+    with_role_map(
+        json!({
+            "byChannelId": {
+                PARENT_ID.to_string(): role_binding("parent-agent", "codex"),
+            },
+        }),
+        || {
+            let inherited = classify_thread("unbound-child", PARENT_NAME);
+            let parent_settings = DiscordBotSettings {
+                allowed_channel_ids: vec![PARENT_ID],
+                ..Default::default()
+            };
+            assert!(
+                validate_runtime_channel_binding_for_bot(
+                    &parent_settings,
+                    &provider,
+                    &inherited,
+                    false,
+                )
+                .is_ok(),
+                "inherited authority validates the captured parent identity and role"
+            );
+            assert!(runtime_channel_binding_owned_by_bot(
+                &parent_settings,
+                &provider,
+                &inherited,
+                false,
+            ));
+        },
+    );
+
+    with_role_map(json!({}), || {
+        let unowned = classify_thread("unbound-child", PARENT_NAME);
+        let unknown = classify_runtime_channel_binding_from_captured_metadata(
+            RuntimeChannelIdentity::new(child_id, None),
+            None,
+            None,
+            RuntimeMetadataState::Unknown,
+        );
+        let permissive_bot = DiscordBotSettings {
+            allowed_channel_ids: vec![CHILD_ID],
+            ..Default::default()
+        };
+        for (label, resolution) in [("unowned", &unowned), ("unknown", &unknown)] {
+            assert_eq!(
+                validate_runtime_channel_binding_for_bot(
+                    &permissive_bot,
+                    &provider,
+                    resolution,
+                    false,
+                ),
+                Err(settings::BotChannelRoutingGuardFailure::ChannelNotAllowed),
+                "{label} must fail closed even for an otherwise permissive bot"
+            );
+            assert!(!runtime_channel_binding_owned_by_bot(
+                &permissive_bot,
+                &provider,
+                resolution,
+                false,
+            ));
+        }
+        assert_eq!(unowned.live_child().channel_id(), child_id);
+        assert_eq!(
+            unowned.parent().map(RuntimeChannelIdentity::channel_id),
+            Some(parent_id)
+        );
+        assert_eq!(
+            unowned.parent_bootstrap_disposition_with_direct_session_escape(true),
+            ParentBootstrapDisposition::DirectSessionEscape,
+            "escape approval is a bootstrap decision and does not mutate bot authority"
+        );
+        assert_eq!(
+            unknown.parent_bootstrap_disposition_with_direct_session_escape(true),
+            ParentBootstrapDisposition::DenyUnknown,
+            "unknown metadata cannot be upgraded by the unowned escape"
+        );
+    });
 }
 
 #[tokio::test]
@@ -1040,6 +1262,31 @@ async fn injected_metadata_resolver_child_http_failure_distinguishes_strict_from
 }
 
 #[tokio::test]
+async fn trusted_dm_hint_promotes_only_unknown_metadata_to_direct_dm() {
+    with_role_map_async(json!({}), |_| async {
+        let child_id = serenity::ChannelId::new(CHILD_ID);
+        let lookup = FakeRuntimeChannelMetadataLookup::new([(child_id, Err(()))]);
+        let unknown =
+            resolve_runtime_channel_binding_resolution_with_lookup(&lookup, child_id).await;
+        assert_eq!(unknown.status(), RuntimeChannelBindingStatus::Unknown);
+
+        let without_hint =
+            super::super::apply_trusted_dm_hint(unknown.clone(), child_id, Some(false));
+        assert_eq!(without_hint.status(), RuntimeChannelBindingStatus::Unknown);
+
+        let trusted_dm = super::super::apply_trusted_dm_hint(unknown, child_id, Some(true));
+        assert_eq!(trusted_dm.status(), RuntimeChannelBindingStatus::Owned);
+        assert!(trusted_dm.is_direct_message());
+        assert!(
+            trusted_dm
+                .authority()
+                .is_some_and(RuntimeBindingAuthority::is_direct)
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn injected_metadata_resolver_handles_private_dm_and_missing_thread_parent() {
     with_role_map_async(json!({}), |_| async {
         let child_id = serenity::ChannelId::new(CHILD_ID);
@@ -1081,7 +1328,7 @@ async fn injected_metadata_resolver_handles_private_dm_and_missing_thread_parent
 }
 
 #[tokio::test]
-async fn injected_metadata_resolver_never_reloads_strict_child_after_lookup() {
+async fn injected_metadata_resolver_resolves_one_child_payload_after_lookup() {
     with_role_map_async(
         json!({"byChannelId": {CHILD_ID.to_string(): role_binding("captured-child", "codex")}}),
         |role_map_path| async move {
@@ -1115,7 +1362,8 @@ async fn injected_metadata_resolver_never_reloads_strict_child_after_lookup() {
             assert!(direct);
             assert_eq!(
                 payload.role.as_ref().map(|role| role.role_id.as_str()),
-                Some("captured-child")
+                Some("late-child"),
+                "role and pinned workspace must come from the same post-metadata config"
             );
             assert_eq!(
                 payload.workspace.as_deref(),
@@ -1129,7 +1377,7 @@ async fn injected_metadata_resolver_never_reloads_strict_child_after_lookup() {
 }
 
 #[tokio::test]
-async fn injected_metadata_resolver_never_reloads_strict_parent_after_lookup() {
+async fn injected_metadata_resolver_resolves_one_parent_payload_after_lookup() {
     with_role_map_async(
         json!({"byChannelId": {PARENT_ID.to_string(): role_binding("captured-parent", "codex")}}),
         |role_map_path| async move {
@@ -1169,7 +1417,8 @@ async fn injected_metadata_resolver_never_reloads_strict_parent_after_lookup() {
             assert!(!direct);
             assert_eq!(
                 payload.role.as_ref().map(|role| role.role_id.as_str()),
-                Some("captured-parent")
+                Some("late-parent"),
+                "role and workspace must come from one config generation after parent metadata"
             );
             assert_eq!(
                 payload.workspace.as_deref(),
@@ -1177,6 +1426,52 @@ async fn injected_metadata_resolver_never_reloads_strict_parent_after_lookup() {
             );
             assert_eq!(lookup.call_count(child_id), 1);
             assert_eq!(lookup.call_count(parent_id), 1);
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn direct_child_added_during_parent_lookup_still_outranks_parent() {
+    with_role_map_async(
+        json!({"byChannelId": {PARENT_ID.to_string(): role_binding("old-parent", "codex")}}),
+        |role_map_path| async move {
+            let child_id = serenity::ChannelId::new(CHILD_ID);
+            let parent_id = serenity::ChannelId::new(PARENT_ID);
+            let mutation_path = role_map_path.clone();
+            let lookup = FakeRuntimeChannelMetadataLookup::new([
+                (
+                    child_id,
+                    Ok(guild_metadata(CHILD_NAME, true, Some(PARENT_ID))),
+                ),
+                (parent_id, Ok(guild_metadata(PARENT_NAME, false, None))),
+            ])
+            .mutate_during_lookup(parent_id, move || {
+                fs::write(
+                    mutation_path,
+                    json!({
+                        "byChannelId": {
+                            CHILD_ID.to_string(): role_binding("new-direct-child", "claude"),
+                            PARENT_ID.to_string(): role_binding("new-parent", "codex"),
+                        },
+                    })
+                    .to_string(),
+                )
+                .expect("bind the direct child while parent metadata is in flight");
+            });
+
+            let resolution =
+                resolve_runtime_channel_binding_resolution_with_lookup(&lookup, child_id).await;
+            let (payload, direct) = authority_payload(&resolution);
+            assert!(
+                direct,
+                "the post-await child recheck must restore the barrier"
+            );
+            assert_eq!(
+                payload.role.as_ref().map(|role| role.role_id.as_str()),
+                Some("new-direct-child")
+            );
+            assert_eq!(resolution.authority_channel_id(), child_id);
         },
     )
     .await;

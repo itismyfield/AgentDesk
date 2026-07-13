@@ -5,6 +5,7 @@ use super::super::super::turn_view_reconciler::{
 };
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
+use crate::services::discord::session_runtime::session_path_is_usable;
 
 mod race_loss;
 mod turn_watchdog;
@@ -653,11 +654,6 @@ pub(super) async fn handle_text_message(
         .or(early_resolved_channel_name.as_deref());
     let dispatch_has_explicit_path =
         dispatch_worktree_path.is_some() || dispatch_target_repo_path.is_some();
-    let dispatch_bootstrap_path_source = if dispatch_has_explicit_path {
-        ThreadBootstrapPathSource::ExplicitDispatch
-    } else {
-        ThreadBootstrapPathSource::ParentDerived(channel_id, original_channel_name)
-    };
     if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
         if let (Some(stale_path), Some(did)) = (
@@ -757,16 +753,67 @@ pub(super) async fn handle_text_message(
                             tid,
                             did
                         );
+                        let bootstrap_request = if dispatch_has_explicit_path {
+                            Some((
+                                dispatch_effective_path.clone(),
+                                ThreadBootstrapPathSource::ExplicitDispatch,
+                            ))
+                        } else {
+                            let resolution =
+                                super::super::super::resolve_runtime_channel_binding_resolution(
+                                    http, tid,
+                                )
+                                .await;
+                            let disposition = resolution.parent_bootstrap_disposition();
+                            let parent_id = resolution
+                                .thread_parent_tuple()
+                                .map(|(parent_id, _)| parent_id);
+                            let parent_session_path = if let Some(parent_id) = parent_id {
+                                let data = shared.core.lock().await;
+                                data.sessions
+                                    .get(&parent_id)
+                                    .and_then(|session| session.current_path.clone())
+                                    .filter(|path| session_path_is_usable(path))
+                            } else {
+                                None
+                            };
+                            let captured_parent_workspace = resolution
+                                .configured_workspace()
+                                .map(ToOwned::to_owned)
+                                .filter(|path| session_path_is_usable(path));
+                            match (
+                                disposition,
+                                parent_id,
+                                parent_session_path.or(captured_parent_workspace),
+                            ) {
+                                (
+                                    ParentBootstrapDisposition::InheritedBinding,
+                                    Some(parent_id),
+                                    Some(parent_path),
+                                ) => Some((
+                                    parent_path,
+                                    ThreadBootstrapPathSource::ParentDerived {
+                                        parent_id,
+                                        disposition,
+                                    },
+                                )),
+                                _ => None,
+                            }
+                        };
                         bootstrapped_fresh_thread_session =
-                            super::super::super::bootstrap_thread_session(
-                                shared,
-                                tid,
-                                &dispatch_effective_path,
-                                dispatch_bootstrap_path_source,
-                                http,
-                                cache,
-                            )
-                            .await;
+                            if let Some((bootstrap_path, bootstrap_source)) = bootstrap_request {
+                                super::super::super::bootstrap_thread_session(
+                                    shared,
+                                    tid,
+                                    &bootstrap_path,
+                                    bootstrap_source,
+                                    http,
+                                    cache,
+                                )
+                                .await
+                            } else {
+                                false
+                            };
                         shared.dispatch.thread_parents.insert(channel_id, tid);
                         // For review dispatches reusing an implementation thread,
                         // override role/model to use the counter-model channel.
@@ -829,7 +876,7 @@ pub(super) async fn handle_text_message(
                                     shared,
                                     thread.id,
                                     &dispatch_effective_path,
-                                    dispatch_bootstrap_path_source,
+                                    ThreadBootstrapPathSource::ExplicitDispatch,
                                     http,
                                     cache,
                                 )

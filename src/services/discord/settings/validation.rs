@@ -144,17 +144,42 @@ pub(crate) fn validate_bot_channel_routing_with_provider_channel(
     // influence agent binding resolution.
     let role_binding = resolve_role_binding(allowlist_channel_id, provider_channel_name);
 
+    validate_bot_channel_routing_with_captured_binding(
+        settings,
+        provider,
+        allowlist_channel_id,
+        binding_channel_name,
+        provider_channel_name,
+        is_dm,
+        role_binding.as_ref(),
+    )
+}
+
+/// Validate bot ownership against an already captured runtime binding.
+///
+/// Runtime callers pass the role selected by the typed channel resolution so a
+/// synthetic or stale name cannot trigger a second generic config lookup after
+/// the Discord metadata boundary (#4317).
+pub(crate) fn validate_bot_channel_routing_with_captured_binding(
+    settings: &DiscordBotSettings,
+    provider: &ProviderKind,
+    allowlist_channel_id: ChannelId,
+    binding_channel_name: Option<&str>,
+    provider_channel_name: Option<&str>,
+    is_dm: bool,
+    role_binding: Option<&RoleBinding>,
+) -> Result<(), BotChannelRoutingGuardFailure> {
     if !bot_settings_allow_channel(settings, provider, allowlist_channel_id, is_dm) {
         return Err(BotChannelRoutingGuardFailure::ChannelNotAllowed);
     }
-    if !bot_settings_allow_agent(settings, role_binding.as_ref(), is_dm) {
+    if !bot_settings_allow_agent(settings, role_binding, is_dm) {
         return Err(BotChannelRoutingGuardFailure::AgentMismatch);
     }
     if !channel_supports_provider(
         provider,
         provider_channel_name.or(binding_channel_name),
         is_dm,
-        role_binding.as_ref(),
+        role_binding,
     ) {
         return Err(BotChannelRoutingGuardFailure::ProviderMismatch);
     }
@@ -379,14 +404,30 @@ pub(crate) fn merge_runtime_configured_binding_with_pinned_name(
     channel_name: Option<&str>,
     strict: Option<ConfiguredBindingCandidate>,
 ) -> Option<ConfiguredBindingPayload> {
+    merge_runtime_configured_binding_decision_with_pinned_name(channel_id, channel_name, strict)
+        .payload
+}
+
+fn merge_runtime_configured_binding_decision_with_pinned_name(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+    strict: Option<ConfiguredBindingCandidate>,
+) -> RuntimeConfiguredBindingDecision {
     let pinned_name = channel_name
         .and_then(|name| resolve_id_pinned_role_map_name_binding(channel_id, Some(name)));
-
-    match (strict, pinned_name) {
-        (Some(strict), Some(pinned_name)) => strict.fill_missing_from(pinned_name).finalize(),
-        (Some(strict), None) => strict.finalize(),
-        (None, Some(pinned_name)) => pinned_name.finalize(),
+    let candidate = match (strict, pinned_name) {
+        (Some(strict), Some(pinned_name)) => Some(strict.fill_missing_from(pinned_name)),
+        (Some(strict), None) => Some(strict),
+        (None, Some(pinned_name)) => Some(pinned_name),
         (None, None) => None,
+    };
+    let thread_inherit = candidate
+        .as_ref()
+        .and_then(|candidate| candidate.thread_inherit);
+    let payload = candidate.and_then(ConfiguredBindingCandidate::finalize);
+    RuntimeConfiguredBindingDecision {
+        payload,
+        thread_inherit,
     }
 }
 
@@ -397,8 +438,19 @@ pub(crate) fn resolve_runtime_configured_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<ConfiguredBindingPayload> {
+    resolve_runtime_configured_binding_decision(channel_id, channel_name).payload
+}
+
+/// Resolve role/workspace/`threadInherit` together after live Discord metadata
+/// has been captured.  Runtime callers must not keep a strict candidate across
+/// an HTTP await and then merge it with a newer pinned-name entry: that creates
+/// a role/workspace pair which never existed in one config generation.
+pub(crate) fn resolve_runtime_configured_binding_decision(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> RuntimeConfiguredBindingDecision {
     let strict = resolve_runtime_strict_configured_binding(channel_id);
-    merge_runtime_configured_binding_with_pinned_name(channel_id, channel_name, strict)
+    merge_runtime_configured_binding_decision_with_pinned_name(channel_id, channel_name, strict)
 }
 
 #[cfg(test)]
@@ -898,11 +950,20 @@ channels:
         ] {
             assert_eq!(
                 source
-                    .matches("classify_live_bot_channel_routing_status(")
+                    .matches("resolve_runtime_channel_binding_resolution(")
                     .count(),
                 1,
-                "each no-event recovery intake must use the tri-state routing gate exactly once"
+                "each no-event recovery intake must capture one typed authority snapshot"
             );
+            assert_eq!(
+                source
+                    .matches("runtime_channel_binding_owned_by_bot(")
+                    .count(),
+                1,
+                "each recovery intake must use the shared fail-closed captured-payload policy"
+            );
+            assert!(!source.contains("classify_live_bot_channel_routing_status("));
+            assert!(!source.contains("resolve_live_channel_routing_metadata("));
             assert!(!source.contains("settings::validate_bot_channel_routing_with_thread_parent("));
             assert!(
                 !source.contains("validate_bot_channel_routing_with_provider_channel("),
@@ -913,39 +974,25 @@ channels:
                 "child metadata must be fetched once; a second lookup could outrank an unseen direct child binding"
             );
             assert_eq!(
-                source
-                    .matches("resolve_live_channel_routing_metadata(")
-                    .count(),
-                1
+                source.matches("if !owned_by_provider {").count(),
+                1,
+                "unowned, unknown, and provider-mismatched recovery candidates fail closed"
             );
         }
 
         let watcher = include_str!("../watchers/lifecycle.rs");
         assert!(!watcher.contains("pname.unwrap_or_else(|| channel_name.clone())"));
-        assert_eq!(watcher.matches("live_child_name.as_deref(),").count(), 1);
         assert!(!watcher.contains("Some(&channel_name),\n            thread_parent"));
-        assert_eq!(
-            watcher
-                .matches(
-                    "if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {",
-                )
-                .count(),
-            1,
-            "watcher restore must admit only proven Owned routing"
-        );
         let rebind = include_str!("../recovery_engine/manual_rebind/mod.rs");
         assert!(!rebind.contains("pname.or(channel_name.clone())"));
-        assert_eq!(rebind.matches("live_child_name.as_deref(),").count(), 1);
         assert!(!rebind.contains("channel_name.as_deref(),\n        thread_parent"));
-        assert!(rebind.contains(".unwrap_or((false, None, None))"));
-        assert_eq!(
-            rebind
-                .matches(
-                    "if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {",
-                )
-                .count(),
-            1,
-            "manual rebind timeout/unknown metadata must not bypass the Owned-only gate"
+        assert!(
+            rebind.contains("parse_provider_and_channel_from_tmux_name"),
+            "parsed tmux names remain available for runtime/session identity"
+        );
+        assert!(
+            !rebind.contains("resolve_role_binding("),
+            "tmux-parsed names must never feed a post-resolution role lookup"
         );
 
         let metadata = include_str!("../session_runtime/channel_routing.rs");

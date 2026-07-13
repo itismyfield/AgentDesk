@@ -385,26 +385,24 @@ async fn rebind_inflight_for_channel_inner(
     // mirroring what `restore_inflight_turns` requires for watcher revival.
     let settings_snapshot = shared.settings.read().await.clone();
     let channel_lookup_timeout = std::time::Duration::from_secs(5);
-    let (is_dm, live_child_name, thread_parent) = tokio::time::timeout(
+    let Ok(binding) = tokio::time::timeout(
         channel_lookup_timeout,
-        super::super::session_runtime::resolve_live_channel_routing_metadata(
+        super::super::session_runtime::resolve_runtime_channel_binding_resolution(
             http,
             discord_channel_id,
         ),
     )
     .await
-    .unwrap_or((false, None, None));
-    let routing_status = super::super::session_runtime::classify_live_bot_channel_routing_status(
+    else {
+        return Err(RebindError::ChannelNotBound);
+    };
+    let owned_by_provider = super::super::session_runtime::runtime_channel_binding_owned_by_bot(
         &settings_snapshot,
         provider,
-        discord_channel_id,
-        is_dm,
-        live_child_name.as_deref(),
-        thread_parent
-            .as_ref()
-            .map(|(parent_id, parent_name)| (*parent_id, parent_name.as_deref())),
+        &binding,
+        binding.is_direct_message(),
     );
-    if routing_status != super::super::session_runtime::RuntimeChannelBindingStatus::Owned {
+    if !owned_by_provider {
         return Err(RebindError::ChannelNotBound);
     }
 

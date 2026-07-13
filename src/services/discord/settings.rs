@@ -57,7 +57,8 @@ pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
     has_configured_channel_binding, merge_runtime_configured_binding_with_pinned_name,
     resolve_cache_ttl_minutes, resolve_dispatch_profile, resolve_runtime_configured_binding,
-    resolve_runtime_strict_configured_binding, validate_bot_channel_routing,
+    resolve_runtime_configured_binding_decision, resolve_runtime_strict_configured_binding,
+    validate_bot_channel_routing, validate_bot_channel_routing_with_captured_binding,
     validate_bot_channel_routing_with_provider_channel,
     validate_bot_channel_routing_with_thread_parent,
 };
@@ -157,6 +158,17 @@ pub(crate) struct ConfiguredBindingPayload {
     pub(crate) role: Option<RoleBinding>,
     pub(crate) workspace: Option<String>,
     pub(crate) thread_inherit: bool,
+}
+
+/// One synchronous runtime-config decision for an exact Discord identity.
+///
+/// `thread_inherit` deliberately survives even when no role/workspace owns the
+/// scope.  A flag-only `false` still has to block the legacy parent-session
+/// escape, while `payload` remains `None` so the flag cannot create ownership.
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeConfiguredBindingDecision {
+    pub(crate) payload: Option<ConfiguredBindingPayload>,
+    pub(crate) thread_inherit: Option<bool>,
 }
 
 impl ConfiguredBindingPayload {
