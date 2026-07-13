@@ -5,8 +5,8 @@ use poise::serenity_prelude::ChannelId;
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::role_map_path;
 use super::settings::{
-    MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
-    resolve_memory_settings,
+    ConfiguredBindingCandidate, MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding,
+    RoleBinding, resolve_memory_settings,
 };
 use crate::services::provider::ProviderKind;
 
@@ -28,8 +28,12 @@ fn load_role_map_json() -> Option<serde_json::Value> {
 
 fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
     let obj = value.as_object()?;
-    let role_id = obj.get("roleId")?.as_str()?.to_string();
-    let prompt_file = expand_tilde(obj.get("promptFile")?.as_str()?);
+    let role_id = obj.get("roleId")?.as_str()?.trim().to_string();
+    let prompt_file = obj.get("promptFile")?.as_str()?.trim();
+    if role_id.is_empty() || prompt_file.is_empty() {
+        return None;
+    }
+    let prompt_file = expand_tilde(prompt_file);
     let provider = obj
         .get("provider")
         .and_then(|v| v.as_str())
@@ -405,6 +409,57 @@ fn entry_matches_channel_id(entry: &serde_json::Value, channel_id: ChannelId) ->
     }
 }
 
+fn entry_is_pinned_to_channel_id(entry: &serde_json::Value, channel_id: ChannelId) -> bool {
+    entry
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|explicit_channel_id| explicit_channel_id == channel_id.get().to_string())
+}
+
+/// Resolve only a name-indexed role-map entry that is explicitly pinned to the
+/// live Discord channel ID. Unpinned same-name fallbacks are discovery hints,
+/// not runtime ownership authority (#4317).
+pub(super) fn resolve_id_pinned_name_binding(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<ConfiguredBindingCandidate> {
+    let Some(json) = load_role_map_json() else {
+        return None;
+    };
+    if !fallback_enabled(&json) {
+        return None;
+    }
+    let Some(channel_name) = channel_name else {
+        return None;
+    };
+    let Some(entry) = json
+        .get("byChannelName")
+        .and_then(|value| value.as_object())
+        .and_then(|by_name| by_name.get(channel_name))
+    else {
+        return None;
+    };
+    entry_is_pinned_to_channel_id(entry, channel_id).then_some(())?;
+
+    let role = parse_role_binding(entry);
+    let workspace = entry
+        .get("workspace")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty())
+        .map(expand_tilde);
+    let payload = ConfiguredBindingCandidate {
+        role,
+        workspace,
+        thread_inherit: entry
+            .get("threadInherit")
+            .or_else(|| entry.get("thread_inherit"))
+            .and_then(|value| value.as_bool()),
+    };
+    payload.owns_scope().then_some(payload)
+}
+
 pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
@@ -438,13 +493,10 @@ pub(super) fn resolve_thread_inherit(
     if let Some(by_id) = json.get("byChannelId").and_then(|value| value.as_object()) {
         let key = channel_id.get().to_string();
         if let Some(entry) = by_id.get(&key) {
-            return Some(
-                entry
-                    .get("threadInherit")
-                    .or_else(|| entry.get("thread_inherit"))
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(true),
-            );
+            return entry
+                .get("threadInherit")
+                .or_else(|| entry.get("thread_inherit"))
+                .and_then(|value| value.as_bool());
         }
     }
 
@@ -458,13 +510,10 @@ pub(super) fn resolve_thread_inherit(
         .and_then(|value| value.as_object())?;
     let entry = by_name.get(cname)?;
     entry_matches_channel_id(entry, channel_id).then_some(())?;
-    Some(
-        entry
-            .get("threadInherit")
-            .or_else(|| entry.get("thread_inherit"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true),
-    )
+    entry
+        .get("threadInherit")
+        .or_else(|| entry.get("thread_inherit"))
+        .and_then(|value| value.as_bool())
 }
 
 pub(super) fn resolve_workspace(

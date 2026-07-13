@@ -356,6 +356,51 @@ pub(crate) fn has_configured_channel_binding(
         || resolve_workspace(channel_id, None).is_some()
 }
 
+pub(crate) fn resolve_runtime_strict_configured_binding(
+    channel_id: ChannelId,
+) -> Option<ConfiguredBindingCandidate> {
+    let strict_role = resolve_role_binding(channel_id, None).filter(RoleBinding::is_runtime_valid);
+    let strict_workspace = resolve_workspace(channel_id, None)
+        .map(|workspace| workspace.trim().to_string())
+        .filter(|workspace| !workspace.is_empty());
+    let strict = ConfiguredBindingCandidate {
+        role: strict_role,
+        workspace: strict_workspace,
+        thread_inherit: resolve_thread_inherit(channel_id, None),
+    };
+    strict.has_strict_signal().then_some(strict)
+}
+
+/// Merge an already-captured strict-ID snapshot with the one narrow safe-name
+/// source. This never reloads or re-resolves the strict sources after an HTTP
+/// metadata await.
+pub(crate) fn merge_runtime_configured_binding_with_pinned_name(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+    strict: Option<ConfiguredBindingCandidate>,
+) -> Option<ConfiguredBindingPayload> {
+    let pinned_name = channel_name
+        .and_then(|name| resolve_id_pinned_role_map_name_binding(channel_id, Some(name)));
+
+    match (strict, pinned_name) {
+        (Some(strict), Some(pinned_name)) => strict.fill_missing_from(pinned_name).finalize(),
+        (Some(strict), None) => strict.finalize(),
+        (None, Some(pinned_name)) => pinned_name.finalize(),
+        (None, None) => None,
+    }
+}
+
+/// Resolve a runtime authority payload without admitting any unpinned name
+/// fallback. Strict ID sources win. An exact role-map name entry may fill only
+/// fields missing from that same channel ID's strict payload.
+pub(crate) fn resolve_runtime_configured_binding(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<ConfiguredBindingPayload> {
+    let strict = resolve_runtime_strict_configured_binding(channel_id);
+    merge_runtime_configured_binding_with_pinned_name(channel_id, channel_name, strict)
+}
+
 #[cfg(test)]
 mod voice_channel_guard_tests {
     use std::fs;

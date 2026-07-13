@@ -13,6 +13,8 @@ pub(crate) use intake_dispatch::{
     IntakeOrigin, IntakeSubmission, QueuedAdmissionDisposition, admit_queued_intake,
     dispatch_skill_intake, dispatch_text_intake, finish_admitted_queued_intake,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use intake_gate::should_skip_for_missing_required_mention;
 pub(super) use intake_gate::{handle_event, should_process_turn_message};
 #[cfg(test)]
 pub(super) use message_handler::set_hosted_tui_promote_busy_for_tests;

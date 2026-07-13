@@ -557,10 +557,10 @@ pub(super) fn resolve_thread_inherit(
 ) -> Option<bool> {
     let config = load_agentdesk_config()?;
     let (_agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
-    Some(match channel {
-        AgentChannel::Legacy(_) => true,
-        AgentChannel::Detailed(config) => config.thread_inherit.unwrap_or(true),
-    })
+    match channel {
+        AgentChannel::Legacy(_) => None,
+        AgentChannel::Detailed(config) => config.thread_inherit,
+    }
 }
 
 /// Resolve a role binding for a Discord voice channel declared in any agent's

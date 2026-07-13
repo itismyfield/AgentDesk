@@ -670,6 +670,8 @@ src/
 │   │   │   ├── relay_format.rs
 │   │   │   └── task_notification_context.rs
 │   │   ├── session_runtime/
+│   │   │   ├── channel_routing/
+│   │   │   │   └── runtime_binding_tests.rs
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
 │   │   │   ├── thread_bootstrap.rs

@@ -28,6 +28,7 @@ use super::role_map::{
     list_registered_channel_bindings as list_registered_channel_bindings_from_role_map,
     load_peer_agents as load_peer_agents_from_role_map,
     load_shared_prompt_path as load_shared_prompt_path_from_role_map,
+    resolve_id_pinned_name_binding as resolve_id_pinned_role_map_name_binding,
     resolve_role_binding as resolve_role_binding_from_role_map,
     resolve_thread_inherit as resolve_thread_inherit_from_role_map,
     resolve_workspace as resolve_workspace_from_role_map,
@@ -54,8 +55,10 @@ pub(crate) use validation::resolve_role_binding;
 pub(crate) use validation::resolve_workspace;
 pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
-    has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_dispatch_profile,
-    validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
+    has_configured_channel_binding, merge_runtime_configured_binding_with_pinned_name,
+    resolve_cache_ttl_minutes, resolve_dispatch_profile, resolve_runtime_configured_binding,
+    resolve_runtime_strict_configured_binding, validate_bot_channel_routing,
+    validate_bot_channel_routing_with_provider_channel,
     validate_bot_channel_routing_with_thread_parent,
 };
 pub(crate) use validation::{
@@ -135,6 +138,75 @@ pub(crate) struct RoleBinding {
     /// Whether hourly agent quality feedback may be injected into the system prompt.
     pub quality_feedback_injection_enabled: bool,
     pub memory: ResolvedMemorySettings,
+}
+
+impl RoleBinding {
+    pub(crate) fn is_runtime_valid(&self) -> bool {
+        !self.role_id.trim().is_empty() && !self.prompt_file.trim().is_empty()
+    }
+}
+
+/// A runtime-owned Discord binding resolved from an exact channel identity.
+///
+/// Runtime routing deliberately carries this payload forward instead of
+/// resolving the channel's (possibly synthetic) display name again.  A payload
+/// may be role-only or workspace-only; either form owns the entire routing
+/// scope and therefore blocks fallback to a thread parent (#4317).
+#[derive(Clone, Debug)]
+pub(crate) struct ConfiguredBindingPayload {
+    pub(crate) role: Option<RoleBinding>,
+    pub(crate) workspace: Option<String>,
+    pub(crate) thread_inherit: bool,
+}
+
+impl ConfiguredBindingPayload {
+    pub(crate) fn owns_scope(&self) -> bool {
+        self.role.is_some() || self.workspace.is_some()
+    }
+}
+
+/// A configured binding before source precedence and defaults are finalized.
+///
+/// Keeping `thread_inherit` optional here is intentional: an omitted strict-ID
+/// flag must not erase an explicit flag from the same-ID pinned-name source.
+/// Runtime consumers only receive [`ConfiguredBindingPayload`], whose flag is
+/// always finalized.
+#[derive(Clone, Debug)]
+pub(crate) struct ConfiguredBindingCandidate {
+    pub(crate) role: Option<RoleBinding>,
+    pub(crate) workspace: Option<String>,
+    pub(crate) thread_inherit: Option<bool>,
+}
+
+impl ConfiguredBindingCandidate {
+    pub(crate) fn owns_scope(&self) -> bool {
+        self.role.is_some() || self.workspace.is_some()
+    }
+
+    pub(crate) fn has_strict_signal(&self) -> bool {
+        self.owns_scope() || self.thread_inherit.is_some()
+    }
+
+    fn fill_missing_from(mut self, fallback: Self) -> Self {
+        if self.role.is_none() {
+            self.role = fallback.role;
+        }
+        if self.workspace.is_none() {
+            self.workspace = fallback.workspace;
+        }
+        if self.thread_inherit.is_none() {
+            self.thread_inherit = fallback.thread_inherit;
+        }
+        self
+    }
+
+    fn finalize(self) -> Option<ConfiguredBindingPayload> {
+        self.owns_scope().then(|| ConfiguredBindingPayload {
+            role: self.role,
+            workspace: self.workspace,
+            thread_inherit: self.thread_inherit.unwrap_or(true),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -22,7 +22,7 @@ pub(super) fn should_skip_self_authored_turn_message(
     author_id == current_bot_id
 }
 
-pub(super) fn should_skip_for_missing_required_mention(
+pub(in crate::services::discord) fn should_skip_for_missing_required_mention(
     settings: &DiscordBotSettings,
     effective_channel_id: serenity::ChannelId,
     is_dm: bool,

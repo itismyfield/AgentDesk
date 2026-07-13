@@ -641,15 +641,15 @@
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 102 | 102 | 0 |  |
 | `services::discord::restart_mode` | `src/services/discord/restart_mode.rs` | 32 | 32 | 0 |  |
 | `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 791 | 494 | 297 |  |
-| `services::discord::role_map` | `src/services/discord/role_map.rs` | 680 | 680 | 0 |  |
-| `services::discord::router` | `src/services/discord/router/mod.rs` | 31 | 31 | 0 |  |
+| `services::discord::role_map` | `src/services/discord/role_map.rs` | 729 | 729 | 0 |  |
+| `services::discord::router` | `src/services/discord/router/mod.rs` | 33 | 33 | 0 |  |
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 | 48 | 0 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 203 | 143 | 60 |  |
 | `services::discord::router::intake_dispatch` | `src/services/discord/router/intake_dispatch.rs` | 258 | 258 | 0 |  |
 | `services::discord::router::intake_dispatch::notice` | `src/services/discord/router/intake_dispatch/notice.rs` | 90 | 74 | 16 |  |
 | `services::discord::router::intake_dispatch::queued` | `src/services/discord/router/intake_dispatch/queued.rs` | 98 | 98 | 0 |  |
 | `services::discord::router::intake_dispatch::skill` | `src/services/discord/router/intake_dispatch/skill.rs` | 44 | 44 | 0 |  |
-| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1579 | 1541 | 38 | giant-file |
+| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1593 | 1555 | 38 | giant-file |
 | `services::discord::router::intake_gate::busy_duplicate_notice` | `src/services/discord/router/intake_gate/busy_duplicate_notice.rs` | 55 | 27 | 28 |  |
 | `services::discord::router::intake_gate::component_events` | `src/services/discord/router/intake_gate/component_events.rs` | 41 | 41 | 0 |  |
 | `services::discord::router::intake_gate::gate` | `src/services/discord/router/intake_gate/gate.rs` | 79 | 79 | 0 |  |
@@ -699,16 +699,16 @@
 | `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 432 | 128 | 304 |  |
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 75 | 75 | 0 |  |
 | `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 803 | 503 | 300 |  |
-| `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 899 | 373 | 526 |  |
-| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 347 | 314 | 33 |  |
+| `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 900 | 374 | 526 |  |
+| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 663 | 630 | 33 |  |
 | `services::discord::session_runtime::restore_cwd` | `src/services/discord/session_runtime/restore_cwd.rs` | 353 | 353 | 0 |  |
 | `services::discord::session_runtime::thread_bootstrap` | `src/services/discord/session_runtime/thread_bootstrap.rs` | 243 | 158 | 85 |  |
 | `services::discord::session_runtime::worktree` | `src/services/discord/session_runtime/worktree.rs` | 601 | 601 | 0 |  |
-| `services::discord::settings` | `src/services/discord/settings.rs` | 350 | 350 | 0 |  |
+| `services::discord::settings` | `src/services/discord/settings.rs` | 422 | 422 | 0 |  |
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 539 | 506 | 33 |  |
 | `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 152 | 152 | 0 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 449 | 449 | 0 |  |
-| `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 1093 | 358 | 735 |  |
+| `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 1138 | 403 | 735 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 386 | 386 | 0 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 81 | 81 | 0 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 749 | 678 | 71 |  |

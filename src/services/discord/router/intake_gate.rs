@@ -14,13 +14,16 @@ mod stale_turn;
 
 pub(in crate::services::discord) use gate::should_process_turn_message;
 #[cfg(test)]
+pub(in crate::services::discord) use gate::should_skip_for_missing_required_mention;
+#[cfg(test)]
 pub(super) use queue_effects::queue_pending_reaction_for;
 
+#[cfg(not(test))]
+use gate::should_skip_for_missing_required_mention;
 use gate::{
     bot_author_allowed_for_live_intake, should_merge_consecutive_messages,
-    should_skip_for_missing_required_mention, should_skip_human_slash_message,
-    should_skip_self_authored_turn_message, should_start_attachment_only_turn,
-    strip_leading_bot_mention,
+    should_skip_human_slash_message, should_skip_self_authored_turn_message,
+    should_start_attachment_only_turn, strip_leading_bot_mention,
 };
 pub(in crate::services::discord::router) use queue_effects::should_schedule_post_enqueue_idle_drain;
 use queue_effects::{IntakeGateQueueEffects, render_visible_queued_ack};
@@ -632,10 +635,19 @@ pub(in crate::services::discord) async fn handle_event(
             {
                 return Ok(());
             }
+            let runtime_binding = if !is_dm && !is_voice_transcript_announcement {
+                Some(resolve_runtime_channel_binding_resolution(&ctx.http, channel_id).await)
+            } else {
+                None
+            };
+            let mention_authority_channel_id = runtime_binding
+                .as_ref()
+                .map(|resolution| resolution.authority_channel_id())
+                .unwrap_or(channel_id);
             if !is_voice_transcript_announcement
                 && should_skip_for_missing_required_mention(
                     &settings_snapshot,
-                    effective_channel_id,
+                    mention_authority_channel_id,
                     is_dm,
                     &new_message.content,
                     ctx.cache.current_user().id,
@@ -643,10 +655,10 @@ pub(in crate::services::discord) async fn handle_event(
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] ⏭ MENTION-GUARD: skipping message {} in channel {} (effective {}) because bot mention is required",
+                    "  [{ts}] ⏭ MENTION-GUARD: skipping message {} in channel {} (authority {}) because bot mention is required",
                     new_message.id,
                     channel_id,
-                    effective_channel_id,
+                    mention_authority_channel_id,
                 );
                 return Ok(());
             }
@@ -664,7 +676,9 @@ pub(in crate::services::discord) async fn handle_event(
                 return Ok(());
             }
             if !is_dm && !is_voice_transcript_announcement {
-                match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
+                match runtime_binding
+                    .expect("non-DM non-voice binding resolution")
+                    .status()
                 {
                     RuntimeChannelBindingStatus::Owned => {}
                     RuntimeChannelBindingStatus::Unowned => {

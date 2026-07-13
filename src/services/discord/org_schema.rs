@@ -232,7 +232,7 @@ pub(super) fn resolve_thread_inherit(
 ) -> Option<bool> {
     let schema = load_org_schema()?;
     let (binding, _agent) = resolve_channel_binding(&schema, channel_id, channel_name)?;
-    Some(binding.thread_inherit.unwrap_or(true))
+    binding.thread_inherit
 }
 
 pub(super) fn resolve_workspace(
