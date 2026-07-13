@@ -409,6 +409,74 @@ class AuthorityFixtureTests(unittest.TestCase):
             with self.subTest(mutant=mutant):
                 self.assertIsNone(assess(observe(mutant)).candidate)
 
+    def test_observation_generation_requires_exact_u64_before_termination_authority(
+        self,
+    ) -> None:
+        now = ClockStamp(5_100, "boot-generation", 51)
+        proof = TerminationProof(
+            episode_key="ep-generation",
+            source_id="source-generation",
+            source_generation=1,
+            durable_anchor="anchor-generation",
+            queue=QueueDisposition.TERMINAL,
+            termination_id="termination-generation",
+            finalizer_committed=True,
+            watcher_stopped=True,
+            action_reprobe_at=now,
+        )
+
+        def observe(source_generation) -> Observation:
+            return Observation(
+                episode_key=proof.episode_key,
+                source_id=proof.source_id,
+                source_generation=source_generation,
+                durable_anchor=proof.durable_anchor,
+                observed_at=now,
+                queue=proof.queue,
+                termination_proof=proof,
+            )
+
+        valid = assess(observe(1))
+        self.assertEqual(valid.candidate, Verdict.PRODUCER_DEAD)
+        self.assertEqual(valid.action, AllowedAction.DELEGATE_EXACT_TERMINATION)
+
+        missing = assess(observe(None))
+        self.assertIsNone(missing.candidate)
+        self.assertEqual(missing.action, AllowedAction.NONE)
+
+        for case, source_generation in (
+            ("bool", True),
+            ("float", 1.0),
+            ("negative", -1),
+            ("overflow", MAX_U64 + 1),
+        ):
+            with self.subTest(case=case):
+                result = assess(observe(source_generation))
+                self.assertIsNone(result.candidate)
+                self.assertEqual(result.action, AllowedAction.NONE)
+                self.assertFalse(result.may_spend_automatic_action)
+                self.assertEqual(
+                    result.reason,
+                    "observation_source_generation_not_typed_or_out_of_range",
+                )
+
+    def test_untyped_termination_proof_is_inconclusive_without_exception(self) -> None:
+        base = Observation(
+            episode_key="ep-untyped-proof",
+            source_id="source-untyped-proof",
+            source_generation=1,
+            durable_anchor="anchor-untyped-proof",
+            observed_at=ClockStamp(5_200, "boot-untyped-proof", 52),
+            queue=QueueDisposition.TERMINAL,
+        )
+        for proof in ({"termination_id": "self-declared"}, "terminated"):
+            with self.subTest(proof=proof):
+                result = assess(replace(base, termination_proof=proof))
+                self.assertIsNone(result.candidate)
+                self.assertEqual(result.action, AllowedAction.NONE)
+                self.assertFalse(result.may_spend_automatic_action)
+                self.assertEqual(result.reason, "termination_proof_not_typed")
+
     def test_untyped_observation_enums_never_authorize_an_action(self) -> None:
         base = Observation(
             episode_key="ep-untyped",
@@ -1047,6 +1115,352 @@ class LedgerFaultTests(unittest.TestCase):
                 self.assertTrue(transition.must_reprobe)
                 self.assertEqual(transition.record, pending)
                 self.assertEqual(transition.reason, "delivery_proof_bool_not_typed")
+
+    def test_observation_generation_contract_guards_all_ledger_entrypoints(
+        self,
+    ) -> None:
+        reserved, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        expected_reason = (
+            "observation_source_generation_not_typed_or_out_of_range"
+        )
+
+        def observation(source_generation) -> Observation:
+            return replace(
+                repair_observation(
+                    reserved.episode_key,
+                    durable_anchor=reserved.durable_anchor,
+                    observed_at=now,
+                ),
+                source_generation=source_generation,
+            )
+
+        proof = delivery_proof(
+            reserved.episode_key,
+            now=now,
+            source_frontier=reserved.baseline_source,
+            committed_frontier=reserved.baseline_delivered,
+            durable_anchor=reserved.durable_anchor,
+        )
+
+        for case, source_generation in (
+            ("bool", True),
+            ("float", 1.0),
+            ("negative", -1),
+            ("overflow", MAX_U64 + 1),
+        ):
+            malformed = observation(source_generation)
+
+            with self.subTest(case=case, entrypoint="reserve"):
+                transition = reserve_attempt(
+                    None,
+                    malformed,
+                    attempt_id=f"invalid-generation-{case}",
+                    delivery_proof=proof,
+                    now=now,
+                )
+                self.assertFalse(transition.changed)
+                self.assertFalse(transition.must_reprobe)
+                self.assertIsNone(transition.record)
+                self.assertEqual(transition.reason, expected_reason)
+
+            with self.subTest(case=case, entrypoint="recover"):
+                transition = recover_after_crash(
+                    reserved,
+                    malformed,
+                    attempt_id=reserved.attempt_id,
+                )
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, reserved)
+                self.assertEqual(transition.reason, expected_reason)
+
+            with self.subTest(case=case, entrypoint="settle"):
+                transition = settle_effect(
+                    pending,
+                    malformed,
+                    attempt_id=pending.attempt_id,
+                    delivery_proof=proof,
+                    now=now,
+                )
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, pending)
+                self.assertEqual(transition.reason, expected_reason)
+
+        missing = observation(None)
+        missing_reserve = reserve_attempt(
+            None,
+            missing,
+            attempt_id="missing-generation",
+            delivery_proof=proof,
+            now=now,
+        )
+        self.assertFalse(missing_reserve.changed)
+        self.assertTrue(missing_reserve.must_reprobe)
+        self.assertIsNone(missing_reserve.record)
+
+        missing_recover = recover_after_crash(
+            reserved,
+            missing,
+            attempt_id=reserved.attempt_id,
+        )
+        self.assertFalse(missing_recover.changed)
+        self.assertTrue(missing_recover.must_reprobe)
+        self.assertEqual(missing_recover.record, reserved)
+
+        missing_settle = settle_effect(
+            pending,
+            missing,
+            attempt_id=pending.attempt_id,
+            delivery_proof=proof,
+            now=now,
+        )
+        self.assertFalse(missing_settle.changed)
+        self.assertTrue(missing_settle.must_reprobe)
+        self.assertEqual(missing_settle.record, pending)
+
+        valid = observation(1)
+        valid_reserve = reserve_attempt(
+            None,
+            valid,
+            attempt_id="valid-generation",
+            delivery_proof=proof,
+            now=now,
+        )
+        self.assertTrue(valid_reserve.changed, valid_reserve.reason)
+        self.assertEqual(valid_reserve.reason, "reserved_without_spend")
+
+        valid_recover = recover_after_crash(
+            reserved,
+            valid,
+            attempt_id=reserved.attempt_id,
+        )
+        self.assertTrue(valid_recover.changed, valid_recover.reason)
+        self.assertFalse(valid_recover.must_reprobe)
+        self.assertEqual(valid_recover.reason, "reserved_action_not_invoked")
+
+        valid_settle = settle_effect(
+            pending,
+            valid,
+            attempt_id=pending.attempt_id,
+            delivery_proof=proof,
+            now=now,
+        )
+        self.assertTrue(valid_settle.changed, valid_settle.reason)
+        self.assertFalse(valid_settle.must_reprobe)
+        self.assertEqual(valid_settle.reason, "no_delivery_progress")
+
+    def test_reserve_rejects_reused_attempt_and_proof_record_identity_mismatch(
+        self,
+    ) -> None:
+        reserved, _ = self._reserve_and_mark()
+        settled = replace(reserved, state=LedgerState.SETTLED)
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+
+        reused = reserve_attempt(
+            settled,
+            repair_observation(
+                settled.episode_key,
+                durable_anchor=settled.durable_anchor,
+                observed_at=now,
+            ),
+            attempt_id=settled.attempt_id,
+            delivery_proof=delivery_proof(
+                settled.episode_key,
+                now=now,
+                source_frontier=settled.baseline_source,
+                committed_frontier=settled.baseline_delivered,
+                durable_anchor=settled.durable_anchor,
+            ),
+            now=now,
+        )
+        self.assertFalse(reused.changed)
+        self.assertEqual(reused.record, settled)
+        self.assertEqual(reused.reason, "attempt_id_reused")
+
+        rebound_observation = repair_observation(
+            settled.episode_key,
+            source_generation=settled.source_generation + 1,
+            durable_anchor=settled.durable_anchor,
+            observed_at=now,
+        )
+        mismatched = reserve_attempt(
+            settled,
+            rebound_observation,
+            attempt_id="attempt-rebound",
+            delivery_proof=delivery_proof(
+                settled.episode_key,
+                now=now,
+                source_frontier=settled.baseline_source,
+                committed_frontier=settled.baseline_delivered,
+                source_generation=settled.source_generation + 1,
+                durable_anchor=settled.durable_anchor,
+            ),
+            now=now,
+        )
+        self.assertFalse(mismatched.changed)
+        self.assertTrue(mismatched.must_reprobe)
+        self.assertEqual(mismatched.record, settled)
+        self.assertEqual(mismatched.reason, "delivery_proof_record_identity_mismatch")
+
+    def test_reserve_honors_backoff_before_creating_a_new_attempt(self) -> None:
+        _, pending = self._reserve_and_mark()
+        settled = self._settle_pending(
+            pending,
+            source=pending.baseline_source,
+            delivered=pending.baseline_delivered,
+            wall=1_000_010,
+            mono=10_010,
+        ).record
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        self.assertGreater(settled.retry_not_before_ms, now.wall_ms)
+        blocked = reserve_attempt(
+            settled,
+            repair_observation(
+                settled.episode_key,
+                durable_anchor=settled.durable_anchor,
+                observed_at=now,
+            ),
+            attempt_id="attempt-during-backoff",
+            delivery_proof=delivery_proof(
+                settled.episode_key,
+                now=now,
+                source_frontier=settled.baseline_source,
+                committed_frontier=settled.baseline_delivered,
+                durable_anchor=settled.durable_anchor,
+            ),
+            now=now,
+        )
+        self.assertFalse(blocked.changed)
+        self.assertEqual(blocked.record, settled)
+        self.assertEqual(blocked.reason, "backoff_active")
+
+    def test_reserve_rejects_each_record_frontier_regression_and_progress_lie(
+        self,
+    ) -> None:
+        reserved, _ = self._reserve_and_mark()
+        settled = replace(reserved, state=LedgerState.SETTLED)
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        cases = (
+            (
+                "source_frontier",
+                settled.baseline_source - 1,
+                settled.baseline_delivered,
+                settled.durable_anchor,
+                False,
+                "delivery_source_frontier_regressed",
+            ),
+            (
+                "delivery_frontier",
+                settled.baseline_source,
+                settled.baseline_delivered - 1,
+                "anchor-regressed",
+                False,
+                "delivery_frontier_regressed",
+            ),
+            (
+                "progress_claim",
+                settled.baseline_source + 1,
+                settled.baseline_delivered + 1,
+                "anchor-advanced",
+                False,
+                "delivery_progress_claim_mismatch",
+            ),
+        )
+        for case, source, delivered, anchor, claimed_progress, reason in cases:
+            observation = repair_observation(
+                settled.episode_key,
+                durable_anchor=anchor,
+                observed_at=now,
+                delivery_progress=claimed_progress,
+            )
+            transition = reserve_attempt(
+                settled,
+                observation,
+                attempt_id=f"attempt-{case}",
+                delivery_proof=delivery_proof(
+                    settled.episode_key,
+                    now=now,
+                    source_frontier=source,
+                    committed_frontier=delivered,
+                    durable_anchor=anchor,
+                ),
+                now=now,
+            )
+            with self.subTest(case=case):
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, settled)
+                self.assertEqual(transition.reason, reason)
+
+    def test_settle_rejects_inconclusive_delivery_queue_before_state_change(
+        self,
+    ) -> None:
+        _, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        observation = repair_observation(
+            pending.episode_key,
+            durable_anchor=pending.durable_anchor,
+            observed_at=now,
+            queue=QueueDisposition.RETRYABLE,
+        )
+        transition = settle_effect(
+            pending,
+            observation,
+            attempt_id=pending.attempt_id,
+            delivery_proof=delivery_proof(
+                pending.episode_key,
+                now=now,
+                source_frontier=pending.baseline_source,
+                committed_frontier=pending.baseline_delivered,
+                durable_anchor=pending.durable_anchor,
+                queue=QueueDisposition.RETRYABLE,
+            ),
+            now=now,
+        )
+        self.assertFalse(transition.changed)
+        self.assertTrue(transition.must_reprobe)
+        self.assertEqual(transition.record, pending)
+        self.assertEqual(transition.reason, "delivery_proof_queue_inconclusive")
+
+    def test_successor_settlement_requires_safe_queue_and_action_time_reprobe(
+        self,
+    ) -> None:
+        _, pending = self._reserve_and_mark()
+        now = ClockStamp(1_000_100, "boot-a", 10_100)
+        cases = (
+            (
+                "queue",
+                QueueDisposition.RETRYABLE,
+                now,
+            ),
+            (
+                "action_time",
+                QueueDisposition.ACTIVE,
+                ClockStamp(now.wall_ms - 1, now.boot_id, now.monotonic_ms - 1),
+            ),
+        )
+        for case, queue, observed_at in cases:
+            transition = settle_effect(
+                pending,
+                repair_observation(
+                    "ep-successor-guard",
+                    continuity=InflightContinuity.REPLACED,
+                    source_generation=pending.source_generation + 1,
+                    durable_anchor="anchor-successor-guard",
+                    observed_at=observed_at,
+                    queue=queue,
+                ),
+                attempt_id=pending.attempt_id,
+                delivery_proof=None,
+                now=now,
+            )
+            with self.subTest(case=case):
+                self.assertFalse(transition.changed)
+                self.assertTrue(transition.must_reprobe)
+                self.assertEqual(transition.record, pending)
+                self.assertEqual(transition.reason, "successor_identity_inconclusive")
 
     def test_delivery_proof_requires_generation_and_anchor_advance(self) -> None:
         _, pending = self._reserve_and_mark()
@@ -1961,6 +2375,67 @@ class EvidenceOracleTests(unittest.TestCase):
 
     def test_good_bundle_reconciles_source_dispositions_discord_and_frontier(self) -> None:
         self.assertEqual(self.validate(self.good), [])
+
+    def test_oracle_load_bearing_known_answer_guards(self) -> None:
+        external_scope_errors = validate_evidence_bundle(
+            self.good,
+            pinned_manifest=self.pins["pinned_manifest"],
+            actual_source_id="other-external-source",
+            actual_source_bytes=self.pins["actual_source_utf8"].encode("utf-8"),
+            discord_channel_id=self.pins["discord_channel_id"],
+            discord_after_message_id=self.pins["discord_after_message_id"],
+        )
+        self.assertIn(
+            "external_source_or_discord_scope_mismatch", external_scope_errors
+        )
+
+        delivery_identity = copy.deepcopy(self.good)
+        delivery_identity["delivery_observation"]["source_id"] = "other-source"
+        self.assertIn(
+            "delivery_source_identity_mismatch", self.validate(delivery_identity)
+        )
+
+        anchor_bundle = copy.deepcopy(self.good)
+        anchor_pins = copy.deepcopy(self.pins["pinned_manifest"])
+        unchanged_anchor = anchor_bundle["manifest"]["durable_anchor_before"]
+        anchor_bundle["manifest"]["durable_anchor_after"] = unchanged_anchor
+        anchor_bundle["delivery_observation"]["durable_anchor"] = unchanged_anchor
+        anchor_pins["durable_anchor_after"] = unchanged_anchor
+        anchor_errors = validate_evidence_bundle(
+            anchor_bundle,
+            pinned_manifest=anchor_pins,
+            actual_source_id=self.pins["actual_source_id"],
+            actual_source_bytes=self.pins["actual_source_utf8"].encode("utf-8"),
+            discord_channel_id=self.pins["discord_channel_id"],
+            discord_after_message_id=self.pins["discord_after_message_id"],
+        )
+        self.assertIn("manifest_durable_anchor_did_not_advance", anchor_errors)
+
+        normalization = copy.deepcopy(self.good)
+        normalization["discord_observations"][0]["raw_body"] += "mutant"
+        self.assertIn("discord_normalization_mismatch", self.validate(normalization))
+
+        wrong_role = copy.deepcopy(self.good)
+        wrong_role["discord_observations"][0]["message_role"] = "panel"
+        self.assertIn("discord_message_wrong_role", self.validate(wrong_role))
+
+        declared_body_hash = copy.deepcopy(self.good)
+        declared_body_hash["dispositions"][0]["expected_body_sha256"] = "0" * 64
+        self.assertIn(
+            "expected_body_hash_not_recomputed", self.validate(declared_body_hash)
+        )
+
+        source_end = copy.deepcopy(self.good)
+        source_end["source_ranges"] = source_end["source_ranges"][:-1]
+        source_end["dispositions"] = source_end["dispositions"][:-1]
+        self.assertIn("source_end_mismatch", self.validate(source_end))
+
+        frontier_gap = copy.deepcopy(self.good)
+        frontier_gap["dispositions"][0], frontier_gap["dispositions"][1] = (
+            frontier_gap["dispositions"][1],
+            frontier_gap["dispositions"][0],
+        )
+        self.assertIn("committed_frontier_gap_or_order", self.validate(frontier_gap))
 
     def test_missing_discord_message_is_rejected(self) -> None:
         broken = copy.deepcopy(self.good)

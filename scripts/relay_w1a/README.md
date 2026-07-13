@@ -63,11 +63,11 @@ message id reused anywhere in that extent.
 
 ## Fixtures and tests
 
-`fixtures/incidents.json` contains the authority matrix, executable ledger and
-backpressure fault cases, the continuous #4104 E-22
-`Missing -> ReappearedSame -> PresentStable` sequence, and a complete oracle
-example with separately supplied pins. The suite invokes the model for every
-fault fixture; fixture names alone are not treated as evidence.
+`fixtures/incidents.json` contains the authority matrix, isolated executable
+ledger and backpressure fault cases, and a complete oracle example with
+separately supplied pins. The test suite constructs the continuous #4104 E-22
+`Missing -> ReappearedSame -> PresentStable` sequence directly. It invokes the
+model for every fault fixture; fixture names alone are not treated as evidence.
 
 Run the isolated standard-library suite from the repository root:
 

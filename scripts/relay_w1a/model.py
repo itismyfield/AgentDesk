@@ -146,6 +146,11 @@ def _observation_contract_error(observation: Observation) -> str | None:
         )
     ):
         return "observation_bool_not_typed"
+    if observation.source_generation is not None and (
+        type(observation.source_generation) is not int
+        or not 0 <= observation.source_generation <= MAX_U64
+    ):
+        return "observation_source_generation_not_typed_or_out_of_range"
     return None
 
 
@@ -178,6 +183,8 @@ def assess(observation: Observation) -> Assessment:
 
     if observation.termination_proof is not None:
         proof = observation.termination_proof
+        if not isinstance(proof, TerminationProof):
+            return _inconclusive("termination_proof_not_typed")
         proof_matches = (
             isinstance(proof.queue, QueueDisposition)
             and isinstance(observation.queue, QueueDisposition)
