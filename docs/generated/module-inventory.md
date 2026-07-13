@@ -56,7 +56,7 @@
 | `app_state` | `src/app_state.rs` | 47 | 47 | 0 |  |
 | `bootstrap` | `src/bootstrap.rs` | 93 | 93 | 0 |  |
 | `cli` | `src/cli/mod.rs` | 25 | 25 | 0 |  |
-| `cli::args` | `src/cli/args.rs` | 1205 | 960 | 245 |  |
+| `cli::args` | `src/cli/args.rs` | 1350 | 960 | 390 |  |
 | `cli::client` | `src/cli/client.rs` | 2732 | 2474 | 258 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1667 | 1667 | 0 | giant-file |
 | `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 913 | 455 | 458 |  |
@@ -80,7 +80,7 @@
 | `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 1039 | 1039 | 0 | giant-file |
 | `cli::query` | `src/cli/query.rs` | 462 | 379 | 83 |  |
 | `cli::run` | `src/cli/run.rs` | 839 | 792 | 47 |  |
-| `cli::utils` | `src/cli/utils.rs` | 581 | 473 | 108 |  |
+| `cli::utils` | `src/cli/utils.rs` | 510 | 402 | 108 |  |
 | `compat` | `src/compat/mod.rs` | 39 | 39 | 0 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 | 12 | 0 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 27 | 27 | 0 |  |
