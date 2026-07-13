@@ -1,0 +1,426 @@
+{
+  "schema_version": 1,
+  "authority_cases": [
+    {
+      "name": "4178_source_live_delivery_frozen",
+      "observation": {
+        "episode_key": "ep-4178",
+        "continuity": "present_stable",
+        "queue": "active",
+        "source_progress": true,
+        "control_contradiction": true
+      },
+      "expected_candidate": "control_plane_desync",
+      "expected_action": "repair_control_plane",
+      "expected_spend": true
+    },
+    {
+      "name": "quiet_is_not_death",
+      "observation": {
+        "episode_key": "ep-quiet",
+        "continuity": "present_stable",
+        "queue": "active"
+      },
+      "expected_candidate": null,
+      "expected_action": "none",
+      "expected_spend": false
+    },
+    {
+      "name": "failed_repairs_are_not_death",
+      "observation": {
+        "episode_key": "ep-no-effect",
+        "continuity": "present_stable",
+        "queue": "active",
+        "failed_repairs": 2
+      },
+      "expected_candidate": null,
+      "expected_action": "none",
+      "expected_spend": false
+    },
+    {
+      "name": "five_hour_live_source_is_not_dead",
+      "observation": {
+        "episode_key": "ep-five-hours",
+        "continuity": "present_stable",
+        "queue": "active",
+        "source_progress": true
+      },
+      "expected_candidate": "producer_live",
+      "expected_action": "observe",
+      "expected_spend": false
+    },
+    {
+      "name": "malformed_clock_is_inconclusive",
+      "observation": {
+        "episode_key": "ep-clock",
+        "continuity": "present_stable",
+        "queue": "active",
+        "clock_valid": false,
+        "source_progress": true
+      },
+      "expected_candidate": null,
+      "expected_action": "none",
+      "expected_spend": false
+    },
+    {
+      "name": "4485_affirmative_death_with_terminal_queue",
+      "observation": {
+        "episode_key": "ep-4485",
+        "source_id": "source-4485",
+        "source_generation": 3,
+        "durable_anchor": "anchor-4485",
+        "observed_at": {
+          "wall_ms": 1000,
+          "boot_id": "boot-4485",
+          "monotonic_ms": 10
+        },
+        "continuity": "present_stable",
+        "queue": "terminal",
+        "termination_proof": {
+          "episode_key": "ep-4485",
+          "source_id": "source-4485",
+          "source_generation": 3,
+          "durable_anchor": "anchor-4485",
+          "queue": "terminal",
+          "termination_id": "termination-4485",
+          "finalizer_committed": true,
+          "watcher_stopped": true,
+          "action_reprobe_at": {
+            "wall_ms": 1000,
+            "boot_id": "boot-4485",
+            "monotonic_ms": 10
+          }
+        }
+      },
+      "expected_candidate": "producer_dead",
+      "expected_action": "delegate_exact_termination",
+      "expected_spend": false
+    },
+    {
+      "name": "4485_death_proof_with_active_queue_fails_closed",
+      "observation": {
+        "episode_key": "ep-4485-active",
+        "source_id": "source-4485-active",
+        "source_generation": 4,
+        "durable_anchor": "anchor-4485-active",
+        "observed_at": {
+          "wall_ms": 2000,
+          "boot_id": "boot-4485",
+          "monotonic_ms": 20
+        },
+        "continuity": "present_stable",
+        "queue": "active",
+        "termination_proof": {
+          "episode_key": "ep-4485-active",
+          "source_id": "source-4485-active",
+          "source_generation": 4,
+          "durable_anchor": "anchor-4485-active",
+          "queue": "active",
+          "termination_id": "termination-4485-active",
+          "finalizer_committed": true,
+          "watcher_stopped": true,
+          "action_reprobe_at": {
+            "wall_ms": 2000,
+            "boot_id": "boot-4485",
+            "monotonic_ms": 20
+          }
+        }
+      },
+      "expected_candidate": null,
+      "expected_action": "none",
+      "expected_spend": false
+    },
+    {
+      "name": "4247_unknown_queue_inhibits_repair_and_death",
+      "observation": {
+        "episode_key": "ep-4247",
+        "continuity": "present_stable",
+        "queue": "unknown",
+        "source_progress": true,
+        "control_contradiction": true
+      },
+      "expected_candidate": null,
+      "expected_action": "none",
+      "expected_spend": false
+    },
+    {
+      "name": "4104_inflight_missing_is_inconclusive",
+      "observation": {
+        "episode_key": "ep-4104",
+        "continuity": "missing",
+        "queue": "active",
+        "source_progress": true,
+        "control_contradiction": true
+      },
+      "expected_candidate": null,
+      "expected_action": "none",
+      "expected_spend": false
+    },
+    {
+      "name": "4104_same_row_reappeared_needs_stability",
+      "observation": {
+        "episode_key": "ep-4104",
+        "continuity": "reappeared_same",
+        "queue": "active",
+        "source_progress": true,
+        "control_contradiction": true
+      },
+      "expected_candidate": null,
+      "expected_action": "none",
+      "expected_spend": false
+    },
+    {
+      "name": "delivered_terminal_typed_idle",
+      "observation": {
+        "episode_key": "ep-idle",
+        "continuity": "present_stable",
+        "queue": "idle",
+        "terminal_delivery_committed": true,
+        "typed_idle": true
+      },
+      "expected_candidate": "delivered_idle",
+      "expected_action": "observe",
+      "expected_spend": false
+    }
+  ],
+  "fault_cases": [
+    {
+      "name": "reserved_crash_is_cancelled_without_spend",
+      "operation": "recover_reserved",
+      "input": {"episode": "fixture-reserved", "source": 100, "delivered": 10},
+      "expected": {"changed": true, "state": "settled", "attempts_spent": 0, "must_reprobe": false}
+    },
+    {
+      "name": "effect_pending_crash_requires_reprobe",
+      "operation": "recover_pending",
+      "input": {"episode": "fixture-pending", "source": 100, "delivered": 10},
+      "expected": {"changed": false, "state": "effect_pending", "attempts_spent": 1, "must_reprobe": true}
+    },
+    {
+      "name": "source_only_progress_does_not_rearm",
+      "operation": "circuit_rearm",
+      "input": {"episode": "fixture-source-only", "delivered_after": 10},
+      "expected": {"changed": false, "reason": "same_episode_circuit_open", "lifetime_no_effect_count": 2}
+    },
+    {
+      "name": "delivery_progress_rearms_same_episode",
+      "operation": "circuit_rearm",
+      "input": {"episode": "fixture-delivery", "delivered_after": 11},
+      "expected": {"changed": true, "reason": "reserved_without_spend", "lifetime_no_effect_count": 0}
+    },
+    {
+      "name": "4104_missing_pending_freezes_without_retry",
+      "operation": "pending_continuity",
+      "input": {"episode": "fixture-4104", "continuity": "missing"},
+      "expected": {"changed": false, "must_reprobe": true, "state": "effect_pending", "attempts_spent": 1}
+    },
+    {
+      "name": "clock_rollback_fails_closed",
+      "operation": "clock_transition",
+      "input": {
+        "previous": {"wall_ms": 10000, "boot_id": "boot-a", "monotonic_ms": 500},
+        "current": {"wall_ms": 9999, "boot_id": "boot-a", "monotonic_ms": 499},
+        "trusted_now": {"wall_ms": 10000, "boot_id": "boot-a", "monotonic_ms": 500},
+        "max_future_skew_ms": 100
+      },
+      "expected": {"allowed": false}
+    },
+    {
+      "name": "future_schema_fails_closed",
+      "operation": "load_ledger",
+      "input": {"raw": "{\"schema_version\":2}"},
+      "expected": {"fail_closed": true, "reason": "future_or_unknown_schema"}
+    },
+    {
+      "name": "corrupt_record_fails_closed",
+      "operation": "load_ledger",
+      "input": {"raw": "{"},
+      "expected": {"fail_closed": true, "reason": "corrupt_json"}
+    },
+    {
+      "name": "oversized_assistant_range_does_not_advance",
+      "operation": "plan_single_range",
+      "input": {"kind": "assistant_text", "body_bytes": 100, "max_items": 4, "max_bytes": 50},
+      "expected": {"processed_end": 0, "blocked_reason": "high_value_range_requires_utf8_safe_split", "dispositions": 0}
+    },
+    {
+      "name": "tool_bulk_summary_advances_after_commit",
+      "operation": "plan_single_range",
+      "input": {"kind": "tool_bulk", "body_bytes": 500, "max_items": 1, "max_bytes": 300},
+      "expected": {"processed_end": 500, "blocked_reason": null, "dispositions": 1, "committed_frontier": 500}
+    }
+  ],
+  "oracle_pinned_inputs": {
+    "pinned_manifest": {
+      "schema_version": 1,
+      "run_id": "run4254",
+      "case_id": "high-volume",
+      "provider": "codex",
+      "channel_id": "1479671301387059200",
+      "base_sha": "b9026baf724b35d2acd9db6bccc8895fab07a902",
+      "binary_sha": "1111111111111111111111111111111111111111",
+      "policy_version": "relay-target-v1",
+      "normalization_version": "discord-body-v1",
+      "actual_source_id": "rollout-019f4254",
+      "source_generation": 7,
+      "coordinate_space": "raw_utf8_bytes",
+      "source_start": 0,
+      "source_end": 123,
+      "durable_frontier_before": 0,
+      "durable_anchor_before": "anchor-4254-0",
+      "durable_anchor_after": "anchor-4254-123",
+      "bot_author_id": "424254",
+      "discord_after_message_id": "999",
+      "started_at": "2026-07-13T10:00:00Z",
+      "discord_complete": true
+    },
+    "actual_source_id": "rollout-019f4254",
+    "actual_source_utf8": "[ADK-E2E:run4254:high-volume:1:BEGIN]answer-one[ADK-E2E:run4254:high-volume:2:END]tool-output:xxxxxxxxxxxxxxxcontrol-record",
+    "discord_channel_id": "1479671301387059200",
+    "discord_after_message_id": "999"
+  },
+  "oracle_good_bundle": {
+    "manifest": {
+      "schema_version": 1,
+      "run_id": "run4254",
+      "case_id": "high-volume",
+      "provider": "codex",
+      "channel_id": "1479671301387059200",
+      "base_sha": "b9026baf724b35d2acd9db6bccc8895fab07a902",
+      "binary_sha": "1111111111111111111111111111111111111111",
+      "policy_version": "relay-target-v1",
+      "normalization_version": "discord-body-v1",
+      "actual_source_id": "rollout-019f4254",
+      "source_generation": 7,
+      "coordinate_space": "raw_utf8_bytes",
+      "source_start": 0,
+      "source_end": 123,
+      "durable_frontier_before": 0,
+      "durable_anchor_before": "anchor-4254-0",
+      "durable_anchor_after": "anchor-4254-123",
+      "bot_author_id": "424254",
+      "discord_after_message_id": "999",
+      "started_at": "2026-07-13T10:00:00Z",
+      "discord_complete": true
+    },
+    "source_ranges": [
+      {
+        "range_id": "r1",
+        "start": 0,
+        "end": 47,
+        "kind": "assistant_text",
+        "sha256": "b13978d97291ab50c695ca9767556eefa2e22facd60df0524421c6312bcd0b51",
+        "marker": "[ADK-E2E:run4254:high-volume:1:BEGIN]",
+        "marker_in_source": true
+      },
+      {
+        "range_id": "r2",
+        "start": 47,
+        "end": 109,
+        "kind": "tool_bulk",
+        "sha256": "8eeb58ba99884c0c203135d0fd2635297cf42161a88a8cb2d19ec4ae1ee23143",
+        "marker": "[ADK-E2E:run4254:high-volume:2:END]",
+        "marker_in_source": true
+      },
+      {
+        "range_id": "r3",
+        "start": 109,
+        "end": 123,
+        "kind": "control",
+        "sha256": "19dc6803cbc0d8f302c6cb9c2634bc150bc119a0255058aa4fc388e5c40d12c5",
+        "marker": null
+      }
+    ],
+    "dispositions": [
+      {
+        "range_ids": ["r1"],
+        "kind": "delivered",
+        "policy_reason": "assistant_text_must_deliver",
+        "source_sha256": "b13978d97291ab50c695ca9767556eefa2e22facd60df0524421c6312bcd0b51",
+        "source_range_sha256s": ["b13978d97291ab50c695ca9767556eefa2e22facd60df0524421c6312bcd0b51"],
+        "discord_message_ids": ["1001"],
+        "expected_body_sha256": "b13978d97291ab50c695ca9767556eefa2e22facd60df0524421c6312bcd0b51",
+        "committed": true
+      },
+      {
+        "range_ids": ["r2"],
+        "kind": "summarized",
+        "policy_reason": "relay-target-v1:tool_bulk_overflow",
+        "source_sha256": "8eeb58ba99884c0c203135d0fd2635297cf42161a88a8cb2d19ec4ae1ee23143",
+        "source_range_sha256s": ["8eeb58ba99884c0c203135d0fd2635297cf42161a88a8cb2d19ec4ae1ee23143"],
+        "discord_message_ids": ["1002"],
+        "expected_body_sha256": "38fae5215b6d510bdf8b8d194dcb73bfc9beadab5613aba9a982788dd585a95a",
+        "committed": true
+      },
+      {
+        "range_ids": ["r3"],
+        "kind": "omitted_policy",
+        "policy_reason": "relay-target-v1:control",
+        "source_sha256": "19dc6803cbc0d8f302c6cb9c2634bc150bc119a0255058aa4fc388e5c40d12c5",
+        "source_range_sha256s": ["19dc6803cbc0d8f302c6cb9c2634bc150bc119a0255058aa4fc388e5c40d12c5"],
+        "discord_message_ids": [],
+        "expected_body_sha256": null,
+        "committed": true
+      }
+    ],
+    "discord_observations": [
+      {
+        "message_id": "1001",
+        "channel_id": "1479671301387059200",
+        "author_id": "424254",
+        "observed_at": "2026-07-13T10:00:01Z",
+        "edited_at": null,
+        "revision_index": 0,
+        "message_role": "relay_body",
+        "raw_body": "[ADK-E2E:run4254:high-volume:1:BEGIN]answer-one",
+        "normalized_body": "[ADK-E2E:run4254:high-volume:1:BEGIN]answer-one"
+      },
+      {
+        "message_id": "1002",
+        "channel_id": "1479671301387059200",
+        "author_id": "424254",
+        "observed_at": "2026-07-13T10:00:02Z",
+        "edited_at": null,
+        "revision_index": 0,
+        "message_role": "relay_body",
+        "raw_body": "[AgentDesk summary policy=relay-target-v1 range=47:109 records=1 raw_bytes=62 sha256=8eeb58ba99884c0c203135d0fd2635297cf42161a88a8cb2d19ec4ae1ee23143 markers=[ADK-E2E:run4254:high-volume:2:END]]",
+        "normalized_body": "[AgentDesk summary policy=relay-target-v1 range=47:109 records=1 raw_bytes=62 sha256=8eeb58ba99884c0c203135d0fd2635297cf42161a88a8cb2d19ec4ae1ee23143 markers=[ADK-E2E:run4254:high-volume:2:END]]"
+      },
+      {
+        "message_id": "1003",
+        "channel_id": "1479671301387059200",
+        "author_id": "424254",
+        "observed_at": "2026-07-13T10:00:02Z",
+        "edited_at": null,
+        "revision_index": 0,
+        "message_role": "panel",
+        "raw_body": "working",
+        "normalized_body": "working"
+      }
+    ],
+    "delivery_observation": {
+      "source_id": "rollout-019f4254",
+      "source_generation": 7,
+      "committed_frontier": 123,
+      "durable_anchor": "anchor-4254-123"
+    },
+    "unrelated_sessions": [
+      {
+        "channel_id": "1479671298497183835",
+        "provider": "claude",
+        "identity_complete": true,
+        "observed_at": "2026-07-13T10:00:03Z",
+        "relay_gap": false,
+        "regression": false
+      },
+      {
+        "channel_id": "1479671301387059111",
+        "provider": "codex",
+        "identity_complete": true,
+        "observed_at": "2026-07-13T10:00:03Z",
+        "relay_gap": false,
+        "regression": false
+      }
+    ]
+  }
+}

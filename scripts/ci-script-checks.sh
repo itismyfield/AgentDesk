@@ -58,6 +58,10 @@ echo "=== Alert dedupe/authority/routing wiring contract (#4448/#4449) ==="
 echo "=== State/lint hardening guard ==="
 "$PYTHON" scripts/audit_state_lint_hardening.py
 
+echo "=== Relay W1-A executable contract (#4254) ==="
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m unittest discover \
+  -s scripts/relay_w1a/tests -p 'test_*.py'
+
 echo "=== Policy DB capability manifest guard (#3734) ==="
 "$PYTHON" scripts/check_policy_db_capabilities.py --no-silent-growth \
   --require-manifest policies/timeouts/active-monitor.cap.yaml \
