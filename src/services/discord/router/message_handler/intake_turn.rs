@@ -990,6 +990,7 @@ pub(super) async fn handle_text_message(
             current_path = active_worktree_path.to_string();
         }
     }
+    let thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;
     // Sanitize input
     let sanitized_input =
         ai_screen::sanitize_user_input(voice_prompt_text.as_deref().unwrap_or(user_text));
@@ -1005,7 +1006,7 @@ pub(super) async fn handle_text_message(
                 .sessions
                 .get(&channel_id)
                 .and_then(|s| s.channel_name.as_deref());
-            resolve_thread_role(channel_id, ch_name, early_thread_parent.as_ref())
+            resolve_thread_role(channel_id, ch_name, thread_parent.as_ref())
         };
     let role_binding = resolved_role.binding.take().or_else(|| {
         dm_default_agent
@@ -1122,7 +1123,6 @@ pub(super) async fn handle_text_message(
         }
     }
 
-    let thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;
     let fast_mode_channel_id = effective_fast_mode_channel_id(channel_id, thread_parent.clone());
     super::super::super::commands::reset_provider_session_if_pending(
         http,

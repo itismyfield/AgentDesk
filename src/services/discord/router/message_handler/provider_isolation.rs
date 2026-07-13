@@ -651,4 +651,67 @@ mod thread_role_tests {
             Some("thread"),
         );
     }
+
+    #[test]
+    fn dispatch_redirect_uses_child_thread_parent_for_role_and_memory_scope() {
+        const PARENT_ID: u64 = 1479671301387059200;
+        let root = tempfile::tempdir().expect("temp AgentDesk root");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("agentdesk.yaml"),
+            format!(
+                r#"server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "{PARENT_ID}"
+        name: adk-cdx
+        prompt_file: /tmp/project-agentdesk.md
+"#
+            ),
+        )
+        .expect("write AgentDesk config");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let original_parent = ChannelId::new(PARENT_ID);
+        let redirected_child = ChannelId::new(1479671301387059299);
+        let post_redirect_parent = Some((original_parent, Some("adk-cdx".to_string())));
+
+        let resolved = resolve_thread_role(
+            redirected_child,
+            Some("dispatch-child"),
+            post_redirect_parent.as_ref(),
+        );
+
+        assert_eq!(resolved.inherited_parent_id, Some(original_parent));
+        assert_eq!(
+            resolved.memory_channel_id(redirected_child),
+            original_parent
+        );
+        assert_eq!(
+            resolved
+                .binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
+            Some("project-agentdesk")
+        );
+
+        let intake = include_str!("intake_turn.rs");
+        let redirect_pos = intake
+            .find("let channel_id = if let Some(ref did) = dispatch_id_for_thread")
+            .expect("dispatch redirect finalizes channel_id");
+        let post_redirect_lookup = intake[redirect_pos..]
+            .find("let thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;")
+            .map(|offset| redirect_pos + offset)
+            .expect("post-redirect parent lookup exists");
+        let role_use = intake[post_redirect_lookup..]
+            .find("resolve_thread_role(channel_id, ch_name, thread_parent.as_ref())")
+            .map(|offset| post_redirect_lookup + offset)
+            .expect("live role resolution uses post-redirect parent");
+        assert!(redirect_pos < post_redirect_lookup && post_redirect_lookup < role_use);
+    }
 }
