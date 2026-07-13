@@ -106,7 +106,7 @@
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1593 |
 | `src/services/routines/store.rs` | 3505 |
-| `src/services/settings.rs` | 1114 |
+| `src/services/settings.rs` | 1067 |
 | `src/services/tui_prompt_dedupe.rs` | 1966 |
 | `src/services/turn_orchestrator.rs` | 3290 |
 | `src/voice/receiver.rs` | 1108 |

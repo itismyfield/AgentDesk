@@ -163,7 +163,7 @@
 | `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 662 | 662 | 0 |  |
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 448 | 448 | 0 |  |
 | `engine::ops::ci_recovery_ops` | `src/engine/ops/ci_recovery_ops.rs` | 347 | 347 | 0 |  |
-| `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 59 | 59 | 0 |  |
+| `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 473 | 108 | 365 |  |
 | `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1640 | 1212 | 428 | giant-file |
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 364 | 364 | 0 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 376 | 376 | 0 |  |
@@ -1034,7 +1034,7 @@
 | `services::session_backend::terminal_usage` | `src/services/session_backend/terminal_usage.rs` | 212 | 106 | 106 |  |
 | `services::session_forwarding` | `src/services/session_forwarding.rs` | 493 | 315 | 178 |  |
 | `services::session_selector_validity` | `src/services/session_selector_validity.rs` | 395 | 149 | 246 |  |
-| `services::settings` | `src/services/settings.rs` | 1273 | 1114 | 159 | giant-file |
+| `services::settings` | `src/services/settings.rs` | 1491 | 1067 | 424 | giant-file |
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 535 | 508 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |

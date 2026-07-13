@@ -107,13 +107,68 @@ test("auto-queue finds a free path from backlog to the nearest dispatchable stat
   assert.deepEqual(toPlain(path), ["requested"]);
 });
 
+test("auto-queue stale terminal statuses accept normalized strings and arrays", () => {
+  const stringConfig = loadPolicy("policies/lib/auto-queue-config.js", {
+    config: {
+      staleDispatchedTerminalStatuses: " failed,expired,FAILED,bad-status "
+    }
+  }).module;
+  const arrayConfig = loadPolicy("policies/lib/auto-queue-config.js", {
+    config: {
+      staleDispatchedTerminalStatuses: ["FAILED", "expired", "failed", "bad-status"]
+    }
+  }).module;
+
+  assert.deepEqual(toPlain(stringConfig.staleDispatchedTerminalStatuses()), ["failed", "expired"]);
+  assert.deepEqual(toPlain(arrayConfig.staleDispatchedTerminalStatuses()), ["failed", "expired"]);
+});
+
+test("auto-queue stale recovery switches accept only explicit booleans", () => {
+  const validValues = [
+    [true, true],
+    ["true", true],
+    [false, false],
+    ["false", false]
+  ];
+  const readers = [
+    ["staleDispatchedRecoverNullDispatch", "staleDispatchedRecoverNullDispatch"],
+    ["staleDispatchedRecoverMissingDispatch", "staleDispatchedRecoverMissingDispatch"]
+  ];
+
+  for (const [key, reader] of readers) {
+    for (const [configured, expected] of validValues) {
+      const module = loadPolicy("policies/lib/auto-queue-config.js", {
+        config: { [key]: configured }
+      }).module;
+      assert.equal(module[reader](), expected, `${key}=${JSON.stringify(configured)}`);
+    }
+  }
+});
+
+test("auto-queue stale recovery switches fail safely on malformed values", () => {
+  const malformedValues = [null, undefined, [], {}, 0, 1, "TRUE", "FALSE", "yes", ""];
+  const readers = [
+    ["staleDispatchedRecoverNullDispatch", "staleDispatchedRecoverNullDispatch"],
+    ["staleDispatchedRecoverMissingDispatch", "staleDispatchedRecoverMissingDispatch"]
+  ];
+
+  for (const [key, reader] of readers) {
+    for (const configured of malformedValues) {
+      const module = loadPolicy("policies/lib/auto-queue-config.js", {
+        config: { [key]: configured }
+      }).module;
+      assert.equal(module[reader](), true, `${key}=${JSON.stringify(configured)}`);
+    }
+  }
+});
+
 test("auto-queue onTick1min honors stale dispatched runtime config", () => {
   const recordedFailures = [];
   const { policy } = loadPolicy("policies/auto-queue.js", {
     config: {
       maxEntryRetries: 7,
       staleDispatchedGraceMin: 5,
-      staleDispatchedTerminalStatuses: "failed,expired",
+      staleDispatchedTerminalStatuses: ["failed", "expired", "FAILED", "bad-status"],
       staleDispatchedRecoverNullDispatch: false,
       staleDispatchedRecoverMissingDispatch: true
     },
