@@ -361,7 +361,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     channel_id: serenity::ChannelId,
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
-) {
+) -> anyhow::Result<()> {
     clear_channel_session_state_with_session_key(
         http,
         shared,
@@ -371,7 +371,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         notify_mode,
         None,
     )
-    .await;
+    .await
 }
 
 pub(in crate::services::discord) async fn clear_channel_session_state_with_session_key(
@@ -382,7 +382,13 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
-) {
+) -> anyhow::Result<()> {
+    crate::db::session_transcripts::record_channel_clear_boundary(
+        shared.pg_pool.as_ref(),
+        &channel_id.get().to_string(),
+    )
+    .await?;
+
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -475,6 +481,8 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
             &content,
         );
     }
+
+    Ok(())
 }
 
 /// /stop — Cancel in-progress AI request
@@ -552,7 +560,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         "/clear",
         SoftClearNotifyMode::Suppress,
     )
-    .await;
+    .await?;
 
     ctx.say(super::SESSION_CLEARED_RESPONSE).await?;
     tracing::info!("  [{ts}] ▶ [{user_name}] Session cleared");

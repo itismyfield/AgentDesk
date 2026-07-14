@@ -40,7 +40,35 @@ fn build_prompt_with_optional_manifest_for(
         false,
         None,
         None,
+        None,
         Some("turn-current-task-test"),
+    )
+}
+
+fn build_prompt_with_channel_recent_context(
+    channel_recent_context: Option<&ChannelRecentContextManifestInput>,
+) -> BuiltSystemPrompt {
+    build_system_prompt_with_manifest(
+        "ctx",
+        &[],
+        "/tmp",
+        ChannelId::new(1),
+        ChannelId::new(1),
+        "tok",
+        None,
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        channel_recent_context,
+        None,
+        Some("turn-channel-recent-context-test"),
     )
 }
 
@@ -197,7 +225,7 @@ fn prompt_manifest_log_records_hash_metadata_without_full_content() {
 
     // Exactly the metadata logged at info level — no full_content field exists.
     let layer_hashes = format!("{:?}", prompt_manifest_layer_hashes(&manifest));
-    assert_eq!(manifest.layers.len(), 7);
+    assert_eq!(manifest.layers.len(), 8);
     assert_eq!(manifest.layer_count, 6);
     assert_eq!(
         manifest.total_input_bytes,
@@ -247,7 +275,7 @@ fn current_task_dispatch_layer_is_recorded_with_redacted_preview_only() {
 
     assert!(built.system_prompt.contains("[Current Task]"));
     let manifest = built.manifest.expect("prompt manifest");
-    assert_eq!(manifest.layers.len(), 7);
+    assert_eq!(manifest.layers.len(), 8);
     let layer = manifest
         .layers
         .iter()
@@ -299,6 +327,7 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
         false,
         None,
         None,
+        None,
         Some("turn-layer-inventory"),
     );
 
@@ -340,7 +369,7 @@ fn current_task_freeform_layer_uses_discord_message_source() {
     let built = build_prompt_with_manifest_for(&current_task, None);
 
     let manifest = built.manifest.expect("prompt manifest");
-    assert_eq!(manifest.layers.len(), 7);
+    assert_eq!(manifest.layers.len(), 8);
     let layer = manifest
         .layers
         .iter()
@@ -566,6 +595,7 @@ fn build_prompt_manifest_includes_recovery_context_layer() {
             audit_record: None,
         }),
         None,
+        None,
         Some("turn-recovery-context-test"),
     );
 
@@ -601,6 +631,35 @@ fn build_prompt_manifest_includes_recovery_context_layer() {
     assert_eq!(
         layer.content_visibility,
         PromptContentVisibility::UserDerived
+    );
+}
+
+#[test]
+fn prompt_manifest_total_input_bytes_accounts_for_channel_recent_context() {
+    let context = ChannelRecentContextManifestInput {
+        rendered_context: "previous user: 비밀\nprevious assistant: acknowledged".to_string(),
+        pair_count: 1,
+        audit_reason: "fresh_session;pairs=1".to_string(),
+    };
+    let without_context = build_prompt_with_channel_recent_context(None);
+    let with_context = build_prompt_with_channel_recent_context(Some(&context));
+
+    assert_eq!(with_context.system_prompt, without_context.system_prompt);
+    assert_eq!(
+        without_context
+            .manifest
+            .as_ref()
+            .expect("manifest without channel context")
+            .total_input_bytes,
+        i64::try_from(without_context.system_prompt.len()).unwrap()
+    );
+    assert_eq!(
+        with_context
+            .manifest
+            .as_ref()
+            .expect("manifest with channel context")
+            .total_input_bytes,
+        i64::try_from(with_context.system_prompt.len() + context.rendered_context.len()).unwrap()
     );
 }
 
@@ -1029,6 +1088,7 @@ fn build_codex_memento_prompt_for_issue_4309() -> BuiltSystemPrompt {
         Some(&settings),
         true,
         false,
+        None,
         None,
         None,
         Some("turn-codex-memento-contract-4309"),
