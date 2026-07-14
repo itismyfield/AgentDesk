@@ -87,9 +87,12 @@ COVERAGE_UNCOVERED = "uncovered"
 COVERAGE_UNKNOWN = "unknown"
 COVERAGE_CONFIRM_TICKS = 2
 # #4504: a bare attached_but_desynced (no corroborating delivery gap) must
-# persist far longer than the 2-tick default before it can alarm on its own,
-# because under bursty load it self-clears with delivery fully intact.
-COVERAGE_DESYNC_CONFIRM_TICKS = 20  # ~10 min at a 30s poll
+# persist this long before it can alarm on its own. Wall-clock, NOT tick count,
+# so it is independent of poll_secs (default 120s). ~10 min: comfortably beyond
+# the load-transient false positives (seconds) this suppresses, and the
+# transcript-vs-Discord gap alarm independently catches real delivery loss at
+# gap_alert_secs (~15 min) regardless of this backstop.
+COVERAGE_DESYNC_CONFIRM_SECS = 600
 # A foreground turn must show an outbound/relay write inside this window before
 # a transient watcher-state desync can be treated as covered.  Ten minutes
 # matches the watchdog's calibrated delivery grace while still letting a
@@ -2661,6 +2664,7 @@ def tick_coverage(
         rt.log(f"[{cid}] coverage unknown reason={verdict.reason} — no alert")
         return
     if verdict.state == COVERAGE_COVERED:
+        chs.pop("coverage_desync_since", None)
         if chs.pop("coverage_alerting", None):
             if verdict.reason == "tmux_not_expected":
                 rt.log(
@@ -2672,6 +2676,18 @@ def tick_coverage(
         # Keep last_coverage_alert across recovery as an anti-flap cooldown,
         # matching the independent PG monitor's persistence semantics.
         return
+
+    desync_since: float | None = None
+    if verdict.reason == "attached_but_desynced":
+        raw_desync_since = chs.get("coverage_desync_since")
+        if (
+            _is_finite_nonnegative_number(raw_desync_since)
+            and float(raw_desync_since) <= now
+        ):
+            desync_since = float(raw_desync_since)
+        else:
+            desync_since = now
+            chs["coverage_desync_since"] = desync_since
 
     if not verdict.confirmed:
         rt.log(
@@ -2685,14 +2701,17 @@ def tick_coverage(
     # keep the 2-tick behavior (different reason strings).
     if verdict.reason == "attached_but_desynced":
         delivery_gap_active = bool(chs.get("gap_since") or chs.get("alerting"))
+        desync_for = (
+            max(0.0, now - desync_since) if desync_since is not None else 0.0
+        )
         if (
             not delivery_gap_active
-            and verdict.consecutive_uncovered < COVERAGE_DESYNC_CONFIRM_TICKS
+            and desync_for < COVERAGE_DESYNC_CONFIRM_SECS
         ):
             rt.log(
                 f"[{cid}] coverage desync uncorroborated "
-                f"ticks={verdict.consecutive_uncovered}/"
-                f"{COVERAGE_DESYNC_CONFIRM_TICKS} — not alarming"
+                f"duration={int(desync_for)}s/"
+                f"{COVERAGE_DESYNC_CONFIRM_SECS}s — not alarming"
             )
             return
     if rt.in_deploy_window(now):
