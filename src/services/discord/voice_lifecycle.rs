@@ -19,9 +19,95 @@ use dashmap::{DashMap, DashSet};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, GuildId};
 use songbird::events::context_data::{DisconnectKind, DisconnectReason};
+use songbird::model::CloseCode as VoiceCloseCode;
 use songbird::{Event, EventContext, EventHandler};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+/// App-level outcome for Discord voice close codes that indicate DAVE/E2EE
+/// negotiation failed. The alert metadata lives beside the classifier so the
+/// close-code -> operator-visible outcome mapping cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) struct VoiceSecurityDisconnect {
+    pub close_code: u16,
+    pub outcome: &'static str,
+    pub alert_kind: &'static str,
+    pub alert_reason: &'static str,
+}
+
+/// Classify Discord voice gateway close codes that require a distinct
+/// DAVE/E2EE operator alert. 4016 is the legacy encryption-mode negotiation
+/// failure; 4017 is Discord's forced-DAVE failure.
+pub(in crate::services::discord) fn classify_voice_security_close_code(
+    close_code: VoiceCloseCode,
+) -> Option<VoiceSecurityDisconnect> {
+    match close_code {
+        VoiceCloseCode::UnknownEncryptionMode => Some(VoiceSecurityDisconnect {
+            close_code: 4016,
+            outcome: "unknown_encryption_mode",
+            alert_kind: "voice-e2ee-4016",
+            alert_reason: "지원되는 음성 암호화 모드를 협상하지 못했습니다.",
+        }),
+        VoiceCloseCode::DaveProtocolRequired => Some(VoiceSecurityDisconnect {
+            close_code: 4017,
+            outcome: "dave_protocol_required",
+            alert_kind: "voice-dave-4017",
+            alert_reason: "Discord가 요구하는 DAVE 종단간 암호화를 협상하지 못했습니다.",
+        }),
+        _ => None,
+    }
+}
+
+fn classify_voice_security_disconnect(
+    reason: Option<DisconnectReason>,
+) -> Option<VoiceSecurityDisconnect> {
+    match reason {
+        Some(DisconnectReason::WsClosed(Some(close_code))) => {
+            classify_voice_security_close_code(close_code)
+        }
+        _ => None,
+    }
+}
+
+fn record_voice_security_disconnect(
+    provider: &str,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+    classified: VoiceSecurityDisconnect,
+) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    let metric_total = TOTAL.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    crate::services::observability::events::record_simple(
+        "voice_security_disconnect",
+        Some(channel_id.get()),
+        Some(provider),
+        serde_json::json!({
+            "guild_id": guild_id.get(),
+            "close_code": classified.close_code,
+            "outcome": classified.outcome,
+            "metric": "voice_security_disconnect_total",
+            "metric_total": metric_total,
+        }),
+    );
+    metric_total
+}
+
+fn voice_security_alert_content(
+    provider: &str,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+    classified: VoiceSecurityDisconnect,
+) -> String {
+    format!(
+        "🚨 음성 보안 프로토콜 협상 실패로 연결이 종료되었습니다 (provider `{provider}`, guild `{}`, channel `{}`, close code `{}`). {} DAVE/E2EE 지원 상태를 확인해 주세요.",
+        guild_id.get(),
+        channel_id.get(),
+        classified.close_code,
+        classified.alert_reason,
+    )
+}
 
 /// A request to re-establish a dropped voice connection, routed from a
 /// `VoiceLifecycleHandler` (which fires inside songbird's driver task) to the
@@ -292,7 +378,37 @@ impl EventHandler for VoiceLifecycleHandler {
                 );
             }
             EventContext::DriverDisconnect(data) => {
-                if data.reason.is_none() {
+                if let Some(classified) = classify_voice_security_disconnect(data.reason) {
+                    let metric_total = record_voice_security_disconnect(
+                        &self.provider,
+                        self.guild_id,
+                        self.channel_id,
+                        classified,
+                    );
+                    tracing::warn!(
+                        guild_id = self.guild_id.get(),
+                        channel_id = self.channel_id.get(),
+                        provider = %self.provider,
+                        kind = ?data.kind,
+                        reason = ?data.reason,
+                        close_code = classified.close_code,
+                        outcome = classified.outcome,
+                        metric = "voice_security_disconnect_total",
+                        metric_total,
+                        "voice driver disconnected: DAVE/E2EE negotiation failure"
+                    );
+                    super::commands::notify_voice_alert(
+                        self.control_channel_id,
+                        voice_security_alert_content(
+                            &self.provider,
+                            self.guild_id,
+                            self.channel_id,
+                            classified,
+                        ),
+                        classified.alert_kind,
+                    )
+                    .await;
+                } else if data.reason.is_none() {
                     tracing::info!(
                         guild_id = self.guild_id.get(),
                         channel_id = self.channel_id.get(),
@@ -689,6 +805,37 @@ async fn sleep_through_backoff(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn close_code_4017_maps_to_dave_failure_and_ops_alert() {
+        let classified = classify_voice_security_close_code(VoiceCloseCode::DaveProtocolRequired)
+            .expect("4017 must be classified as a DAVE/E2EE failure");
+
+        assert_eq!(classified.close_code, 4017);
+        assert_eq!(classified.outcome, "dave_protocol_required");
+        assert_eq!(classified.alert_kind, "voice-dave-4017");
+        let alert = voice_security_alert_content(
+            "claude",
+            GuildId::new(42),
+            ChannelId::new(84),
+            classified,
+        );
+        assert!(alert.contains("음성 보안 프로토콜 협상 실패"));
+        assert!(alert.contains("close code `4017`"));
+        assert!(alert.contains("DAVE/E2EE"));
+
+        let related = classify_voice_security_close_code(VoiceCloseCode::UnknownEncryptionMode)
+            .expect("4016 must share the E2EE classification path");
+        assert_eq!(related.close_code, 4016);
+        assert_eq!(related.outcome, "unknown_encryption_mode");
+        assert_eq!(related.alert_kind, "voice-e2ee-4016");
+
+        assert_eq!(
+            classify_voice_security_close_code(VoiceCloseCode::VoiceServerCrash),
+            None,
+            "non-security close codes must stay on the generic disconnect path"
+        );
+    }
 
     #[test]
     fn reconnect_backoff_table_and_cap() {

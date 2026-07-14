@@ -886,7 +886,7 @@
 | `services::discord::voice_barge_in::tts_pipeline` | `src/services/discord/voice_barge_in/tts_pipeline.rs` | 86 | 86 | 0 |  |
 | `services::discord::voice_config_cache` | `src/services/discord/voice_config_cache.rs` | 79 | 79 | 0 |  |
 | `services::discord::voice_id_sequences` | `src/services/discord/voice_id_sequences.rs` | 69 | 69 | 0 |  |
-| `services::discord::voice_lifecycle` | `src/services/discord/voice_lifecycle.rs` | 988 | 688 | 300 |  |
+| `services::discord::voice_lifecycle` | `src/services/discord/voice_lifecycle.rs` | 1135 | 804 | 331 |  |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 163 | 138 | 25 |  |
 | `services::discord::voice_sensitivity` | `src/services/discord/voice_sensitivity.rs` | 113 | 113 | 0 |  |
 | `services::discord::watchers::codex_tui_restore` | `src/services/discord/watchers/codex_tui_restore.rs` | 178 | 146 | 32 |  |

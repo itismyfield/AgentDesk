@@ -433,6 +433,14 @@
 
 ### Audited touches
 
+- #4237 DAVE/E2EE voice-close observability: the existing worker-local
+  `DriverDisconnect` handler now classifies Discord voice close codes 4016/4017,
+  records a structured counter event, and routes a deduplicated operator alert
+  through the existing notify bot. Multinode class: **worker-local likely** —
+  the metric, alert dedup, Songbird connection, and rejoin supervisor remain
+  pinned to the node/provider that owns the guild voice connection; no shared
+  authority, PG lease, or leader-only side effect changes.
+
 - #4247 S0 reaction status-only containment removes the guild and DM reaction
   gateway subscriptions plus the only destructive `ReactionRemove` intake
   route. This narrows connection-level event intake on every node; it does not
