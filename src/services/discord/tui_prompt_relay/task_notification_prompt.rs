@@ -35,20 +35,22 @@ pub(super) fn observe(
     }
     let event = if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
         Some(
-            super::super::task_notification_delivery::TaskCardEvent::from_task_prompt(
+            super::super::task_notification_delivery::TaskCardEvent::from_task_prompt_with_source_event_id(
                 channel_id.get(),
                 &prompt.provider,
                 &prompt.tmux_session_name,
                 &prompt.prompt,
+                prompt.source_event_id.as_deref(),
             ),
         )
     } else if injected_class.is_subagent_notification_event() {
         Some(
-            super::super::task_notification_delivery::TaskCardEvent::from_subagent_prompt(
+            super::super::task_notification_delivery::TaskCardEvent::from_subagent_prompt_with_source_event_id(
                 channel_id.get(),
                 &prompt.provider,
                 &prompt.tmux_session_name,
                 &prompt.prompt,
+                prompt.source_event_id.as_deref(),
             ),
         )
     } else {

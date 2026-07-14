@@ -8,6 +8,7 @@ mod card_post;
 mod gateway;
 mod response_chunks;
 mod store;
+mod terminal_identity;
 
 #[cfg(test)]
 mod tests;
@@ -171,12 +172,33 @@ pub(super) fn merge_context(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub(super) struct TaskCardScope {
     channel_id: u64,
     provider: String,
     session_key: String,
     event_key: String,
+    terminal_delivery_fingerprint: Option<String>,
+}
+
+impl PartialEq for TaskCardScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.channel_id == other.channel_id
+            && self.provider == other.provider
+            && self.session_key == other.session_key
+            && self.event_key == other.event_key
+    }
+}
+
+impl Eq for TaskCardScope {}
+
+impl std::hash::Hash for TaskCardScope {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.channel_id.hash(state);
+        self.provider.hash(state);
+        self.session_key.hash(state);
+        self.event_key.hash(state);
+    }
 }
 
 impl TaskCardScope {
@@ -191,7 +213,13 @@ impl TaskCardScope {
             provider: provider.into().trim().to_ascii_lowercase(),
             session_key: session_key.into(),
             event_key: event_key.into(),
+            terminal_delivery_fingerprint: None,
         }
+    }
+
+    fn with_terminal_delivery_fingerprint(mut self, fingerprint: String) -> Self {
+        self.terminal_delivery_fingerprint = Some(fingerprint);
+        self
     }
 }
 
@@ -229,77 +257,6 @@ pub(super) struct TaskCardEvent {
 }
 
 impl TaskCardEvent {
-    pub(super) fn from_task_prompt(
-        channel_id: u64,
-        provider: &str,
-        session_key: &str,
-        raw_prompt: &str,
-    ) -> Self {
-        let note = super::tui_task_card::parse_task_notification(raw_prompt);
-        let task_id = note.task_id.clone().and_then(clean_owned);
-        let tool_use_id = note.tool_use_id.clone().and_then(clean_owned);
-        let kind = note.kind().to_string();
-        let normalized_payload = normalized_task_payload_fingerprint(
-            task_id.as_deref(),
-            tool_use_id.as_deref(),
-            note.status.as_deref().unwrap_or(""),
-            note.summary.as_deref().unwrap_or(""),
-        );
-        let event_key = semantic_event_key(
-            task_id.as_deref(),
-            tool_use_id.as_deref(),
-            &normalized_payload,
-        );
-        Self {
-            scope: TaskCardScope::new(channel_id, provider, session_key, event_key),
-            task_id,
-            tool_use_id,
-            kind,
-            payload: TaskCardPayload::Task(note),
-        }
-    }
-
-    pub(super) fn from_subagent_prompt(
-        channel_id: u64,
-        provider: &str,
-        session_key: &str,
-        raw_prompt: &str,
-    ) -> Self {
-        let semantic = super::response_sanitizer::subagent_notification_card::semantic_event(
-            raw_prompt,
-        )
-        .unwrap_or_else(|| {
-            // A malformed machine envelope must still receive one safe durable
-            // card. Hash the normalized input for identity, but retain none of
-            // its raw fields in state, logs, or rendered content.
-            super::response_sanitizer::subagent_notification_card::SubagentNotificationSemantic {
-                task_id: None,
-                tool_use_id: None,
-                payload_fingerprint: fingerprint(&[
-                    "malformed-subagent",
-                    &super::tui_task_card::strip_terminal_controls(raw_prompt),
-                ]),
-            }
-        });
-        let event_key = semantic_event_key(
-            semantic.task_id.as_deref(),
-            semantic.tool_use_id.as_deref(),
-            &semantic.payload_fingerprint,
-        );
-        Self {
-            scope: TaskCardScope::new(channel_id, provider, session_key, event_key),
-            task_id: semantic.task_id,
-            tool_use_id: semantic.tool_use_id,
-            kind: "subagent".to_string(),
-            payload: TaskCardPayload::Subagent(
-                super::response_sanitizer::subagent_notification_card::format_subagent_notification_card(
-                    Some(session_key),
-                    raw_prompt,
-                ),
-            ),
-        }
-    }
-
     /// A restored watcher can observe terminal task output without the original
     /// provider envelope. Give that turn a deterministic, sanitized card rather
     /// than waiting forever for context that can no longer arrive.
@@ -845,7 +802,7 @@ async fn deliver_claim<T: TaskCardTransport>(
             Ok(CardEnsureOutcome {
                 message_id,
                 bot_key: claimed.bot_key,
-                disposition: if claimed.revision > 1 {
+                disposition: if claimed.revision > 1 && !claimed.new_terminal_completion {
                     CardDisposition::Replaced
                 } else {
                     CardDisposition::Created

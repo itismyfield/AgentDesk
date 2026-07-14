@@ -30,7 +30,7 @@
 | `src/services/discord/tmux_watcher.rs` | 3558 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tmux_watcher/turn_stream_collector.rs` | 1158 | discord-relay | 2026-10-31 | #4229 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1495 | discord-relay | 2026-08-31 | #3540 |
-| `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1078 | discord-relay | 2026-10-31 | #4019 |
+| `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1079 | discord-relay | 2026-10-31 | #4019 |
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/turn_view_reconciler.rs` | 2213 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2905 | voice-runtime | 2026-08-31 | #3405 |
@@ -107,6 +107,6 @@
 | `src/services/routines/discord_log.rs` | 1593 |
 | `src/services/routines/store.rs` | 3505 |
 | `src/services/settings.rs` | 1067 |
-| `src/services/tui_prompt_dedupe.rs` | 1966 |
+| `src/services/tui_prompt_dedupe.rs` | 1970 |
 | `src/services/turn_orchestrator.rs` | 3290 |
 | `src/voice/receiver.rs` | 1108 |

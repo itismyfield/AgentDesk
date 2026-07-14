@@ -1964,6 +1964,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                     provider: record.provider.clone(),
                     tmux_session_name: record.tmux_session_name.clone(),
                     prompt: record.prompt_text.clone(),
+                    source_event_id: None,
                     observed_at: chrono::Utc::now(),
                 };
                 let spawned = maybe_spawn_claude_idle_response_tail(
