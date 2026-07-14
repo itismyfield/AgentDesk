@@ -10,8 +10,10 @@ specific line or block for another reason.
 
 ## Rationale
 
-Korean and English comments are mixed across 70% of non-test files, creating
-inconsistency and making cross-model review harder.
+A substantial minority of non-test source files mix Korean and English comments
+(~11% of non-test `.rs` files contain Korean in comments; ~25% contain Korean
+anywhere including string literals), creating inconsistency and making
+cross-model review harder.
 
 ## Scope
 
