@@ -686,12 +686,14 @@ src/
 │   │   │   │   ├── missing_card_replacement.rs
 │   │   │   │   ├── response_chunks.rs
 │   │   │   │   ├── response_fence.rs
-│   │   │   │   └── response_identity.rs
+│   │   │   │   ├── response_identity.rs
+│   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── response_chunks.rs
 │   │   │   ├── store.rs
+│   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
 │   │   ├── tmux/
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs

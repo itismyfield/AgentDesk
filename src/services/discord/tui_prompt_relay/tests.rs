@@ -2460,6 +2460,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
         provider: ProviderKind::Claude.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: "direct input without runtime binding".to_string(),
+        source_event_id: None,
         observed_at: chrono::Utc::now(),
     };
     let lease = ExternalInputRelayLease {
@@ -2526,7 +2527,8 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
     let prompt = ObservedTuiPrompt {
             provider: ProviderKind::Claude.as_str().to_string(),
             tmux_session_name: tmux.to_string(),
-            prompt: "<task-notification><task-id>repeat-x</task-id><status>completed</status></task-notification>".to_string(),
+        prompt: "<task-notification><task-id>repeat-x</task-id><status>completed</status></task-notification>".to_string(),
+        source_event_id: None,
             observed_at: chrono::Utc::now(),
         };
     let lease = ExternalInputRelayLease {
@@ -2583,6 +2585,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
         provider: ProviderKind::Claude.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: "<task-notification><task-id>repeat-y</task-id></task-notification>".to_string(),
+        source_event_id: None,
         observed_at: chrono::Utc::now(),
     };
     let repeat_lease = ExternalInputRelayLease {
@@ -3395,6 +3398,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
         provider: provider.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: prompt_text.to_string(),
+        source_event_id: None,
         observed_at: chrono::Utc::now(),
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
@@ -3465,6 +3469,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         provider: provider.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: "please review PR #1234".to_string(),
+        source_event_id: None,
         observed_at: chrono::Utc::now(),
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);

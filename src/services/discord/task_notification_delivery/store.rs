@@ -4,6 +4,7 @@ mod missing_card_replacement;
 mod response_chunks;
 mod response_fence;
 mod response_identity;
+mod terminal_footer;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -17,6 +18,7 @@ use super::{TaskCardScope, stable_nonce};
 pub(super) use missing_card_replacement::{
     MissingCardReplacementClaim, claim_missing_card_replacement,
 };
+use terminal_footer::record_footer_only_pg;
 
 pub(super) use response_chunks::{
     PreparedResponseChunk, ResponseChunkJournal, ResponseChunkPrepareError, confirm_response_chunk,
@@ -224,40 +226,6 @@ pub(super) async fn prepare_replacement(
     }
 }
 
-async fn record_footer_only_pg(
-    pool: &PgPool,
-    scope: &TaskCardScope,
-    content: &str,
-    content_hash: &str,
-) -> Result<(), String> {
-    let channel_id = db_id(scope.channel_id, "channel_id")?;
-    let nonce = stable_nonce(scope, 1);
-    sqlx::query(
-        "INSERT INTO task_notification_card_state
-             (channel_id, provider, session_key, event_key, surface_owner,
-              delivery_state, bot_key, discord_nonce, revision, update_count,
-              rendered_content, content_hash)
-         VALUES ($1, $2, $3, $4, 'footer_only', 'footer_only', '', $5, 1, 1, $6, $7)
-         ON CONFLICT (channel_id, provider, session_key, event_key) DO UPDATE
-         SET rendered_content = EXCLUDED.rendered_content,
-             content_hash = EXCLUDED.content_hash,
-             updated_at = NOW()
-         WHERE task_notification_card_state.delivery_state = 'footer_only'",
-    )
-    .bind(channel_id)
-    .bind(&scope.provider)
-    .bind(&scope.session_key)
-    .bind(&scope.event_key)
-    .bind(nonce)
-    .bind(content)
-    .bind(content_hash)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("record footer-only task card state: {error}"))?;
-    cleanup_old_rows_pg(pool).await;
-    Ok(())
-}
-
 async fn claim_card_pg(
     pool: &PgPool,
     scope: &TaskCardScope,
@@ -273,10 +241,11 @@ async fn claim_card_pg(
         "INSERT INTO task_notification_card_state
              (channel_id, provider, session_key, event_key, surface_owner,
               delivery_state, bot_key, discord_nonce, revision, update_count,
-              rendered_content, content_hash, lease_owner, lease_expires_at)
+              rendered_content, content_hash, lease_owner, lease_expires_at,
+              terminal_delivery_fingerprint)
          VALUES ($1, $2, $3, $4, 'card', 'posting', $5, $6, 1, 1, $7, $8,
-                 $9, NOW() + make_interval(secs => $10))
-         ON CONFLICT (channel_id, provider, session_key, event_key) DO NOTHING
+                 $9, NOW() + make_interval(secs => $10), $11)
+         ON CONFLICT DO NOTHING
          RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
     )
     .bind(channel_id)
@@ -289,6 +258,7 @@ async fn claim_card_pg(
     .bind(seed_hash)
     .bind(&lease_owner)
     .bind(LEASE_SECONDS)
+    .bind(&scope.terminal_delivery_fingerprint)
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("insert task card lease: {error}"))?
@@ -302,16 +272,22 @@ async fn claim_card_pg(
     }
 
     let current = sqlx::query(
-        "SELECT delivery_state, bot_key, discord_nonce, discord_message_id,
+        "SELECT session_key, event_key, terminal_delivery_fingerprint,
+                delivery_state, bot_key, discord_nonce, discord_message_id,
                 revision, update_count, rendered_content,
                 (lease_owner IS NOT NULL AND lease_expires_at > NOW()) AS lease_active
          FROM task_notification_card_state
-         WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
+         WHERE channel_id = $1 AND provider = $2
+           AND ((session_key = $3 AND event_key = $4)
+                OR ($5::VARCHAR IS NOT NULL AND terminal_delivery_fingerprint = $5))
+         ORDER BY CASE WHEN session_key = $3 AND event_key = $4 THEN 0 ELSE 1 END
+         LIMIT 1",
     )
     .bind(channel_id)
     .bind(&scope.provider)
     .bind(&scope.session_key)
     .bind(&scope.event_key)
+    .bind(&scope.terminal_delivery_fingerprint)
     .fetch_one(pool)
     .await
     .map_err(|error| format!("load task card state after conflict: {error}"))?;
@@ -319,7 +295,10 @@ async fn claim_card_pg(
     let current_bot: String = current.get("bot_key");
     let current_message: Option<i64> = current.get("discord_message_id");
     let lease_active: bool = current.get("lease_active");
-    if state == "card_posted" && intent == StoreIntent::Promotion {
+    let current_fingerprint: Option<String> = current.get("terminal_delivery_fingerprint");
+    let exact_terminal_replay = scope.terminal_delivery_fingerprint.is_some()
+        && current_fingerprint == scope.terminal_delivery_fingerprint;
+    if state == "card_posted" && (intent == StoreIntent::Promotion || exact_terminal_replay) {
         if lease_active {
             return Ok(CardClaim::Busy {
                 bot_key: current_bot,
@@ -330,6 +309,14 @@ async fn claim_card_pg(
             bot_key: current_bot,
         });
     }
+
+    let current_scope = TaskCardScope {
+        channel_id: scope.channel_id,
+        provider: scope.provider.clone(),
+        session_key: current.get("session_key"),
+        event_key: current.get("event_key"),
+        terminal_delivery_fingerprint: current_fingerprint,
+    };
 
     let row = if state == "card_posted" {
         sqlx::query(
@@ -346,8 +333,8 @@ async fn claim_card_pg(
         )
         .bind(channel_id)
         .bind(&scope.provider)
-        .bind(&scope.session_key)
-        .bind(&scope.event_key)
+        .bind(&current_scope.session_key)
+        .bind(&current_scope.event_key)
         .bind(&lease_owner)
         .bind(LEASE_SECONDS)
         .fetch_optional(pool)
@@ -387,8 +374,8 @@ async fn claim_card_pg(
         )
         .bind(channel_id)
         .bind(&scope.provider)
-        .bind(&scope.session_key)
-        .bind(&scope.event_key)
+        .bind(&current_scope.session_key)
+        .bind(&current_scope.event_key)
         .bind(preferred_bot_key)
         .bind(&nonce)
         .bind(seed_content)
@@ -414,7 +401,7 @@ async fn claim_card_pg(
         ClaimAction::Post
     };
     Ok(CardClaim::Owned(claimed_from_row(
-        scope,
+        &current_scope,
         lease_owner,
         &row,
         action,

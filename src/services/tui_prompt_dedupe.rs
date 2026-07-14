@@ -91,6 +91,9 @@ pub struct ObservedTuiPrompt {
     pub provider: String,
     pub tmux_session_name: String,
     pub prompt: String,
+    /// Stable provider entry identity when the transcript/rollout exposes one.
+    /// Unlike byte offsets this survives compaction and head rotation.
+    pub source_event_id: Option<String>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -1174,6 +1177,7 @@ fn observe_prompt_candidates_by_tmux_inner(
         provider,
         tmux_session_name: tmux_session_name.to_string(),
         prompt,
+        source_event_id: entry_id.map(str::to_string),
         observed_at,
     };
     let _ = OBSERVED_PROMPTS.send(event);

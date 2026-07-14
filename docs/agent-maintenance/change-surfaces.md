@@ -1120,7 +1120,9 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1966 lines; +117 from #4423: adopt Claude's
+  - `src/services/tui_prompt_dedupe.rs` (1970 lines; +4 from #4295: retain the
+    stable provider source-event id on observed TUI prompts so terminal-card
+    delivery can reject an exact post-compaction replay durably; +117 from #4423: adopt Claude's
     actual continuation UUID from a hook payload only through the registered
     launch UUID and a real sibling transcript; retain the launch UUID as the
     live hook-routing identity, register the payload alias, require newer mtime

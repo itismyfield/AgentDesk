@@ -409,6 +409,153 @@ fn event(task_id: &str) -> TaskCardEvent {
     )
 }
 
+fn sourced_event(
+    session_key: &str,
+    source_event_id: &str,
+    task_id: &str,
+    result: &str,
+) -> TaskCardEvent {
+    TaskCardEvent::from_task_prompt_with_source_event_id(
+        44_295,
+        "claude",
+        session_key,
+        &format!(
+            "<task-notification><task-id>{task_id}</task-id><status>completed</status><summary>Agent completed</summary><result>{result}</result></task-notification>"
+        ),
+        Some(source_event_id),
+    )
+}
+
+#[tokio::test]
+async fn durable_terminal_identity_suppresses_restart_compaction_exact_replay_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_card_exact_replay_4295",
+        "task card restart compaction exact replay guard",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let clients = clients();
+    let source_event_id = "af4848f5-source-entry";
+    let first_event = sourced_event(
+        "AgentDesk-claude-4295-before-restart",
+        source_event_id,
+        "af4848f5",
+        "original terminal payload",
+    );
+    let first_transport = FakeTransport::new();
+    let first = ensure_card(
+        Some(&pool),
+        &clients,
+        &first_transport,
+        &first_event,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("first terminal card");
+    assert_eq!(first_transport.physical_posts.load(Ordering::Acquire), 1);
+
+    sqlx::query(
+        "UPDATE task_notification_card_state
+         SET created_at = NOW() - INTERVAL '12 hours',
+             updated_at = NOW() - INTERVAL '12 hours'
+         WHERE discord_message_id = $1",
+    )
+    .bind(i64::try_from(first.message_id).expect("message id"))
+    .execute(&pool)
+    .await
+    .expect("age delivered card past the former one-hour dedupe window");
+    pool.close().await;
+
+    // A process restart loses every in-memory nonce/message cache. Compaction
+    // also shifts the transcript byte boundary and can mint a new synthetic
+    // anchor/session, but the provider entry id remains byte-for-byte stable.
+    let restarted_pool = pg_db.connect_and_migrate().await;
+    let replay_event = sourced_event(
+        "AgentDesk-claude-4295-after-compact-offset-reset",
+        source_event_id,
+        "af4848f5",
+        "original terminal payload",
+    );
+    let restarted_transport = FakeTransport::new();
+    let replay = ensure_card(
+        Some(&restarted_pool),
+        &clients,
+        &restarted_transport,
+        &replay_event,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("durable replay lookup");
+
+    assert_eq!(replay.disposition, CardDisposition::Existing);
+    assert_eq!(replay.message_id, first.message_id);
+    assert_eq!(
+        restarted_transport.physical_posts.load(Ordering::Acquire),
+        0,
+        "restart + 12h + compact-offset-reset exact replay must issue zero POSTs"
+    );
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn same_task_new_source_event_and_payload_posts_followup_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_card_followup_4295",
+        "same task new terminal follow-up remains deliverable",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let clients = clients();
+    let transport = FakeTransport::new();
+    let original = sourced_event(
+        "AgentDesk-claude-4295-followup",
+        "source-boundary-first",
+        "af4848f5",
+        "first terminal payload",
+    );
+    let followup = sourced_event(
+        "AgentDesk-claude-4295-followup",
+        "source-boundary-second",
+        "af4848f5",
+        "new follow-up terminal payload",
+    );
+
+    let first = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &original,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("original terminal card");
+    let second = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &followup,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("new follow-up terminal card");
+
+    assert_eq!(first.disposition, CardDisposition::Created);
+    assert_eq!(second.disposition, CardDisposition::Created);
+    assert_ne!(first.message_id, second.message_id);
+    assert_eq!(
+        transport.physical_posts.load(Ordering::Acquire),
+        2,
+        "a different source boundary/payload for the same task id must POST"
+    );
+    pg_db.drop().await;
+}
+
 #[test]
 fn xml_and_stream_json_share_semantic_key_and_nonce_is_bounded() {
     let event = event("same-task");

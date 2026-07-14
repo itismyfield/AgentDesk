@@ -460,6 +460,11 @@
       "path": "migrations/postgres/0089_drop_agent_archive.sql",
       "sha256": "6d0a9dbbcd91bfc67e44d2ffa9cdf99e6a1479e0b787d3b866cdb439384c5e78",
       "version": 89
+    },
+    {
+      "path": "migrations/postgres/0090_task_notification_terminal_delivery_fingerprint.sql",
+      "sha256": "bf4edff97d25772f942f7cd46357c8d78f859bb2daf757d530aba77a10ea6beb",
+      "version": 90
     }
   ],
   "version": 1
