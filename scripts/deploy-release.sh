@@ -308,6 +308,7 @@ _notify_channel() {
 
     local rel_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
     curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
+        -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${rel_port}" \
         -H 'Content-Type: application/json' \
         --data-binary "$payload" >/dev/null 2>&1 \
         || true
@@ -1759,6 +1760,7 @@ POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_
 POST_DEPLOY_SMOKE_TMP_DIR=""
 POST_DEPLOY_SMOKE_HEALTH_BODY=""
 POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
+POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 POST_DEPLOY_SMOKE_FAILURES=()
 
 _post_deploy_smoke_note() {
@@ -1781,6 +1783,7 @@ _post_deploy_smoke_probe_apis() {
     for endpoint in "${POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS[@]}"; do
         body_path="$POST_DEPLOY_SMOKE_TMP_DIR/${endpoint//\//_}.json"
         if http_code=$(curl -sS --connect-timeout 2 --max-time 15 \
+            -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
             -o "$body_path" -w '%{http_code}' \
             "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}${endpoint}"); then
             _post_deploy_smoke_note "api endpoint=${endpoint} status=${http_code}" || return 1
@@ -1793,9 +1796,14 @@ _post_deploy_smoke_probe_apis() {
             POST_DEPLOY_SMOKE_HEALTH_BODY="$body_path"
         elif [ "$endpoint" = "/api/health/detail" ]; then
             POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$body_path"
+        elif [ "$endpoint" = "/api/sessions" ]; then
+            POST_DEPLOY_SMOKE_SESSIONS_BODY="$body_path"
         fi
         if [ "$http_code" != "200" ]; then
             _post_deploy_smoke_fail "core API ${endpoint}: expected HTTP 200, got ${http_code}" || true
+            failed=1
+        elif [ ! -s "$body_path" ]; then
+            _post_deploy_smoke_fail "core API ${endpoint}: HTTP 200 body was empty" || true
             failed=1
         fi
     done
@@ -1906,7 +1914,7 @@ _post_deploy_smoke_check_fail_closed_warn_rate() {
 }
 
 _post_deploy_smoke_check_relay_round_trip() {
-    local cluster_standby channel_id relay_output relay_log
+    local cluster_standby channel_id relay_output relay_log resolve_rc cell_busy cell_guard_rc
     local config_path="$ADK_REL/config/agentdesk.yaml"
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
         _post_deploy_smoke_fail "relay E-1: /api/health body unavailable for standby gate" || true
@@ -1929,22 +1937,122 @@ _post_deploy_smoke_check_relay_round_trip() {
 
     # Reuse the #3729 wrapper's config resolver: channel ids remain
     # machine-local agentdesk.yaml data and are never hard-coded here.
-    if ! channel_id=$(python3 - "$REPO" "$config_path" "$POST_DEPLOY_SMOKE_RELAY_CELL" <<'PY'
+    if channel_id=$(python3 - "$REPO" "$config_path" "$POST_DEPLOY_SMOKE_RELAY_CELL" \
+        2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
 import sys
 from pathlib import Path
 
 repo, config, cell = sys.argv[1:]
 sys.path.insert(0, str(Path(repo) / "scripts" / "e2e"))
-from post_deploy_relay_continuity import load_channel_id_from_config
+from post_deploy_relay_continuity import SmokeConfigError, load_channel_id_from_config
 
-print(load_channel_id_from_config(Path(config), cell))
+try:
+    channel_id = load_channel_id_from_config(Path(config), cell)
+except (FileNotFoundError, SmokeConfigError) as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(2) from error
+except Exception as error:
+    print(f"unexpected E2E cell config error: {type(error).__name__}: {error}", file=sys.stderr)
+    raise SystemExit(1) from error
+print(channel_id)
 PY
     ); then
+        :
+    else
+        resolve_rc=$?
+        if [ "$resolve_rc" -eq 2 ]; then
+            _post_deploy_smoke_note "relay E-1=skipped: no E2E cell configured" || return 1
+            return 0
+        fi
         _post_deploy_smoke_fail \
             "relay E-1: could not resolve ${POST_DEPLOY_SMOKE_RELAY_CELL} channel from ${config_path}" \
             || true
         return 1
     fi
+
+    # E-1 is a real live turn, so reuse the E2E driver's mailbox/session busy
+    # predicates against the authenticated core-probe snapshots before sending.
+    # An unreadable snapshot skips the injection fail-open: safety requires
+    # proving the target cell idle, while the already-recorded API finding (if
+    # any) remains the smoke result.
+    if cell_busy=$(python3 - "$REPO" "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" \
+        "$POST_DEPLOY_SMOKE_SESSIONS_BODY" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$channel_id" \
+        2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+repo, health_path, sessions_path, cell, channel_id = sys.argv[1:]
+sys.path.insert(0, str(Path(repo) / "scripts" / "e2e"))
+import run_tui_relay as cell_driver
+
+try:
+    with Path(health_path).open(encoding="utf-8") as handle:
+        detail = json.load(handle)
+    with Path(sessions_path).open(encoding="utf-8") as handle:
+        sessions_payload = json.load(handle)
+    mailboxes = detail.get("mailboxes") if isinstance(detail, dict) else None
+    if not isinstance(mailboxes, list):
+        raise ValueError("health/detail mailboxes is not a list")
+    sessions = (
+        sessions_payload.get("sessions")
+        if isinstance(sessions_payload, dict)
+        else sessions_payload
+    )
+    if not isinstance(sessions, list):
+        raise ValueError("sessions payload is not a list")
+
+    provider = cell_driver.cell_provider(cell)
+    busy = []
+    for mailbox in mailboxes:
+        if not isinstance(mailbox, dict):
+            continue
+        if cell_driver._mailbox_channel_id(mailbox) != str(channel_id):
+            continue
+        if cell_driver._mailbox_provider(mailbox) != provider:
+            continue
+        reasons = cell_driver._mailbox_busy_reasons(mailbox)
+        if reasons:
+            busy.append(
+                f"mailbox {provider}:{channel_id} [{', '.join(reasons)}]"
+            )
+
+    workspace_substring = cell_driver.cell_workspace_substring(cell)
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        status = str(session.get("status") or "").lower()
+        if status not in {"turn_active", "turn_busy", "active"}:
+            continue
+        session_key = str(session.get("session_key") or "")
+        session_channel = str(
+            session.get("channel_id") or session.get("channelId") or ""
+        )
+        if session_channel == str(channel_id) or workspace_substring in session_key:
+            busy.append(
+                f"session {session_key or session_channel or '<unknown>'} status={status}"
+            )
+except Exception as error:
+    print(f"{type(error).__name__}: {error}", file=sys.stderr)
+    raise SystemExit(2) from error
+
+if busy:
+    print("; ".join(busy))
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    ); then
+        _post_deploy_smoke_note "relay E-1=skipped: foreign active turn on cell" || return 1
+        _post_deploy_smoke_note "relay E-1 cell-busy evidence=${cell_busy}" || return 1
+        return 0
+    else
+        cell_guard_rc=$?
+        if [ "$cell_guard_rc" -ne 1 ]; then
+            _post_deploy_smoke_note "relay E-1=skipped: could not verify E2E cell is idle" || return 1
+            return 0
+        fi
+    fi
+
     relay_output="$ADK_REL/logs/post-deploy-smoke-relay-${POST_DEPLOY_SMOKE_STAMP}"
     relay_log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-e1.log"
     _post_deploy_smoke_note \
