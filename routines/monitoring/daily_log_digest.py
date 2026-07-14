@@ -29,8 +29,8 @@ from log_digest_issue_drafts import (
 
 REPOSITORY = "itismyfield/AgentDesk"
 OPEN_ISSUE_LIMIT = 1000
-UNDATED_CHECKPOINT_VERSION = 2
-UNDATED_FINGERPRINT_BYTES = 128
+UNDATED_CHECKPOINT_VERSION = 3
+UNDATED_HEAD_FINGERPRINT_CAP = 65_536
 _LINE_TIMESTAMP_RE = re.compile(
     r"(?<!\d)(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
 )
@@ -95,8 +95,8 @@ def _load_undated_offsets(
                 "device": int(entry["device"]),
                 "inode": int(entry["inode"]),
                 "offset": int(entry["offset"]),
-                "tail_hash": str(entry["tail_hash"]),
-                "tail_length": int(entry["tail_length"]),
+                "head_hash": str(entry["head_hash"]),
+                "head_length": int(entry["head_length"]),
             }
         return offsets, []
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -125,21 +125,21 @@ def _save_undated_offsets(
     return []
 
 
-def _tail_fingerprint(stream: BinaryIO, offset: int) -> tuple[int, str]:
-    tail_length = min(offset, UNDATED_FINGERPRINT_BYTES)
-    stream.seek(offset - tail_length)
-    digest = hashlib.sha256(stream.read(tail_length)).hexdigest()
-    return tail_length, digest
+def _head_fingerprint(stream: BinaryIO, offset: int) -> tuple[int, str]:
+    head_length = min(offset, UNDATED_HEAD_FINGERPRINT_CAP)
+    stream.seek(0)
+    digest = hashlib.sha256(stream.read(head_length)).hexdigest()
+    return head_length, digest
 
 
 def _watermark_matches(stream: BinaryIO, previous: dict[str, int | str]) -> bool:
     offset = int(previous["offset"])
-    tail_length = int(previous["tail_length"])
-    if tail_length != min(offset, UNDATED_FINGERPRINT_BYTES):
+    head_length = int(previous["head_length"])
+    if head_length != min(offset, UNDATED_HEAD_FINGERPRINT_CAP):
         return False
-    stream.seek(offset - tail_length)
-    current = hashlib.sha256(stream.read(tail_length)).hexdigest()
-    return current == previous["tail_hash"]
+    stream.seek(0)
+    current = hashlib.sha256(stream.read(head_length)).hexdigest()
+    return current == previous["head_hash"]
 
 
 def recent_log_lines(
@@ -192,19 +192,23 @@ def recent_log_lines(
                         if since <= timestamp <= now + timedelta(minutes=5):
                             lines.append(line)
                     elif include_undated and line_end > previous_offset:
-                        # Identity, offset, and tail fingerprint make appended
+                        # Identity, offset, and head fingerprint make appended
                         # ranges eligible once. Rotation or detected rewrite
                         # restarts at byte zero; first observation baselines EOF.
                         lines.append(line)
                 if path.name == "dcserver.launchd.stderr.log":
                     final_offset = stream.tell()
-                    tail_length, tail_hash = _tail_fingerprint(stream, final_offset)
+                    # A rewrite beyond the cap that reproduces the first 64 KiB
+                    # cannot be distinguished from an append. For append-only
+                    # launchd logs, reproducing that prefix (or a SHA collision)
+                    # after truncate/regrow is considered operationally negligible.
+                    head_length, head_hash = _head_fingerprint(stream, final_offset)
                     undated_offsets[checkpoint_key] = {
                         "device": stat.st_dev,
                         "inode": stat.st_ino,
                         "offset": final_offset,
-                        "tail_length": tail_length,
-                        "tail_hash": tail_hash,
+                        "head_length": head_length,
+                        "head_hash": head_hash,
                     }
         except OSError as error:
             warnings.append(f"could not read {path}: {error}")

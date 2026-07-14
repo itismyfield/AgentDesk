@@ -45,7 +45,9 @@ _DYNAMIC_KEY_VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 _MEASURED_NUMBER_RE = re.compile(
-    r"(?<![A-Za-z0-9])\d+(?:\.\d+)?\s*(req/s|/s|kib|mib|gib|kb|mb|gb|ms|us|ns|b|s|m|h|%)(?![A-Za-z0-9])",
+    r"(?<![A-Za-z0-9_./-])\d+(?:\.\d+)?\s*"
+    r"(req/s|/s|kib|mib|gib|kb|mb|gb|ms|us|ns|b|s|m|h|%)"
+    r"(?![A-Za-z0-9_./-])",
     re.IGNORECASE,
 )
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?(?![A-Za-z0-9])")

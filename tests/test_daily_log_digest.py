@@ -183,6 +183,53 @@ class SignatureNormalizationTests(unittest.TestCase):
         self.assertEqual(fresh, ["ERROR new content after truncation"] * 10)
         self.assertEqual(warnings, [])
 
+    def test_truncate_regrow_with_same_tail_resets_then_plain_append_resumes(self) -> None:
+        now = datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc)
+        since = now - timedelta(days=1)
+        tail = "ERROR tail unchanged marker\n" * 8
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            launchd_stderr = root / "dcserver.launchd.stderr.log"
+            checkpoint = root / "runtime" / "undated-offsets.json"
+            launchd_stderr.write_text("ERROR old prelude\n" + tail, encoding="utf-8")
+            os.utime(launchd_stderr, (now.timestamp(), now.timestamp()))
+            baseline, baseline_warnings = recent_log_lines(
+                [launchd_stderr], since, now, undated_checkpoint=checkpoint
+            )
+            old_inode = launchd_stderr.stat().st_ino
+            old_offset = launchd_stderr.stat().st_size
+
+            rewritten = (
+                "ERROR new prelude\n"
+                + tail
+                + "ERROR appended beyond old offset\n"
+            )
+            with launchd_stderr.open("w", encoding="utf-8") as stream:
+                stream.write(rewritten)
+            os.utime(launchd_stderr, (now.timestamp(), now.timestamp()))
+            new_inode = launchd_stderr.stat().st_ino
+            fresh, fresh_warnings = recent_log_lines(
+                [launchd_stderr], since, now, undated_checkpoint=checkpoint
+            )
+
+            with launchd_stderr.open("a", encoding="utf-8") as stream:
+                stream.write("ERROR plain append after rewrite\n")
+            appended, append_warnings = recent_log_lines(
+                [launchd_stderr], since, now, undated_checkpoint=checkpoint
+            )
+
+        self.assertEqual(baseline, [])
+        self.assertEqual(new_inode, old_inode)
+        self.assertGreater(len(rewritten.encode()), old_offset)
+        self.assertEqual(
+            fresh,
+            ["ERROR new prelude"]
+            + ["ERROR tail unchanged marker"] * 8
+            + ["ERROR appended beyond old offset"],
+        )
+        self.assertEqual(appended, ["ERROR plain append after rewrite"])
+        self.assertEqual(baseline_warnings + fresh_warnings + append_warnings, [])
+
     def test_different_ids_hashes_and_timestamps_collapse(self) -> None:
         first = (
             "2026-07-13T01:02:03.123Z WARN sqlx pool timed out while acquiring "
@@ -251,6 +298,31 @@ class SignatureNormalizationTests(unittest.TestCase):
             normalize_signature("ERROR error500handler failed"),
             "error500handler failed",
         )
+
+    def test_measured_numbers_require_standalone_token_boundaries(self) -> None:
+        for first, second in (
+            ("cache_1mb_loader", "cache_2mb_loader"),
+            ("cache-1mb-loader", "cache-2mb-loader"),
+        ):
+            with self.subTest(first=first, second=second):
+                patterns = aggregate_normalized_signatures(
+                    [f"ERROR {first} failed", f"ERROR {second} failed"]
+                )
+                self.assertEqual(len(patterns), 2)
+                self.assertNotEqual(patterns[0].signature, patterns[1].signature)
+
+        for first, second, placeholder in (
+            ("took 123ms", "took 456ms", "<dur>"),
+            ("used 512kb", "used 1mb", "<size>"),
+            ("took 1.5s", "took 8.25s", "<dur>"),
+        ):
+            with self.subTest(first=first, second=second):
+                patterns = aggregate_normalized_signatures(
+                    [f"ERROR {first}", f"ERROR {second}"]
+                )
+                self.assertEqual(len(patterns), 1)
+                self.assertEqual(patterns[0].count, 2)
+                self.assertIn(placeholder, patterns[0].signature)
 
     def test_http_status_codes_remain_distinct(self) -> None:
         self.assertNotEqual(
