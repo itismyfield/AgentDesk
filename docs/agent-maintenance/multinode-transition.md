@@ -1415,3 +1415,8 @@
   Gated on the default-OFF flag so the OFF path is byte-identical; introduces no
   new PG lease, cross-node read, leader-only side effect, singleton assumption, or
   PG schema change.
+- #4309 codex memento contract via prompt injection + version allowlist —
+  **Worker-local**: the provider-aware guidance is assembled per turn on the node
+  that owns the provider session, and the CLI allowlist is a node-local startup
+  compatibility check. No cross-node authority, lease, singleton, or routing
+  behavior is introduced.

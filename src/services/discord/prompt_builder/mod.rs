@@ -110,6 +110,7 @@ pub(super) fn build_system_prompt(
     longterm_catalog: Option<&str>,
     memory_settings: Option<&ResolvedMemorySettings>,
     memento_mcp_available: bool,
+    is_claude_harness: bool,
 ) -> String {
     build_system_prompt_with_manifest(
         discord_context,
@@ -127,6 +128,7 @@ pub(super) fn build_system_prompt(
         longterm_catalog,
         memory_settings,
         memento_mcp_available,
+        is_claude_harness,
         None,
         None,
         None,
@@ -150,6 +152,7 @@ pub(super) fn build_system_prompt_with_manifest(
     longterm_catalog: Option<&str>,
     memory_settings: Option<&ResolvedMemorySettings>,
     memento_mcp_available: bool,
+    is_claude_harness: bool,
     recovery_context: Option<&RecoveryContextManifestInput<'_>>,
     memory_recall_manifest: Option<&MemoryRecallManifestInput<'_>>,
     turn_id: Option<&str>,
@@ -438,6 +441,7 @@ pub(super) fn build_system_prompt_with_manifest(
         role_binding,
         profile,
         memento_mcp_available,
+        is_claude_harness,
     ) {
         system_prompt_owned.push_str(&memory_guidance);
         prompt_manifest_layers.push(prompt_manifest_layer(
