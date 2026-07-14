@@ -414,7 +414,11 @@ fn synthetic_self_check_config() -> HookBundleConfig {
 /// with the real CLI's contract. For any other version we emit a warning even
 /// when the in-process invariants pass, because AgentDesk has no way to know
 /// (until #2259 lands) whether Codex changed its canonicalization upstream.
-const VERIFIED_CODEX_CLI_VERSIONS: &[&str] = &["codex-cli 0.130.0"];
+const VERIFIED_CODEX_CLI_VERSIONS: &[&str] = &[
+    "codex-cli 0.130.0",
+    "codex-cli 0.142.5",
+    "codex-cli 0.144.1",
+];
 
 /// One-shot startup self-check (issue #2210 item 2).
 ///
@@ -873,12 +877,14 @@ mod tests {
 
     #[test]
     fn run_codex_hook_startup_self_check_passes_on_verified_version() {
-        // In-process invariants hold + verified Codex CLI version → returns true.
-        assert!(run_codex_hook_startup_self_check(
-            true,
-            Some("codex-cli 0.130.0"),
-            Some("/opt/homebrew/bin/codex"),
-        ));
+        // In-process invariants hold + every audited Codex CLI version → returns true.
+        for version in VERIFIED_CODEX_CLI_VERSIONS {
+            assert!(run_codex_hook_startup_self_check(
+                true,
+                Some(version),
+                Some("/opt/homebrew/bin/codex"),
+            ));
+        }
     }
 
     #[test]

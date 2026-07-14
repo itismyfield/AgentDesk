@@ -899,6 +899,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         longterm_catalog_for_prompt,
         Some(&memory_settings),
         memento_mcp_available,
+        matches!(&provider, ProviderKind::Claude),
         recovery_context_for_manifest.as_ref(),
         Some(&memory_recall_manifest),
         Some(&turn_id),

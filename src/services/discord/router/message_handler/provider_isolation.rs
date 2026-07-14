@@ -662,6 +662,7 @@ mod thread_role_inheritance_tests {
             None,
             Some(&memory),
             true,
+            true,
             None,
             None,
             None,

@@ -1827,6 +1827,7 @@ pub(super) async fn handle_text_message(
         longterm_catalog_for_prompt,
         Some(&memory_settings),
         memento_mcp_available,
+        matches!(&provider, ProviderKind::Claude),
         recovery_context_for_manifest.as_ref(),
         Some(&memory_recall_manifest),
         Some(&turn_id),

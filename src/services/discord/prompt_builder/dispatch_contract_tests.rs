@@ -37,6 +37,7 @@ fn build_prompt_with_optional_manifest_for(
         None,
         None,
         false,
+        false,
         None,
         None,
         Some("turn-current-task-test"),
@@ -91,6 +92,7 @@ fn issue_4310_role_and_sak_layers_survive_memento_health_changes() {
             Some(sak),
             None,
             Some(&settings),
+            true,
             true,
         );
 
@@ -148,6 +150,7 @@ fn issue_4313_agentdesk_prompt_has_single_policy_owner() {
             backend: MemoryBackendKind::Memento,
             ..ResolvedMemorySettings::default()
         }),
+        true,
         true,
     );
 
@@ -274,6 +277,8 @@ fn current_task_dispatch_layer_is_recorded_with_redacted_preview_only() {
 
 #[test]
 fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     let binding = test_role_binding("manifest-inventory-agent");
     let built = build_system_prompt_with_manifest(
         "ctx",
@@ -290,6 +295,7 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
         Some("[Shared Agent Knowledge]\nimportant invariant"),
         Some("- memory.md: durable fact"),
         None,
+        false,
         false,
         None,
         None,
@@ -553,6 +559,7 @@ fn build_prompt_manifest_includes_recovery_context_layer() {
         None,
         None,
         None,
+        false,
         false,
         Some(&RecoveryContextManifestInput {
             raw_context,
@@ -893,6 +900,7 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
             ..ResolvedMemorySettings::default()
         }),
         false,
+        false,
     );
     let review_prompt = build_system_prompt(
         "ctx",
@@ -911,6 +919,7 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
             backend: MemoryBackendKind::File,
             ..ResolvedMemorySettings::default()
         }),
+        false,
         false,
     );
 
@@ -937,6 +946,8 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
 
 #[test]
 fn full_memento_prompt_carries_tool_feedback_contract() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     // #4306: the Proactive Memory Guidance memento branch must carry the
     // always-on `tool_feedback` contract that was dropped during the da7ccb39
     // provider-prompt slim-down. It is gated to the Full profile with the
@@ -959,6 +970,7 @@ fn full_memento_prompt_carries_tool_feedback_contract() {
         None,
         None,
         Some(&settings),
+        true,
         true,
     );
 
@@ -990,6 +1002,80 @@ fn full_memento_prompt_carries_tool_feedback_contract() {
             )
             .count(),
         1
+    );
+}
+
+fn build_codex_memento_prompt_for_issue_4309() -> BuiltSystemPrompt {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    build_system_prompt_with_manifest(
+        "ctx",
+        &[],
+        "/tmp/agentdesk",
+        ChannelId::new(1),
+        ChannelId::new(1),
+        "tok",
+        None,
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        None,
+        None,
+        Some(&settings),
+        true,
+        false,
+        None,
+        None,
+        Some("turn-codex-memento-contract-4309"),
+    )
+}
+
+#[test]
+fn fresh_codex_turn_receives_provider_portable_memento_contract() {
+    let built = build_codex_memento_prompt_for_issue_4309();
+    let provider = crate::services::provider::ProviderKind::Codex;
+    let fresh_system_prompt = crate::services::provider::system_prompt_for_provider_turn(
+        &provider,
+        None,
+        &built.system_prompt,
+    )
+    .expect("fresh Codex turns must receive the assembled system prompt");
+    let folded = crate::services::codex::compose_codex_developer_instructions(
+        Some(fresh_system_prompt),
+        None,
+    )
+    .expect("Codex must fold a non-empty system prompt into developer instructions");
+
+    assert!(folded.contains("[Proactive Memory Guidance]"));
+    assert!(folded.contains("mcp__memento__tool_feedback"));
+    assert!(folded.contains(super::memory_guidance::MEMENTO_RECALL_OWNERSHIP));
+    assert!(
+        !folded.contains(
+            "If the tool is deferred, load it first via ToolSearch \
+             `select:mcp__memento__tool_feedback`."
+        ),
+        "Codex developer instructions must omit the Claude-only ToolSearch clause: {folded}"
+    );
+}
+
+#[test]
+fn resumed_codex_turn_omits_repeated_memento_system_prompt() {
+    let built = build_codex_memento_prompt_for_issue_4309();
+    let provider = crate::services::provider::ProviderKind::Codex;
+
+    assert!(
+        crate::services::provider::system_prompt_for_provider_turn(
+            &provider,
+            Some("codex-session-4309"),
+            &built.system_prompt,
+        )
+        .is_none(),
+        "resumed Codex sessions persist developer instructions and must omit the repeated prompt"
     );
 }
 
@@ -1026,6 +1112,7 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
             None,
             Some(&settings),
             true,
+            true,
         );
         assert!(
             !prompt.contains("[Proactive Memory Guidance]"),
@@ -1049,6 +1136,8 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
 
 #[test]
 fn foreign_workspace_full_prompt_omits_repo_relative_doc_paths() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     // #4314 (end-to-end anchor): a Full-profile agent whose cwd is NOT an
     // AgentDesk checkout (no docs/source-of-truth.md / docs/memory-scope.md
     // under it) must never get the repo-relative doc references injected into
@@ -1073,6 +1162,7 @@ fn foreign_workspace_full_prompt_omits_repo_relative_doc_paths() {
             backend: MemoryBackendKind::Memento,
             ..ResolvedMemorySettings::default()
         }),
+        true,
         true,
     );
 

@@ -11,7 +11,7 @@ use crate::services::memory::{
     sanitize_memento_workspace_segment,
 };
 
-const MEMENTO_RECALL_OWNERSHIP: &str = "AgentDesk owns automatic turn-recall decisions, including session-start identity recall and intentional skips. Do not call `context` or `recall` solely because Memento server instructions mention session start; use them only for an explicit user/task lookup.";
+pub(super) const MEMENTO_RECALL_OWNERSHIP: &str = "AgentDesk owns automatic turn-recall decisions, including session-start identity recall and intentional skips. Do not call `context` or `recall` solely because Memento server instructions mention session start; use them only for an explicit user/task lookup.";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryRecallManifestInput<'a> {
@@ -27,6 +27,7 @@ pub(super) fn proactive_memory_guidance(
     role_binding: Option<&RoleBinding>,
     profile: DispatchProfile,
     memento_mcp_available: bool,
+    is_claude_harness: bool,
 ) -> Option<String> {
     proactive_memory_guidance_with(
         memory_settings,
@@ -35,6 +36,7 @@ pub(super) fn proactive_memory_guidance(
         role_binding,
         profile,
         memento_mcp_available,
+        is_claude_harness,
         |p| std::path::Path::new(p).exists(),
     )
 }
@@ -51,6 +53,7 @@ pub(super) fn proactive_memory_guidance_with(
     role_binding: Option<&RoleBinding>,
     profile: DispatchProfile,
     memento_mcp_available: bool,
+    is_claude_harness: bool,
     exists: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let settings = memory_settings?;
@@ -85,6 +88,11 @@ pub(super) fn proactive_memory_guidance_with(
         ),
         MemoryBackendKind::Memento if !memento_mcp_available => return None,
         MemoryBackendKind::Memento => {
+            let deferred_tool_instruction = if is_claude_harness {
+                " If the tool is deferred, load it first via ToolSearch `select:mcp__memento__tool_feedback`."
+            } else {
+                ""
+            };
             let role_id = role_binding
                 .map(|binding| binding.role_id.as_str())
                 .unwrap_or(UNBOUND_MEMORY_ROLE_ID);
@@ -115,7 +123,7 @@ pub(super) fn proactive_memory_guidance_with(
                 format!(
                     "\n- automatic recall: {MEMENTO_RECALL_OWNERSHIP}\n\
                      - scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.{memory_policy_line}\n\
-                     - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `tool_name`, `relevant`, `sufficient`; when the response carries `_meta.searchEventId`, also pass it as `search_event_id` — recommended). If the tool is deferred, load it first via ToolSearch `select:mcp__memento__tool_feedback`."
+                     - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `tool_name`, `relevant`, `sufficient`; when the response carries `_meta.searchEventId`, also pass it as `search_event_id` — recommended).{deferred_tool_instruction}"
                 ),
             )
         }
@@ -152,6 +160,7 @@ mod tests {
             None,
             DispatchProfile::Full,
             false,
+            true,
         )
         .expect("file backend must produce proactive guidance");
 
@@ -179,6 +188,7 @@ mod tests {
             None,
             DispatchProfile::Full,
             false,
+            true,
         )
         .expect("fallback mode must produce proactive guidance");
 
@@ -208,6 +218,8 @@ mod tests {
         // while keeping the always-on scope hints and tool_feedback contract.
         // Removing the guard so the reference is always injected makes THIS
         // assert fail on its own — not on a compile error.
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
         let settings = memento_settings();
         let guidance = proactive_memory_guidance_with(
             Some(&settings),
@@ -215,6 +227,7 @@ mod tests {
             ChannelId::new(1),
             None,
             DispatchProfile::Full,
+            true,
             true,
             |_| false,
         )
@@ -234,6 +247,8 @@ mod tests {
         // #4314 T4 reverse: an AgentDesk workspace (docs present) must keep the
         // `docs/memory-scope.md` reference. Forcing the guard to always omit
         // makes THIS assert fail on its own.
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
         let settings = memento_settings();
         let guidance = proactive_memory_guidance_with(
             Some(&settings),
@@ -241,6 +256,7 @@ mod tests {
             ChannelId::new(1),
             None,
             DispatchProfile::Full,
+            true,
             true,
             |_| true,
         )
@@ -265,6 +281,7 @@ mod tests {
                 None,
                 profile,
                 true,
+                true,
             )
             .expect("memento-enabled non-Full profile must keep recall ownership");
 
@@ -282,6 +299,7 @@ mod tests {
                 None,
                 DispatchProfile::Lite,
                 false,
+                true,
             )
             .is_none(),
             "without the Memento MCP there are no server instructions to override"
@@ -301,6 +319,7 @@ mod tests {
                 None,
                 DispatchProfile::ReviewLite,
                 false,
+                true,
             )
             .is_none()
         );
