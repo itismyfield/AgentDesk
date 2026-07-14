@@ -219,24 +219,21 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     let early_role_binding = routine_role_binding
         .clone()
         .or_else(|| {
-            metadata_parent_channel_id(metadata.as_ref())
-                .and_then(|parent_channel_id| resolve_role_binding(parent_channel_id, None))
-        })
-        .or_else(|| {
-            resolve_role_binding(
+            resolve_thread_role_binding(
                 channel_id,
                 early_channel_name
                     .as_deref()
                     .or(channel_name_hint.as_deref())
                     .or(early_resolved_channel_name.as_deref()),
+                early_thread_parent.as_ref(),
             )
+            .role_binding
         })
         .or_else(|| {
-            early_thread_parent
-                .as_ref()
-                .and_then(|(parent_id, parent_name)| {
-                    resolve_role_binding(*parent_id, parent_name.as_deref())
-                })
+            early_thread_parent.is_none().then(|| {
+                metadata_parent_channel_id(metadata.as_ref())
+                    .and_then(|parent_id| resolve_role_binding(parent_id, None))
+            })?
         });
     let early_provider = early_role_binding
         .as_ref()
@@ -307,6 +304,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             session.clear_provider_session();
         }
         if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
+            // Existing sessions retain their child-channel runtime identity.
             if let Some(channel_name) = resolved_channel_name_for_session.as_ref()
                 && let Some(session) = data.sessions.get_mut(&channel_id)
                 && session.channel_name.is_none()
@@ -318,6 +316,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             let workspace = resolve_headless_workspace(
                 channel_id,
                 resolved_channel_name_for_session.as_deref(),
+                early_thread_parent.as_ref(),
                 metadata.as_ref(),
             )
             .ok_or_else(|| {
@@ -405,27 +404,28 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     };
 
     let turn_id = reservation.turn_id(channel_id);
-    let role_binding = {
+    let mut resolved_role_binding = {
         let data = shared.core.lock().await;
         let channel_name = data
             .sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.as_deref());
-        routine_role_binding
-            .clone()
-            .or_else(|| {
-                metadata_parent_channel_id(metadata.as_ref())
-                    .and_then(|parent_channel_id| resolve_role_binding(parent_channel_id, None))
-            })
-            .or_else(|| resolve_role_binding(channel_id, channel_name))
-    }
-    .or_else(|| {
-        early_thread_parent
-            .as_ref()
-            .and_then(|(parent_id, parent_name)| {
-                resolve_role_binding(*parent_id, parent_name.as_deref())
-            })
-    });
+        if let Some(binding) = routine_role_binding.clone() {
+            ResolvedThreadRoleBinding::direct(Some(binding))
+        } else {
+            let mut resolved =
+                resolve_thread_role_binding(channel_id, channel_name, early_thread_parent.as_ref());
+            if resolved.role_binding.is_none() && early_thread_parent.is_none() {
+                resolved.role_binding = metadata_parent_channel_id(metadata.as_ref())
+                    .and_then(|parent_id| resolve_role_binding(parent_id, None));
+            }
+            resolved
+        }
+    };
+    let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
+    let memory_channel_id = memory_scope_channel_id.get();
+    let inherited_memory_channel_name = resolved_role_binding.memory_channel_name(None);
+    let role_binding = resolved_role_binding.role_binding.take();
     let provider = role_binding
         .as_ref()
         .and_then(|binding| binding.provider.clone())
@@ -502,10 +502,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         )
     };
 
-    let fast_mode_channel_id = effective_fast_mode_channel_id(
-        channel_id,
-        super::super::super::resolve_thread_parent(&ctx.http, channel_id).await,
-    );
+    let fast_mode_channel_id = effective_fast_mode_channel_id(channel_id, early_thread_parent);
     super::super::super::commands::reset_provider_session_if_pending(
         &ctx.http,
         shared,
@@ -771,9 +768,11 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .recall(RecallRequest {
                 provider: provider.clone(),
                 role_id: resolve_memory_role_id(role_binding.as_ref()),
-                channel_id: channel_id.get(),
-                channel_name: channel_name.clone(),
-                session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+                channel_id: memory_channel_id,
+                channel_name: inherited_memory_channel_name
+                    .clone()
+                    .or_else(|| channel_name.clone()),
+                session_id: resolve_memory_session_id(session_id.as_deref(), memory_channel_id),
                 dispatch_profile,
                 user_text: prompt.to_string(),
                 mode: memento_recall_gate.mode,
@@ -889,6 +888,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         &channel_participants,
         &current_path,
         channel_id,
+        memory_scope_channel_id,
         token,
         role_binding.as_ref(),
         false,

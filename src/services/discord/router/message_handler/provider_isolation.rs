@@ -10,7 +10,73 @@ pub(super) fn metadata_parent_channel_id(
         .filter(|id| *id > 0)
         .map(serenity::ChannelId::new)
 }
+#[derive(Debug, Clone)]
+pub(super) struct ResolvedThreadRoleBinding {
+    pub(super) role_binding: Option<settings::RoleBinding>,
+    inherited_parent: Option<(ChannelId, Option<String>)>,
+}
+impl ResolvedThreadRoleBinding {
+    pub(super) fn direct(role_binding: Option<settings::RoleBinding>) -> Self {
+        Self {
+            role_binding,
+            inherited_parent: None,
+        }
+    }
 
+    pub(super) fn memory_channel_id(&self, channel_id: ChannelId) -> ChannelId {
+        self.inherited_parent
+            .as_ref()
+            .map(|(parent_id, _)| *parent_id)
+            .unwrap_or(channel_id)
+    }
+
+    pub(super) fn memory_channel_name(&self, channel_name: Option<&str>) -> Option<String> {
+        self.inherited_parent
+            .as_ref()
+            .and_then(|(_, parent_name)| parent_name.clone())
+            .or_else(|| channel_name.map(String::from))
+    }
+}
+fn inheritable_thread_parent(
+    thread_parent: Option<&(ChannelId, Option<String>)>,
+) -> Option<&(ChannelId, Option<String>)> {
+    thread_parent.filter(|(parent_id, parent_name)| {
+        super::super::super::role_map::thread_inheritance_enabled(
+            *parent_id,
+            parent_name.as_deref(),
+        )
+    })
+}
+pub(super) fn resolve_thread_role_binding(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+    thread_parent: Option<&(ChannelId, Option<String>)>,
+) -> ResolvedThreadRoleBinding {
+    let direct = settings::resolve_role_binding(channel_id, channel_name);
+    if direct.is_some() {
+        return ResolvedThreadRoleBinding::direct(direct);
+    }
+    let inherited =
+        inheritable_thread_parent(thread_parent).and_then(|(parent_id, parent_name)| {
+            settings::resolve_role_binding(*parent_id, parent_name.as_deref())
+                .map(|binding| (binding, (*parent_id, parent_name.clone())))
+        });
+    ResolvedThreadRoleBinding {
+        role_binding: inherited.as_ref().map(|(binding, _)| binding.clone()),
+        inherited_parent: inherited.map(|(_, parent)| parent),
+    }
+}
+pub(super) fn resolve_thread_workspace(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+    thread_parent: Option<&(ChannelId, Option<String>)>,
+) -> Option<String> {
+    settings::resolve_workspace(channel_id, channel_name).or_else(|| {
+        inheritable_thread_parent(thread_parent).and_then(|(parent_id, parent_name)| {
+            settings::resolve_workspace(*parent_id, parent_name.as_deref())
+        })
+    })
+}
 pub(super) fn metadata_delivery_bot(metadata: Option<&serde_json::Value>) -> Option<String> {
     metadata
         .and_then(|value| value.get("delivery_bot"))
@@ -312,11 +378,14 @@ pub(super) fn normalize_delivery_bot_name(value: &str) -> Option<String> {
 pub(super) fn resolve_headless_workspace(
     channel_id: serenity::ChannelId,
     channel_name_hint: Option<&str>,
+    thread_parent: Option<&(ChannelId, Option<String>)>,
     metadata: Option<&serde_json::Value>,
 ) -> Option<String> {
-    settings::resolve_workspace(channel_id, channel_name_hint).or_else(|| {
-        metadata_parent_channel_id(metadata)
-            .and_then(|parent_channel_id| settings::resolve_workspace(parent_channel_id, None))
+    resolve_thread_workspace(channel_id, channel_name_hint, thread_parent).or_else(|| {
+        thread_parent.is_none().then(|| {
+            metadata_parent_channel_id(metadata)
+                .and_then(|parent_id| settings::resolve_workspace(parent_id, None))
+        })?
     })
 }
 pub(super) fn native_fast_mode_override_for_turn(
@@ -347,6 +416,33 @@ pub(super) fn effective_fast_mode_channel_id(
     thread_parent
         .map(|(parent_channel_id, _)| parent_channel_id)
         .unwrap_or(channel_id)
+}
+
+pub(super) fn select_final_path<'a>(
+    dispatch: &'a str,
+    workspace: Option<&'a str>,
+    authoritative: bool,
+) -> &'a str {
+    workspace.filter(|_| !authoritative).unwrap_or(dispatch)
+}
+
+pub(super) async fn apply_final_thread_workspace(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    thread_parent: Option<&(ChannelId, Option<String>)>,
+    selection: (&mut String, bool),
+) -> bool {
+    let (dispatch_path, authoritative) = selection;
+    let data = shared.core.lock().await;
+    let channel_name = data
+        .sessions
+        .get(&channel_id)
+        .and_then(|session| session.channel_name.as_deref());
+    let workspace = resolve_thread_workspace(channel_id, channel_name, thread_parent);
+    let has_workspace = workspace.is_some();
+    *dispatch_path =
+        select_final_path(dispatch_path, workspace.as_deref(), authoritative).to_owned();
+    has_workspace
 }
 
 pub(super) fn dispatch_type_bypasses_provider_worktree_isolation(
@@ -502,4 +598,159 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
     *session_id = None;
     *memento_context_loaded = false;
     *session_strategy_reason = "provider_channel_worktree_isolated";
+}
+#[cfg(test)]
+mod thread_role_inheritance_tests {
+    use super::*;
+    fn bind_parent(
+        root: &std::path::Path,
+        id: ChannelId,
+        prompt: &std::path::Path,
+        workspace: &std::path::Path,
+        thread_inherit: Option<bool>,
+    ) {
+        let path = crate::runtime_layout::role_map_path(root);
+        std::fs::create_dir_all(path.parent().expect("role-map parent")).unwrap();
+        let mut entry = serde_json::json!({
+            "roleId": "parent-role",
+            "promptFile": prompt,
+            "workspace": workspace,
+        });
+        if let Some(enabled) = thread_inherit {
+            entry["threadInherit"] = serde_json::Value::Bool(enabled);
+        }
+        let json = serde_json::json!({ "byChannelId": { (id.get().to_string()): entry } });
+        std::fs::write(path, json.to_string()).unwrap();
+    }
+    #[test]
+    fn thread_inherits_parent_role_workspace_and_memory_scope_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let prompt = root.path().join("parent-role.md");
+        let workspace = root.path().join("parent-memory-workspace");
+        std::fs::write(&prompt, "PARENT ROLE PROMPT").unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let child = ChannelId::new(43_170_101);
+        let parent = (ChannelId::new(43_170_102), Some("parent".to_string()));
+        bind_parent(root.path(), parent.0, &prompt, &workspace, None);
+        let resolved = resolve_thread_role_binding(child, Some("thread"), Some(&parent));
+        let binding = resolved.role_binding.as_ref().expect("parent role");
+        assert_eq!(binding.role_id, "parent-role");
+        assert_eq!(
+            resolve_thread_workspace(child, Some("thread"), Some(&parent)).as_deref(),
+            workspace.to_str()
+        );
+        assert_eq!(resolved.memory_channel_id(child), parent.0);
+        assert_eq!(resolved.memory_channel_name(None), parent.1);
+        let memory = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..Default::default()
+        };
+        let built = super::super::super::super::prompt_builder::build_system_prompt_with_manifest(
+            "discord",
+            &[],
+            workspace.to_str().unwrap(),
+            child,
+            parent.0,
+            "token",
+            Some(binding),
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            None,
+            Some(&memory),
+            true,
+            None,
+            None,
+            None,
+        );
+        assert!(built.system_prompt.contains("PARENT ROLE PROMPT"));
+        assert!(
+            built
+                .system_prompt
+                .contains("workspace=agentdesk-parent-memory-workspace")
+        );
+        let unbound_parent = (ChannelId::new(43_170_103), Some("unbound".to_string()));
+        let unbound = resolve_thread_role_binding(child, Some("thread"), Some(&unbound_parent));
+        assert!(unbound.role_binding.is_none());
+        assert_eq!(unbound.memory_channel_id(child), child);
+    }
+    #[test]
+    fn thread_inherit_false_opts_out() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let prompt = std::path::Path::new("/tmp/parent-role.md");
+        let workspace = std::path::Path::new("/tmp/parent-workspace");
+        let child = ChannelId::new(43_170_201);
+        let parent = (ChannelId::new(43_170_202), Some("parent".to_string()));
+        bind_parent(root.path(), parent.0, prompt, workspace, Some(false));
+
+        let resolved = resolve_thread_role_binding(child, Some("thread"), Some(&parent));
+        assert!(resolved.role_binding.is_none());
+        assert!(resolve_thread_workspace(child, Some("thread"), Some(&parent)).is_none());
+        assert_eq!(resolved.memory_channel_id(child), child);
+        assert_eq!(
+            resolved.memory_channel_name(Some("t")).as_deref(),
+            Some("t")
+        );
+    }
+
+    #[test]
+    fn non_thread_resolution_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let prompt = std::path::Path::new("/tmp/child-role.md");
+        let workspace = std::path::Path::new("/tmp/child-workspace");
+        let child = ChannelId::new(43_170_301);
+        bind_parent(root.path(), child, prompt, workspace, Some(false));
+
+        let resolved = resolve_thread_role_binding(child, Some("channel"), None);
+        let binding = resolved.role_binding.as_ref().expect("direct child role");
+        assert_eq!(binding.role_id, "parent-role");
+        assert_eq!(
+            resolve_thread_workspace(child, Some("channel"), None).as_deref(),
+            workspace.to_str()
+        );
+        assert_eq!(resolved.memory_channel_id(child), child);
+    }
+
+    #[test]
+    fn redirect_uses_final_parent_for_inheritance_and_fast_mode_key() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let prompt = std::path::Path::new("/tmp/final-parent-role.md");
+        let workspace = std::path::Path::new("/tmp/final-parent-workspace");
+        let incoming_channel = ChannelId::new(43_170_401);
+        let final_thread = ChannelId::new(43_170_402);
+        let final_parent = (ChannelId::new(43_170_403), Some("final-parent".to_string()));
+        bind_parent(root.path(), final_parent.0, prompt, workspace, None);
+
+        let resolved =
+            resolve_thread_role_binding(final_thread, Some("dispatch-thread"), Some(&final_parent));
+        assert_eq!(
+            resolved
+                .role_binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
+            Some("parent-role")
+        );
+        assert_eq!(resolved.memory_channel_id(final_thread), final_parent.0);
+        assert_eq!(
+            resolve_thread_workspace(final_thread, Some("dispatch-thread"), Some(&final_parent))
+                .as_deref(),
+            workspace.to_str()
+        );
+        let fast_mode_key =
+            effective_fast_mode_channel_id(final_thread, Some(final_parent.clone()));
+        assert_eq!(fast_mode_key, final_parent.0);
+        assert_ne!(fast_mode_key, incoming_channel);
+        let workspace = workspace.to_str();
+        let inherited = select_final_path("/default", workspace, false);
+        assert_eq!(inherited, workspace.unwrap());
+        let should_update = dispatch_session_path_should_update;
+        assert!(should_update(true, None, false, false, "/in", inherited));
+        assert_eq!(select_final_path("/explicit", workspace, true), "/explicit");
+    }
 }

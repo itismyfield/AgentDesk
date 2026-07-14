@@ -582,7 +582,7 @@
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
 | `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 270 | 270 | 0 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1315 | 1020 | 295 | giant-file |
-| `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 598 | 598 | 0 |  |
+| `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 600 | 600 | 0 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
 | `services::discord::prompt_builder::layer_rendering` | `src/services/discord/prompt_builder/layer_rendering.rs` | 498 | 299 | 199 |  |
 | `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 359 | 359 | 0 |  |
@@ -641,7 +641,7 @@
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 102 | 102 | 0 |  |
 | `services::discord::restart_mode` | `src/services/discord/restart_mode.rs` | 32 | 32 | 0 |  |
 | `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 438 | 438 | 0 |  |
-| `services::discord::role_map` | `src/services/discord/role_map.rs` | 642 | 642 | 0 |  |
+| `services::discord::role_map` | `src/services/discord/role_map.rs` | 665 | 665 | 0 |  |
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 31 | 31 | 0 |  |
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 | 48 | 0 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 203 | 143 | 60 |  |
@@ -666,7 +666,7 @@
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 256 | 256 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::voice_intake` | `src/services/discord/router/message_handler/intake_turn/voice_intake.rs` | 155 | 155 | 0 |  |
 | `services::discord::router::message_handler::latency_spans` | `src/services/discord/router/message_handler/latency_spans.rs` | 230 | 158 | 72 |  |
-| `services::discord::router::message_handler::provider_isolation` | `src/services/discord/router/message_handler/provider_isolation.rs` | 505 | 505 | 0 |  |
+| `services::discord::router::message_handler::provider_isolation` | `src/services/discord/router/message_handler/provider_isolation.rs` | 756 | 601 | 155 |  |
 | `services::discord::router::message_handler::tui_followup` | `src/services/discord/router/message_handler/tui_followup.rs` | 994 | 968 | 26 |  |
 | `services::discord::router::message_handler::turn_lifecycle` | `src/services/discord/router/message_handler/turn_lifecycle.rs` | 183 | 183 | 0 |  |
 | `services::discord::router::message_handler::voice_announcement_route` | `src/services/discord/router/message_handler/voice_announcement_route.rs` | 444 | 106 | 338 |  |
@@ -700,7 +700,7 @@
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 75 | 75 | 0 |  |
 | `services::discord::session_relay_sink::task_notification_context` | `src/services/discord/session_relay_sink/task_notification_context.rs` | 803 | 503 | 300 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1027 | 501 | 526 |  |
-| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 235 | 235 | 0 |  |
+| `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 253 | 240 | 13 |  |
 | `services::discord::session_runtime::restore_cwd` | `src/services/discord/session_runtime/restore_cwd.rs` | 353 | 353 | 0 |  |
 | `services::discord::session_runtime::worktree` | `src/services/discord/session_runtime/worktree.rs` | 601 | 601 | 0 |  |
 | `services::discord::settings` | `src/services/discord/settings.rs` | 345 | 345 | 0 |  |
