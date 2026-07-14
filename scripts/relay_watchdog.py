@@ -86,6 +86,10 @@ COVERAGE_COVERED = "covered"
 COVERAGE_UNCOVERED = "uncovered"
 COVERAGE_UNKNOWN = "unknown"
 COVERAGE_CONFIRM_TICKS = 2
+# #4504: a bare attached_but_desynced (no corroborating delivery gap) must
+# persist far longer than the 2-tick default before it can alarm on its own,
+# because under bursty load it self-clears with delivery fully intact.
+COVERAGE_DESYNC_CONFIRM_TICKS = 20  # ~10 min at a 30s poll
 # A foreground turn must show an outbound/relay write inside this window before
 # a transient watcher-state desync can be treated as covered.  Ten minutes
 # matches the watchdog's calibrated delivery grace while still letting a
@@ -2675,6 +2679,22 @@ def tick_coverage(
             f"confirm={verdict.consecutive_uncovered}/{COVERAGE_CONFIRM_TICKS}"
         )
         return
+    # #4504: attached_but_desynced is a watcher-state desync, not proof of
+    # delivery loss. Require a corroborating real delivery gap OR much longer
+    # persistence before this alarms on its own. detached / watcher_state_404
+    # keep the 2-tick behavior (different reason strings).
+    if verdict.reason == "attached_but_desynced":
+        delivery_gap_active = bool(chs.get("gap_since") or chs.get("alerting"))
+        if (
+            not delivery_gap_active
+            and verdict.consecutive_uncovered < COVERAGE_DESYNC_CONFIRM_TICKS
+        ):
+            rt.log(
+                f"[{cid}] coverage desync uncorroborated "
+                f"ticks={verdict.consecutive_uncovered}/"
+                f"{COVERAGE_DESYNC_CONFIRM_TICKS} — not alarming"
+            )
+            return
     if rt.in_deploy_window(now):
         rt.log(
             f"[{cid}] coverage violation reason={verdict.reason} suppressed — "
