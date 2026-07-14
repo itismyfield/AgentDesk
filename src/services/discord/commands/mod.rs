@@ -21,6 +21,35 @@ mod text_commands;
 mod tui_passthrough;
 mod voice;
 
+pub(super) const STOPPING_RESPONSE: &str = "중지하고 있어요...";
+pub(super) const ALREADY_STOPPING_RESPONSE: &str = "이미 중지 중이에요.";
+pub(super) const NO_ACTIVE_TURN_RESPONSE: &str = "중지할 활성 턴이 없어요.";
+pub(super) const SESSION_CLEARED_RESPONSE: &str = "세션을 초기화했어요.";
+
+pub(super) fn session_started_response(path: &str) -> String {
+    format!("`{path}`에서 세션을 시작했어요.")
+}
+
+pub(super) fn session_restored_response(path: &str) -> String {
+    format!("`{path}`에서 세션을 복원했어요.")
+}
+
+pub(super) fn owner_error_response(summary: &str, detail: &str) -> String {
+    const DETAIL_PREVIEW_CHARS: usize = 1_400;
+
+    let detail = detail.trim();
+    let truncated = detail.chars().count() > DETAIL_PREVIEW_CHARS;
+    let preview: String = detail.chars().take(DETAIL_PREVIEW_CHARS).collect();
+    let preview = super::formatting::escape_for_code_fence(&preview).replace("||", "|\u{200b}|");
+    let suffix = if truncated {
+        "\n…(이하 생략)"
+    } else {
+        ""
+    };
+
+    format!("⚠️ {summary}\n||**상세**\n```text\n{preview}{suffix}\n```||")
+}
+
 #[allow(unused_imports)]
 pub(in crate::services::discord) use command_policy::{CommandRisk, PolicyDecision};
 pub(in crate::services::discord) use command_policy::{
@@ -77,6 +106,41 @@ pub(in crate::services::discord) use voice::{
     register_songbird, voice_occupancy,
 };
 pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
+
+#[cfg(test)]
+mod response_wording_tests {
+    use super::{
+        ALREADY_STOPPING_RESPONSE, NO_ACTIVE_TURN_RESPONSE, SESSION_CLEARED_RESPONSE,
+        STOPPING_RESPONSE, owner_error_response, session_restored_response,
+        session_started_response,
+    };
+
+    #[test]
+    fn shared_command_states_use_korean_responses() {
+        assert_eq!(STOPPING_RESPONSE, "중지하고 있어요...");
+        assert_eq!(ALREADY_STOPPING_RESPONSE, "이미 중지 중이에요.");
+        assert_eq!(NO_ACTIVE_TURN_RESPONSE, "중지할 활성 턴이 없어요.");
+        assert_eq!(SESSION_CLEARED_RESPONSE, "세션을 초기화했어요.");
+        assert_eq!(
+            session_started_response("/tmp/work"),
+            "`/tmp/work`에서 세션을 시작했어요."
+        );
+        assert_eq!(
+            session_restored_response("/tmp/work"),
+            "`/tmp/work`에서 세션을 복원했어요."
+        );
+    }
+
+    #[test]
+    fn owner_error_detail_is_folded_and_markdown_safe() {
+        let response = owner_error_response("명령을 실행하지 못했어요.", "bad ``` fence || leak");
+
+        assert!(response.starts_with("⚠️ 명령을 실행하지 못했어요.\n||**상세**"));
+        assert!(response.ends_with("```||"));
+        assert!(!response.contains("bad ``` fence"));
+        assert!(!response.contains("|| leak"));
+    }
+}
 
 /// Apply the issue #1005 owner guard to a slash command.
 ///

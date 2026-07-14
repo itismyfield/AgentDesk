@@ -437,10 +437,10 @@
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 291 | 291 | 0 |  |
 | `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 97 | 97 | 0 |  |
 | `services::discord::catch_up::too_old_notice` | `src/services/discord/catch_up/too_old_notice.rs` | 195 | 106 | 89 |  |
-| `services::discord::commands` | `src/services/discord/commands/mod.rs` | 121 | 121 | 0 |  |
+| `services::discord::commands` | `src/services/discord/commands/mod.rs` | 185 | 151 | 34 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 221 | 209 | 12 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
-| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 834 | 776 | 58 |  |
+| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 839 | 781 | 58 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics/mod.rs` | 389 | 389 | 0 |  |
 | `services::discord::commands::diagnostics::reports` | `src/services/discord/commands/diagnostics/reports.rs` | 681 | 655 | 26 |  |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 82 | 82 | 0 |  |
@@ -460,13 +460,13 @@
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 264 | 264 | 0 |  |
 | `services::discord::commands::node` | `src/services/discord/commands/node.rs` | 481 | 452 | 29 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 266 | 266 | 0 |  |
-| `services::discord::commands::recovery_ops` | `src/services/discord/commands/recovery_ops.rs` | 502 | 363 | 139 |  |
+| `services::discord::commands::recovery_ops` | `src/services/discord/commands/recovery_ops.rs` | 511 | 372 | 139 |  |
 | `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 242 | 242 | 0 |  |
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 230 | 230 | 0 |  |
 | `services::discord::commands::sidecar` | `src/services/discord/commands/sidecar.rs` | 41 | 41 | 0 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 381 | 381 | 0 |  |
 | `services::discord::commands::steer` | `src/services/discord/commands/steer.rs` | 147 | 147 | 0 |  |
-| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1480 | 1480 | 0 | giant-file |
+| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1496 | 1496 | 0 | giant-file |
 | `services::discord::commands::tui_passthrough` | `src/services/discord/commands/tui_passthrough.rs` | 412 | 357 | 55 |  |
 | `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 1056 | 998 | 58 |  |
 | `services::discord::delivery_lease_key` | `src/services/discord/delivery_lease_key.rs` | 156 | 156 | 0 |  |

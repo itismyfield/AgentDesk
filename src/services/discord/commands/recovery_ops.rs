@@ -289,19 +289,28 @@ async fn run_recovery(
                 parts.push(format!("```\n{}\n```", stdout.trim_end()));
             }
             if !stderr.is_empty() {
-                parts.push(format!("stderr:\n```\n{}\n```", stderr.trim_end()));
+                parts.push(super::owner_error_response(
+                    "복구 명령이 오류 출력을 반환했어요.",
+                    stderr.trim_end(),
+                ));
             }
             if let Some(cause) = outcome.timed_out {
-                parts.push(format!("killed by shell guard ({})", cause.as_str()));
+                parts.push(super::owner_error_response(
+                    "복구 명령이 제한 시간을 초과해 중지됐어요.",
+                    cause.as_str(),
+                ));
             } else if parts.is_empty() {
-                parts.push(format!("(exit code: {})", outcome.exit_code));
+                parts.push(format!("(종료 코드: {})", outcome.exit_code));
             } else if outcome.exit_code != 0 {
-                parts.push(format!("(exit code: {})", outcome.exit_code));
+                parts.push(format!("(종료 코드: {})", outcome.exit_code));
             }
             parts.join("\n")
         }
-        Ok(Err(e)) => format!("Failed to execute: {}", e),
-        Err(e) => format!("Task error: {}", e),
+        Ok(Err(e)) => super::owner_error_response("복구 명령을 실행하지 못했어요.", &e),
+        Err(e) => super::owner_error_response(
+            "복구 명령을 처리하는 중 오류가 발생했어요.",
+            &e.to_string(),
+        ),
     };
 
     send_long_message_ctx(ctx, &response).await?;

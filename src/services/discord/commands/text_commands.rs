@@ -112,13 +112,13 @@ fn format_escalation_settings_summary(settings: &crate::config::EscalationSettin
     let owner = settings
         .owner_user_id
         .map(|id| id.to_string())
-        .unwrap_or_else(|| "(none)".to_string());
+        .unwrap_or_else(|| "(없음)".to_string());
     let pm_channel = settings
         .pm_channel_id
         .clone()
-        .unwrap_or_else(|| "(none)".to_string());
+        .unwrap_or_else(|| "(없음)".to_string());
     format!(
-        "mode: `{}`\nowner_user_id: `{}`\npm_channel_id: `{}`\nschedule: `{}` / `{}`",
+        "모드: `{}`\n소유자 ID: `{}`\nPM 채널 ID: `{}`\n일정: `{}` / `{}`",
         mode, owner, pm_channel, settings.schedule.pm_hours, settings.schedule.timezone
     )
 }
@@ -255,10 +255,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] ▶ Session started: {}", effective_path);
             let _ = msg
-                .reply(
-                    &ctx.http,
-                    format!("Session started at `{}`.", effective_path),
-                )
+                .reply(&ctx.http, super::session_started_response(&effective_path))
                 .await;
             return Ok(true);
         }
@@ -426,10 +423,10 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     );
                 }
                 TextStopLookup::AlreadyStopping => {
-                    let _ = msg.reply(&ctx.http, "Already stopping...").await;
+                    let _ = msg.reply(&ctx.http, super::ALREADY_STOPPING_RESPONSE).await;
                 }
                 TextStopLookup::NoActiveTurn => {
-                    let _ = msg.reply(&ctx.http, "No active turn to stop.").await;
+                    let _ = msg.reply(&ctx.http, super::NO_ACTIVE_TURN_RESPONSE).await;
                 }
             }
             return Ok(true);
@@ -445,7 +442,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 super::SoftClearNotifyMode::Suppress,
             )
             .await;
-            let _ = msg.reply(&ctx.http, "Session cleared.").await;
+            let _ = msg.reply(&ctx.http, super::SESSION_CLEARED_RESPONSE).await;
             return Ok(true);
         }
 
@@ -541,7 +538,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg
-                    .reply(&ctx.http, "Only the owner can change escalation settings.")
+                    .reply(&ctx.http, "소유자만 에스컬레이션 설정을 변경할 수 있어요.")
                     .await;
                 return Ok(true);
             }
@@ -552,7 +549,10 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     let _ = msg
                         .reply(
                             &ctx.http,
-                            format!("Failed to load escalation settings: {err}"),
+                            super::owner_error_response(
+                                "에스컬레이션 설정을 불러오지 못했어요.",
+                                &err,
+                            ),
                         )
                         .await;
                     return Ok(true);
@@ -564,7 +564,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     .reply(
                         &ctx.http,
                         format!(
-                            "**Escalation Settings**\n{}",
+                            "**에스컬레이션 설정**\n{}",
                             format_escalation_settings_summary(&settings)
                         ),
                     )
@@ -576,7 +576,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             let subcommand = parts.next().unwrap_or("").trim().to_ascii_lowercase();
             let value = parts.next().unwrap_or("").trim();
 
-            let usage = "Usage: `!escalation status|pm|user|scheduled|schedule <HH:MM-HH:MM>|timezone <IANA>|owner <user_id>|pm-channel <channel_id>`";
+            let usage = "사용법: `!escalation status|pm|user|scheduled|schedule <HH:MM-HH:MM>|timezone <IANA>|owner <user_id>|pm-channel <channel_id>`";
             let update_error = match subcommand.as_str() {
                 "pm" => {
                     settings.mode = crate::config::EscalationMode::Pm;
@@ -592,7 +592,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 }
                 "schedule" => {
                     if value.is_empty() {
-                        Some("schedule value is required")
+                        Some("일정 값을 입력해 주세요.")
                     } else {
                         settings.mode = crate::config::EscalationMode::Scheduled;
                         settings.schedule.pm_hours = value.to_string();
@@ -601,7 +601,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 }
                 "timezone" => {
                     if value.is_empty() {
-                        Some("timezone value is required")
+                        Some("시간대 값을 입력해 주세요.")
                     } else {
                         settings.schedule.timezone = value.to_string();
                         None
@@ -612,7 +612,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         settings.owner_user_id = Some(user_id);
                         None
                     }
-                    None => Some("owner must be a numeric Discord user id or mention"),
+                    None => Some("소유자는 Discord 사용자 숫자 ID 또는 멘션으로 입력해 주세요."),
                 },
                 "clear-owner" => {
                     settings.owner_user_id = None;
@@ -620,7 +620,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 }
                 "pm-channel" => {
                     if value.is_empty() {
-                        Some("pm-channel value is required")
+                        Some("PM 채널 값을 입력해 주세요.")
                     } else {
                         settings.pm_channel_id = Some(value.to_string());
                         None
@@ -644,7 +644,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         .reply(
                             &ctx.http,
                             format!(
-                                "**Escalation Settings Updated**\n{}",
+                                "**에스컬레이션 설정을 변경했어요**\n{}",
                                 format_escalation_settings_summary(&response.current)
                             ),
                         )
@@ -654,7 +654,10 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     let _ = msg
                         .reply(
                             &ctx.http,
-                            format!("Failed to save escalation settings: {err}"),
+                            super::owner_error_response(
+                                "에스컬레이션 설정을 저장하지 못했어요.",
+                                &err,
+                            ),
                         )
                         .await;
                 }
@@ -1062,10 +1065,7 @@ Any other message is sent to {p}.
 
             if cmd_str.is_empty() {
                 let _ = msg
-                    .reply(
-                        &ctx.http,
-                        "Usage: `!shell <command>`\nExample: `!shell ls -la`",
-                    )
+                    .reply(&ctx.http, "사용법: `!shell <command>`\n예: `!shell ls -la`")
                     .await;
                 return Ok(true);
             }
@@ -1132,24 +1132,31 @@ Any other message is sent to {p}.
                         parts.push(format!("```\n{}\n```", stdout.trim_end()));
                     }
                     if !stderr.is_empty() {
-                        parts.push(format!("stderr:\n```\n{}\n```", stderr.trim_end()));
+                        parts.push(super::owner_error_response(
+                            "셸 명령이 오류 출력을 반환했어요.",
+                            stderr.trim_end(),
+                        ));
                     }
                     if let Some(cause) = outcome.timed_out {
                         parts.push(format!(
-                            "killed by shell guard ({}). Issue #1128: split the command, \
-                             scope the path, or add `--exclude-dir`/`-name` filters before \
-                             retrying.",
-                            cause.as_str()
+                            "⚠️ 셸 명령이 제한 시간을 초과해 중지됐어요.\n명령을 나누거나 경로 범위를 좁힌 뒤, `--exclude-dir`/`-name` 필터를 추가해 다시 시도해 주세요.\n{}",
+                            super::owner_error_response(
+                                "중지 원인 상세를 확인해 주세요.",
+                                cause.as_str(),
+                            )
                         ));
                     } else if parts.is_empty() {
-                        parts.push(format!("(exit code: {})", exit_code));
+                        parts.push(format!("(종료 코드: {})", exit_code));
                     } else if exit_code != 0 {
-                        parts.push(format!("(exit code: {})", exit_code));
+                        parts.push(format!("(종료 코드: {})", exit_code));
                     }
                     parts.join("\n")
                 }
-                Ok(Err(e)) => format!("Failed to execute: {}", e),
-                Err(e) => format!("Task error: {}", e),
+                Ok(Err(e)) => super::owner_error_response("셸 명령을 실행하지 못했어요.", &e),
+                Err(e) => super::owner_error_response(
+                    "셸 명령을 처리하는 중 오류가 발생했어요.",
+                    &e.to_string(),
+                ),
             };
 
             send_long_message_raw(&ctx.http, channel_id, &response, &data.shared).await?;
@@ -1250,19 +1257,28 @@ Any other message is sent to {p}.
                         parts.push(format!("```\n{}\n```", stdout.trim_end()));
                     }
                     if !stderr.is_empty() {
-                        parts.push(format!("stderr:\n```\n{}\n```", stderr.trim_end()));
+                        parts.push(super::owner_error_response(
+                            "복구 명령이 오류 출력을 반환했어요.",
+                            stderr.trim_end(),
+                        ));
                     }
                     if let Some(cause) = outcome.timed_out {
-                        parts.push(format!("killed by shell guard ({})", cause.as_str()));
+                        parts.push(super::owner_error_response(
+                            "복구 명령이 제한 시간을 초과해 중지됐어요.",
+                            cause.as_str(),
+                        ));
                     } else if parts.is_empty() {
-                        parts.push(format!("(exit code: {})", outcome.exit_code));
+                        parts.push(format!("(종료 코드: {})", outcome.exit_code));
                     } else if outcome.exit_code != 0 {
-                        parts.push(format!("(exit code: {})", outcome.exit_code));
+                        parts.push(format!("(종료 코드: {})", outcome.exit_code));
                     }
                     parts.join("\n")
                 }
-                Ok(Err(e)) => format!("Failed to execute: {}", e),
-                Err(e) => format!("Task error: {}", e),
+                Ok(Err(e)) => super::owner_error_response("복구 명령을 실행하지 못했어요.", &e),
+                Err(e) => super::owner_error_response(
+                    "복구 명령을 처리하는 중 오류가 발생했어요.",
+                    &e.to_string(),
+                ),
             };
             send_long_message_raw(&ctx.http, channel_id, &response, &data.shared).await?;
             return Ok(true);
@@ -1360,13 +1376,13 @@ Any other message is sent to {p}.
                                 channel_id,
                                 &stop_reason,
                             );
-                            let _ = msg.reply(&ctx.http, "Stopping...").await;
+                            let _ = msg.reply(&ctx.http, super::STOPPING_RESPONSE).await;
                         }
                         TextStopLookup::AlreadyStopping => {
-                            let _ = msg.reply(&ctx.http, "Already stopping...").await;
+                            let _ = msg.reply(&ctx.http, super::ALREADY_STOPPING_RESPONSE).await;
                         }
                         TextStopLookup::NoActiveTurn => {
-                            let _ = msg.reply(&ctx.http, "No active request to stop.").await;
+                            let _ = msg.reply(&ctx.http, super::NO_ACTIVE_TURN_RESPONSE).await;
                         }
                     }
                     return Ok(true);

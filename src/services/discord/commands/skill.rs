@@ -148,7 +148,7 @@ async fn run_skill_slash_command(
     // Handle built-in commands directly instead of sending to AI
     match skill.as_str() {
         "clear" => {
-            ctx.say("Use the `/clear` slash command instead.").await?;
+            ctx.say("`/clear` 슬래시 명령을 사용해 주세요.").await?;
             return Ok(());
         }
         "stop" => {
@@ -166,10 +166,10 @@ async fn run_skill_slash_command(
             match result.token {
                 Some(token) => {
                     if result.already_stopping {
-                        ctx.say("Already stopping...").await?;
+                        ctx.say(super::ALREADY_STOPPING_RESPONSE).await?;
                         return Ok(());
                     }
-                    ctx.say("Stopping...").await?;
+                    ctx.say(super::STOPPING_RESPONSE).await?;
                     super::super::turn_bridge::stop_active_turn(
                         &ctx.data().provider,
                         &token,
@@ -180,7 +180,7 @@ async fn run_skill_slash_command(
                     tracing::info!("  [{ts}] ■ Cancel signal sent");
                 }
                 None => {
-                    ctx.say("No active request to stop.").await?;
+                    ctx.say(super::NO_ACTIVE_TURN_RESPONSE).await?;
                 }
             }
             return Ok(());

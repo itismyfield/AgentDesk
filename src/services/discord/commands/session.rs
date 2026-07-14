@@ -156,13 +156,13 @@ pub(in crate::services::discord) async fn cmd_start(
         if has_existing_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] ▶ Session restored: {effective_path}");
-            response_lines.push(format!("Session restored at `{}`.", effective_path));
+            response_lines.push(super::session_restored_response(&effective_path));
         } else {
             session.history.clear();
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] ▶ Session started: {effective_path}");
-            response_lines.push(format!("Session started at `{}`.", effective_path));
+            response_lines.push(super::session_started_response(&effective_path));
         }
 
         // Notify about worktree if created
