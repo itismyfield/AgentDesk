@@ -101,7 +101,7 @@
 | `src/services/onboarding/mod.rs` | 2937 |
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1381 |
-| `src/services/provider.rs` | 1807 |
+| `src/services/provider.rs` | 1801 |
 | `src/services/qwen.rs` | 2198 |
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1593 |

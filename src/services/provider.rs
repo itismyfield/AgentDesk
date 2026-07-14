@@ -97,16 +97,6 @@ impl ProviderExecutionAdapter {
             },
         }
     }
-
-    pub const fn cancelled_error_sample(self) -> &'static str {
-        match self {
-            Self::Claude => "Claude request cancelled",
-            Self::Codex => "Codex request cancelled",
-            Self::Gemini => "Gemini request cancelled",
-            Self::OpenCode => "OpenCode request cancelled",
-            Self::Qwen => "Qwen request cancelled",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1420,6 +1410,10 @@ pub(crate) fn tmux_capture_indicates_ready_for_input(
     capture: &str,
     provider: &ProviderKind,
 ) -> bool {
+    if let ProviderKind::Unsupported(_) = provider {
+        return crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
+            || tmux_capture_contains_wrapper_ready_marker(capture, provider);
+    }
     let Some(adapter) = provider.readiness_adapter() else {
         return false;
     };

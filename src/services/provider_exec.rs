@@ -271,25 +271,6 @@ pub async fn execute_structured_with_context(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderExecutionErrorClass {
-    Cancelled,
-    Timeout,
-    Other,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn classify_provider_execution_error(error: &str) -> ProviderExecutionErrorClass {
-    let normalized = error.to_ascii_lowercase();
-    if normalized.contains("cancelled") || normalized.contains("canceled") {
-        ProviderExecutionErrorClass::Cancelled
-    } else if normalized.contains("timeout") || normalized.contains("timed out") {
-        ProviderExecutionErrorClass::Timeout
-    } else {
-        ProviderExecutionErrorClass::Other
-    }
-}
-
 pub(crate) fn simple_timeout_error(stage_label: &str, timeout: Duration) -> String {
     format!("{stage_label} timed out after {}s", timeout.as_secs())
 }

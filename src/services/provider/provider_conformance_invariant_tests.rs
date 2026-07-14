@@ -1,11 +1,6 @@
 use std::collections::HashSet;
-use std::time::Duration;
 
 use super::{ProviderCompactionAdapter, ProviderKind, provider_registry};
-use crate::services::provider_exec::{
-    ProviderExecutionErrorClass, classify_provider_execution_error, simple_timeout_error,
-    structured_timeout_error,
-};
 
 const READY_CAPTURE: &str = "Ready for input (type message + Enter)\n> ";
 const BUSY_CAPTURE: &str = "working\nstill waiting for tool output";
@@ -86,28 +81,6 @@ fn provider_exec_registry_conformance_invariant() {
             "{} readiness adapter accepted a generic busy capture",
             entry.id
         );
-
-        assert_eq!(
-            classify_provider_execution_error(execution_adapter.cancelled_error_sample()),
-            ProviderExecutionErrorClass::Cancelled,
-            "{} cancellation error is not classified as cancelled",
-            entry.id
-        );
-        assert_eq!(
-            classify_provider_execution_error(&simple_timeout_error(
-                entry.display_name,
-                Duration::from_secs(7),
-            )),
-            ProviderExecutionErrorClass::Timeout,
-            "{} simple timeout error is not classified as timeout",
-            entry.id
-        );
-        assert_eq!(
-            classify_provider_execution_error(&structured_timeout_error(entry.display_name, 7)),
-            ProviderExecutionErrorClass::Timeout,
-            "{} structured timeout error is not classified as timeout",
-            entry.id
-        );
     }
 
     assert!(
@@ -115,6 +88,26 @@ fn provider_exec_registry_conformance_invariant() {
         "provider registry must not be empty"
     );
     assert_scoped_dispatches_have_no_wildcard_arms();
+}
+
+#[test]
+fn unsupported_provider_preserves_generic_readiness_fallback() {
+    let provider = ProviderKind::Unsupported("future-provider".to_string());
+    let wrapper_marker =
+        r#"{"type":"ready_for_input","provider":"future-provider","ts":"2026-07-14T00:00:00Z"}"#;
+
+    assert!(super::tmux_capture_indicates_ready_for_input(
+        READY_CAPTURE,
+        &provider
+    ));
+    assert!(super::tmux_capture_indicates_ready_for_input(
+        wrapper_marker,
+        &provider
+    ));
+    assert!(!super::tmux_capture_indicates_ready_for_input(
+        BUSY_CAPTURE,
+        &provider
+    ));
 }
 
 fn assert_scoped_dispatches_have_no_wildcard_arms() {
