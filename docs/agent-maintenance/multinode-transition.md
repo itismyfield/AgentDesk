@@ -433,6 +433,17 @@
 
 ### Audited touches
 
+- #4263 (daily log-digest routine): adds a **LEADER-ONLY/SINGLETON** scheduled
+  monitoring routine. `server::worker_registry` already runs
+  `routine_runtime_loop` through `register_leader_tokio`, and the existing
+  PostgreSQL routine claim also locks the single attached routine row with
+  `FOR UPDATE SKIP LOCKED` plus `in_flight_run_id`; no second scheduler or
+  node-local timer is introduced. Operators attach exactly one daily row on the
+  cluster leader. The routine checkpoint suppresses a second KST-day dispatch,
+  while pending issue drafts are written on the active leader's runtime root.
+  On leader failover the normal stale-run recovery and routine lease semantics
+  remain authoritative. GitHub issue reads happen in the agent turn; issue
+  creation stays default-off and requires the literal human-confirmed gate.
 - #4262 (post-deploy functional smoke): adds a **WORKER-LOCAL deploy-tooling**
   stage after `DEPLOY_OK` in `scripts/deploy-release.sh`. Each deployed node
   probes its own loopback API on the configured `server.port`, local
