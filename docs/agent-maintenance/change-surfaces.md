@@ -1849,7 +1849,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/dispatched_sessions.rs` (1650; #4091 r2 adds the two-sample
   growth-evidence selector cross-check wiring, claude_tui transcript-mtime
   runtime-activity anchors, and the flip-back window guard), and
-  `src/services/settings.rs` (1067) — service-layer route support surfaces
+  `src/services/settings.rs` (1059) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
 - `src/services/dispatches/outbox_route.rs` (1173) — dispatch outbox route
@@ -1945,7 +1945,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   live-activity guard anchor, and log kill/skip timing decisions; +4 from #3795
   replacing inline session-key split errors with central `SessionIdentity`
   helper calls and explicit legacy/namespaced error messages.)
-- `src/services/settings.rs` (1067) — settings domain service extracted from
+- `src/services/settings.rs` (1059) — settings domain service extracted from
   the route layer in #1519. Keep follow-up changes bugfix-only unless the file
   is split further.
 - `src/services/routines/{store.rs (2844), migrated.rs (1286),

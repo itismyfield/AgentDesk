@@ -1298,10 +1298,7 @@ mod tests {
     fn seeded_runtime_config_preserves_intentional_empty_explicit_metadata() {
         let mut saved_obj = runtime_config_defaults_map(&crate::config::Config::default());
         saved_obj.insert("maxEntryRetries".to_string(), json!(8));
-        saved_obj.insert(
-            RUNTIME_CONFIG_EXPLICIT_KEYS_META.to_string(),
-            json!([]),
-        );
+        saved_obj.insert(RUNTIME_CONFIG_EXPLICIT_KEYS_META.to_string(), json!([]));
         let mut config = crate::config::Config::default();
         config.runtime.max_entry_retries = Some(4);
 
