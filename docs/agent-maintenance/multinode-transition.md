@@ -440,6 +440,14 @@
   the metric, alert dedup, Songbird connection, and rejoin supervisor remain
   pinned to the node/provider that owns the guild voice connection; no shared
   authority, PG lease, or leader-only side effect changes.
+- #4249 PostgreSQL bootstrap timeout hardening runs migration/reseed on an eager
+  startup pool with a 10s acquire deadline, then eagerly activates the separate
+  runtime pool with the original 3s deadline before the shared six-attempt
+  retry/alert envelope can succeed. Typed `sqlx::Error::PoolTimedOut` failures
+  get timestamped, source-attributed bootstrap diagnostics.
+  Classification: **worker-local** — every node owns its own connection pool,
+  wait budget, retry loop, and stderr; this changes no shared row, schema,
+  leader-only side effect, cross-node routing rule, or PG lease/claim authority.
 
 - #4247 S0 reaction status-only containment removes the guild and DM reaction
   gateway subscriptions plus the only destructive `ReactionRemove` intake

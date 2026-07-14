@@ -1377,81 +1377,64 @@ pub fn handle_dcserver(token: Option<String>) {
         // launchd (KeepAlive + ThrottleInterval=5) a transient DB blip became a
         // ~8s tight crash loop that flooded the log and left Discord relay
         // silently dead. We now retry (1 + MAX_RETRIES attempts, 1→2→4→8→16s)
-        // and, only on exhaustion, fire one PG-independent Discord alert (the
-        // bot token + human_alert_channel_id are already in memory here — loaded
-        // above, before this connect) before exiting. `exit(1)` is preserved so
-        // launchd still revives us, but each boot now spends ~45s on retries
-        // instead of <1s, dissolving the tight loop; a PG that recovers
-        // mid-backoff boots cleanly with no alert.
+        // and alert only on exhaustion. Both startup initialization and runtime
+        // pool activation remain inside that envelope before any exit.
         let discord_pg_pool = {
             let connect_cfg = ad_config.clone();
-            let pool = match crate::cli::dcserver_pg_bootstrap::connect_with_backoff(
+            let alert_tokens = crate::cli::dcserver_pg_bootstrap::candidate_alert_tokens(
+                launch_configs.iter().map(|config| config.token.as_str()),
+                token.as_deref(),
+            );
+            let alert_channel = ad_config.kanban.human_alert_channel_id.clone();
+            let bootstrap = crate::cli::dcserver_pg_bootstrap::connect_with_backoff_and_notify(
                 || {
-                    let cfg = &connect_cfg;
-                    async move { crate::db::postgres::connect(cfg).await }
+                    let cfg = connect_cfg.clone();
+                    let root = runtime_root.clone();
+                    let scan = legacy_scan.clone();
+                    async move {
+                        let Some(startup_pool) =
+                            crate::db::postgres::connect_for_bootstrap(&cfg).await?
+                        else {
+                            return Ok(None);
+                        };
+                        let cfg = crate::cli::dcserver_pg_bootstrap::initialize_postgres_for_bootstrap(
+                            &startup_pool,
+                            cfg,
+                            root.as_deref(),
+                            &scan,
+                        )
+                        .await?;
+                        drop(startup_pool);
+                        let runtime_pool =
+                            crate::db::postgres::connect_runtime_after_bootstrap(&cfg).await?;
+                        Ok(runtime_pool.map(|pool| (pool, cfg)))
+                    }
                 },
                 |delay| tokio::time::sleep(delay),
+                "cli::dcserver::postgres_startup_and_runtime",
+                move |failure| async move {
+                    crate::cli::dcserver_pg_bootstrap::notify_pg_unavailable(
+                        alert_tokens,
+                        alert_channel.as_deref(),
+                        &failure.last_error,
+                    )
+                    .await;
+                },
             )
-            .await
-            {
-                Ok(pool) => pool,
+            .await;
+            match bootstrap {
+                Ok((pool, initialized_config)) => {
+                    ad_config = initialized_config;
+                    pool
+                }
                 Err(failure) => {
                     eprintln!(
                         "  ✖ PostgreSQL connect failed after {} attempt(s): {}",
                         failure.attempts, failure.last_error
                     );
-                    // Candidates cover both configured bots and the CLI/env
-                    // single-token boot mode; the alert pipeline inside is
-                    // bounded by a 15s deadline at the boundary (not inside
-                    // the shared transport — #4391 lesson: a deadline composed
-                    // at the boundary stays true regardless of how the shared
-                    // client evolves) so a hung Discord call cannot stall this
-                    // exit path and break the launchd restart cycle.
-                    crate::cli::dcserver_pg_bootstrap::notify_pg_unavailable(
-                        crate::cli::dcserver_pg_bootstrap::candidate_alert_tokens(
-                            launch_configs.iter().map(|config| config.token.as_str()),
-                            token.as_deref(),
-                        ),
-                        ad_config.kanban.human_alert_channel_id.as_deref(),
-                        &failure.last_error,
-                    )
-                    .await;
                     std::process::exit(1);
                 }
-            };
-            if let Err(error) = crate::db::postgres::with_startup_advisory_lock(&pool, || async {
-                crate::db::postgres::migrate(&pool).await?;
-                if let Some(root) = runtime_root.as_ref() {
-                    match crate::services::discord_config_audit::load_runtime_config(root).and_then(
-                        |loaded| {
-                            crate::services::discord_config_audit::audit_and_reconcile_config_only(
-                                root,
-                                loaded.config,
-                                loaded.path,
-                                loaded.existed,
-                                &legacy_scan,
-                                false,
-                            )
-                        },
-                    ) {
-                        Ok(outcome) => {
-                            ad_config = outcome.config;
-                        }
-                        Err(error) => {
-                            return Err(format!(
-                                "Config audit after PostgreSQL migration failed: {error}"
-                            ));
-                        }
-                    }
-                }
-                crate::db::postgres::startup_reseed_with_warmup_pool(&pool, &ad_config).await
-            })
-            .await
-            {
-                eprintln!("  ✖ PostgreSQL startup initialization failed: {error}");
-                std::process::exit(1);
             }
-            pool
         };
         crate::services::provider_hosting::install_provider_hosting_config(&ad_config);
         crate::services::termination_audit::init_audit_db(Some(discord_pg_pool.clone()));

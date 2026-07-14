@@ -45,7 +45,7 @@
 | Path | Prod |
 | --- | ---: |
 | `src/cli/client.rs` | 2474 |
-| `src/cli/dcserver.rs` | 1667 |
+| `src/cli/dcserver.rs` | 1650 |
 | `src/cli/direct.rs` | 1758 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
@@ -58,7 +58,7 @@
 | `src/db/auto_queue/phase_gates.rs` | 1639 |
 | `src/db/dispatched_sessions.rs` | 1734 |
 | `src/db/dispatches/mod.rs` | 1028 |
-| `src/db/postgres.rs` | 1280 |
+| `src/db/postgres.rs` | 1389 |
 | `src/dispatch/dispatch_context.rs` | 2817 |
 | `src/dispatch/dispatch_create.rs` | 1334 |
 | `src/dispatch/dispatch_status.rs` | 1445 |

@@ -15,8 +15,13 @@
 //! 1. [`connect_with_backoff`] wraps the connect attempt in a bounded
 //!    exponential backoff (1 initial attempt + up to [`MAX_RETRIES`] retries,
 //!    delays `1→2→4→8→16s` capped at [`BACKOFF_CAP_SECS`]). This alone removes
-//!    the tight launchd loop: each boot now spends ~45s exhausting retries
-//!    instead of dying in <1s, and a PG that recovers mid-backoff boots cleanly.
+//!    the tight launchd loop: each attempt runs real migration/startup work on
+//!    an eager pool with a 10s deadline, then activates the eager runtime pool
+//!    with its fast 3s acquire timeout. A PG that recovers mid-backoff boots
+//!    cleanly; failures in either phase exhaust through the same alert path.
+//!    Pool-acquire timeouts are logged per attempt with an RFC3339 timestamp and
+//!    the caller-provided source label so future incidents identify the failing
+//!    bootstrap stage instead of collapsing into an anonymous SQLx error.
 //! 2. [`notify_pg_unavailable`] fires a single Discord alert on retry
 //!    exhaustion, using bot tokens + `human_alert_channel_id` already loaded
 //!    into memory *before* the PG connect (so no PG is required to alert — see
@@ -34,7 +39,7 @@
 //!       ([`candidate_alert_tokens`] covers both configured bots and the
 //!       CLI/env single-token boot mode);
 //!    4. if every token fails (or the boundary deadline fires), roll the
-//!       attempt-stamp back so the *next* boot (~45s later) retries — an
+//!       attempt-stamp back so the *next* bounded boot retry cycle tries again — an
 //!       undelivered alert must not consume the 900s suppression window;
 //!    5. on success the stamp stays, giving the normal 900s suppression.
 //!
@@ -47,6 +52,8 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::db::postgres::{PgConnectFailure, PgConnectFailureKind};
 
 /// Number of retries after the initial connect attempt. Total attempts =
 /// `1 + MAX_RETRIES` = 6, with retry delays `1,2,4,8,16s`.
@@ -68,6 +75,28 @@ const ALERT_STATE_FILE: &str = "dcserver-pg-alert.state";
 /// exchange would stall `notify_pg_unavailable().await` forever and break the
 /// launchd restart cycle right when the operator most needs it.
 pub(crate) const ALERT_SEND_TIMEOUT_SECS: u64 = 15;
+fn pool_acquire_timeout_diagnostic(
+    timestamp: &str,
+    source: &str,
+    attempt: Option<u32>,
+    error: &PgConnectFailure,
+) -> Option<String> {
+    (error.kind() == PgConnectFailureKind::PoolTimedOut).then(|| {
+        format!(
+            "[{timestamp}] level=ERROR event=postgres_pool_acquire_timeout source={source} attempt={} error={error}",
+            attempt
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        )
+    })
+}
+
+fn log_pool_acquire_timeout(source: &str, attempt: Option<u32>, error: &PgConnectFailure) {
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    if let Some(diagnostic) = pool_acquire_timeout_diagnostic(&timestamp, source, attempt, error) {
+        eprintln!("  ✖ {diagnostic}");
+    }
+}
 
 /// Outcome of an exhausted [`connect_with_backoff`] loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,10 +135,11 @@ pub(crate) fn backoff_delay(retry: u32) -> Duration {
 pub(crate) async fn connect_with_backoff<T, C, CFut, S, SFut>(
     mut connect: C,
     mut sleep: S,
+    source: &str,
 ) -> Result<T, PgBootstrapFailure>
 where
     C: FnMut() -> CFut,
-    CFut: Future<Output = Result<Option<T>, String>>,
+    CFut: Future<Output = Result<Option<T>, PgConnectFailure>>,
     S: FnMut(Duration) -> SFut,
     SFut: Future<Output = ()>,
 {
@@ -121,7 +151,8 @@ where
                 last_error = "PostgreSQL is required for Discord HTTP runtime".to_string();
             }
             Err(error) => {
-                last_error = error;
+                log_pool_acquire_timeout(source, Some(attempt + 1), &error);
+                last_error = error.to_string();
             }
         }
         // Sleep only *between* attempts — never after the final one, so we do
@@ -134,6 +165,64 @@ where
         last_error,
         attempts: MAX_RETRIES + 1,
     })
+}
+
+/// Run the bounded bootstrap loop and notify exactly once on exhaustion.
+///
+/// Keeping notification in this wrapper prevents callers from adding an
+/// unalerted exit path after a startup connection or migration failure.
+pub(crate) async fn connect_with_backoff_and_notify<T, C, CFut, S, SFut, N, NFut>(
+    connect: C,
+    sleep: S,
+    source: &str,
+    notify: N,
+) -> Result<T, PgBootstrapFailure>
+where
+    C: FnMut() -> CFut,
+    CFut: Future<Output = Result<Option<T>, PgConnectFailure>>,
+    S: FnMut(Duration) -> SFut,
+    SFut: Future<Output = ()>,
+    N: FnOnce(PgBootstrapFailure) -> NFut,
+    NFut: Future<Output = ()>,
+{
+    match connect_with_backoff(connect, sleep, source).await {
+        Ok(value) => Ok(value),
+        Err(failure) => {
+            notify(failure.clone()).await;
+            Err(failure)
+        }
+    }
+}
+
+/// Run migration, config reconciliation, and reseeding on the eager startup
+/// pool. The caller places this whole operation inside the retry/alert envelope.
+pub(crate) async fn initialize_postgres_for_bootstrap(
+    pool: &sqlx::PgPool,
+    mut config: crate::config::Config,
+    runtime_root: Option<&Path>,
+    legacy_scan: &crate::services::discord_config_audit::LegacySourceScan,
+) -> Result<crate::config::Config, PgConnectFailure> {
+    crate::db::postgres::with_startup_advisory_lock(pool, || async {
+        crate::db::postgres::migrate(pool).await?;
+        if let Some(root) = runtime_root {
+            let loaded = crate::services::discord_config_audit::load_runtime_config(root)?;
+            config = crate::services::discord_config_audit::audit_and_reconcile_config_only(
+                root,
+                loaded.config,
+                loaded.path,
+                loaded.existed,
+                legacy_scan,
+                false,
+            )?
+            .config;
+        }
+        crate::db::postgres::startup_reseed_with_warmup_pool(pool, &config).await
+    })
+    .await
+    .map_err(|error| {
+        PgConnectFailure::other(format!("postgres startup initialization: {error}"))
+    })?;
+    Ok(config)
 }
 
 /// Pure rate-limit predicate: should an alert be sent `now` given the
@@ -230,7 +319,7 @@ pub(crate) enum AlertAttempt {
 /// 2. attempt-stamp written **before** the send, so a crash mid-send or a
 ///    post-success write failure can never re-spam every boot. If the write
 ///    itself fails we WARN and **send anyway** (fail-open): this issue exists
-///    to abolish silent DB outages, and an alert repeating each ~45s boot
+///    to abolish silent DB outages, and an alert repeating each bounded boot cycle
 ///    under a broken state file is itself the visible signal of that second
 ///    failure — silence would hide both;
 /// 3. sequential sends across the candidate tokens until one succeeds;
@@ -486,7 +575,7 @@ mod tests {
     /// Drives `connect_with_backoff` with fully synchronous fakes: a scripted
     /// connect and a sleep recorder, so no real clock or runtime is involved.
     fn run_backoff<T: Clone + 'static>(
-        results: Vec<Result<Option<T>, String>>,
+        results: Vec<Result<Option<T>, PgConnectFailure>>,
     ) -> (Result<T, PgBootstrapFailure>, Vec<Duration>, usize) {
         let script = Rc::new(RefCell::new(results.into_iter()));
         let calls = Rc::new(RefCell::new(0usize));
@@ -505,13 +594,14 @@ mod tests {
                 let next = script_c
                     .borrow_mut()
                     .next()
-                    .unwrap_or_else(|| Err("script exhausted".to_string()));
+                    .unwrap_or_else(|| Err(PgConnectFailure::other("script exhausted")));
                 async move { next }
             },
             move |d: Duration| {
                 slept_c.borrow_mut().push(d);
                 async move {}
             },
+            "cli::dcserver_pg_bootstrap::tests",
         );
         let result = futures::executor::block_on(fut);
         let slept_vec = slept.borrow().clone();
@@ -531,7 +621,7 @@ mod tests {
     fn connect_retries_then_succeeds_recording_backoff() {
         // Fail (Err), fail (Ok(None)), then succeed on the 3rd attempt.
         let (result, slept, calls) = run_backoff(vec![
-            Err("pool timed out".to_string()),
+            Err(PgConnectFailure::other("pool timed out")),
             Ok(None),
             Ok(Some(7u32)),
         ]);
@@ -545,12 +635,12 @@ mod tests {
     fn connect_exhausts_budget_and_reports_last_error() {
         // Always fail: 6 attempts total, 5 backoff sleeps 1→2→4→8→16.
         let (result, slept, calls) = run_backoff::<u32>(vec![
-            Err("e1".into()),
-            Err("e2".into()),
-            Err("e3".into()),
-            Err("e4".into()),
-            Err("e5".into()),
-            Err("final boom".into()),
+            Err(PgConnectFailure::other("e1")),
+            Err(PgConnectFailure::other("e2")),
+            Err(PgConnectFailure::other("e3")),
+            Err(PgConnectFailure::other("e4")),
+            Err(PgConnectFailure::other("e5")),
+            Err(PgConnectFailure::other("final boom")),
         ]);
         assert_eq!(
             result,
@@ -569,6 +659,71 @@ mod tests {
                 Duration::from_secs(8),
                 Duration::from_secs(16),
             ]
+        );
+    }
+
+    #[test]
+    fn slow_startup_timeout_exhausts_retries_then_notifies() {
+        let calls = Rc::new(RefCell::new(0usize));
+        let notifications: Rc<RefCell<Vec<PgBootstrapFailure>>> = Rc::new(RefCell::new(Vec::new()));
+        let calls_c = calls.clone();
+        let notifications_c = notifications.clone();
+
+        let result = futures::executor::block_on(connect_with_backoff_and_notify(
+            move || {
+                *calls_c.borrow_mut() += 1;
+                async {
+                    Err::<Option<u32>, _>(PgConnectFailure::from_sqlx(
+                        "connect postgres startup/migrate pool",
+                        sqlx::Error::PoolTimedOut,
+                    ))
+                }
+            },
+            |_delay| async {},
+            "cli::dcserver::postgres_startup_and_runtime",
+            move |failure| {
+                notifications_c.borrow_mut().push(failure);
+                async {}
+            },
+        ));
+
+        assert_eq!(
+            *calls.borrow(),
+            6,
+            "slow startup uses the full retry budget"
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            notifications.borrow().as_slice(),
+            &[result.unwrap_err()],
+            "retry exhaustion reaches the operator-alert callback exactly once"
+        );
+    }
+
+    #[test]
+    fn pool_timeout_diagnostic_includes_timestamp_source_and_attempt() {
+        let pool_timeout =
+            PgConnectFailure::from_sqlx("connect postgres", sqlx::Error::PoolTimedOut);
+        let diagnostic = pool_acquire_timeout_diagnostic(
+            "2026-07-14T12:34:56.789Z",
+            "cli::dcserver::postgres_startup_and_runtime",
+            Some(3),
+            &pool_timeout,
+        )
+        .expect("pool timeout diagnostic");
+
+        assert!(diagnostic.contains("[2026-07-14T12:34:56.789Z]"));
+        assert!(diagnostic.contains("event=postgres_pool_acquire_timeout"));
+        assert!(diagnostic.contains("source=cli::dcserver::postgres_startup_and_runtime"));
+        assert!(diagnostic.contains("attempt=3"));
+        assert!(
+            pool_acquire_timeout_diagnostic(
+                "2026-07-14T12:34:56.789Z",
+                "cli::dcserver::postgres_startup_and_runtime",
+                Some(1),
+                &PgConnectFailure::other("connect postgres: connection refused")
+            )
+            .is_none()
         );
     }
 

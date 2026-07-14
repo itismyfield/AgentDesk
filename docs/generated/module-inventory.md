@@ -58,8 +58,8 @@
 | `cli` | `src/cli/mod.rs` | 25 | 25 | 0 |  |
 | `cli::args` | `src/cli/args.rs` | 1523 | 971 | 552 |  |
 | `cli::client` | `src/cli/client.rs` | 2732 | 2474 | 258 | giant-file |
-| `cli::dcserver` | `src/cli/dcserver.rs` | 1667 | 1667 | 0 | giant-file |
-| `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 913 | 455 | 458 |  |
+| `cli::dcserver` | `src/cli/dcserver.rs` | 1650 | 1650 | 0 | giant-file |
+| `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 1068 | 544 | 524 |  |
 | `cli::direct` | `src/cli/direct.rs` | 1758 | 1758 | 0 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 | 123 | 0 |  |
 | `cli::discord_thread_create` | `src/cli/discord_thread_create.rs` | 1468 | 415 | 1053 |  |
@@ -126,7 +126,7 @@
 | `db::kanban_cards::metadata` | `src/db/kanban_cards/metadata.rs` | 123 | 123 | 0 |  |
 | `db::kanban_cards::transitions` | `src/db/kanban_cards/transitions.rs` | 456 | 456 | 0 |  |
 | `db::meetings` | `src/db/meetings.rs` | 621 | 621 | 0 |  |
-| `db::postgres` | `src/db/postgres.rs` | 2699 | 1280 | 1419 | giant-file |
+| `db::postgres` | `src/db/postgres.rs` | 2819 | 1389 | 1430 | giant-file |
 | `db::prompt_manifests` | `src/db/prompt_manifests/mod.rs` | 26 | 26 | 0 |  |
 | `db::prompt_manifests::builder` | `src/db/prompt_manifests/builder.rs` | 90 | 90 | 0 |  |
 | `db::prompt_manifests::model` | `src/db/prompt_manifests/model.rs` | 191 | 191 | 0 |  |

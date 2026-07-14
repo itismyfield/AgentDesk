@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,7 +16,7 @@ use crate::services::settings::{KvSeedAction, config_default_seed_actions};
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 const LEGACY_AGENT_PREFIX: &str = "openclaw-";
 const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 3;
-const STARTUP_PG_ACQUIRE_TIMEOUT_SECS: u64 = 60;
+const STARTUP_PG_ACQUIRE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_PG_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
 const DEFAULT_PG_MAX_LIFETIME_SECS: u64 = 30 * 60;
 const STARTUP_INITIALIZATION_ADVISORY_LOCK_ID: i64 = 3_722_000_001;
@@ -99,6 +100,48 @@ struct PoolConnectSettings {
     idle_timeout: Duration,
     max_lifetime: Duration,
     test_before_acquire: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PgConnectFailureKind {
+    PoolTimedOut,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PgConnectFailure {
+    kind: PgConnectFailureKind,
+    message: String,
+}
+
+impl PgConnectFailure {
+    pub(crate) fn other(message: impl Into<String>) -> Self {
+        Self {
+            kind: PgConnectFailureKind::Other,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn from_sqlx(context: &str, error: sqlx::Error) -> Self {
+        let kind = match &error {
+            sqlx::Error::PoolTimedOut => PgConnectFailureKind::PoolTimedOut,
+            _ => PgConnectFailureKind::Other,
+        };
+        Self {
+            kind,
+            message: format!("{context}: {error}"),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> PgConnectFailureKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for PgConnectFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 
 /// Session-scoped PostgreSQL advisory lock lease.
@@ -218,6 +261,16 @@ fn runtime_pool_settings(config: &Config) -> PoolConnectSettings {
     }
 }
 
+fn bootstrap_pool_settings(config: &Config) -> PoolConnectSettings {
+    PoolConnectSettings {
+        max_connections: config.database.pool_max.max(1),
+        acquire_timeout: Duration::from_secs(STARTUP_PG_ACQUIRE_TIMEOUT_SECS),
+        idle_timeout: Duration::from_secs(DEFAULT_PG_IDLE_TIMEOUT_SECS),
+        max_lifetime: Duration::from_secs(DEFAULT_PG_MAX_LIFETIME_SECS),
+        test_before_acquire: true,
+    }
+}
+
 fn startup_pool_settings(config: &Config) -> PoolConnectSettings {
     let steady_max = config.database.pool_max.max(1);
     PoolConnectSettings {
@@ -229,27 +282,62 @@ fn startup_pool_settings(config: &Config) -> PoolConnectSettings {
     }
 }
 
-async fn connect_with_settings(
-    config: &Config,
-    settings: PoolConnectSettings,
-    context: &str,
-) -> Result<Option<PgPool>, String> {
-    let Some(options) = connect_options(config)? else {
-        return Ok(None);
-    };
-
-    let pool = PgPoolOptions::new()
+fn pool_options(settings: PoolConnectSettings) -> PgPoolOptions {
+    PgPoolOptions::new()
         .max_connections(settings.max_connections)
         .acquire_timeout(settings.acquire_timeout)
         .idle_timeout(settings.idle_timeout)
         .max_lifetime(settings.max_lifetime)
         .test_before_acquire(settings.test_before_acquire)
+}
+
+async fn run_health_check(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT 1").fetch_one(pool).await.map(|_| ())
+}
+
+async fn connect_with_settings_typed(
+    config: &Config,
+    settings: PoolConnectSettings,
+    context: &str,
+) -> Result<Option<PgPool>, PgConnectFailure> {
+    let Some(options) = connect_options(config).map_err(PgConnectFailure::other)? else {
+        return Ok(None);
+    };
+
+    let pool = pool_options(settings)
         .connect_with(options)
         .await
-        .map_err(|error| format!("{context}: {error}"))?;
+        .map_err(|error| PgConnectFailure::from_sqlx(context, error))?;
 
-    health_check(&pool).await?;
+    run_health_check(&pool)
+        .await
+        .map_err(|error| PgConnectFailure::from_sqlx("postgres health check failed", error))?;
     Ok(Some(pool))
+}
+
+async fn connect_with_settings(
+    config: &Config,
+    settings: PoolConnectSettings,
+    context: &str,
+) -> Result<Option<PgPool>, String> {
+    connect_with_settings_typed(config, settings, context)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn install_foreground_reserve(config: &Config) {
+    let pool_max = config.database.pool_max.max(1);
+    let requested = config.database.foreground_reserve;
+    let effective = clamp_foreground_reserve(requested, pool_max);
+    if effective != requested {
+        tracing::warn!(
+            requested,
+            pool_max,
+            effective,
+            "#3651: foreground_reserve >= pool_max; clamped to preserve a background budget"
+        );
+    }
+    FOREGROUND_RESERVE.store(effective, Ordering::Release);
 }
 
 pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
@@ -267,18 +355,41 @@ pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
         // 6 with a small `pool_max: 4`) would otherwise make the budget 0 and
         // yield every background tick forever — a regression for pre-existing
         // small-pool configs. We keep at least one background slot.
-        let pool_max = config.database.pool_max.max(1);
-        let requested = config.database.foreground_reserve;
-        let effective = clamp_foreground_reserve(requested, pool_max);
-        if effective != requested {
-            tracing::warn!(
-                requested,
-                pool_max,
-                effective,
-                "#3651: foreground_reserve >= pool_max; clamped to preserve a background budget"
-            );
-        }
-        FOREGROUND_RESERVE.store(effective, Ordering::Release);
+        install_foreground_reserve(config);
+    }
+    Ok(pool)
+}
+
+/// Build the eager pool used by dcserver migration and startup initialization.
+///
+/// The connection established here is retained and used for real bootstrap DB
+/// work. Its 10-second acquire deadline tolerates slow TCP/TLS/auth handshakes;
+/// the separate long-lived runtime pool is built only after initialization and
+/// retains the normal 3-second acquire timeout.
+pub(crate) async fn connect_for_bootstrap(
+    config: &Config,
+) -> Result<Option<PgPool>, PgConnectFailure> {
+    connect_with_settings_typed(
+        config,
+        bootstrap_pool_settings(config),
+        "connect postgres startup/migrate pool",
+    )
+    .await
+}
+
+/// Activate the eager long-lived runtime pool after bootstrap initialization.
+/// This stays typed so `PoolTimedOut` classification reaches bootstrap logs.
+pub(crate) async fn connect_runtime_after_bootstrap(
+    config: &Config,
+) -> Result<Option<PgPool>, PgConnectFailure> {
+    let pool = connect_with_settings_typed(
+        config,
+        runtime_pool_settings(config),
+        "connect postgres runtime pool after bootstrap",
+    )
+    .await?;
+    if pool.is_some() {
+        install_foreground_reserve(config);
     }
     Ok(pool)
 }
@@ -471,10 +582,8 @@ pub(crate) fn agent_roster_sync_enabled(config: &Config) -> bool {
 }
 
 pub async fn health_check(pool: &PgPool) -> Result<(), String> {
-    sqlx::query("SELECT 1")
-        .fetch_one(pool)
+    run_health_check(pool)
         .await
-        .map(|_| ())
         .map_err(|error| format!("postgres health check failed: {error}"))
 }
 
@@ -1282,12 +1391,12 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 mod tests {
     use super::{
         AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS,
-        agent_roster_sync_enabled, checksum_hex, clamp_foreground_reserve, close_test_pool,
-        config_database_summary, connect_options, connect_test_pool_and_migrate_config,
-        create_test_database, database_enabled, database_summary, health_check,
-        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, should_yield_for_counters,
-        startup_pool_settings, startup_reseed, sync_agents_from_config_pg,
-        with_startup_advisory_lock,
+        agent_roster_sync_enabled, bootstrap_pool_settings, checksum_hex, clamp_foreground_reserve,
+        close_test_pool, config_database_summary, connect_options,
+        connect_test_pool_and_migrate_config, create_test_database, database_enabled,
+        database_summary, health_check, run_test_postgres_sqlx_op_with_timeout,
+        runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
+        sync_agents_from_config_pg, with_startup_advisory_lock,
     };
     use sqlx::Row;
     use std::collections::BTreeMap;
@@ -1530,6 +1639,17 @@ mod tests {
         assert_eq!(settings.idle_timeout, Duration::from_secs(5 * 60));
         assert_eq!(settings.max_lifetime, Duration::from_secs(30 * 60));
         assert!(settings.test_before_acquire);
+    }
+
+    #[test]
+    fn bootstrap_migration_pool_has_longer_scoped_deadline() {
+        let mut config = crate::config::Config::default();
+        config.database.enabled = true;
+        config.database.pool_max = 18;
+        let settings = bootstrap_pool_settings(&config);
+
+        assert_eq!(settings.max_connections, 18);
+        assert_eq!(settings.acquire_timeout, Duration::from_secs(10));
     }
 
     #[test]
