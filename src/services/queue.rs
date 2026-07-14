@@ -312,7 +312,7 @@ impl QueueService {
                 crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
                     pool,
                     dispatch_id,
-                    None,
+                    Some(crate::dispatch::USER_CANCEL_REASON_QUEUE_API),
                 )
                 .await
                 .map_err(|error| {
@@ -429,7 +429,7 @@ impl QueueService {
             count += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
                 pool,
                 dispatch_id,
-                None,
+                Some(crate::dispatch::USER_CANCEL_REASON_QUEUE_API),
             )
             .await
             .map_err(|error| {
@@ -568,7 +568,7 @@ impl QueueService {
                 && let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
                     pool,
                     dispatch_id,
-                    None,
+                    Some(crate::dispatch::USER_CANCEL_REASON_QUEUE_API),
                 )
                 .await
             {

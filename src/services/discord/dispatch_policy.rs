@@ -69,29 +69,51 @@ fn dispatch_status_allows_turn(status: &str) -> bool {
 
 fn stale_dispatch_queue_exit_kind(
     status: Option<&str>,
-    result: Option<&str>,
+    reason: Option<&str>,
 ) -> Option<QueueExitKind> {
     let Some(status) = status.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Some(QueueExitKind::Superseded);
+        return None;
     };
     if dispatch_status_allows_turn(status) {
         return None;
     }
     let normalized_status = status.to_ascii_lowercase();
-    let result_says_superseded = result
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|value| value.contains("superseded"));
-    // Dispatch status tracks task lifecycle, not an authenticated queue-cancel
-    // action. Only explicit supersede evidence can discard the queued message;
-    // the mailbox cancellation path handles actual user queue cancellation.
-    if normalized_status == "superseded"
-        || (normalized_status == "cancelled" && result_says_superseded)
-    {
-        return Some(QueueExitKind::Superseded);
+    if normalized_status != "cancelled" {
+        return None;
     }
-    None
+    let reason = reason.map(str::trim).filter(|value| !value.is_empty());
+    if reason.is_some_and(|value| value.starts_with("superseded_by_")) {
+        Some(QueueExitKind::Superseded)
+    } else if crate::dispatch::is_user_cancel_reason(reason) {
+        Some(QueueExitKind::Cancelled)
+    } else {
+        None
+    }
 }
 
+const STALE_DISPATCH_REASON_QUERY: &str = "SELECT status, result::jsonb ->> 'reason' AS reason
+       FROM task_dispatches
+      WHERE id = $1";
+
+fn stale_dispatch_turn_from_row(
+    dispatch_id: String,
+    row: Option<(String, Option<String>)>,
+) -> Option<StaleDispatchTurn> {
+    let (status, reason) = row?;
+    stale_dispatch_queue_exit_kind(Some(&status), reason.as_deref()).map(|queue_exit_kind| {
+        StaleDispatchTurn {
+            dispatch_id,
+            status,
+            queue_exit_kind,
+        }
+    })
+}
+
+/// Returns a queue-exit decision only when the dispatch row contains structured
+/// evidence of an explicit supersede or user cancellation. Terminal status by
+/// itself, an empty status, and a missing row are not exit evidence: the queued
+/// instruction is allowed to proceed so retention cleanup or an incomplete
+/// terminal write cannot silently discard user input.
 pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
     pg_pool: Option<&sqlx::PgPool>,
     text: &str,
@@ -100,14 +122,10 @@ pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
     let Some(pool) = pg_pool else {
         return None;
     };
-    let row = match sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT status, result::TEXT AS result
-           FROM task_dispatches
-          WHERE id = $1",
-    )
-    .bind(&dispatch_id)
-    .fetch_optional(pool)
-    .await
+    let row = match sqlx::query_as::<_, (String, Option<String>)>(STALE_DISPATCH_REASON_QUERY)
+        .bind(&dispatch_id)
+        .fetch_optional(pool)
+        .await
     {
         Ok(row) => row,
         Err(error) => {
@@ -119,24 +137,15 @@ pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
             return None;
         }
     };
-    match row {
-        Some((status, result)) => stale_dispatch_queue_exit_kind(Some(&status), result.as_deref())
-            .map(|queue_exit_kind| StaleDispatchTurn {
-                dispatch_id,
-                status,
-                queue_exit_kind,
-            }),
-        None => Some(StaleDispatchTurn {
-            dispatch_id,
-            status: "missing".to_string(),
-            queue_exit_kind: QueueExitKind::Superseded,
-        }),
-    }
+    stale_dispatch_turn_from_row(dispatch_id, row)
 }
 
 #[cfg(test)]
 mod dispatch_turn_gate_tests {
-    use super::{QueueExitKind, dispatch_status_allows_turn, stale_dispatch_queue_exit_kind};
+    use super::{
+        QueueExitKind, STALE_DISPATCH_REASON_QUERY, dispatch_status_allows_turn,
+        stale_dispatch_queue_exit_kind, stale_dispatch_turn_from_row,
+    };
 
     #[test]
     fn dispatch_turn_status_allows_only_live_statuses() {
@@ -156,47 +165,88 @@ mod dispatch_turn_gate_tests {
     }
 
     #[test]
-    fn stale_dispatch_queue_exit_kind_classifies_explicit_exit_evidence() {
+    fn queued_user_instruction_without_exit_evidence_is_preserved() {
         assert_eq!(stale_dispatch_queue_exit_kind(Some("pending"), None), None);
+        for terminal_status in ["completed", "failed", "cancelled"] {
+            assert_eq!(
+                stale_dispatch_queue_exit_kind(Some(terminal_status), None),
+                None,
+                "terminal dispatch status alone is not queue-exit evidence"
+            );
+        }
+        assert_eq!(stale_dispatch_queue_exit_kind(Some(""), None), None);
+        assert_eq!(stale_dispatch_queue_exit_kind(None, None), None);
+        assert!(stale_dispatch_turn_from_row("retained-message".to_string(), None).is_none());
+        assert!(
+            stale_dispatch_turn_from_row("empty-status".to_string(), Some((String::new(), None)),)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stale_dispatch_query_extracts_only_structured_reason_evidence() {
+        assert!(STALE_DISPATCH_REASON_QUERY.contains("result::jsonb ->> 'reason'"));
+        assert!(!STALE_DISPATCH_REASON_QUERY.contains("result::TEXT"));
+    }
+
+    #[test]
+    fn retry_supersede_is_dropped_without_resurrecting_the_old_dispatch() {
+        let kanban_source = include_str!("../../server/routes/kanban.rs");
+        let retry_source = kanban_source
+            .split_once("pub async fn retry_card")
+            .expect("retry_card production path exists")
+            .1
+            .split_once("pub async fn redispatch_card")
+            .expect("retry_card is followed by redispatch_card")
+            .0;
+        assert!(
+            retry_source.contains("Some(crate::dispatch::SUPERSEDE_REASON_RETRY_CARD)"),
+            "retry_card must persist supersede evidence before creating its replacement"
+        );
         assert_eq!(
             stale_dispatch_queue_exit_kind(
                 Some("cancelled"),
-                Some("Cancelled: superseded by rereview")
+                Some(crate::dispatch::SUPERSEDE_REASON_RETRY_CARD),
             ),
-            Some(QueueExitKind::Superseded)
-        );
-        assert_eq!(
-            stale_dispatch_queue_exit_kind(Some("superseded"), None),
-            Some(QueueExitKind::Superseded)
-        );
-        assert_eq!(
-            stale_dispatch_queue_exit_kind(None, None),
             Some(QueueExitKind::Superseded)
         );
     }
 
     #[test]
-    fn queued_user_instruction_survives_terminal_status_without_explicit_exit_cause() {
-        for (status, result) in [
-            (
-                "completed",
-                "ordinary result discussing a superseded prior attempt",
+    fn explicit_user_cancel_is_dropped_without_resurrection() {
+        let queue_source = include_str!("../queue.rs");
+        assert_eq!(
+            queue_source
+                .matches("Some(crate::dispatch::USER_CANCEL_REASON_QUEUE_API)")
+                .count(),
+            3,
+            "cancel_dispatch, cancel_all_dispatches, and cancel_turn must persist user-cancel evidence"
+        );
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(
+                Some("cancelled"),
+                Some(crate::dispatch::USER_CANCEL_REASON_QUEUE_API),
             ),
-            ("failed", "tmux session died"),
-            (
-                "cancelled",
-                concat!(
-                    r#"{"completion_source":"force_transition","reason":"#,
-                    r#""auto_cancelled_on_terminal_card"}"#
-                ),
+            Some(QueueExitKind::Cancelled)
+        );
+    }
+
+    #[test]
+    fn superseded_word_outside_a_structured_reason_prefix_is_not_exit_evidence() {
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(
+                Some("cancelled"),
+                Some("ordinary payload discussing a superseded prior attempt"),
             ),
-        ] {
-            assert_eq!(
-                stale_dispatch_queue_exit_kind(Some(status), Some(result)),
-                None,
-                "{status} lacks explicit queue-exit evidence"
-            );
-        }
+            None
+        );
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(
+                Some("completed"),
+                Some(crate::dispatch::SUPERSEDE_REASON_RETRY_CARD),
+            ),
+            None
+        );
     }
 }
 

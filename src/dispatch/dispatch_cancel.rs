@@ -9,6 +9,10 @@ use sqlx::{PgPool, Row as SqlxRow};
 /// `pending`, which would let the next tick re-dispatch the same work.
 const USER_CANCEL_REASONS: &[&str] = &["turn_bridge_cancelled"];
 
+pub(crate) const USER_CANCEL_REASON_QUEUE_API: &str = "user_cancelled_by_queue_api";
+pub(crate) const SUPERSEDE_REASON_RETRY_CARD: &str = "superseded_by_retry_card";
+pub(crate) const SUPERSEDE_REASON_REDISPATCH_CARD: &str = "superseded_by_redispatch_card";
+
 /// Returns true when the supplied cancel reason represents a user /
 /// external explicit stop. Matches either an exact reason in
 /// [`USER_CANCEL_REASONS`] or any reason with the `user_` prefix so

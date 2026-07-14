@@ -3048,9 +3048,26 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
     match kind {
         QueueExitKind::Cancelled => "🚫 **큐에서 제거됨** — 사용자 취소로 처리되지 않습니다.",
         QueueExitKind::Expired => "⌛ **큐에서 제거됨** — 대기 시간 초과로 처리되지 않습니다.",
-        // #4260 dual r1: the pre-split ⏏ text carries over to `Overflow`.
-        QueueExitKind::Superseded | QueueExitKind::Overflow => {
+        QueueExitKind::Superseded => {
             "⏏ **큐에서 제거됨** — 후속 메시지로 대체되어 처리되지 않습니다."
+        }
+        QueueExitKind::Overflow => "⏏ **큐에서 제거됨** — 큐 용량을 초과하여 처리되지 않습니다.",
+    }
+}
+
+#[cfg(test)]
+mod queue_exit_card_body_tests {
+    use super::{QueueExitKind, queue_exit_card_body};
+
+    #[test]
+    fn replacement_text_is_reserved_for_verified_supersedes() {
+        assert!(queue_exit_card_body(QueueExitKind::Superseded).contains("후속 메시지로 대체"));
+        for kind in [
+            QueueExitKind::Cancelled,
+            QueueExitKind::Expired,
+            QueueExitKind::Overflow,
+        ] {
+            assert!(!queue_exit_card_body(kind).contains("후속 메시지로 대체"));
         }
     }
 }

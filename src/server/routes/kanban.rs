@@ -653,7 +653,7 @@ pub async fn retry_card(
         match crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
             pool,
             prev_dispatch_id,
-            None,
+            Some(crate::dispatch::SUPERSEDE_REASON_RETRY_CARD),
         )
         .await
         {
@@ -833,7 +833,7 @@ pub async fn redispatch_card(
         match crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
             pool,
             prev_dispatch_id,
-            None,
+            Some(crate::dispatch::SUPERSEDE_REASON_REDISPATCH_CARD),
         )
         .await
         {
