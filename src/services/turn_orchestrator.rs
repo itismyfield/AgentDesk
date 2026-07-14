@@ -1639,13 +1639,8 @@ impl ChannelMailboxRegistry {
                 handle
             }
         };
-        // The process-global map has no runtime identity. Preserve the first
-        // published actor until its identity-guarded purge removes it; a
-        // sibling registry creating the same channel must not replace the
-        // owning runtime's mailbox with its own empty actor.
-        GLOBAL_CHANNEL_MAILBOXES
-            .entry(channel_id)
-            .or_insert_with(|| resolved.clone());
+        // Preserve the first runtime's global mirror; this map carries no runtime identity.
+        GLOBAL_CHANNEL_MAILBOXES.entry(channel_id).or_insert(resolved.clone());
         resolved
     }
 

@@ -8,6 +8,51 @@ use super::{
     SharedData, apply_queue_exit_feedback, queue_persistence_context, turn_completion_events,
 };
 
+fn unavailable_finish_turn_result() -> FinishTurnResult {
+    FinishTurnResult {
+        removed_token: None,
+        has_pending: false,
+        mailbox_online: false,
+        queue_exit_events: Vec::new(),
+        persistence_error: None,
+    }
+}
+
+/// Recovery-only non-creating finish. Runtime selection must resolve an
+/// instance-local mailbox; a process-global mirror is not runtime identity.
+pub(in crate::services::discord) async fn mailbox_finish_owned_turn(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> FinishTurnResult {
+    let Some(handle) = shared.mailbox_peek(channel_id) else {
+        return unavailable_finish_turn_result();
+    };
+    let result = handle
+        .finish_turn(queue_persistence_context(shared, provider, channel_id))
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    shared.mailboxes.recovery_done(channel_id).mark_done();
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    result
+}
+
+pub(in crate::services::discord) async fn mailbox_finish_cancelled_turn(
+    shared: &SharedData,
+    channel_id: ChannelId,
+) -> FinishTurnResult {
+    let Some(handle) = shared.mailbox_peek(channel_id) else {
+        return unavailable_finish_turn_result();
+    };
+    let result = handle.finish_cancelled_turn().await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if result.removed_token.is_some() {
+        shared.mailboxes.recovery_done(channel_id).mark_done();
+    }
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    result
+}
+
 pub(in crate::services::discord) async fn mailbox_finish_turn(
     shared: &SharedData,
     provider: &ProviderKind,

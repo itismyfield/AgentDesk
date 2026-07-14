@@ -1233,6 +1233,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _root_guard = AgentdeskRootGuard::set(temp.path());
         let mut state = make_state(200);
+        let output_path = temp.path().join("out.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 200]).expect("write bounded transcript");
+        state.output_path = Some(output_path.to_string_lossy().into_owned());
         state.watcher_owner_channel_id = None;
         state.turn_start_offset = Some(0);
         state.last_offset = 150;
@@ -1273,6 +1276,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let _root_guard = AgentdeskRootGuard::set(temp.path());
         let mut state = make_state(200);
+        let output_path = temp.path().join("out.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 200]).expect("write bounded transcript");
+        state.output_path = Some(output_path.to_string_lossy().into_owned());
         state.watcher_owner_channel_id = None;
         state.turn_start_offset = Some(0);
         state.last_offset = 150;

@@ -165,7 +165,7 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
         .find("episode_handoff::commit_episode_side_effects")
         .expect("episode side-effect commit");
     let claim = parent[commit..]
-        .find("claim_or_reuse_watcher")
+        .find("claim_rebind_watcher")
         .map(|relative| commit + relative)
         .expect("guarded watcher claim");
     let spawn = parent[claim..]

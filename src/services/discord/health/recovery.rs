@@ -655,10 +655,7 @@ struct RuntimeChannelMatch {
     channel_id: ChannelId,
 }
 
-async fn has_local_mailbox_ownership_evidence(
-    shared: &SharedData,
-    channel_id: ChannelId,
-) -> bool {
+async fn has_local_mailbox_ownership_evidence(shared: &SharedData, channel_id: ChannelId) -> bool {
     let Some(handle) = shared.mailbox_peek(channel_id) else {
         return false;
     };
@@ -699,8 +696,7 @@ async fn find_runtime_channel_match(
                 let data = shared.core.lock().await;
                 data.sessions.contains_key(&channel_id)
             };
-            let has_local_mailbox =
-                has_local_mailbox_ownership_evidence(&shared, channel_id).await;
+            let has_local_mailbox = has_local_mailbox_ownership_evidence(&shared, channel_id).await;
             let has_watcher = shared.tmux_watchers.contains_key(&channel_id);
             // A process-global mailbox is only a raw fallback after runtime
             // resolution fails. It cannot prove which same-provider runtime
@@ -1114,15 +1110,7 @@ pub async fn stop_providerless_runtime_turn_preserving_watcher_strict_ownership(
     channel_id: u64,
     stop_source: &'static str,
 ) -> HardStopRuntimeResult {
-    runtime_turn_cleanup_by_lookup(
-        registry,
-        None,
-        Some(channel_id),
-        None,
-        stop_source,
-        false,
-    )
-    .await
+    runtime_turn_cleanup_by_lookup(registry, None, Some(channel_id), None, stop_source, false).await
 }
 
 pub async fn finish_cancelled_provider_channel_mailbox(
@@ -1137,13 +1125,8 @@ pub async fn finish_cancelled_provider_channel_mailbox(
     let Some(channel_id) = channel_id.map(ChannelId::new) else {
         return FinishCancelledMailboxResult::default();
     };
-    let Some(runtime) = find_runtime_channel_match(
-        registry,
-        provider_name,
-        Some(channel_id),
-        None,
-    )
-    .await
+    let Some(runtime) =
+        find_runtime_channel_match(registry, provider_name, Some(channel_id), None).await
     else {
         return FinishCancelledMailboxResult::default();
     };
@@ -1202,13 +1185,8 @@ async fn runtime_turn_cleanup_by_lookup(
     let channel_id = channel_id.map(ChannelId::new);
 
     if let Some(registry) = registry
-        && let Some(runtime) = find_runtime_channel_match(
-            registry,
-            provider_name,
-            channel_id,
-            tmux_name,
-        )
-        .await
+        && let Some(runtime) =
+            find_runtime_channel_match(registry, provider_name, channel_id, tmux_name).await
     {
         let owned_role_override = discord::turn_finalizer::cleanup::snapshot_role_override(
             &runtime.shared,
@@ -5226,7 +5204,7 @@ mod hard_stop_completion_event_tests {
                 channel,
                 token.clone(),
                 UserId::new(4_048_249),
-                MessageId::new(4_048_249),
+                MessageId::new(4_048_250),
             )
             .await
         );
