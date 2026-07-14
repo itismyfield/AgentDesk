@@ -57,6 +57,49 @@ fn test_role_binding(role_id: &str) -> RoleBinding {
 }
 
 #[test]
+fn issue_4310_role_and_sak_layers_survive_memento_health_changes() {
+    let temp = tempfile::tempdir().expect("prompt dir");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+    let prompt_path = temp.path().join("role.md");
+    std::fs::write(&prompt_path, "ISSUE 4310 ROLE PROMPT").expect("write role prompt");
+    let mut binding = test_role_binding("issue-4310-role");
+    binding.prompt_file = prompt_path.display().to_string();
+    let sak = "[Shared Agent Knowledge]\nISSUE 4310 SAK";
+
+    for settings in [
+        ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        },
+        ResolvedMemorySettings {
+            backend: MemoryBackendKind::File,
+            memento_fallback: true,
+            ..ResolvedMemorySettings::default()
+        },
+    ] {
+        let prompt = build_system_prompt(
+            "ctx",
+            &[],
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            Some(&binding),
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            Some(sak),
+            None,
+            Some(&settings),
+            true,
+        );
+
+        assert!(prompt.contains("ISSUE 4310 ROLE PROMPT"));
+        assert!(prompt.contains("ISSUE 4310 SAK"));
+    }
+}
+
+#[test]
 fn issue_4313_prompt_policy_contract() {
     let built = build_prompt_with_optional_manifest_for(None, Some("implementation"));
     let prompt = built.system_prompt;

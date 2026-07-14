@@ -3,10 +3,16 @@ use crate::services::memory::{RecallMode, RecallResponse};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct MemoryInjectionPlan<'a> {
-    pub(super) shared_knowledge_for_context: Option<&'a str>,
-    pub(super) shared_knowledge_for_system_prompt: Option<&'a str>,
+    pub(super) shared_knowledge_for_context: Option<String>,
+    pub(super) shared_knowledge_for_system_prompt: Option<String>,
     pub(super) external_recall_for_context: Option<&'a str>,
     pub(super) longterm_catalog_for_system_prompt: Option<&'a str>,
+}
+
+impl MemoryInjectionPlan<'_> {
+    pub(super) fn sak_for_system_prompt(&self) -> Option<&str> {
+        self.shared_knowledge_for_system_prompt.as_deref()
+    }
 }
 
 /// #1083: Memento recall gate decision.
@@ -32,17 +38,18 @@ pub(super) fn build_memory_injection_plan<'a>(
     dispatch_profile: DispatchProfile,
     memory_recall: &'a RecallResponse,
 ) -> MemoryInjectionPlan<'a> {
+    let shared_knowledge = crate::services::discord::shared_memory::load_shared_knowledge();
     let should_inject_shared_knowledge =
         dispatch_profile == DispatchProfile::Full && !has_session_id;
     let shared_knowledge_for_context =
         if should_inject_shared_knowledge && !matches!(provider, ProviderKind::Claude) {
-            memory_recall.shared_knowledge.as_deref()
+            shared_knowledge.as_deref().map(str::to_owned)
         } else {
             None
         };
     let shared_knowledge_for_system_prompt =
         if dispatch_profile == DispatchProfile::Full && matches!(provider, ProviderKind::Claude) {
-            memory_recall.shared_knowledge.as_deref()
+            shared_knowledge.as_deref().map(str::to_owned)
         } else {
             None
         };
@@ -426,5 +433,38 @@ mod tests {
             merge_reply_contexts(None, format_voluntary_feedback_reminder("")),
             None,
         );
+    }
+
+    #[test]
+    fn issue_4310_sak_layer_is_independent_of_memento_recall_state() {
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+        let sak_path = crate::runtime_layout::shared_agent_knowledge_path(runtime_root.path());
+        std::fs::create_dir_all(sak_path.parent().expect("SAK parent")).expect("create SAK parent");
+        std::fs::write(&sak_path, "state-independent rules").expect("write SAK");
+        crate::services::discord::shared_memory::invalidate_shared_knowledge_cache_for_tests();
+        let expected = "[Shared Agent Knowledge]\nstate-independent rules";
+        let healthy_recall = RecallResponse {
+            external_recall: Some("memento context".to_string()),
+            memento_context_loaded: true,
+            ..RecallResponse::default()
+        };
+        let degraded_recall = RecallResponse {
+            warnings: vec!["memento unavailable; local fallback used".to_string()],
+            ..RecallResponse::default()
+        };
+
+        for recall in [&healthy_recall, &degraded_recall] {
+            let plan = build_memory_injection_plan(
+                &ProviderKind::Claude,
+                false,
+                DispatchProfile::Full,
+                recall,
+            );
+            assert_eq!(
+                plan.shared_knowledge_for_system_prompt.as_deref(),
+                Some(expected)
+            );
+        }
     }
 }
