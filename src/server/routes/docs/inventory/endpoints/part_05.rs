@@ -483,7 +483,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "dispatchPollSec": 30,
                     "maxRetries": 3,
                     "maxEntryRetries": 3
-                }
+                },
+                "explicit_keys": ["dispatchPollSec", "maxRetries", "maxEntryRetries"]
             }),
         ),
         ep(
