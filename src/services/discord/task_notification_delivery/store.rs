@@ -17,6 +17,8 @@ use sqlx::{PgPool, Row};
 
 use super::{TaskCardScope, stable_nonce};
 
+#[cfg(test)]
+pub(super) use card_claim::install_new_terminal_claim_race_hook;
 use card_claim::{claim_card_pg, find_terminal_delivery_pg};
 use retention::cleanup_old_rows_pg;
 #[cfg(test)]

@@ -726,8 +726,8 @@
 | `services::discord::task_notification_delivery::card_post` | `src/services/discord/task_notification_delivery/card_post.rs` | 109 | 109 | 0 |  |
 | `services::discord::task_notification_delivery::gateway` | `src/services/discord/task_notification_delivery/gateway.rs` | 278 | 264 | 14 |  |
 | `services::discord::task_notification_delivery::response_chunks` | `src/services/discord/task_notification_delivery/response_chunks.rs` | 635 | 598 | 37 |  |
-| `services::discord::task_notification_delivery::store` | `src/services/discord/task_notification_delivery/store.rs` | 959 | 959 | 0 |  |
-| `services::discord::task_notification_delivery::store::card_claim` | `src/services/discord/task_notification_delivery/store/card_claim.rs` | 427 | 427 | 0 |  |
+| `services::discord::task_notification_delivery::store` | `src/services/discord/task_notification_delivery/store.rs` | 961 | 961 | 0 |  |
+| `services::discord::task_notification_delivery::store::card_claim` | `src/services/discord/task_notification_delivery/store/card_claim.rs` | 471 | 471 | 0 |  |
 | `services::discord::task_notification_delivery::store::missing_card_replacement` | `src/services/discord/task_notification_delivery/store/missing_card_replacement.rs` | 189 | 189 | 0 |  |
 | `services::discord::task_notification_delivery::store::response_chunks` | `src/services/discord/task_notification_delivery/store/response_chunks.rs` | 569 | 569 | 0 |  |
 | `services::discord::task_notification_delivery::store::response_fence` | `src/services/discord/task_notification_delivery/store/response_fence.rs` | 999 | 999 | 0 |  |

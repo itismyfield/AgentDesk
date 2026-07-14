@@ -666,6 +666,102 @@ async fn pane_first_then_uuid_replay_backfills_semantic_delivery_pg() {
 }
 
 #[tokio::test]
+async fn promotion_first_edit_then_new_completion_preserves_original_replay_hash_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_card_promotion_edit_replay_4295",
+        "promotion-first edited task card replay hash",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let clients = clients();
+    let transport = FakeTransport::new();
+    let session_key = "AgentDesk-claude-4295-promotion-edit-replay";
+    let task_id = "promotion-edit-replay-task";
+    let promoted = promotion_event(session_key, task_id);
+    let original_content = promoted.payload.render(1);
+    let first = ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &promoted,
+        EnsureIntent::Promotion,
+    )
+    .await
+    .expect("promotion-first card without source fingerprint");
+
+    let edited = TaskCardEvent::from_task_prompt(
+        44_295,
+        "claude",
+        session_key,
+        &format!(
+            "<task-notification><task-id>{task_id}</task-id><status>completed</status><summary>Agent completed</summary><result>later pane detail</result></task-notification>"
+        ),
+    );
+    ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &edited,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("fingerprint-less duplicate edits promoted card");
+    assert_ne!(edited.payload.render(2), original_content);
+
+    let followup = sourced_event(
+        session_key,
+        "promotion-edit-followup-entry",
+        task_id,
+        "genuine later completion",
+    );
+    ensure_card(
+        Some(&pool),
+        &clients,
+        &transport,
+        &followup,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("new source-bound completion");
+    assert_eq!(transport.physical_posts.load(Ordering::Acquire), 2);
+    pool.close().await;
+
+    let restarted_pool = pg_db.connect_and_migrate().await;
+    let replay = TaskCardEvent::from_task_prompt_with_source_event_id(
+        44_295,
+        "claude",
+        "AgentDesk-claude-4295-promotion-edit-restarted",
+        &format!(
+            "<task-notification><task-id>{task_id}</task-id><status>completed</status><summary>Agent completed</summary></task-notification>"
+        ),
+        Some("promotion-edit-original-entry-replay"),
+    );
+    assert_eq!(replay.payload.render(1), original_content);
+    let replay_transport = FakeTransport::new();
+    let replay_outcome = ensure_card(
+        Some(&restarted_pool),
+        &clients,
+        &replay_transport,
+        &replay,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("original source entry replay after restart");
+
+    assert_eq!(replay_outcome.disposition, CardDisposition::Existing);
+    assert_eq!(replay_outcome.message_id, first.message_id);
+    assert_eq!(
+        replay_transport.physical_posts.load(Ordering::Acquire),
+        0,
+        "the first-delivered hash must survive edits and later completions"
+    );
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn durable_terminal_identity_suppresses_restart_compaction_exact_replay_pg() {
     let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
         "agentdesk_task_card_exact_replay_4295",
@@ -791,6 +887,94 @@ async fn same_task_new_source_event_and_payload_posts_followup_pg() {
         transport.physical_posts.load(Ordering::Acquire),
         2,
         "a different source boundary/payload for the same task id must POST"
+    );
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn concurrent_new_completions_advance_distinct_revisions_and_nonces_pg() {
+    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        "agentdesk_task_card_concurrent_followup_4295",
+        "concurrent new terminal completions use distinct nonces",
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = pg_db.connect_and_migrate().await;
+    let clients = clients();
+    let transport = Arc::new(FakeTransport::new());
+    let session_key = "AgentDesk-claude-4295-concurrent-followup";
+    let task_id = "concurrent-followup-task";
+    let original = sourced_event(
+        session_key,
+        "concurrent-followup-original",
+        task_id,
+        "original completion",
+    );
+    ensure_card(
+        Some(&pool),
+        &clients,
+        transport.as_ref(),
+        &original,
+        EnsureIntent::Observation,
+    )
+    .await
+    .expect("original completion card");
+
+    let left_event = sourced_event(
+        session_key,
+        "concurrent-followup-left",
+        task_id,
+        "left completion",
+    );
+    let right_event = sourced_event(
+        session_key,
+        "concurrent-followup-right",
+        task_id,
+        "right completion",
+    );
+    store::install_new_terminal_claim_race_hook(left_event.event_key());
+    let (left, right) = tokio::join!(
+        ensure_card(
+            Some(&pool),
+            &clients,
+            transport.as_ref(),
+            &left_event,
+            EnsureIntent::Observation,
+        ),
+        ensure_card(
+            Some(&pool),
+            &clients,
+            transport.as_ref(),
+            &right_event,
+            EnsureIntent::Observation,
+        ),
+    );
+    let left = left.expect("left concurrent completion");
+    let right = right.expect("right concurrent completion");
+
+    assert_ne!(left.message_id, right.message_id);
+    assert_eq!(
+        transport.physical_posts.load(Ordering::Acquire),
+        3,
+        "each distinct completion must cross Discord with a distinct nonce"
+    );
+    let revisions: Vec<i32> = sqlx::query_scalar(
+        "SELECT revision FROM task_notification_card_state
+         WHERE channel_id = $1 AND provider = $2 AND event_key = $3",
+    )
+    .bind(i64::try_from(original.scope.channel_id).expect("channel id"))
+    .bind(&original.scope.provider)
+    .bind(original.event_key())
+    .fetch_all(&pool)
+    .await
+    .expect("load final task card revision");
+    assert_eq!(revisions, vec![3]);
+    assert_eq!(
+        transport.by_nonce.lock().expect("fake nonce map").len(),
+        3,
+        "revision CAS must force the stale writer to derive a fresh nonce"
     );
     pg_db.drop().await;
 }

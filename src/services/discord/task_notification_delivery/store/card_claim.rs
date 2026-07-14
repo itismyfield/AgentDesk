@@ -2,6 +2,45 @@
 
 use super::*;
 
+#[cfg(test)]
+static NEW_TERMINAL_CLAIM_RACE_HOOK: LazyLock<
+    Mutex<Option<(String, std::sync::Arc<tokio::sync::Barrier>)>>,
+> = LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+pub(in crate::services::discord::task_notification_delivery) fn install_new_terminal_claim_race_hook(
+    event_key: &str,
+) {
+    let mut installed = NEW_TERMINAL_CLAIM_RACE_HOOK
+        .lock()
+        .expect("new terminal claim race hook");
+    assert!(installed.is_none(), "new terminal claim race hook leaked");
+    *installed = Some((
+        event_key.to_string(),
+        std::sync::Arc::new(tokio::sync::Barrier::new(2)),
+    ));
+}
+
+#[cfg(test)]
+async fn pause_new_terminal_claim_for_race(scope: &TaskCardScope) {
+    let barrier = NEW_TERMINAL_CLAIM_RACE_HOOK
+        .lock()
+        .expect("new terminal claim race hook")
+        .as_ref()
+        .filter(|(event_key, _)| event_key == &scope.event_key)
+        .map(|(_, barrier)| std::sync::Arc::clone(barrier));
+    let Some(barrier) = barrier else {
+        return;
+    };
+    if barrier.wait().await.is_leader() {
+        NEW_TERMINAL_CLAIM_RACE_HOOK
+            .lock()
+            .expect("new terminal claim race hook")
+            .take();
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    }
+}
+
 pub(super) async fn claim_card_pg(
     pool: &PgPool,
     scope: &TaskCardScope,
@@ -121,7 +160,7 @@ pub(super) async fn claim_card_pg(
                      EXCLUDED.terminal_delivery_fingerprint
                  ),
                  bot_key = EXCLUDED.bot_key,
-                 content_hash = EXCLUDED.content_hash",
+                 content_hash = task_notification_terminal_delivery.content_hash",
         )
         .bind(channel_id)
         .bind(&scope.provider)
@@ -136,8 +175,11 @@ pub(super) async fn claim_card_pg(
         .map_err(|error| format!("preserve prior terminal delivery: {error}"))?;
 
         current_scope.terminal_delivery_fingerprint = scope.terminal_delivery_fingerprint.clone();
-        let next_revision = current.get::<i32, _>("revision").saturating_add(1);
+        let current_revision = current.get::<i32, _>("revision");
+        let next_revision = current_revision.saturating_add(1);
         let next_nonce = stable_nonce(&current_scope, next_revision);
+        #[cfg(test)]
+        pause_new_terminal_claim_for_race(scope).await;
         sqlx::query(
             "UPDATE task_notification_card_state
              SET surface_owner = 'card',
@@ -156,6 +198,7 @@ pub(super) async fn claim_card_pg(
                  updated_at = NOW()
              WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
                AND delivery_state = 'card_posted'
+               AND revision = $12
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
              RETURNING bot_key, discord_nonce, discord_message_id, revision,
                        update_count, rendered_content",
@@ -171,6 +214,7 @@ pub(super) async fn claim_card_pg(
         .bind(&current_scope.terminal_delivery_fingerprint)
         .bind(&lease_owner)
         .bind(LEASE_SECONDS)
+        .bind(current_revision)
         .fetch_optional(pool)
         .await
         .map_err(|error| format!("claim new terminal completion: {error}"))?
