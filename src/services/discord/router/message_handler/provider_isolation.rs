@@ -666,6 +666,7 @@ mod thread_role_inheritance_tests {
             None,
             None,
             None,
+            None,
         );
         assert!(built.system_prompt.contains("PARENT ROLE PROMPT"));
         assert!(

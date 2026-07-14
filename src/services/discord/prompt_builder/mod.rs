@@ -5,11 +5,15 @@ use super::settings::{
 use super::*;
 use crate::db::prompt_manifests::{PromptContentVisibility, PromptManifest};
 
+mod channel_recent_context;
 mod dispatch_contract;
 mod layer_rendering;
 mod manifest;
 mod memory_guidance;
 
+pub(crate) use channel_recent_context::{
+    ChannelRecentContextManifestInput, load_channel_recent_context,
+};
 pub(crate) use dispatch_contract::CurrentTaskContext;
 pub(crate) use manifest::RecoveryContextManifestInput;
 pub(crate) use memory_guidance::MemoryRecallManifestInput;
@@ -20,9 +24,9 @@ use layer_rendering::{
     render_channel_participants, shared_agent_rules_lookup, tool_output_efficiency_guidance,
 };
 use manifest::{
-    build_prompt_manifest, current_task_manifest_layer, dispatch_contract_manifest_layer,
-    memory_recall_manifest_layer, prompt_manifest_layer, recovery_context_manifest_layer,
-    role_prompt_manifest_layer,
+    build_prompt_manifest, channel_recent_context_manifest_layer, current_task_manifest_layer,
+    dispatch_contract_manifest_layer, memory_recall_manifest_layer, prompt_manifest_layer,
+    recovery_context_manifest_layer, role_prompt_manifest_layer,
 };
 use memory_guidance::proactive_memory_guidance;
 
@@ -132,6 +136,7 @@ pub(super) fn build_system_prompt(
         None,
         None,
         None,
+        None,
     )
     .system_prompt
 }
@@ -154,6 +159,7 @@ pub(super) fn build_system_prompt_with_manifest(
     memento_mcp_available: bool,
     is_claude_harness: bool,
     recovery_context: Option<&RecoveryContextManifestInput<'_>>,
+    channel_recent_context: Option<&ChannelRecentContextManifestInput>,
     memory_recall_manifest: Option<&MemoryRecallManifestInput<'_>>,
     turn_id: Option<&str>,
 ) -> BuiltSystemPrompt {
@@ -531,6 +537,9 @@ pub(super) fn build_system_prompt_with_manifest(
                 .push(recovery_context_manifest_layer(None).expect("disabled recovery layer"));
         }
     }
+    prompt_manifest_layers.push(channel_recent_context_manifest_layer(
+        channel_recent_context,
+    ));
 
     if profile != DispatchProfile::Full {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -568,7 +577,9 @@ pub(super) fn build_system_prompt_with_manifest(
                 layer.enabled
                     && matches!(
                         layer.layer_name.as_str(),
-                        manifest::MEMORY_RECALL_LAYER_NAME | manifest::RECOVERY_CONTEXT_LAYER_NAME
+                        manifest::MEMORY_RECALL_LAYER_NAME
+                            | manifest::RECOVERY_CONTEXT_LAYER_NAME
+                            | manifest::CHANNEL_RECENT_CONTEXT_LAYER_NAME
                     )
             })
             .fold(0_i64, |sum, layer| {

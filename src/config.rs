@@ -1546,6 +1546,12 @@ pub struct RuntimeSettingsConfig {
     pub github_repo_cache_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_stale_sec: Option<u64>,
+    /// Number of completed user/assistant pairs from the same Discord channel
+    /// added as background context when a fresh provider session starts.
+    /// Unset defaults to 3, `0` disables the layer, and values are clamped to 10.
+    /// Read live for each turn through `config_live_reload::current()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_context_recent_pairs: Option<u64>,
     /// Optional override (seconds) for the Follow-up TUI prompt-readiness wait.
     /// When unset (or `0`), both the Claude and Codex TUI follow-up waits keep
     /// the compiled-in 45s default (`FOLLOWUP_PROMPT_READY_TIMEOUT`). Read live
@@ -1675,6 +1681,7 @@ impl RuntimeSettingsConfig {
             && self.rate_limit_danger_pct.is_none()
             && self.github_repo_cache_sec.is_none()
             && self.rate_limit_stale_sec.is_none()
+            && self.session_context_recent_pairs.is_none()
             && self.followup_prompt_ready_timeout_secs.is_none()
             && self.active_session_audit_enabled.is_none()
             && self.active_session_audit_stale_secs.is_none()

@@ -1180,8 +1180,8 @@ pub(super) async fn handle_text_message(
         return Ok(());
     }
     let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
-    let fresh_codex_goal_session_requested = force_fresh_provider_session;
     if force_fresh_provider_session {
+        record_fresh_session_context_boundary(shared, channel_id).await?;
         clear_codex_goal_start_provider_session(
             shared,
             channel_id,
@@ -1198,7 +1198,7 @@ pub(super) async fn handle_text_message(
         sanitized_input
     };
     if session_id.is_none() {
-        if fresh_codex_goal_session_requested {
+        if force_fresh_provider_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to /goal fresh session request",
@@ -1621,12 +1621,10 @@ pub(super) async fn handle_text_message(
         }
     };
     let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
-    let reply_context = merge_reply_contexts(
-        reply_context,
-        session_retry_context
-            .as_ref()
-            .map(|context| context.formatted_context.clone()),
-    );
+    let retry_reply_context = session_retry_context
+        .as_ref()
+        .map(|c| c.formatted_context.clone());
+    let reply_context = merge_reply_contexts(reply_context, retry_reply_context);
     // #4307 PR-B: fold the voluntary tool_feedback reminder stashed last turn
     // into `reply_context`; the owned reminder is kept for the refusal put-back.
     let (feedback_reminder, reply_context) =
@@ -1738,7 +1736,6 @@ pub(super) async fn handle_text_message(
             warning
         );
     }
-
     // Prepend pending file uploads
     let mut context_chunks = Vec::new();
     let memory_injection_plan = build_memory_injection_plan(
@@ -1747,11 +1744,25 @@ pub(super) async fn handle_text_message(
         dispatch_profile,
         &memory_recall,
     );
+    let channel_recent_context = load_channel_recent_context(
+        shared.pg_pool.as_ref(),
+        channel_id,
+        session_id.as_deref(),
+        force_fresh_provider_session,
+        session_was_cleared,
+        dispatch_profile,
+        active_dispatch_id_for_prompt.as_deref(),
+        session_retry_context.as_ref(),
+    )
+    .await;
     if !pending_uploads.is_empty() {
         context_chunks.push(pending_uploads.join("\n"));
     }
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
+    }
+    if let Some(ref recent_context) = channel_recent_context {
+        recent_context.append_rendered_context_to(&mut context_chunks);
     }
     if let Some(ref knowledge) = memory_injection_plan.shared_knowledge_for_context {
         context_chunks.push(knowledge.to_string());
@@ -1769,7 +1780,6 @@ pub(super) async fn handle_text_message(
         session_id.as_deref(),
         context_chunks.join("\n\n"),
     );
-
     // Build Discord context info
     let discord_context = {
         let data = shared.core.lock().await;
@@ -1781,7 +1791,6 @@ pub(super) async fn handle_text_message(
             false,
         )
     };
-
     // Claude keeps SAK in the system prompt for prefix-cache stability.
     // Non-Claude providers receive SAK in the user context instead.
     let sak_for_system = memory_injection_plan.sak_for_system_prompt();
@@ -1803,7 +1812,6 @@ pub(super) async fn handle_text_message(
         gate_reason: memento_recall_gate.reason,
         external_recall: memory_recall.external_recall.as_deref(),
     };
-
     let recovery_context_for_manifest =
         session_retry_context
             .as_ref()
@@ -1829,6 +1837,7 @@ pub(super) async fn handle_text_message(
         memento_mcp_available,
         matches!(&provider, ProviderKind::Claude),
         recovery_context_for_manifest.as_ref(),
+        channel_recent_context.as_ref(),
         Some(&memory_recall_manifest),
         Some(&turn_id),
     );
