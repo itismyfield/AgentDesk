@@ -144,8 +144,8 @@
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 418 | 418 | 0 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 181 | 181 | 0 |  |
 | `db::turns` | `src/db/turns.rs` | 216 | 173 | 43 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 55 | 55 | 0 |  |
-| `dispatch::dispatch_cancel` | `src/dispatch/dispatch_cancel.rs` | 539 | 489 | 50 |  |
+| `dispatch` | `src/dispatch/mod.rs` | 59 | 59 | 0 |  |
+| `dispatch::dispatch_cancel` | `src/dispatch/dispatch_cancel.rs` | 543 | 493 | 50 |  |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 149 | 94 | 55 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3950 | 2817 | 1133 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 1464 | 1334 | 130 | giant-file |
@@ -428,7 +428,7 @@
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 862 | 354 | 508 |  |
 | `services::codex_tui::warm_followup` | `src/services/codex_tui/warm_followup.rs` | 695 | 512 | 183 |  |
 | `services::cswap` | `src/services/cswap.rs` | 887 | 552 | 335 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 5551 | 4167 | 1384 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 5568 | 4168 | 1400 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 981 | 855 | 126 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1079 | 652 | 427 |  |
@@ -474,7 +474,7 @@
 | `services::discord::destructive_cancel_capture` | `src/services/discord/destructive_cancel_capture.rs` | 63 | 34 | 29 |  |
 | `services::discord::destructive_cancel_gate` | `src/services/discord/destructive_cancel_gate.rs` | 705 | 350 | 355 |  |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 509 | 509 | 0 |  |
-| `services::discord::dispatch_policy` | `src/services/discord/dispatch_policy.rs` | 351 | 218 | 133 |  |
+| `services::discord::dispatch_policy` | `src/services/discord/dispatch_policy.rs` | 429 | 228 | 201 |  |
 | `services::discord::footer_view_reconciler` | `src/services/discord/footer_view_reconciler/mod.rs` | 658 | 470 | 188 |  |
 | `services::discord::footer_view_reconciler::registry` | `src/services/discord/footer_view_reconciler/registry.rs` | 624 | 624 | 0 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3898 | 2566 | 1332 | giant-file |
