@@ -980,7 +980,7 @@
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1229 | 759 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2261 | 1647 | 614 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2421 | 1807 | 614 | giant-file |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
@@ -996,7 +996,7 @@
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 74 | 74 | 0 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 637 | 637 | 0 |  |
 | `services::provider_error_transcript` | `src/services/provider_error_transcript.rs` | 87 | 48 | 39 |  |
-| `services::provider_exec` | `src/services/provider_exec.rs` | 309 | 309 | 0 |  |
+| `services::provider_exec` | `src/services/provider_exec.rs` | 335 | 335 | 0 |  |
 | `services::provider_hosting` | `src/services/provider_hosting.rs` | 1073 | 493 | 580 |  |
 | `services::provider_output_guard` | `src/services/provider_output_guard.rs` | 195 | 195 | 0 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 73 | 73 | 0 |  |

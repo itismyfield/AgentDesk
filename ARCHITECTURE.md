@@ -1046,6 +1046,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── shell.rs
 │   │   └── tmux.rs
+│   ├── provider/
+│   │   └── provider_conformance_invariant_tests.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
 │   │   ├── context.rs
