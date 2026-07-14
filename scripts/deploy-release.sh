@@ -1501,6 +1501,17 @@ else
     sleep 2
 fi
 
+# Watermark the shared append-only stdout log only after the old dcserver has
+# exited. The post-deploy WARN-rate smoke must not count lines from the prior
+# process lifetime (#4511).
+POST_DEPLOY_SMOKE_LOG_PATH="$ADK_REL/logs/dcserver.stdout.log"
+POST_DEPLOY_SMOKE_LOG_OFFSET=""
+if [ ! -e "$POST_DEPLOY_SMOKE_LOG_PATH" ]; then
+    POST_DEPLOY_SMOKE_LOG_OFFSET=0
+elif POST_DEPLOY_SMOKE_LOG_OFFSET=$(wc -c < "$POST_DEPLOY_SMOKE_LOG_PATH" 2>/dev/null); then
+    POST_DEPLOY_SMOKE_LOG_OFFSET="${POST_DEPLOY_SMOKE_LOG_OFFSET//[[:space:]]/}"
+fi
+
 # Promote the already signed staged binary atomically. In-place codesign can
 # corrupt the OS signing cache if it fails mid-write.
 #
@@ -1994,7 +2005,7 @@ _post_deploy_smoke_check_wedges() {
 }
 
 _post_deploy_smoke_check_fail_closed_warn_rate() {
-    local log_path="$ADK_REL/logs/dcserver.stdout.log"
+    local log_path="$POST_DEPLOY_SMOKE_LOG_PATH"
     local sample_path="$POST_DEPLOY_SMOKE_TMP_DIR/recent-dcserver.log"
     local sampled_lines warn_lines fail_closed_warns
     case "$POST_DEPLOY_SMOKE_LOG_LINES" in
@@ -2017,8 +2028,15 @@ _post_deploy_smoke_check_fail_closed_warn_rate() {
         _post_deploy_smoke_fail "fail-closed WARN sample: unreadable log ${log_path}" || true
         return 1
     fi
-    if ! tail -n "$POST_DEPLOY_SMOKE_LOG_LINES" "$log_path" > "$sample_path"; then
-        _post_deploy_smoke_fail "fail-closed WARN sample: could not read recent log lines" || true
+    case "$POST_DEPLOY_SMOKE_LOG_OFFSET" in
+        ''|*[!0-9]*)
+            _post_deploy_smoke_fail "fail-closed WARN sample: restart log watermark unavailable" || true
+            return 1
+            ;;
+    esac
+    if ! tail -c "+$((POST_DEPLOY_SMOKE_LOG_OFFSET + 1))" "$log_path" \
+      | tail -n "$POST_DEPLOY_SMOKE_LOG_LINES" > "$sample_path"; then
+        _post_deploy_smoke_fail "fail-closed WARN sample: could not read post-restart log lines" || true
         return 1
     fi
     sampled_lines=$(wc -l < "$sample_path" | tr -d ' ') || return 1
@@ -2037,7 +2055,7 @@ _post_deploy_smoke_check_fail_closed_warn_rate() {
     # default 5 / 500 lines (1%). It intentionally does not block on one WARN.
     if [ "$fail_closed_warns" -ge "$POST_DEPLOY_SMOKE_WARN_LIMIT" ]; then
         _post_deploy_smoke_fail \
-            "fail-closed WARN spike: ${fail_closed_warns} in last ${sampled_lines} log lines (threshold ${POST_DEPLOY_SMOKE_WARN_LIMIT})" \
+            "fail-closed WARN spike: ${fail_closed_warns} in last ${sampled_lines} post-restart log lines (threshold ${POST_DEPLOY_SMOKE_WARN_LIMIT})" \
             || true
         return 1
     fi
