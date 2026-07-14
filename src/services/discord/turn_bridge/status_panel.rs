@@ -38,9 +38,19 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
         provider,
         started_at_unix,
     );
+    let inflight = crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
+        provider,
+        channel_id,
+        Some(expected_user_msg_id),
+    );
+    let (panel_text, wip_warning) =
+        completion_panel_with_wip_warning(panel_text, last_status_panel_text, inflight.as_ref());
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
         StatusPanelCompletionAction::AlreadyCommitted => {
+            if let Some(warning) = wip_warning {
+                warning.commit();
+            }
             purge_pending_bind_for_completed_status_panel(
                 shared,
                 provider,
@@ -50,20 +60,6 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             true
         }
         StatusPanelCompletionAction::SendFallback => {
-            let inflight =
-                crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
-                    provider,
-                    channel_id,
-                    Some(expected_user_msg_id),
-                );
-            let _ = warn_turn_end_wip_before_status_panel_commit(
-                shared,
-                gateway,
-                channel_id,
-                inflight.as_ref(),
-                source,
-            )
-            .await;
             complete_status_panel_v2_fallback_with_gateway(
                 shared,
                 gateway,
@@ -72,25 +68,12 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                 expected_user_msg_id,
                 last_status_panel_text,
                 panel_text,
+                wip_warning,
                 source,
             )
             .await
         }
         StatusPanelCompletionAction::Edit(status_msg_id) => {
-            let inflight =
-                crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
-                    provider,
-                    channel_id,
-                    Some(expected_user_msg_id),
-                );
-            let _ = warn_turn_end_wip_before_status_panel_commit(
-                shared,
-                gateway,
-                channel_id,
-                inflight.as_ref(),
-                source,
-            )
-            .await;
             let edit_result = if gateway.can_chain_locally() {
                 TurnGateway::edit_message(gateway, channel_id, status_msg_id, &panel_text).await
             } else if let Some(http) = shared.serenity_http_or_token_fallback() {
@@ -103,6 +86,9 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             };
             match edit_result {
                 Ok(()) => {
+                    if let Some(warning) = wip_warning {
+                        warning.commit();
+                    }
                     *last_status_panel_text = panel_text;
                     purge_pending_bind_for_completed_status_panel(
                         shared,
@@ -122,6 +108,7 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                             expected_user_msg_id,
                             last_status_panel_text,
                             panel_text,
+                            wip_warning,
                             source,
                         )
                         .await;
@@ -140,23 +127,25 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     }
 }
 
-async fn warn_turn_end_wip_before_status_panel_commit<G: TurnGateway + ?Sized>(
-    shared: &SharedData,
-    gateway: &G,
-    channel_id: ChannelId,
+fn completion_panel_with_wip_warning(
+    panel_text: String,
+    previous_panel_text: &str,
     inflight: Option<&super::super::InflightTurnState>,
-    source: &'static str,
-) -> crate::services::discord::turn_end_wip_warning::TurnEndWipWarningOutcome {
-    if gateway.can_chain_locally() {
-        return crate::services::discord::turn_end_wip_warning::warn_turn_end_wip_with_gateway(
-            gateway, channel_id, inflight, source,
-        )
-        .await;
-    }
-    crate::services::discord::turn_end_wip_warning::warn_turn_end_wip_with_shared_http(
-        shared, channel_id, inflight, source,
-    )
-    .await
+) -> (
+    String,
+    Option<crate::services::discord::turn_end_wip_warning::TurnEndWipWarningReservation>,
+) {
+    use crate::services::discord::turn_end_wip_warning as wip;
+
+    let reservation = wip::reserve_turn_end_wip_warning(inflight);
+    let panel_text = if reservation.is_some() {
+        wip::merge_turn_end_wip_warning(panel_text, reservation.as_ref())
+    } else if wip::turn_end_wip_warning_was_delivered(inflight) {
+        wip::preserve_merged_turn_end_wip_warning(panel_text, previous_panel_text)
+    } else {
+        panel_text
+    };
+    (panel_text, reservation)
 }
 
 enum StatusPanelWipInflight<'a> {
@@ -223,10 +212,16 @@ async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGateway + ?Sized>
     expected_user_msg_id: u64,
     last_status_panel_text: &mut String,
     panel_text: String,
+    wip_warning: Option<
+        crate::services::discord::turn_end_wip_warning::TurnEndWipWarningReservation,
+    >,
     source: &'static str,
 ) -> bool {
     match send_status_panel_v2_completion_fallback(shared, gateway, channel_id, &panel_text).await {
         Ok(message_id) => {
+            if let Some(warning) = wip_warning {
+                warning.commit();
+            }
             persist_status_panel_completion_fallback_message_id(
                 provider,
                 channel_id,
@@ -278,9 +273,23 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
         provider,
         started_at_unix,
     );
+    let inflight = status_panel_wip_inflight_for_completion(
+        inflight_snapshot,
+        provider,
+        channel_id,
+        expected_user_msg_id,
+    );
+    let (panel_text, wip_warning) = completion_panel_with_wip_warning(
+        panel_text,
+        last_status_panel_text,
+        inflight.as_ref().map(StatusPanelWipInflight::as_inflight),
+    );
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
         StatusPanelCompletionAction::AlreadyCommitted => {
+            if let Some(warning) = wip_warning {
+                warning.commit();
+            }
             purge_pending_bind_for_completed_status_panel(
                 shared.as_ref(),
                 provider,
@@ -290,19 +299,6 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
             true
         }
         StatusPanelCompletionAction::SendFallback => {
-            let inflight = status_panel_wip_inflight_for_completion(
-                inflight_snapshot,
-                provider,
-                channel_id,
-                expected_user_msg_id,
-            );
-            let _ = crate::services::discord::turn_end_wip_warning::warn_turn_end_wip_with_http(
-                http,
-                channel_id,
-                inflight.as_ref().map(StatusPanelWipInflight::as_inflight),
-                source,
-            )
-            .await;
             rate_limit_wait(shared, channel_id).await;
             complete_status_panel_v2_fallback_with_http(
                 http,
@@ -311,29 +307,20 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
                 expected_user_msg_id,
                 last_status_panel_text,
                 panel_text,
+                wip_warning,
                 source,
             )
             .await
         }
         StatusPanelCompletionAction::Edit(status_msg_id) => {
-            let inflight = status_panel_wip_inflight_for_completion(
-                inflight_snapshot,
-                provider,
-                channel_id,
-                expected_user_msg_id,
-            );
-            let _ = crate::services::discord::turn_end_wip_warning::warn_turn_end_wip_with_http(
-                http,
-                channel_id,
-                inflight.as_ref().map(StatusPanelWipInflight::as_inflight),
-                source,
-            )
-            .await;
             rate_limit_wait(shared, channel_id).await;
             match super::http::edit_channel_message(http, channel_id, status_msg_id, &panel_text)
                 .await
             {
                 Ok(_) => {
+                    if let Some(warning) = wip_warning {
+                        warning.commit();
+                    }
                     *last_status_panel_text = panel_text;
                     purge_pending_bind_for_completed_status_panel(
                         shared.as_ref(),
@@ -353,6 +340,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
                             expected_user_msg_id,
                             last_status_panel_text,
                             panel_text,
+                            wip_warning,
                             source,
                         )
                         .await;
@@ -378,10 +366,16 @@ async fn complete_status_panel_v2_fallback_with_http(
     expected_user_msg_id: Option<u64>,
     last_status_panel_text: &mut String,
     panel_text: String,
+    wip_warning: Option<
+        crate::services::discord::turn_end_wip_warning::TurnEndWipWarningReservation,
+    >,
     source: &'static str,
 ) -> bool {
     match send_status_panel_v2_completion_fallback_http(http, channel_id, &panel_text).await {
         Ok(message_id) => {
+            if let Some(warning) = wip_warning {
+                warning.commit();
+            }
             persist_status_panel_completion_fallback_message_id(
                 provider,
                 channel_id,

@@ -1,26 +1,78 @@
-//! Turn-end WIP warning facade (#3792).
+//! Turn-end WIP warning completion-surface merge (#3792, #4217).
 //!
 //! This module bridges the generic git detector in `utils::wip_detect` to the
-//! Discord completion helpers. It is intentionally best-effort: failing to read
-//! git state or failing to send the Discord warning must never fail the turn.
+//! Discord completion helpers. A per-inflight reservation ensures that the
+//! bridge, watcher, and footer reconciler cannot render duplicate warnings.
 
-use std::future::Future;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 
-use poise::serenity_prelude as serenity;
-use serenity::ChannelId;
+use poise::serenity_prelude::ChannelId;
 
-use super::SharedData;
-use super::gateway::TurnGateway;
 use super::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
 use crate::utils::wip_detect::{WipWarning, check_wip_uncommitted_files};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) enum TurnEndWipWarningOutcome {
-    Suppressed,
-    Sent,
-    SendFailed,
+const WIP_WARNING_MARKER: &str = "⚠️ **턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요.**";
+const MAX_RECORDED_DELIVERIES: usize = 2_048;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TurnEndWipKey {
+    provider: String,
+    channel_id: u64,
+    user_msg_id: u64,
+}
+
+#[derive(Default)]
+struct TurnEndWipDedup {
+    claimed: HashSet<TurnEndWipKey>,
+    delivered: HashSet<TurnEndWipKey>,
+    delivery_order: VecDeque<TurnEndWipKey>,
+}
+
+static TURN_END_WIP_DEDUP: LazyLock<Mutex<TurnEndWipDedup>> =
+    LazyLock::new(|| Mutex::new(TurnEndWipDedup::default()));
+
+pub(in crate::services::discord) struct TurnEndWipWarningReservation {
+    key: TurnEndWipKey,
+    text: String,
+    committed: bool,
+}
+
+impl TurnEndWipWarningReservation {
+    pub(in crate::services::discord) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(in crate::services::discord) fn commit(mut self) {
+        let mut dedup = TURN_END_WIP_DEDUP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dedup.claimed.remove(&self.key);
+        if dedup.delivered.insert(self.key.clone()) {
+            dedup.delivery_order.push_back(self.key.clone());
+        }
+        while dedup.delivery_order.len() > MAX_RECORDED_DELIVERIES {
+            if let Some(expired) = dedup.delivery_order.pop_front() {
+                dedup.delivered.remove(&expired);
+            }
+        }
+        self.committed = true;
+    }
+}
+
+impl Drop for TurnEndWipWarningReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        TURN_END_WIP_DEDUP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .claimed
+            .remove(&self.key);
+    }
 }
 
 pub(in crate::services::discord) fn load_matching_inflight_state(
@@ -57,10 +109,10 @@ pub(in crate::services::discord) fn turn_end_wip_warning_text(
 
 fn format_turn_end_wip_warning(warning: &WipWarning) -> String {
     format!(
-        "WARNING: WIP uncommitted files detected before turn completion.\n\
-         Workspace: `{}`\n\
-         Counts: {} staged, {} unstaged, {} untracked.\n\
-         Commit or explicitly discard these changes before ending the turn.",
+        "{WIP_WARNING_MARKER}\n\
+         작업공간: `{}`\n\
+         파일 수: 스테이징됨 {}개 · 스테이징 안 됨 {}개 · 추적되지 않음 {}개\n\
+         턴을 끝내기 전에 변경사항을 커밋하거나 명시적으로 폐기하세요.",
         warning.workspace.display(),
         warning.staged.len(),
         warning.unstaged.len(),
@@ -68,87 +120,81 @@ fn format_turn_end_wip_warning(warning: &WipWarning) -> String {
     )
 }
 
-pub(in crate::services::discord) async fn send_turn_end_wip_warning_with<F, Fut>(
+pub(in crate::services::discord) fn reserve_turn_end_wip_warning(
     inflight: Option<&InflightTurnState>,
-    source: &'static str,
-    mut send_warning: F,
-) -> TurnEndWipWarningOutcome
-where
-    F: FnMut(String) -> Fut,
-    Fut: Future<Output = Result<(), String>>,
-{
-    let Some(text) = turn_end_wip_warning_text(inflight) else {
-        return TurnEndWipWarningOutcome::Suppressed;
+) -> Option<TurnEndWipWarningReservation> {
+    let inflight = inflight?;
+    if inflight.user_msg_id == 0 {
+        return None;
+    }
+    let text = turn_end_wip_warning_text(Some(inflight))?;
+    let key = TurnEndWipKey {
+        provider: inflight.provider.clone(),
+        channel_id: inflight.channel_id,
+        user_msg_id: inflight.user_msg_id,
     };
-    match send_warning(text).await {
-        Ok(()) => TurnEndWipWarningOutcome::Sent,
-        Err(error) => {
-            tracing::warn!(
-                "[turn_end_wip_warning] failed to send WIP warning from {}: {}",
-                source,
-                error
-            );
-            TurnEndWipWarningOutcome::SendFailed
-        }
+    let mut dedup = TURN_END_WIP_DEDUP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if dedup.claimed.contains(&key) || dedup.delivered.contains(&key) {
+        return None;
+    }
+    dedup.claimed.insert(key.clone());
+    Some(TurnEndWipWarningReservation {
+        key,
+        text,
+        committed: false,
+    })
+}
+
+pub(in crate::services::discord) fn turn_end_wip_warning_was_delivered(
+    inflight: Option<&InflightTurnState>,
+) -> bool {
+    let Some(inflight) = inflight.filter(|state| state.user_msg_id != 0) else {
+        return false;
+    };
+    let key = TurnEndWipKey {
+        provider: inflight.provider.clone(),
+        channel_id: inflight.channel_id,
+        user_msg_id: inflight.user_msg_id,
+    };
+    TURN_END_WIP_DEDUP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .delivered
+        .contains(&key)
+}
+
+pub(in crate::services::discord) fn merge_turn_end_wip_warning(
+    completion_surface: String,
+    reservation: Option<&TurnEndWipWarningReservation>,
+) -> String {
+    let Some(warning) = reservation.map(TurnEndWipWarningReservation::text) else {
+        return completion_surface;
+    };
+    let completion_surface = completion_surface.trim_end();
+    if completion_surface.is_empty() {
+        warning.to_string()
+    } else {
+        format!("{completion_surface}\n\n{warning}")
     }
 }
 
-pub(in crate::services::discord) async fn warn_turn_end_wip_with_gateway<
-    G: TurnGateway + ?Sized,
->(
-    gateway: &G,
-    channel_id: ChannelId,
-    inflight: Option<&InflightTurnState>,
-    source: &'static str,
-) -> TurnEndWipWarningOutcome {
-    send_turn_end_wip_warning_with(inflight, source, |text| async move {
-        TurnGateway::send_message(gateway, channel_id, &text)
-            .await
-            .map(|_| ())
-    })
-    .await
-}
-
-pub(in crate::services::discord) async fn warn_turn_end_wip_with_http(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    inflight: Option<&InflightTurnState>,
-    source: &'static str,
-) -> TurnEndWipWarningOutcome {
-    send_turn_end_wip_warning_with(inflight, source, |text| async move {
-        super::http::send_channel_message(http, channel_id, &text)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    })
-    .await
-}
-
-pub(in crate::services::discord) async fn warn_turn_end_wip_with_shared_http(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    inflight: Option<&InflightTurnState>,
-    source: &'static str,
-) -> TurnEndWipWarningOutcome {
-    let Some(http) = shared.serenity_http_or_token_fallback() else {
-        if turn_end_wip_warning_text(inflight).is_some() {
-            tracing::warn!(
-                "[turn_end_wip_warning] failed to send WIP warning from {}: no Discord HTTP available",
-                source
-            );
-            return TurnEndWipWarningOutcome::SendFailed;
-        }
-        return TurnEndWipWarningOutcome::Suppressed;
+pub(in crate::services::discord) fn preserve_merged_turn_end_wip_warning(
+    completion_surface: String,
+    previous_surface: &str,
+) -> String {
+    let Some((_, warning)) = previous_surface.split_once(WIP_WARNING_MARKER) else {
+        return completion_surface;
     };
-    warn_turn_end_wip_with_http(&http, channel_id, inflight, source).await
+    let completion_surface = completion_surface.trim_end();
+    format!("{completion_surface}\n\n{WIP_WARNING_MARKER}{warning}")
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
-
     use tempfile::TempDir;
 
     use super::*;
@@ -258,9 +304,10 @@ mod tests {
         let state = inflight_for_worktree(temp.path());
         let text = turn_end_wip_warning_text(Some(&state)).expect("dirty warning text");
 
-        assert!(text.contains("WIP uncommitted files detected"));
-        assert!(text.contains(&format!("Workspace: `{}`", temp.path().display())));
-        assert!(text.contains("Counts: 1 staged, 1 unstaged, 1 untracked."));
+        assert!(text.contains("커밋되지 않은 변경사항"));
+        assert!(text.contains(&format!("작업공간: `{}`", temp.path().display())));
+        assert!(text.contains("파일 수: 스테이징됨 1개 · 스테이징 안 됨 1개 · 추적되지 않음 1개"));
+        assert!(!text.contains("WARNING:"));
     }
 
     #[test]
@@ -300,8 +347,8 @@ mod tests {
         assert_eq!(turn_end_wip_warning_text(None), None);
     }
 
-    #[tokio::test]
-    async fn send_failure_is_non_fatal() {
+    #[test]
+    fn dropped_reservation_can_be_claimed_by_another_completion_path() {
         let Some(temp) = init_git_repo() else {
             return;
         };
@@ -310,35 +357,26 @@ mod tests {
         fs::write(temp.path().join("untracked.txt"), "untracked\n").expect("write untracked");
         let state = inflight_for_worktree(temp.path());
 
-        let outcome = send_turn_end_wip_warning_with(Some(&state), "unit_test", |_text| async {
-            Err("discord unavailable".to_string())
-        })
-        .await;
-
-        assert_eq!(outcome, TurnEndWipWarningOutcome::SendFailed);
+        let first = reserve_turn_end_wip_warning(Some(&state)).expect("first reservation");
+        assert!(reserve_turn_end_wip_warning(Some(&state)).is_none());
+        drop(first);
+        assert!(reserve_turn_end_wip_warning(Some(&state)).is_some());
     }
 
-    #[tokio::test]
-    async fn clean_warning_does_not_call_sender() {
-        let Some(temp) = committed_repo() else {
+    #[test]
+    fn committed_reservation_suppresses_other_completion_paths() {
+        let Some(temp) = init_git_repo() else {
             return;
         };
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let _root = RuntimeRootGuard::new();
-        let state = inflight_for_worktree(temp.path());
-        let called = Arc::new(Mutex::new(false));
-        let called_for_send = called.clone();
+        fs::write(temp.path().join("untracked.txt"), "untracked\n").expect("write untracked");
+        let mut state = inflight_for_worktree(temp.path());
+        state.user_msg_id = 33_792_001;
 
-        let outcome = send_turn_end_wip_warning_with(Some(&state), "unit_test", move |_text| {
-            let called_for_send = called_for_send.clone();
-            async move {
-                *called_for_send.lock().expect("called lock") = true;
-                Ok(())
-            }
-        })
-        .await;
-
-        assert_eq!(outcome, TurnEndWipWarningOutcome::Suppressed);
-        assert!(!*called.lock().expect("called lock"));
+        reserve_turn_end_wip_warning(Some(&state))
+            .expect("first completion path reservation")
+            .commit();
+        assert!(reserve_turn_end_wip_warning(Some(&state)).is_none());
     }
 }

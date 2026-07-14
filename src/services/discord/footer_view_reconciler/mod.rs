@@ -57,7 +57,10 @@ impl<'a> FooterViewWriter<'a> {
     }
 
     #[cfg(test)]
-    fn test(shared: &'a SharedData, sink: &'a FooterViewTestSink) -> Self {
+    pub(in crate::services::discord) fn test(
+        shared: &'a SharedData,
+        sink: &'a FooterViewTestSink,
+    ) -> Self {
         Self::Test { shared, sink }
     }
 
@@ -109,42 +112,6 @@ impl<'a> FooterViewWriter<'a> {
             }
         }
     }
-
-    async fn warn_turn_end_wip(
-        self,
-        channel_id: ChannelId,
-        provider: &ProviderKind,
-        expected_user_msg_id: Option<u64>,
-        source: &'static str,
-    ) {
-        let inflight = super::turn_end_wip_warning::load_matching_inflight_state(
-            provider,
-            channel_id,
-            expected_user_msg_id,
-        );
-        match self {
-            Self::Bridge { shared } => {
-                let _ = super::turn_end_wip_warning::warn_turn_end_wip_with_shared_http(
-                    shared,
-                    channel_id,
-                    inflight.as_ref(),
-                    source,
-                )
-                .await;
-            }
-            Self::Watcher { http, .. } => {
-                let _ = super::turn_end_wip_warning::warn_turn_end_wip_with_http(
-                    http,
-                    channel_id,
-                    inflight.as_ref(),
-                    source,
-                )
-                .await;
-            }
-            #[cfg(test)]
-            Self::Test { .. } => {}
-        }
-    }
 }
 
 #[cfg(test)]
@@ -174,7 +141,7 @@ impl FooterViewTestSink {
             });
     }
 
-    fn edits(&self) -> Vec<FooterViewRecordedEdit> {
+    pub(in crate::services::discord) fn edits(&self) -> Vec<FooterViewRecordedEdit> {
         self.edits
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -208,6 +175,7 @@ fn prepare_turn_completed_footer(
     indicator: &str,
     background: bool,
     background_agent_pending: bool,
+    wip_warning: Option<&super::turn_end_wip_warning::TurnEndWipWarningReservation>,
 ) -> CompletedFooterPlan {
     shared.ui.placeholder_live_events.push_status_event(
         channel_id,
@@ -220,6 +188,11 @@ fn prepare_turn_completed_footer(
         .ui
         .placeholder_live_events
         .render_completion_footer(channel_id, provider, indicator);
+    let completion_block = super::turn_end_wip_warning::merge_turn_end_wip_warning(
+        rendered.block.unwrap_or_default(),
+        wip_warning,
+    );
+    let completion_block = (!completion_block.trim().is_empty()).then_some(completion_block);
     let Some(msg_id) = terminal_msg_id else {
         return CompletedFooterPlan {
             supersede_edit: None,
@@ -233,20 +206,20 @@ fn prepare_turn_completed_footer(
         provider,
         chrono::Utc::now().timestamp(),
         terminal_text,
-        rendered.block.as_deref(),
+        completion_block.as_deref(),
         rendered.has_unfinished_entries,
     );
     let terminal_edit = smp::finalize_streaming_footer_with_completion(
         terminal_text,
         provider,
-        rendered.block.as_deref(),
+        completion_block.as_deref(),
     )
     .map(|text| CompletionFooterTerminalEdit {
         message_id: msg_id,
         owner,
         text,
         remove_after_edit: !rendered.has_unfinished_entries,
-        completion_block: rendered.block,
+        completion_block,
         delivered_terminal_ids: rendered.delivered_terminal_ids,
     });
     CompletedFooterPlan {
@@ -268,6 +241,12 @@ pub(in crate::services::discord) async fn note_turn_completed_footer(
     background_agent_pending: bool,
     source: &'static str,
 ) -> bool {
+    let inflight = super::turn_end_wip_warning::load_matching_inflight_state(
+        provider,
+        channel_id,
+        Some(owner.user_msg_id),
+    );
+    let wip_warning = super::turn_end_wip_warning::reserve_turn_end_wip_warning(inflight.as_ref());
     let plan = prepare_turn_completed_footer(
         writer.shared(),
         channel_id,
@@ -278,6 +257,7 @@ pub(in crate::services::discord) async fn note_turn_completed_footer(
         indicator,
         background,
         background_agent_pending,
+        wip_warning.as_ref(),
     );
     if let Some(edit) = plan.supersede_edit
         && let Err(error) = writer
@@ -295,9 +275,6 @@ pub(in crate::services::discord) async fn note_turn_completed_footer(
     let Some(terminal_edit) = plan.terminal_edit else {
         return true;
     };
-    writer
-        .warn_turn_end_wip(channel_id, provider, Some(owner.user_msg_id), source)
-        .await;
     let edited = match writer
         .edit_channel_message(
             channel_id,
@@ -319,6 +296,9 @@ pub(in crate::services::discord) async fn note_turn_completed_footer(
             false
         }
     };
+    if edited && let Some(warning) = wip_warning {
+        warning.commit();
+    }
     let recorded = registry::completion_footer_record_committed_text_result_for_owner(
         channel_id,
         terminal_edit.message_id,

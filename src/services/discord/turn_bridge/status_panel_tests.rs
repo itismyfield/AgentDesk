@@ -38,13 +38,6 @@ impl StatusPanelFallbackGateway {
             ..Self::default()
         }
     }
-
-    fn without_local_chain() -> Self {
-        Self {
-            can_chain_locally: false,
-            ..Self::default()
-        }
-    }
 }
 
 impl Default for StatusPanelFallbackGateway {
@@ -142,42 +135,6 @@ impl TurnGateway for StatusPanelFallbackGateway {
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         Some(ProviderKind::Claude)
     }
-}
-
-#[tokio::test]
-async fn status_panel_wip_warning_does_not_use_synthetic_gateway_when_http_path_required() {
-    let Some(worktree) = init_git_repo_for_wip_warning() else {
-        return;
-    };
-    fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
-
-    let shared = make_status_panel_v2_shared_for_tests();
-    let gateway = StatusPanelFallbackGateway::without_local_chain();
-    let state =
-        wip_warning_inflight_state(&ProviderKind::Claude, 3_792_010, 3_792_011, worktree.path());
-
-    let outcome = super::warn_turn_end_wip_before_status_panel_commit(
-        shared.as_ref(),
-        &gateway,
-        ChannelId::new(3_792_010),
-        Some(&state),
-        "test_wip_warning_http_path",
-    )
-    .await;
-
-    assert_eq!(
-        outcome,
-        crate::services::discord::turn_end_wip_warning::TurnEndWipWarningOutcome::SendFailed,
-        "no local-chain gateway plus no HTTP handle should fail instead of being swallowed"
-    );
-    assert!(
-        gateway
-            .sent_messages
-            .lock()
-            .expect("sent messages lock")
-            .is_empty(),
-        "headless/synthetic gateway sends must not absorb WIP warnings"
-    );
 }
 
 #[test]
@@ -801,7 +758,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
 }
 
 #[tokio::test]
-async fn status_panel_completion_sends_wip_warning_before_completion_surface() {
+async fn status_panel_completion_merges_korean_wip_warning_into_completion_surface() {
     let Some(worktree) = init_git_repo_for_wip_warning() else {
         return;
     };
@@ -844,11 +801,15 @@ async fn status_panel_completion_sends_wip_warning_before_completion_surface() {
         .lock()
         .expect("sent messages lock")
         .clone();
-    assert_eq!(sent_messages.len(), 2);
-    assert!(sent_messages[0].contains("WIP uncommitted files detected"));
-    assert!(sent_messages[0].contains(&format!("Workspace: `{}`", worktree.path().display())));
-    assert!(sent_messages[0].contains("Counts: 0 staged, 0 unstaged, 1 untracked."));
-    assert!(sent_messages[1].contains("완료"));
+    assert_eq!(sent_messages.len(), 1);
+    assert!(sent_messages[0].contains("완료"));
+    assert!(sent_messages[0].contains("커밋되지 않은 변경사항"));
+    assert!(sent_messages[0].contains(&format!("작업공간: `{}`", worktree.path().display())));
+    assert!(
+        sent_messages[0]
+            .contains("파일 수: 스테이징됨 0개 · 스테이징 안 됨 0개 · 추적되지 않음 1개")
+    );
+    assert!(!sent_messages[0].contains("WARNING:"));
 
     let committed_retry = complete_status_panel_v2(
         shared.as_ref(),
@@ -872,8 +833,97 @@ async fn status_panel_completion_sends_wip_warning_before_completion_surface() {
             .lock()
             .expect("sent messages lock")
             .len(),
-        2,
+        1,
         "already-committed completion retries must not duplicate WIP warnings"
+    );
+}
+
+#[tokio::test]
+async fn multiple_completion_paths_render_wip_warning_exactly_once() {
+    let Some(worktree) = init_git_repo_for_wip_warning() else {
+        return;
+    };
+    fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
+
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let footer_sink =
+        crate::services::discord::footer_view_reconciler::FooterViewTestSink::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(3_792_030);
+    let user_msg_id = 3_792_031;
+    save_inflight_state(&wip_warning_inflight_state(
+        &provider,
+        channel_id.get(),
+        user_msg_id,
+        worktree.path(),
+    ))
+    .expect("save inflight state");
+
+    assert!(
+        crate::services::discord::footer_view_reconciler::note_turn_completed_footer(
+            crate::services::discord::footer_view_reconciler::FooterViewWriter::test(
+                shared.as_ref(),
+                &footer_sink,
+            ),
+            channel_id,
+            Some(MessageId::new(3_792_032)),
+            crate::services::discord::footer_view_reconciler::CompletionFooterOwner::new(
+                user_msg_id,
+                1_700_000_000,
+            ),
+            &provider,
+            "Final answer",
+            "⠸",
+            false,
+            false,
+            "test_footer_completion_path",
+        )
+        .await
+    );
+
+    let mut last_status_panel_text = String::new();
+    assert!(
+        complete_status_panel_v2(
+            shared.as_ref(),
+            &gateway,
+            channel_id,
+            None,
+            &provider,
+            1_700_000_000,
+            &mut last_status_panel_text,
+            false,
+            false,
+            "test_status_panel_completion_path",
+            user_msg_id,
+        )
+        .await
+    );
+
+    let footer_edits = footer_sink.edits();
+    let status_messages = gateway
+        .sent_messages
+        .lock()
+        .expect("sent messages lock")
+        .clone();
+    assert_eq!(footer_edits.len(), 1);
+    assert_eq!(status_messages.len(), 1);
+    assert!(footer_edits[0].text.contains("Final answer"));
+    let warning_count = footer_edits
+        .iter()
+        .map(|edit| edit.text.matches("커밋되지 않은 변경사항").count())
+        .sum::<usize>()
+        + status_messages
+            .iter()
+            .map(|message| message.matches("커밋되지 않은 변경사항").count())
+            .sum::<usize>();
+    assert_eq!(
+        warning_count, 1,
+        "footer reconciler and status-panel completion must share one inflight-key dedup"
+    );
+    crate::services::discord::footer_view_reconciler::completion_footer_forget_registered_target(
+        channel_id,
     );
 }
 
