@@ -191,9 +191,9 @@ pub(super) struct StallWatchdogLivenessEvidence {
     pub(super) outbound_activity_age_secs: Option<u64>,
     pub(super) background_synthetic_activity_age_secs: Option<u64>,
     pub(super) background_synthetic_kind: Option<String>,
+    pub(super) delivery_backlogged: bool,
     pub(super) has_undelivered_backlog: bool,
-    /// #4400 (a): age of `inflight.updated_at`, populated ONLY when the row's
-    /// persisted tool fields witness an unresolved tool execution AND the tmux
+    /// Age of `inflight.updated_at` only for an unresolved tool on a live tmux
     /// pane is confirmed alive (`tmux_session_alive == Some(true)`). Judged
     /// against the dedicated `STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS` budget,
     /// not the caller's 120s freshness.
@@ -224,12 +224,6 @@ impl StallWatchdogLivenessEvidence {
         if self.has_undelivered_backlog {
             reasons.push("has_undelivered_backlog");
         }
-        // #4400 (a): tool-phase evidence carries its own 30-minute budget —
-        // deliberately NOT the caller's `freshness_secs` (120s), because a
-        // long-running tool keeps the transcript silent far past 120s while
-        // the turn is demonstrably alive (I4). Bounded by the 4h absolute
-        // backstop in `evaluate_stall_watchdog_liveness` like every other
-        // positive-liveness reason (I5).
         if is_recent_age(
             self.open_tool_execution_age_secs,
             STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS,
@@ -249,7 +243,8 @@ impl StallWatchdogLivenessEvidence {
     }
 
     pub(super) fn has_positive_liveness(&self, freshness_secs: u64) -> bool {
-        !self.reason_codes(freshness_secs).is_empty()
+        self.composite_progress(freshness_secs).class
+            != super::relay_progress::RelayProgressClass::NoObservedProgress
     }
 }
 
@@ -509,6 +504,7 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
     threshold_secs: u64,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
+    let progress = decision.evidence.composite_progress(freshness_secs);
     let (shadow_verdict, shadow_reasons) = stall_verdict::judgment_log_fields(
         snapshot,
         Some(decision),
@@ -544,6 +540,9 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
         queue_depth = snapshot.relay_health.queue_depth,
         last_outbound_activity_age_secs = ?basis.last_outbound_activity_age_secs,
         liveness_freshness_secs = freshness_secs,
+        relay_progress = progress.class.as_str(),
+        source_progress_recent = progress.source_recent,
+        delivery_progress_recent = progress.delivery_recent,
         liveness_reasons = decision.evidence.reason_codes_csv(freshness_secs),
         pane_offset_current = ?decision.evidence.pane_offset_current,
         pane_offset_previous = ?decision.evidence.pane_offset_previous,
@@ -724,6 +723,7 @@ impl StallWatchdogLivenessEvidence {
                 .as_ref()
                 .map(|(_, age)| *age),
             background_synthetic_kind: background_synthetic.map(|(kind, _)| kind),
+            delivery_backlogged: live_undelivered_backlog(snapshot),
             has_undelivered_backlog: has_undelivered_backlog(snapshot, &relay_observation),
             open_tool_execution_age_secs: open_tool_execution_age_secs(
                 snapshot,

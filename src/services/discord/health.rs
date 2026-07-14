@@ -28,6 +28,7 @@ mod recovery;
 mod redaction;
 mod relay_auto_heal;
 mod relay_dead_reattach;
+mod relay_progress;
 mod runtime_resolve;
 mod session_enrichment;
 mod snapshot;
