@@ -22,6 +22,7 @@ ROUTINE_DIR = ROOT / "routines" / "monitoring"
 sys.path.insert(0, str(ROUTINE_DIR))
 
 from log_digest_issue_drafts import (  # noqa: E402
+    _MEASURED_NUMBER_RE,
     IssueDraft,
     OpenIssue,
     SignatureCount,
@@ -303,6 +304,7 @@ class SignatureNormalizationTests(unittest.TestCase):
         for first, second in (
             ("cache_1mb_loader", "cache_2mb_loader"),
             ("cache-1mb-loader", "cache-2mb-loader"),
+            ("cache.1mb.loader", "cache.2mb.loader"),
         ):
             with self.subTest(first=first, second=second):
                 patterns = aggregate_normalized_signatures(
@@ -311,10 +313,26 @@ class SignatureNormalizationTests(unittest.TestCase):
                 self.assertEqual(len(patterns), 2)
                 self.assertNotEqual(patterns[0].signature, patterns[1].signature)
 
+        for first, second, expected_signature in (
+            ("request took 123ms.", "request took 456ms.", "request took <dur>."),
+            ("size 512kb.", "size 1mb.", "size <size>."),
+            ("request took 123ms,", "request took 456ms,", "request took <dur>,"),
+            ("request took (123ms)", "request took (456ms)", "request took (<dur>)"),
+            ("request took 123ms;", "request took 456ms;", "request took <dur>;"),
+            ("request took 123ms:", "request took 456ms:", "request took <dur>"),
+        ):
+            with self.subTest(first=first, second=second):
+                patterns = aggregate_normalized_signatures(
+                    [f"ERROR {first}", f"ERROR {second}"]
+                )
+                self.assertEqual(len(patterns), 1)
+                self.assertEqual(patterns[0].count, 2)
+                self.assertEqual(patterns[0].signature, expected_signature)
+
         for first, second, placeholder in (
             ("took 123ms", "took 456ms", "<dur>"),
-            ("used 512kb", "used 1mb", "<size>"),
-            ("took 1.5s", "took 8.25s", "<dur>"),
+            ("512kb", "1mb", "<size>"),
+            ("took 1.5s", "took 2.5s", "<dur>"),
         ):
             with self.subTest(first=first, second=second):
                 patterns = aggregate_normalized_signatures(
@@ -323,6 +341,8 @@ class SignatureNormalizationTests(unittest.TestCase):
                 self.assertEqual(len(patterns), 1)
                 self.assertEqual(patterns[0].count, 2)
                 self.assertIn(placeholder, patterns[0].signature)
+
+        self.assertIsNone(_MEASURED_NUMBER_RE.search("0.144.1"))
 
     def test_http_status_codes_remain_distinct(self) -> None:
         self.assertNotEqual(
