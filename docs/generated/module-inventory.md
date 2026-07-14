@@ -384,7 +384,7 @@
 | `services::claude_e::process` | `src/services/claude_e/process.rs` | 360 | 360 | 0 |  |
 | `services::claude_e::spawn_queue` | `src/services/claude_e/spawn_queue.rs` | 3 | 3 | 0 |  |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 17 | 17 | 0 |  |
-| `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1223 | 733 | 490 |  |
+| `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1229 | 737 | 492 |  |
 | `services::claude_tui::hook_output_guard` | `src/services/claude_tui/hook_output_guard.rs` | 157 | 157 | 0 |  |
 | `services::claude_tui::hook_registry` | `src/services/claude_tui/hook_registry.rs` | 1333 | 718 | 615 |  |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 2085 | 806 | 1279 |  |
