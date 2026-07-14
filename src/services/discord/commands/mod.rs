@@ -97,12 +97,14 @@ pub(in crate::services::discord) use command_policy::{
 pub(in crate::services::discord) use super::model_catalog::{
     provider_supports_model_override, validate_model_input,
 };
+#[cfg(unix)]
+pub(in crate::services::discord) use config::effective_provider_for_channel;
 pub(in crate::services::discord) use config::{
     ModelPickerAction, build_allowall_policy_note, build_model_picker_components_from_snapshot,
     build_model_picker_embed_from_snapshot, channel_codex_goals_setting, channel_fast_mode_setting,
     clear_model_picker_pending, current_working_dir, effective_model_snapshot,
-    effective_provider_for_channel, model_picker_pending_to_override, parse_model_picker_custom_id,
-    resolve_model_for_turn, update_channel_model_override, would_channel_model_override_change,
+    model_picker_pending_to_override, parse_model_picker_custom_id, resolve_model_for_turn,
+    update_channel_model_override, would_channel_model_override_change,
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(in crate::services::discord) use control::{

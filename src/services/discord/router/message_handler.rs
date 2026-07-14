@@ -30,9 +30,8 @@ use super::turn_start::{
 #[cfg(test)]
 use super::turn_start::{session_strategy_lifecycle_event, should_emit_session_strategy_lifecycle};
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::discord::tmux_reaper::{
-    resolve_channel_tmux_names, stale_busy_context, try_start_turn_with_stale_busy_heal,
-};
+#[cfg(unix)]
+use crate::services::discord::tmux_reaper::heal_stale_busy_mailbox;
 use crate::services::memory::{
     RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
     note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
@@ -64,6 +63,83 @@ use self::turn_lifecycle::{
     cleanup_terminal_delivery_marker_after_turn_start, should_add_turn_pending_reaction,
 };
 use self::watchdog::*;
+
+/// Claim an intake turn, healing a stale busy mailbox and retrying once when
+/// its managed tmux session is proven absent. On non-Unix platforms the tmux
+/// self-heal is unavailable, so this preserves the ordinary single claim.
+async fn try_start_turn_with_stale_busy_heal(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: serenity::UserId,
+    user_msg_id: serenity::MessageId,
+    context: (Option<&str>, &ProviderKind, Option<&str>),
+) -> bool {
+    let (session_key, provider, tmux_session_name) = context;
+    let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
+        shared,
+        channel_id,
+        cancel_token.clone(),
+        request_owner,
+        user_msg_id,
+        session_key,
+    )
+    .await;
+
+    #[cfg(unix)]
+    if !started
+        && let Some(tmux_session_name) = tmux_session_name
+        && heal_stale_busy_mailbox(
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            "discord_intake",
+        )
+        .await
+    {
+        return mailbox_try_start_turn_with_terminal_marker_cleanup(
+            shared,
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_msg_id,
+            session_key,
+        )
+        .await;
+    }
+
+    #[cfg(not(unix))]
+    let _ = (provider, tmux_session_name);
+    started
+}
+
+fn stale_busy_context<'a>(
+    provider: &'a ProviderKind,
+    session_names: [Option<&'a str>; 2],
+) -> (Option<&'a str>, &'a ProviderKind, Option<&'a str>) {
+    (session_names[0], provider, session_names[1])
+}
+
+async fn resolve_channel_tmux_names(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> (Option<String>, Option<String>) {
+    let data = shared.core.lock().await;
+    let channel_name = data
+        .sessions
+        .get(&channel_id)
+        .and_then(|session| session.channel_name.clone());
+    let tmux_session_name = if provider.uses_managed_tmux_backend() {
+        channel_name
+            .as_ref()
+            .map(|name| provider.build_tmux_session_name(name))
+    } else {
+        None
+    };
+    (channel_name, tmux_session_name)
+}
 
 pub(super) use self::attachments::handle_file_upload;
 pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
