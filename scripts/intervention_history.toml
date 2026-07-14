@@ -1,0 +1,6 @@
+# Manual intervention recurrence history (#4264). Schema version 1.
+#
+# Append one [[intervention]] block with the next per-type count whenever an
+# operator clears a marker, re-baselines a monitor, or force-restarts dcserver.
+
+schema_version = 1
