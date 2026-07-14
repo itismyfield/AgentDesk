@@ -433,6 +433,22 @@
 
 ### Audited touches
 
+- #4262 (post-deploy functional smoke): adds a **WORKER-LOCAL deploy-tooling**
+  stage after `DEPLOY_OK` in `scripts/deploy-release.sh`. Each deployed node
+  probes its own loopback API on the configured `server.port`, local
+  health/detail relay-wedge markers, and local `dcserver.stdout.log`. Wedge
+  classification is skipped while startup recovery is incomplete; after full
+  recovery, a marker must persist across two snapshots separated by a 4-second
+  settle before it is reported. The one live E-1 relay round-trip is gated by
+  that node's public `cluster_standby == false` signal, resolves its dedicated
+  E2E channel from machine-local `agentdesk.yaml`, and requires the target cell's
+  loopback health/session snapshots to be idle. A standby, a node with no E2E
+  cell, or a cell with a foreign live turn therefore never receives an injected
+  turn. The stage owns no shared queue, durable lease, or singleton and is
+  deliberately fail-open: findings only warn, alert, and write a node-local
+  issue draft before peer propagation/source-manifest work continues. Core API
+  probes and the alert POST use same-port loopback `Origin` authentication
+  without reading or exposing `server.auth_token`.
 - #4237 DAVE/E2EE voice-close observability: the existing worker-local
   `DriverDisconnect` handler now classifies Discord voice close codes 4016/4017,
   records a structured counter event, and routes a deduplicated operator alert

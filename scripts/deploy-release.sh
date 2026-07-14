@@ -58,6 +58,21 @@ set -euo pipefail
 #                                          escape hatch — proceed past a failed
 #                                          resource pre-flight (findings are still
 #                                          printed, downgraded to warnings).
+# Post-deploy functional smoke (#4262 — always fail-open after DEPLOY_OK):
+#   AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL  configured TUI E2E cell for the
+#                                          single E-1 relay round-trip
+#                                          (default: claude-tui).
+#   AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES   recent dcserver log sample size
+#                                          (default: 500 lines).
+#   AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT  fail-closed WARN count considered
+#                                          abnormal (default: 5 in the bounded
+#                                          sample; one WARN never flags).
+#   AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE
+#                                          default: off. Set to literal
+#                                          "confirmed" only when an operator
+#                                          accepts live issue creation for a
+#                                          confirmed regression. Failures always
+#                                          write a local draft regardless.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
@@ -284,6 +299,50 @@ _staged_deploy_binary_path() {
     mktemp "$ADK_REL/bin/agentdesk.deploy.XXXXXX"
 }
 
+_resolve_release_server_port() {
+    local fallback_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
+    local config_path=""
+    local configured_port
+
+    if [ -n "${AGENTDESK_CONFIG:-}" ] && [ -f "$AGENTDESK_CONFIG" ]; then
+        config_path="$AGENTDESK_CONFIG"
+    elif [ -f "$ADK_REL/config/agentdesk.yaml" ]; then
+        config_path="$ADK_REL/config/agentdesk.yaml"
+    elif [ -f "$ADK_REL/agentdesk.yaml" ]; then
+        config_path="$ADK_REL/agentdesk.yaml"
+    fi
+
+    if [ -z "$config_path" ]; then
+        printf '%s\n' "$fallback_port"
+        return 0
+    fi
+
+    if configured_port=$(python3 - "$config_path" "$fallback_port" <<'PY'
+import sys
+
+import yaml
+
+path, fallback = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    config = yaml.safe_load(handle)
+server = config.get("server") if isinstance(config, dict) else None
+port = server.get("port", fallback) if isinstance(server, dict) else fallback
+if isinstance(port, bool) or not isinstance(port, (int, str)):
+    raise ValueError("server.port must be an integer")
+port = int(port)
+if not 1 <= port <= 65535:
+    raise ValueError("server.port must be between 1 and 65535")
+print(port)
+PY
+    ); then
+        printf '%s\n' "$configured_port"
+        return 0
+    fi
+
+    echo "⚠ Could not resolve server.port from $config_path — using :$fallback_port" >&2
+    printf '%s\n' "$fallback_port"
+}
+
 _notify_channel() {
     local content="$1"
     [ -n "$REPORT_CHANNEL_ID" ] || return 0
@@ -291,8 +350,10 @@ _notify_channel() {
     local payload
     payload=$(printf '%s' "$content" | jq -Rs --arg source "project-agentdesk" --arg target "channel:$REPORT_CHANNEL_ID" '{target:$target, content: ., source:$source, bot:"notify"}')
 
-    local rel_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
+    local rel_port
+    rel_port="${REL_PORT:-$(_resolve_release_server_port)}"
     curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
+        -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${rel_port}" \
         -H 'Content-Type: application/json' \
         --data-binary "$payload" >/dev/null 2>&1 \
         || true
@@ -1098,7 +1159,7 @@ fi
 # A restart during an in-flight create-pr dispatch leaves its completion
 # unstamped after the new code rolls out. If the release API is unreachable
 # the gate skips itself (recovery deploys must not be false-blocked).
-REL_PORT="${AGENTDESK_REL_PORT:-8791}"
+REL_PORT="$(_resolve_release_server_port)"
 if ! curl -sf --max-time 3 "http://127.0.0.1:${REL_PORT}/api/health" > /dev/null 2>&1; then
     echo "▸ [gate] Release API not reachable on :${REL_PORT} — skipping zero-inflight check"
 else
@@ -1672,7 +1733,7 @@ if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_RE
 fi
 
 # Health check (server health + dashboard availability)
-REL_PORT="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
+REL_PORT="$(_resolve_release_server_port)"
 echo "▸ Waiting for release health on :${REL_PORT}..."
 REL_HEALTHY=false
 # #4348 Defect 1: the trailing `1` opts the DEPLOY readiness gate into treating a
@@ -1721,6 +1782,535 @@ elif _health_json_reconcile_only "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; 
     echo "✓ Release is serving on :${REL_PORT} (provider reconcile in progress)"
 else
     echo "✓ Release is healthy on :${REL_PORT}"
+fi
+
+# ── Post-deploy functional smoke (#4262) ─────────────────────────────────────
+# Named and intentionally local to this stage so the dashboard API contract is
+# easy to edit. Every path is a confirmed GET route under src/server/routes/;
+# /api/claude-accounts is the functional surface whose 502 exposed #4126.
+POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
+    "/api/health"
+    "/api/health/detail"
+    "/api/agents"
+    "/api/sessions"
+    "/api/claude-accounts"
+    "/api/docs"
+)
+POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
+POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
+POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS=4
+POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
+POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
+POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown-%s' "$$")"
+POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_STAMP}.log"
+POST_DEPLOY_SMOKE_TMP_DIR=""
+POST_DEPLOY_SMOKE_HEALTH_BODY=""
+POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
+POST_DEPLOY_SMOKE_SESSIONS_BODY=""
+POST_DEPLOY_SMOKE_FAILURES=()
+
+_post_deploy_smoke_note() {
+    local message="$1"
+    printf '%s\n' "$message"
+    printf '%s\n' "$message" >> "$POST_DEPLOY_SMOKE_EVIDENCE" || return 1
+}
+
+_post_deploy_smoke_fail() {
+    local finding="$1"
+    POST_DEPLOY_SMOKE_FAILURES+=("$finding")
+    _post_deploy_smoke_note "FAIL: $finding" || return 1
+    return 1
+}
+
+_post_deploy_smoke_probe_apis() {
+    local endpoint body_path http_code
+    local failed=0
+
+    for endpoint in "${POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS[@]}"; do
+        body_path="$POST_DEPLOY_SMOKE_TMP_DIR/${endpoint//\//_}.json"
+        if http_code=$(curl -sS --connect-timeout 2 --max-time 15 \
+            -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
+            -o "$body_path" -w '%{http_code}' \
+            "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}${endpoint}"); then
+            _post_deploy_smoke_note "api endpoint=${endpoint} status=${http_code}" || return 1
+        else
+            _post_deploy_smoke_fail "core API ${endpoint}: curl failed" || true
+            failed=1
+            continue
+        fi
+        if [ "$endpoint" = "/api/health" ]; then
+            POST_DEPLOY_SMOKE_HEALTH_BODY="$body_path"
+        elif [ "$endpoint" = "/api/health/detail" ]; then
+            POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$body_path"
+        elif [ "$endpoint" = "/api/sessions" ]; then
+            POST_DEPLOY_SMOKE_SESSIONS_BODY="$body_path"
+        fi
+        if [ "$http_code" != "200" ]; then
+            _post_deploy_smoke_fail "core API ${endpoint}: expected HTTP 200, got ${http_code}" || true
+            failed=1
+        elif [ ! -s "$body_path" ]; then
+            _post_deploy_smoke_fail "core API ${endpoint}: HTTP 200 body was empty" || true
+            failed=1
+        fi
+    done
+
+    [ "$failed" -eq 0 ]
+}
+
+_post_deploy_smoke_wedge_markers_from_file() {
+    local health_detail_path="$1"
+    # Reuse the health/detail markers consumed by the relay E2E validator:
+    # explicit non-healthy relay_stall_state, ownerless/detached inflight,
+    # desync, stale thread proof, or stale watcher attachment. Ordinary active
+    # turns and queues are deliberately not classified as wedges.
+    jq -r '
+        [
+          .degraded_reasons[]?
+          | strings
+          | select(test("relay.*(wedge|dead|stall|stuck)|(?:wedge|dead|stall|stuck).*relay"; "i"))
+          | "degraded_reason=" + .
+        ] + [
+          .mailboxes[]?
+          | . as $mailbox
+          | (($mailbox.relay_stall_state // "healthy") | ascii_downcase) as $stall
+          | select(
+              ($stall != "" and $stall != "healthy")
+              or ($mailbox.relay_health.desynced == true)
+              or ($mailbox.relay_health.stale_thread_proof == true)
+              or ($mailbox.relay_health.watcher_attached_stale == true)
+              or (
+                $mailbox.inflight_state_present == true
+                and (($mailbox.relay_owner_kind // "none") | ascii_downcase) as $owner
+                | ($owner == "" or $owner == "none" or $owner == "unknown")
+              )
+              or (
+                $mailbox.inflight_state_present == true
+                and $mailbox.watcher_attached == false
+              )
+            )
+          | "mailbox provider=\($mailbox.provider // "unknown") channel=\($mailbox.channel_id // "unknown") stall=\($stall)"
+        ]
+        | .[]
+    ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
+}
+
+_post_deploy_smoke_fully_recovered_from_file() {
+    local health_path="$1"
+    jq -r '
+        if (.fully_recovered | type) == "boolean" then
+            .fully_recovered
+        else
+            error("fully_recovered is not boolean")
+        end
+    ' "$health_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
+}
+
+_post_deploy_smoke_check_wedges() {
+    local fully_recovered wedge_markers wedge_markers_resampled persistent_markers wedge_summary
+    local resample_path="$POST_DEPLOY_SMOKE_TMP_DIR/api_health_detail_resample.json"
+    if [ -z "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ] \
+      || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ]; then
+        _post_deploy_smoke_fail "relay wedge check: /api/health/detail body unavailable" || true
+        return 1
+    fi
+
+    if ! fully_recovered=$(
+        _post_deploy_smoke_fully_recovered_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    ); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: startup recovery state unavailable" || return 1
+        return 0
+    fi
+    if [ "$fully_recovered" = "false" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: startup recovery in progress" || return 1
+        return 0
+    fi
+
+    if ! wedge_markers=$(
+        _post_deploy_smoke_wedge_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    ); then
+        _post_deploy_smoke_fail "relay wedge check: health/detail JSON could not be parsed" || true
+        return 1
+    fi
+    if [ -z "$wedge_markers" ]; then
+        _post_deploy_smoke_note "relay wedge markers=absent" || return 1
+        return 0
+    fi
+
+    _post_deploy_smoke_note \
+        "relay wedge marker observed; settling ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s before resample" \
+        || return 1
+    sleep "$POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS"
+    if ! curl -fsS --connect-timeout 2 --max-time 15 \
+        -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
+        -o "$resample_path" \
+        "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health/detail"; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample unavailable" || return 1
+        return 0
+    fi
+    if [ ! -s "$resample_path" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample body empty" || return 1
+        return 0
+    fi
+    if ! fully_recovered=$(_post_deploy_smoke_fully_recovered_from_file "$resample_path"); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle recovery state unavailable" || return 1
+        return 0
+    fi
+    if [ "$fully_recovered" = "false" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: startup recovery in progress" || return 1
+        return 0
+    fi
+    if ! wedge_markers_resampled=$(
+        _post_deploy_smoke_wedge_markers_from_file "$resample_path"
+    ); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample JSON could not be parsed" || return 1
+        return 0
+    fi
+    if ! persistent_markers=$(comm -12 \
+        <(printf '%s\n' "$wedge_markers" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$wedge_markers_resampled" | LC_ALL=C sort -u)); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample comparison failed" || return 1
+        return 0
+    fi
+    if [ -z "$persistent_markers" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge markers=cleared after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle" \
+            || return 1
+        return 0
+    fi
+
+    wedge_summary="${persistent_markers//$'\n'/; }"
+    _post_deploy_smoke_fail \
+        "relay wedge marker persisted after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle: ${wedge_summary}" \
+        || true
+    return 1
+}
+
+_post_deploy_smoke_check_fail_closed_warn_rate() {
+    local log_path="$ADK_REL/logs/dcserver.stdout.log"
+    local sample_path="$POST_DEPLOY_SMOKE_TMP_DIR/recent-dcserver.log"
+    local sampled_lines warn_lines fail_closed_warns
+    case "$POST_DEPLOY_SMOKE_LOG_LINES" in
+        ''|*[!0-9]*)
+            _post_deploy_smoke_fail "fail-closed WARN sample: invalid line count ${POST_DEPLOY_SMOKE_LOG_LINES}" || true
+            return 1
+            ;;
+    esac
+    case "$POST_DEPLOY_SMOKE_WARN_LIMIT" in
+        ''|*[!0-9]*)
+            _post_deploy_smoke_fail "fail-closed WARN sample: invalid threshold ${POST_DEPLOY_SMOKE_WARN_LIMIT}" || true
+            return 1
+            ;;
+    esac
+    if [ "$POST_DEPLOY_SMOKE_LOG_LINES" -eq 0 ] || [ "$POST_DEPLOY_SMOKE_WARN_LIMIT" -lt 2 ]; then
+        _post_deploy_smoke_fail "fail-closed WARN sample: require lines > 0 and threshold >= 2" || true
+        return 1
+    fi
+    if [ ! -r "$log_path" ]; then
+        _post_deploy_smoke_fail "fail-closed WARN sample: unreadable log ${log_path}" || true
+        return 1
+    fi
+    if ! tail -n "$POST_DEPLOY_SMOKE_LOG_LINES" "$log_path" > "$sample_path"; then
+        _post_deploy_smoke_fail "fail-closed WARN sample: could not read recent log lines" || true
+        return 1
+    fi
+    sampled_lines=$(wc -l < "$sample_path" | tr -d ' ') || return 1
+    warn_lines=$(awk 'tolower($0) ~ /warn/ { count++ } END { print count + 0 }' "$sample_path") || return 1
+    fail_closed_warns=$(awk '
+        {
+            line = tolower($0)
+            if (line ~ /warn/ && line ~ /fail[-_ ]closed/) count++
+        }
+        END { print count + 0 }
+    ' "$sample_path") || return 1
+    _post_deploy_smoke_note \
+        "fail-closed WARN sample=${sampled_lines} warn_lines=${warn_lines} fail_closed_warns=${fail_closed_warns} threshold=${POST_DEPLOY_SMOKE_WARN_LIMIT}" \
+        || return 1
+    # A count threshold over a bounded recent window is the density guard:
+    # default 5 / 500 lines (1%). It intentionally does not block on one WARN.
+    if [ "$fail_closed_warns" -ge "$POST_DEPLOY_SMOKE_WARN_LIMIT" ]; then
+        _post_deploy_smoke_fail \
+            "fail-closed WARN spike: ${fail_closed_warns} in last ${sampled_lines} log lines (threshold ${POST_DEPLOY_SMOKE_WARN_LIMIT})" \
+            || true
+        return 1
+    fi
+}
+
+_post_deploy_smoke_check_relay_round_trip() {
+    local cluster_standby channel_id relay_output relay_log resolve_rc cell_busy cell_guard_rc
+    local config_path="$ADK_REL/config/agentdesk.yaml"
+    if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
+        _post_deploy_smoke_fail "relay E-1: /api/health body unavailable for standby gate" || true
+        return 1
+    fi
+    if ! cluster_standby=$(jq -er '
+        if (.cluster_standby | type) == "boolean" then
+            .cluster_standby
+        else
+            error("cluster_standby is not boolean")
+        end
+    ' "$POST_DEPLOY_SMOKE_HEALTH_BODY" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
+        _post_deploy_smoke_fail "relay E-1: could not prove node is non-standby; round-trip skipped" || true
+        return 1
+    fi
+    if [ "$cluster_standby" = "true" ]; then
+        _post_deploy_smoke_note "relay E-1=skipped cluster_standby=true (no standby injection)" || return 1
+        return 0
+    fi
+
+    # Reuse the #3729 wrapper's config resolver: channel ids remain
+    # machine-local agentdesk.yaml data and are never hard-coded here.
+    if channel_id=$(python3 - "$REPO" "$config_path" "$POST_DEPLOY_SMOKE_RELAY_CELL" \
+        2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
+import sys
+from pathlib import Path
+
+repo, config, cell = sys.argv[1:]
+sys.path.insert(0, str(Path(repo) / "scripts" / "e2e"))
+from post_deploy_relay_continuity import SmokeConfigError, load_channel_id_from_config
+
+try:
+    channel_id = load_channel_id_from_config(Path(config), cell)
+except (FileNotFoundError, SmokeConfigError) as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(2) from error
+except Exception as error:
+    print(f"unexpected E2E cell config error: {type(error).__name__}: {error}", file=sys.stderr)
+    raise SystemExit(1) from error
+print(channel_id)
+PY
+    ); then
+        :
+    else
+        resolve_rc=$?
+        if [ "$resolve_rc" -eq 2 ]; then
+            _post_deploy_smoke_note "relay E-1=skipped: no E2E cell configured" || return 1
+            return 0
+        fi
+        _post_deploy_smoke_fail \
+            "relay E-1: could not resolve ${POST_DEPLOY_SMOKE_RELAY_CELL} channel from ${config_path}" \
+            || true
+        return 1
+    fi
+
+    # E-1 is a real live turn, so reuse the E2E driver's mailbox/session busy
+    # predicates against the authenticated core-probe snapshots before sending.
+    # An unreadable snapshot skips the injection fail-open: safety requires
+    # proving the target cell idle, while the already-recorded API finding (if
+    # any) remains the smoke result.
+    if cell_busy=$(python3 - "$REPO" "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" \
+        "$POST_DEPLOY_SMOKE_SESSIONS_BODY" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$channel_id" \
+        2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+repo, health_path, sessions_path, cell, channel_id = sys.argv[1:]
+sys.path.insert(0, str(Path(repo) / "scripts" / "e2e"))
+import run_tui_relay as cell_driver
+
+try:
+    with Path(health_path).open(encoding="utf-8") as handle:
+        detail = json.load(handle)
+    with Path(sessions_path).open(encoding="utf-8") as handle:
+        sessions_payload = json.load(handle)
+    mailboxes = detail.get("mailboxes") if isinstance(detail, dict) else None
+    if not isinstance(mailboxes, list):
+        raise ValueError("health/detail mailboxes is not a list")
+    sessions = (
+        sessions_payload.get("sessions")
+        if isinstance(sessions_payload, dict)
+        else sessions_payload
+    )
+    if not isinstance(sessions, list):
+        raise ValueError("sessions payload is not a list")
+
+    provider = cell_driver.cell_provider(cell)
+    busy = []
+    for mailbox in mailboxes:
+        if not isinstance(mailbox, dict):
+            continue
+        if cell_driver._mailbox_channel_id(mailbox) != str(channel_id):
+            continue
+        if cell_driver._mailbox_provider(mailbox) != provider:
+            continue
+        reasons = cell_driver._mailbox_busy_reasons(mailbox)
+        if reasons:
+            busy.append(
+                f"mailbox {provider}:{channel_id} [{', '.join(reasons)}]"
+            )
+
+    workspace_substring = cell_driver.cell_workspace_substring(cell)
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        status = str(session.get("status") or "").lower()
+        if status not in {"turn_active", "turn_busy", "active"}:
+            continue
+        session_key = str(session.get("session_key") or "")
+        session_channel = str(
+            session.get("channel_id") or session.get("channelId") or ""
+        )
+        if session_channel == str(channel_id) or workspace_substring in session_key:
+            busy.append(
+                f"session {session_key or session_channel or '<unknown>'} status={status}"
+            )
+except Exception as error:
+    print(f"{type(error).__name__}: {error}", file=sys.stderr)
+    raise SystemExit(2) from error
+
+if busy:
+    print("; ".join(busy))
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    ); then
+        _post_deploy_smoke_note "relay E-1=skipped: foreign active turn on cell" || return 1
+        _post_deploy_smoke_note "relay E-1 cell-busy evidence=${cell_busy}" || return 1
+        return 0
+    else
+        cell_guard_rc=$?
+        if [ "$cell_guard_rc" -ne 1 ]; then
+            _post_deploy_smoke_note "relay E-1=skipped: could not verify E2E cell is idle" || return 1
+            return 0
+        fi
+    fi
+
+    relay_output="$ADK_REL/logs/post-deploy-smoke-relay-${POST_DEPLOY_SMOKE_STAMP}"
+    relay_log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-e1.log"
+    _post_deploy_smoke_note \
+        "relay E-1 cell=${POST_DEPLOY_SMOKE_RELAY_CELL} channel=${channel_id} output=${relay_output}" \
+        || return 1
+    if ! (
+        cd "$REPO" || exit 1
+        python3 scripts/e2e/run_tui_relay.py \
+            --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
+            --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" \
+            --channel-id "$channel_id" \
+            --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
+            --filter E-1 \
+            --output "$relay_output" \
+            --queue-runtime-root "$ADK_REL/runtime" \
+            --required-agent-mode real_live \
+            --required-coverage-class live
+    ) > "$relay_log" 2>&1; then
+        tail -n 40 "$relay_log" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
+        _post_deploy_smoke_fail "relay E-1 round-trip failed (evidence: ${relay_output})" || true
+        return 1
+    fi
+    tail -n 20 "$relay_log" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
+    _post_deploy_smoke_note "relay E-1 round-trip=pass" || return 1
+}
+
+_run_post_deploy_functional_smoke() {
+    local failed=0
+    mkdir -p "$ADK_REL/logs" || return 1
+    : > "$POST_DEPLOY_SMOKE_EVIDENCE" || return 1
+    POST_DEPLOY_SMOKE_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-post-deploy-smoke.XXXXXX") || return 1
+    _post_deploy_smoke_note "post-deploy functional smoke start stamp=${POST_DEPLOY_SMOKE_STAMP} port=${REL_PORT}" || return 1
+
+    if ! _post_deploy_smoke_probe_apis; then
+        failed=1
+    fi
+    if ! _post_deploy_smoke_check_wedges; then
+        failed=1
+    fi
+    if ! _post_deploy_smoke_check_fail_closed_warn_rate; then
+        failed=1
+    fi
+    if ! _post_deploy_smoke_check_relay_round_trip; then
+        failed=1
+    fi
+    rm -rf "$POST_DEPLOY_SMOKE_TMP_DIR" 2>/dev/null || true
+    POST_DEPLOY_SMOKE_TMP_DIR=""
+    [ "$failed" -eq 0 ]
+}
+
+_report_post_deploy_smoke_failure() {
+    local draft_path="$ADK_REL/logs/post-deploy-smoke-issue-draft-${POST_DEPLOY_SMOKE_STAMP}.md"
+    local commit_sha node_name issue_url finding alert_text
+    commit_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unknown')
+    node_name=$(hostname 2>/dev/null || printf 'unknown')
+
+    if ! {
+        printf '# Post-deploy functional smoke regression\n\n'
+        printf -- '- Detected: `%s`\n' "$POST_DEPLOY_SMOKE_STAMP"
+        printf -- '- Node: `%s`\n' "$node_name"
+        printf -- '- Commit: `%s`\n' "$commit_sha"
+        printf -- '- Port: `%s`\n' "$REL_PORT"
+        printf -- '- Evidence: `%s`\n\n' "$POST_DEPLOY_SMOKE_EVIDENCE"
+        printf '## Findings\n\n'
+        for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
+            printf -- '- %s\n' "$finding"
+        done
+        printf '\n## Deploy disposition\n\n'
+        printf 'Fail-open: the health-confirmed release was not rolled back and peer propagation/source-manifest work continued.\n'
+    } > "$draft_path"; then
+        echo "⚠ Post-deploy smoke issue draft write FAILED: $draft_path"
+        draft_path="unavailable"
+    fi
+
+    alert_text="⚠ post-deploy functional smoke FAILED (fail-open; release remains serving)
+node: ${node_name}
+commit: ${commit_sha}
+draft: ${draft_path}
+evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
+    for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
+        alert_text="${alert_text}
+- ${finding}"
+    done
+    _notify_channel "$alert_text"
+
+    # Default OFF. The literal `confirmed` is an operator assertion that this
+    # is a real regression, not a relay/API flake; only then may automation file.
+    if [ "$POST_DEPLOY_SMOKE_CREATE_ISSUE" = "confirmed" ] && [ -f "$draft_path" ]; then
+        if command -v gh >/dev/null 2>&1; then
+            if issue_url=$(gh issue create \
+                --repo itismyfield/AgentDesk \
+                --title "ops: post-deploy functional smoke regression (${node_name})" \
+                --body-file "$draft_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
+                echo "⚠ Post-deploy smoke issue created (confirmed mode): $issue_url"
+            else
+                echo "⚠ Post-deploy smoke issue creation FAILED; draft retained: $draft_path"
+            fi
+        else
+            echo "⚠ Post-deploy smoke issue creation requested but gh is unavailable; draft retained: $draft_path"
+        fi
+    elif [ "$POST_DEPLOY_SMOKE_CREATE_ISSUE" != "off" ]; then
+        echo "⚠ Ignoring AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE=${POST_DEPLOY_SMOKE_CREATE_ISSUE}; use literal 'confirmed' or 'off'"
+    fi
+    return 0
+}
+
+echo "▸ Running post-deploy functional smoke (#4262)..."
+# INVARIANT: the ENTIRE smoke block is fail-open. We are past DEPLOY_OK, so a
+# functional failure must degrade to a loud warning + channel alert + local
+# issue draft and let the script continue. It must NEVER roll back, exit 1,
+# poison the healthy deploy's exit code, or skip watchdog/PG-tunnel install,
+# _write_release_source_manifest, or _deploy_to_all_peers below.
+#
+# The smoke function runs from an `if` guard, suspending `set -e` within it;
+# each fallible step is nevertheless explicitly guarded or carries `|| return`.
+if _run_post_deploy_functional_smoke; then
+    echo "✓ Post-deploy functional smoke passed (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+else
+    echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"
+    echo "  evidence: $POST_DEPLOY_SMOKE_EVIDENCE"
+    if [ -n "$POST_DEPLOY_SMOKE_TMP_DIR" ]; then
+        rm -rf "$POST_DEPLOY_SMOKE_TMP_DIR" 2>/dev/null || true
+        POST_DEPLOY_SMOKE_TMP_DIR=""
+    fi
+    if [ "${#POST_DEPLOY_SMOKE_FAILURES[@]}" -eq 0 ]; then
+        POST_DEPLOY_SMOKE_FAILURES+=("smoke harness failed before recording a functional finding")
+    fi
+    _report_post_deploy_smoke_failure || true
 fi
 
 # ── Out-of-band relay watchdog (#4381) ────────────────────────────────────────
