@@ -425,24 +425,20 @@ mod tests {
     }
 
     /// #3297 finding-5 red-green: the global mirrors are process-wide single
-    /// slots. When a SECOND registry instance has published a different
-    /// (busy) actor for the same channel, purging the FIRST instance's idle
-    /// entry must unlink only the instance maps — the global mirror pointing
-    /// at the busy foreign actor must survive (pre-fix code removed it
-    /// unconditionally on the instance-local idle verdict alone).
+    /// slots. When one registry owns the mirrored busy actor and another has a
+    /// distinct idle actor for the same channel, purging the idle instance must
+    /// unlink only its instance maps — the global mirror pointing at the busy
+    /// foreign actor must survive (pre-fix code removed it unconditionally on
+    /// the instance-local idle verdict alone).
     #[tokio::test]
     async fn remove_idle_entry_skips_global_mirrors_owned_by_another_instance() {
         let registry_a = ChannelMailboxRegistry::default();
         let registry_b = ChannelMailboxRegistry::default();
         let channel = ChannelId::new(93_293_005);
 
-        // A registers first (its actor briefly owns the global slot)...
-        let handle_a = registry_a.handle(channel);
-        let _signal_a = registry_a.recovery_done(channel);
-        // ...then B registers the same channel: B's actor + signal now own
-        // the global mirrors (last-writer-wins), and B's actor is BUSY.
+        // B publishes the owning busy actor first. A later creates a distinct
+        // idle sibling actor, but the mailbox mirror preserves B's identity.
         let handle_b = registry_b.handle(channel);
-        let signal_b = registry_b.recovery_done(channel);
         assert!(
             handle_b
                 .try_start_turn(
@@ -452,6 +448,12 @@ mod tests {
                 )
                 .await
         );
+        let handle_a = registry_a.handle(channel);
+        let _signal_a = registry_a.recovery_done(channel);
+        // Recovery signals retain their existing last-writer-wins behavior;
+        // publish B's after A's so this purge fixture still verifies the
+        // identity guard for that separate global mirror as well.
+        let signal_b = registry_b.recovery_done(channel);
         assert!(
             !handle_a.sender.same_channel(&handle_b.sender),
             "test precondition: two distinct actors for the channel"
