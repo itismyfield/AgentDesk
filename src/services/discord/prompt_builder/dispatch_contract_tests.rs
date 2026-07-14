@@ -946,6 +946,8 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
 
 #[test]
 fn full_memento_prompt_carries_tool_feedback_contract() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     // #4306: the Proactive Memory Guidance memento branch must carry the
     // always-on `tool_feedback` contract that was dropped during the da7ccb39
     // provider-prompt slim-down. It is gated to the Full profile with the
