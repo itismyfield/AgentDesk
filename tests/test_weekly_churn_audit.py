@@ -204,6 +204,52 @@ class WeeklyChurnAuditTests(unittest.TestCase):
         self.assertIn("재설계 후보 (1)", output.getvalue())
         self.assertIn("issue drafts dry-run only", output.getvalue())
 
+    def test_confirmed_issue_gate_still_requires_per_draft_approval(self) -> None:
+        audit_commits = [
+            commit(f"fix: repeat {index}", sha=str(index) * 40)
+            for index in range(1, 4)
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            argv = [
+                "weekly_churn_audit.py",
+                "--repo-root",
+                str(ROOT),
+                "--runtime-root",
+                temp,
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(
+                    os.environ,
+                    {"AGENTDESK_CHURN_AUDIT_CREATE_ISSUE": "confirmed"},
+                    clear=True,
+                ),
+                patch.object(
+                    weekly_churn_audit,
+                    "collect_git_commits",
+                    return_value=audit_commits,
+                ),
+                patch.object(
+                    weekly_churn_audit, "load_open_issues", return_value=([], None)
+                ) as load_open,
+                patch.object(
+                    weekly_churn_audit,
+                    "create_github_issue",
+                    return_value="https://example.test/issues/1",
+                ) as create_issue,
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(weekly_churn_audit.main(), 0)
+                draft = next(
+                    (Path(temp) / "runtime" / "pending-issue-drafts").rglob("*.md")
+                )
+                create_issue.assert_not_called()
+                Path(f"{draft}.approved").touch()
+                self.assertEqual(weekly_churn_audit.main(), 0)
+
+        self.assertEqual(load_open.call_count, 2)
+        create_issue.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
