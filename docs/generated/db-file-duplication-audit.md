@@ -67,7 +67,6 @@ Classification key:
 | `review_decisions` | 1k+ | runtime only | keep-db-canonical | Review decision log. |
 | `review_tuning_outcomes` | 100+ | runtime only | keep-db-canonical | Outcome tracking. |
 | `pr_tracking` | 100+ | runtime only | keep-db-canonical | PR lifecycle log. |
-| `agent_archive` | small | runtime only | keep-db-canonical | Offboarded agents (0014). |
 | `agent_quality_event` | 10k+ | runtime only | keep-db-canonical | Quality signal stream (0012). |
 | `agent_quality_daily` | small | derived | keep-db-canonical | Daily rollup (0013). |
 | `audit_logs` | 10k+ | runtime only | keep-db-canonical | System audit. |
