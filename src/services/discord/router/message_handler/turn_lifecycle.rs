@@ -11,7 +11,7 @@ pub(super) fn should_add_turn_pending_reaction(_dispatch_id: Option<&str>) -> bo
     true
 }
 
-pub(super) async fn mailbox_try_start_turn_with_terminal_marker_cleanup(
+pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_marker_cleanup(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     cancel_token: Arc<CancelToken>,

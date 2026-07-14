@@ -30,6 +30,9 @@ use super::turn_start::{
 #[cfg(test)]
 use super::turn_start::{session_strategy_lifecycle_event, should_emit_session_strategy_lifecycle};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::tmux_reaper::{
+    resolve_channel_tmux_names, stale_busy_context, try_start_turn_with_stale_busy_heal,
+};
 use crate::services::memory::{
     RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
     note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
@@ -56,7 +59,10 @@ mod watchdog;
 use self::goal_lifecycle::*;
 use self::provider_isolation::*;
 use self::tui_followup::*;
-use self::turn_lifecycle::*;
+pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
+use self::turn_lifecycle::{
+    cleanup_terminal_delivery_marker_after_turn_start, should_add_turn_pending_reaction,
+};
 use self::watchdog::*;
 
 pub(super) use self::attachments::handle_file_upload;
