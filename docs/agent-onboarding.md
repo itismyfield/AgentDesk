@@ -293,10 +293,7 @@ through the public HTTP surface:
    `AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER=prompt_file` against a fresh
    tempdir. Assert HTTP 500 and a non-empty `rolled_back[]` containing both
    `prompt_file` and the earlier `agentdesk_yaml` step.
-8. **Archive → unarchive**: archive the agent, confirm
-   `agentdesk.yaml` no longer has it; unarchive, confirm it is restored
-   byte-for-byte from the snapshot.
-9. **Duplicate without sensitive fields**: send `id`, `agent_id`,
+8. **Duplicate without sensitive fields**: send `id`, `agent_id`,
    `discord_channel_id` (source), `token`, `api_key`, `system_prompt` in
    the duplicate body; assert the new row uses `new_agent_id` /
    `new_channel`, source channel does not appear in any of the four channel
