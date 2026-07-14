@@ -72,6 +72,9 @@ echo "=== Daily log-digest routine tests (#4263) ==="
 node --test policies/__tests__/daily-log-digest.test.js
 "$PYTHON" -m unittest tests.test_daily_log_digest
 
+echo "=== Weekly regression-churn audit tests (#4265) ==="
+"$PYTHON" -m unittest tests.test_weekly_churn_audit
+
 echo "=== await_holding_lock ratchet guard ==="
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
 "$PYTHON" -m unittest tests.test_await_holding_lock_ratchet
