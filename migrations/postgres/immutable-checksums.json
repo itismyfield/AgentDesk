@@ -455,6 +455,11 @@
       "path": "migrations/postgres/0088_prompt_manifest_total_input_bytes.sql",
       "sha256": "0ccba730df1a6df1efd0c0262c81aa21c0cc5607e8b0bd1aeefc6e3fe6f23821",
       "version": 88
+    },
+    {
+      "path": "migrations/postgres/0089_drop_agent_archive.sql",
+      "sha256": "6d0a9dbbcd91bfc67e44d2ffa9cdf99e6a1479e0b787d3b866cdb439384c5e78",
+      "version": 89
     }
   ],
   "version": 1

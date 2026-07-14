@@ -31,13 +31,9 @@ interface AgentsTabProps {
   spriteMap: Map<string, number>;
   confirmDeleteId: string | null;
   setConfirmDeleteId: (id: string | null) => void;
-  confirmArchiveId: string | null;
-  setConfirmArchiveId: (id: string | null) => void;
   onOpenAgent: (agent: Agent) => void;
   onEditAgent: (agent: Agent) => void;
   onDuplicateAgent: (agent: Agent) => void;
-  onArchiveAgent: (agentId: string) => void;
-  onUnarchiveAgent: (agentId: string) => void;
   onEditDepartment: (department: Department) => void;
   onDeleteAgent: (agentId: string) => void;
   saving: boolean;
@@ -76,13 +72,9 @@ export default function AgentsTab({
   spriteMap,
   confirmDeleteId,
   setConfirmDeleteId,
-  confirmArchiveId,
-  setConfirmArchiveId,
   onOpenAgent,
   onEditAgent,
   onDuplicateAgent,
-  onArchiveAgent,
-  onUnarchiveAgent,
   onEditDepartment,
   onDeleteAgent,
   saving,
@@ -219,7 +211,6 @@ export default function AgentsTab({
               <option value="idle">{tr("대기", "Idle")}</option>
               <option value="break">{tr("휴식", "Break")}</option>
               <option value="offline">{tr("오프라인", "Offline")}</option>
-              <option value="archived">{tr("보관됨", "Archived")}</option>
             </select>
             <select
               value={sortMode}
@@ -237,7 +228,6 @@ export default function AgentsTab({
               <option value="xp">{tr("정렬: XP", "Sort: XP")}</option>
               <option value="activity">{tr("정렬: 활동량", "Sort: Activity")}</option>
               <option value="created">{tr("정렬: 생성일", "Sort: Created")}</option>
-              <option value="archived">{tr("정렬: 보관일", "Sort: Archived")}</option>
             </select>
             <input
               type="text"
@@ -263,22 +253,18 @@ export default function AgentsTab({
       ) : viewMode === "grid" ? (
         <AgentsGridView
           agents={sortedAgents}
-          confirmArchiveId={confirmArchiveId}
           confirmDeleteId={confirmDeleteId}
           departments={departments}
           isKo={isKo}
           locale={locale}
-          onArchiveAgent={onArchiveAgent}
           onDeleteAgent={onDeleteAgent}
           onDuplicateAgent={onDuplicateAgent}
           onEditAgent={onEditAgent}
           onEditDepartment={onEditDepartment}
           onOpenAgent={onOpenAgent}
-          onUnarchiveAgent={onUnarchiveAgent}
           saving={saving}
           selectedAgent={selectedAgent}
           selectedAgentId={selectedAgentId}
-          setConfirmArchiveId={setConfirmArchiveId}
           setConfirmDeleteId={setConfirmDeleteId}
           setSelectedAgentId={setSelectedAgentId}
           spriteMap={spriteMap}

@@ -150,7 +150,7 @@
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3950 | 2817 | 1133 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 1464 | 1334 | 130 | giant-file |
 | `dispatch::dispatch_query` | `src/dispatch/dispatch_query.rs` | 89 | 89 | 0 |  |
-| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1632 | 1445 | 187 | giant-file |
+| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1638 | 1445 | 193 | giant-file |
 | `dispatch::dispatch_summary` | `src/dispatch/dispatch_summary.rs` | 326 | 240 | 86 |  |
 | `dispatch::test_support` | `src/dispatch/test_support.rs` | 135 | 0 | 135 |  |
 | `dispatch::types` | `src/dispatch/types.rs` | 32 | 32 | 0 |  |
@@ -233,7 +233,7 @@
 | `server::resource_locks` | `src/server/resource_locks.rs` | 416 | 239 | 177 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 570 | 335 | 235 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 1328 | 1278 | 50 | giant-file |
-| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1903 | 1903 | 0 | giant-file |
+| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1331 | 1331 | 0 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1365 | 1365 | 0 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 554 | 554 | 0 |  |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 281 | 178 | 103 |  |
@@ -256,7 +256,7 @@
 | `server::routes::docs::inventory` | `src/server/routes/docs/inventory.rs` | 279 | 279 | 0 |  |
 | `server::routes::docs::inventory::endpoints` | `src/server/routes/docs/inventory/endpoints/mod.rs` | 27 | 27 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_01` | `src/server/routes/docs/inventory/endpoints/part_01.rs` | 661 | 661 | 0 |  |
-| `server::routes::docs::inventory::endpoints::part_02` | `src/server/routes/docs/inventory/endpoints/part_02.rs` | 684 | 684 | 0 |  |
+| `server::routes::docs::inventory::endpoints::part_02` | `src/server/routes/docs/inventory/endpoints/part_02.rs` | 658 | 658 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_03` | `src/server/routes/docs/inventory/endpoints/part_03.rs` | 646 | 646 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_04` | `src/server/routes/docs/inventory/endpoints/part_04.rs` | 719 | 719 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_05` | `src/server/routes/docs/inventory/endpoints/part_05.rs` | 732 | 732 | 0 |  |
@@ -269,7 +269,7 @@
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 9 | 9 | 0 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 13 | 13 | 0 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 83 | 83 | 0 |  |
-| `server::routes::domains::agents` | `src/server/routes/domains/agents.rs` | 59 | 59 | 0 |  |
+| `server::routes::domains::agents` | `src/server/routes/domains/agents.rs` | 57 | 57 | 0 |  |
 | `server::routes::domains::analytics` | `src/server/routes/domains/analytics.rs` | 22 | 22 | 0 |  |
 | `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 86 | 86 | 0 |  |
 | `server::routes::domains::kanban` | `src/server/routes/domains/kanban.rs` | 87 | 87 | 0 |  |
@@ -964,7 +964,7 @@
 | `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 949 | 484 | 465 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 284 | 284 | 0 |  |
 | `services::observability::worker` | `src/services/observability/worker.rs` | 321 | 321 | 0 |  |
-| `services::onboarding` | `src/services/onboarding/mod.rs` | 2988 | 2937 | 51 | giant-file |
+| `services::onboarding` | `src/services/onboarding/mod.rs` | 2987 | 2937 | 50 | giant-file |
 | `services::onboarding::channel` | `src/services/onboarding/channel.rs` | 199 | 199 | 0 |  |
 | `services::onboarding::provider` | `src/services/onboarding/provider.rs` | 181 | 181 | 0 |  |
 | `services::opencode` | `src/services/opencode.rs` | 3125 | 2760 | 365 | giant-file |

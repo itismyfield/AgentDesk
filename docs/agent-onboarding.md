@@ -31,7 +31,6 @@ Cross-references:
 | First time bringing AgentDesk up on a fresh host    | `/api/onboarding/*` (ADK setup wizard)          |
 | ADK is already running, **adding a new agent**      | Dashboard Setup Wizard → `/api/agents/setup`    |
 | Cloning an existing agent under a new id            | Dashboard Setup Wizard (duplicate mode) → `/api/agents/{id}/duplicate` |
-| Pulling an archived agent back into rotation        | Agent detail → Unarchive → `/api/agents/{id}/unarchive` |
 | Hotfixing `agentdesk.yaml` by hand                  | **Don't.** Use the wizard so the prompt / DB / skill manifest stay in sync. |
 | Discord-side ADK setup needs to fall back to legacy | See §7 *Discord legacy path criteria* below.    |
 
@@ -119,7 +118,6 @@ questions:
 | "Run the one-shot installer to materialize `agentdesk.yaml` for the first time" | `/api/onboarding/complete` |
 | "Add a new agent now that ADK is installed"           | `/api/agents/setup`      |
 | "Duplicate an agent into a new id + channel"          | `/api/agents/{id}/duplicate` (calls setup under the hood, sensitive fields stripped) |
-| "Pull an archived agent back into the active set"     | `/api/agents/{id}/unarchive` |
 
 Operationally:
 
@@ -130,7 +128,7 @@ Operationally:
   agents.
 - `/api/agents/setup` is per-agent and idempotent: re-running with the same
   body returns `200 OK` with all steps `skipped`. The same endpoint is the
-  inner call site for `duplicate` and `unarchive`.
+  inner call site for `duplicate`.
 
 If a screen lets the user toggle between the two, the convention is:
 
@@ -220,29 +218,7 @@ Steps recognized: `agentdesk_yaml`, `prompt_file`, `workspace_seed`,
 
 ---
 
-## 6. Archive / Unarchive / Duplicate
-
-These three are *not* wizard steps but they share the same configuration
-surface, so they live here for completeness.
-
-### 6.1 Archive
-
-`POST /api/agents/<id>/archive` snapshots the `agents[]` block, the prompt
-path, the role-map (legacy), and the `discord_action` (the operator decides
-whether to also leave the Discord channel). The archive row goes into
-`agent_archive` with `state='archived'`.
-
-Refused with `409 Conflict` while a session for the agent is `working` —
-clear the active turn first.
-
-### 6.2 Unarchive
-
-`POST /api/agents/<id>/unarchive` rehydrates `agentdesk.yaml` from the
-snapshot and flips `agent_archive.state` to `unarchived`. The agent is
-immediately available again. The DB row, prompt file, workspace, and skill
-mappings are restored to the snapshot — no second wizard pass is needed.
-
-### 6.3 Duplicate
+## 6. Duplicate
 
 `POST /api/agents/<id>/duplicate` takes a small allow-listed body
 (`new_agent_id`, `channel_id`, optional `name`/`name_ko`/`department_id`/

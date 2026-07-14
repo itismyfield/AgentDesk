@@ -1475,10 +1475,16 @@ mod auto_queue_terminal_sync_policy_tests {
     #[test]
     fn core_status_check_migration_normalizes_before_constraining() {
         let sql = include_str!("../../migrations/postgres/0068_core_status_constraints.sql");
+        let final_sql = include_str!("../../migrations/postgres/0089_drop_agent_archive.sql");
         assert!(
             sql.contains("agents_status_known_check")
                 && sql.contains("status IN ('idle', 'working', 'archived')"),
-            "agents.status must have a closed stable CHECK"
+            "the immutable core migration must retain its original closed CHECK"
+        );
+        assert!(
+            final_sql.contains("WHERE status = 'archived'")
+                && final_sql.contains("status IN ('idle', 'working')"),
+            "the archive removal migration must normalize archived agents before narrowing the CHECK"
         );
         assert!(
             sql.contains("WHEN lower(btrim(status)) IN ('active') THEN 'idle'"),

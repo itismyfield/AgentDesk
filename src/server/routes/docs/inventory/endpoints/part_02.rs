@@ -326,32 +326,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/agents/{id}/archive",
-            "agents",
-            "Soft-archive an agent: blocks active turns, disables config binding, records agent_archive state, and optionally applies Discord readonly/move action.",
-        )
-        .with_params([
-            ("id", path_param("Agent id")),
-            ("reason", body_param("string", false, "Archive reason")),
-            ("discord_action", body_param("string", false, "none, readonly, or move").with_enum(&["none", "readonly", "move"])),
-            ("archive_category_id", body_param("string", false, "Discord category id for move action")),
-        ])
-        .with_example(
-            json!({"path": {"id": "project-agentdesk"}, "body": {"reason": "temporary pause", "discord_action": "readonly"}}),
-            json!({"ok": true, "archive_state": "archived"}),
-        ),
-        ep(
-            "POST",
-            "/api/agents/{id}/unarchive",
-            "agents",
-            "Restore an archived agent config binding and mark archive state unarchived.",
-        )
-        .with_example(
-            json!({"path": {"id": "project-agentdesk"}}),
-            json!({"ok": true, "agent_id": "project-agentdesk", "archive_state": "unarchived", "status": "idle"}),
-        ),
-        ep(
-            "POST",
             "/api/agents/{id}/duplicate",
             "agents",
             "Duplicate an agent by reusing /api/agents/setup with the source prompt as template.",

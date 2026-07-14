@@ -3,29 +3,24 @@ import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import { getCurrentTaskSummary } from "../../lib/agentHelpers";
 import AgentAvatar from "../AgentAvatar";
-import { SurfaceActionButton, SurfaceCard, SurfaceNotice } from "../common/SurfacePrimitives";
+import { SurfaceActionButton, SurfaceCard } from "../common/SurfacePrimitives";
 import { getAgentLevel, getAgentTitle } from "./agentProgress";
 import type { Translator } from "./types";
-import { archiveBlockedByActiveTurn, resolveArchiveChannelImpact } from "./archive-impact";
 
 interface AgentsGridViewProps {
   agents: Agent[];
-  confirmArchiveId: string | null;
   confirmDeleteId: string | null;
   departments: Department[];
   isKo: boolean;
   locale: string;
-  onArchiveAgent: (agentId: string) => void;
   onDeleteAgent: (agentId: string) => void;
   onDuplicateAgent: (agent: Agent) => void;
   onEditAgent: (agent: Agent) => void;
   onEditDepartment: (department: Department) => void;
   onOpenAgent: (agent: Agent) => void;
-  onUnarchiveAgent: (agentId: string) => void;
   saving: boolean;
   selectedAgent: Agent | null;
   selectedAgentId: string | null;
-  setConfirmArchiveId: (id: string | null) => void;
   setConfirmDeleteId: (id: string | null) => void;
   setSelectedAgentId: (id: string | null) => void;
   spriteMap: Map<string, number>;
@@ -40,22 +35,18 @@ function agentSecondaryLine(agent: Agent, locale: string) {
 
 export function AgentsGridView({
   agents: sortedAgents,
-  confirmArchiveId,
   confirmDeleteId,
   departments,
   isKo,
   locale,
-  onArchiveAgent,
   onDeleteAgent,
   onDuplicateAgent,
   onEditAgent,
   onEditDepartment,
   onOpenAgent,
-  onUnarchiveAgent,
   saving,
   selectedAgent,
   selectedAgentId,
-  setConfirmArchiveId,
   setConfirmDeleteId,
   setSelectedAgentId,
   spriteMap,
@@ -104,8 +95,6 @@ export function AgentsGridView({
                       ? "bg-amber-300"
                     : agent.status === "offline"
                       ? "bg-slate-500"
-                      : agent.status === "archived"
-                        ? "bg-zinc-400"
                       : "bg-sky-400"
                 }`}
                 style={{ borderColor: "var(--th-card-bg)" }}
@@ -206,9 +195,7 @@ export function AgentsGridView({
                         ? tr("휴식", "Break")
                         : selectedAgent.status === "offline"
                           ? tr("오프라인", "Offline")
-                          : selectedAgent.status === "archived"
-                            ? tr("보관됨", "Archived")
-                            : tr("대기", "Idle"),
+                          : tr("대기", "Idle"),
                 },
                 {
                   label: tr("부서", "Department"),
@@ -286,94 +273,6 @@ export function AgentsGridView({
               </div>
             </div>
 
-            {selectedAgent.archive_state || selectedAgent.archive_reason ? (
-              <SurfaceNotice tone="neutral" compact>
-                <div className="space-y-1">
-                  <div>
-                    {tr("보관 상태", "Archive State")}: {selectedAgent.archive_state ?? selectedAgent.status}
-                  </div>
-                  {selectedAgent.archive_reason && (
-                    <div>{selectedAgent.archive_reason}</div>
-                  )}
-                </div>
-              </SurfaceNotice>
-            ) : null}
-
-            {confirmArchiveId === selectedAgent.id && (() => {
-              const channelImpact = resolveArchiveChannelImpact(selectedAgent);
-              const blocked = archiveBlockedByActiveTurn(selectedAgent);
-              const roleLabel = (role: "primary" | "alt" | "codex") =>
-                role === "primary"
-                  ? tr("기본", "Primary")
-                  : role === "alt"
-                    ? tr("대체", "Alt")
-                    : tr("Codex", "Codex");
-              return (
-                <SurfaceNotice tone={blocked ? "danger" : "warn"} data-testid="archive-confirm-impact">
-                  <div className="space-y-2">
-                    <div className="font-medium">
-                      {tr(
-                        "보관하면 role_map에서 비활성화되고 아래 Discord 채널이 readonly 처리됩니다.",
-                        "Archiving disables the role map entry and makes the following Discord channels readonly.",
-                      )}
-                    </div>
-                    {channelImpact.length > 0 ? (
-                      <ul
-                        className="space-y-1 rounded-xl border px-3 py-2 text-xs"
-                        style={{
-                          borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                          background: "color-mix(in srgb, var(--th-bg-surface) 86%, transparent)",
-                          color: "var(--th-text-secondary)",
-                        }}
-                        data-testid="archive-confirm-channels"
-                      >
-                        {channelImpact.map((channel) => (
-                          <li
-                            key={`${channel.role}-${channel.id}`}
-                            className="flex items-center justify-between gap-3"
-                          >
-                            <span className="font-mono">#{channel.id}</span>
-                            <span
-                              className="rounded-full border px-2 py-0.5 text-[10px]"
-                              style={{
-                                borderColor:
-                                  "color-mix(in srgb, var(--th-border) 60%, transparent)",
-                                color: "var(--th-text-muted)",
-                              }}
-                            >
-                              {roleLabel(channel.role)}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                        {tr(
-                          "연결된 Discord 채널이 없습니다.",
-                          "No Discord channels are bound to this agent.",
-                        )}
-                      </div>
-                    )}
-                    {blocked ? (
-                      <div className="text-xs font-medium" style={{ color: "var(--th-accent-danger)" }}>
-                        {tr(
-                          "현재 진행 중인 턴이 있어 API가 보관 요청을 거부합니다. 턴이 끝난 뒤 다시 시도하세요.",
-                          "An active turn will cause the API to reject the request. Wait for the turn to finish.",
-                        )}
-                      </div>
-                    ) : (
-                      <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                        {tr(
-                          "보관 해제하면 동일한 채널로 role_map 이 복원됩니다.",
-                          "Unarchiving will restore the role_map binding to the same channels.",
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </SurfaceNotice>
-              );
-            })()}
-
             <div className="flex flex-wrap gap-2">
               <SurfaceActionButton onClick={() => onEditAgent(selectedAgent)} tone="neutral">
                 {tr("편집", "Edit")}
@@ -384,41 +283,6 @@ export function AgentsGridView({
               <SurfaceActionButton onClick={() => onOpenAgent(selectedAgent)}>
                 {tr("상세 보기", "Open Detail")}
               </SurfaceActionButton>
-              {selectedAgent.status === "archived" ? (
-                <SurfaceActionButton
-                  onClick={() => onUnarchiveAgent(selectedAgent.id)}
-                  disabled={saving}
-                  tone="success"
-                >
-                  {tr("보관 해제", "Unarchive")}
-                </SurfaceActionButton>
-              ) : confirmArchiveId === selectedAgent.id ? (
-                <>
-                  <SurfaceActionButton
-                    onClick={() => onArchiveAgent(selectedAgent.id)}
-                    disabled={saving || selectedAgent.status === "working"}
-                    tone="warn"
-                  >
-                    {tr("보관", "Archive")}
-                  </SurfaceActionButton>
-                  <SurfaceActionButton
-                    onClick={() => setConfirmArchiveId(null)}
-                    tone="neutral"
-                  >
-                    {tr("취소", "Cancel")}
-                  </SurfaceActionButton>
-                </>
-              ) : (
-                <SurfaceActionButton
-                  onClick={() => {
-                    setConfirmDeleteId(null);
-                    setConfirmArchiveId(selectedAgent.id);
-                  }}
-                  tone="neutral"
-                >
-                  {tr("보관", "Archive")}
-                </SurfaceActionButton>
-              )}
               {confirmDeleteId === selectedAgent.id ? (
                 <>
                   <SurfaceActionButton
@@ -437,10 +301,7 @@ export function AgentsGridView({
                 </>
               ) : (
                 <SurfaceActionButton
-                  onClick={() => {
-                    setConfirmArchiveId(null);
-                    setConfirmDeleteId(selectedAgent.id);
-                  }}
+                  onClick={() => setConfirmDeleteId(selectedAgent.id)}
                   tone="neutral"
                 >
                   {tr("삭제", "Delete")}

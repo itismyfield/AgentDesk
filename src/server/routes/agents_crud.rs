@@ -6,7 +6,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, QueryBuilder, Row};
@@ -75,16 +75,6 @@ pub(super) struct UpdateAgentBody {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct ArchiveAgentBody {
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default, alias = "discordAction")]
-    discord_action: Option<String>,
-    #[serde(default, alias = "archiveCategoryId")]
-    archive_category_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub(super) struct DuplicateAgentBody {
     #[serde(alias = "newRoleId", alias = "new_agent_id")]
     new_agent_id: String,
@@ -112,17 +102,6 @@ pub(super) struct DuplicateAgentBody {
 struct AgentManagementFields {
     prompt_path: Option<String>,
     prompt_content: Option<String>,
-    archive_state: Option<String>,
-    archived_at: Option<String>,
-    archive_reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-struct DiscordArchiveReport {
-    action: String,
-    status: String,
-    channels: Vec<String>,
-    errors: Vec<String>,
 }
 
 fn normalize_channel_field(value: Option<String>) -> Option<String> {
@@ -287,9 +266,6 @@ fn load_agent_management_fields(agent_id: &str, provider: Option<&str>) -> Agent
     AgentManagementFields {
         prompt_path: prompt_path.map(|path| path.display().to_string()),
         prompt_content,
-        archive_state: None,
-        archived_at: None,
-        archive_reason: None,
     }
 }
 
@@ -303,24 +279,6 @@ fn attach_management_fields(mut agent: Value, fields: AgentManagementFields) -> 
             "prompt_content".to_string(),
             fields
                 .prompt_content
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-        );
-        object.insert(
-            "archive_state".to_string(),
-            fields
-                .archive_state
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-        );
-        object.insert(
-            "archived_at".to_string(),
-            fields.archived_at.map(Value::String).unwrap_or(Value::Null),
-        );
-        object.insert(
-            "archive_reason".to_string(),
-            fields
-                .archive_reason
                 .map(Value::String)
                 .unwrap_or(Value::Null),
         );
@@ -431,7 +389,6 @@ async fn list_agents_pg(
                a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
                a.status, a.xp, a.sprite_number, d.name AS department_name, d.name_ko AS department_name_ko,
                d.color AS department_color, a.created_at::text AS created_at,
-               aa.state AS archive_state, aa.archived_at::text AS archived_at, aa.reason AS archive_reason,
                (SELECT COUNT(DISTINCT kc.id)::BIGINT FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                (SELECT COALESCE(SUM(s.tokens), 0)::BIGINT FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                (SELECT td2.id
@@ -469,7 +426,6 @@ async fn list_agents_pg(
           FROM agents a
           INNER JOIN office_agents oa ON oa.agent_id = a.id
           LEFT JOIN departments d ON d.id = a.department
-          LEFT JOIN agent_archive aa ON aa.agent_id = a.id AND aa.state = 'archived'
          WHERE oa.office_id = $1
          ORDER BY a.id";
     let sql_all = "
@@ -477,7 +433,6 @@ async fn list_agents_pg(
                a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
                a.status, a.xp, a.sprite_number, d.name AS department_name, d.name_ko AS department_name_ko,
                d.color AS department_color, a.created_at::text AS created_at,
-               aa.state AS archive_state, aa.archived_at::text AS archived_at, aa.reason AS archive_reason,
                (SELECT COUNT(DISTINCT kc.id)::BIGINT FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                (SELECT COALESCE(SUM(s.tokens), 0)::BIGINT FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                (SELECT td2.id
@@ -514,7 +469,6 @@ async fn list_agents_pg(
                a.pipeline_config::text AS pipeline_config
           FROM agents a
           LEFT JOIN departments d ON d.id = a.department
-          LEFT JOIN agent_archive aa ON aa.agent_id = a.id AND aa.state = 'archived'
          ORDER BY a.id";
 
     let rows = match office_id {
@@ -570,9 +524,6 @@ async fn list_agents_pg(
                 "department_name_ko": row.try_get::<Option<String>, _>("department_name_ko").ok().flatten(),
                 "department_color": row.try_get::<Option<String>, _>("department_color").ok().flatten(),
                 "created_at": row.try_get::<Option<String>, _>("created_at").ok().flatten(),
-                "archive_state": row.try_get::<Option<String>, _>("archive_state").ok().flatten(),
-                "archived_at": row.try_get::<Option<String>, _>("archived_at").ok().flatten(),
-                "archive_reason": row.try_get::<Option<String>, _>("archive_reason").ok().flatten(),
                 "alias": serde_json::Value::Null,
                 "role_id": row.try_get::<Option<String>, _>("id").ok().flatten(),
                 "personality": serde_json::Value::Null,
@@ -593,7 +544,6 @@ async fn load_agent_pg(pool: &sqlx::PgPool, id: &str) -> Result<Option<serde_jso
                a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
                a.status, a.xp, a.sprite_number, d.name AS department_name, d.name_ko AS department_name_ko,
                d.color AS department_color, a.created_at::text AS created_at,
-               aa.state AS archive_state, aa.archived_at::text AS archived_at, aa.reason AS archive_reason,
                (SELECT COUNT(DISTINCT kc.id)::BIGINT FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                (SELECT COALESCE(SUM(s.tokens), 0)::BIGINT FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                (SELECT td2.id
@@ -630,7 +580,6 @@ async fn load_agent_pg(pool: &sqlx::PgPool, id: &str) -> Result<Option<serde_jso
                a.pipeline_config::text AS pipeline_config
           FROM agents a
           LEFT JOIN departments d ON d.id = a.department
-          LEFT JOIN agent_archive aa ON aa.agent_id = a.id AND aa.state = 'archived'
          WHERE a.id = $1",
     )
     .bind(id)
@@ -654,19 +603,7 @@ async fn load_agent_pg(pool: &sqlx::PgPool, id: &str) -> Result<Option<serde_jso
         .try_get::<Option<String>, _>("discord_channel_cdx")
         .ok()
         .flatten();
-    let mut fields = load_agent_management_fields(&id, provider.as_deref());
-    fields.archive_state = row
-        .try_get::<Option<String>, _>("archive_state")
-        .ok()
-        .flatten();
-    fields.archived_at = row
-        .try_get::<Option<String>, _>("archived_at")
-        .ok()
-        .flatten();
-    fields.archive_reason = row
-        .try_get::<Option<String>, _>("archive_reason")
-        .ok()
-        .flatten();
+    let fields = load_agent_management_fields(&id, provider.as_deref());
 
     Ok(Some(attach_management_fields(
         json!({
@@ -1065,515 +1002,6 @@ pub(super) async fn update_agent(
                 Json(json!({"error": error})),
             ),
         };
-    }
-
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
-}
-
-async fn pg_agent_channels(
-    pool: &sqlx::PgPool,
-    id: &str,
-) -> Result<(Option<String>, crate::db::agents::AgentChannelBindings), String> {
-    let row = sqlx::query("SELECT status FROM agents WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("{error}"))?
-        .ok_or_else(|| "agent not found".to_string())?;
-    let status = row.try_get::<Option<String>, _>("status").ok().flatten();
-    let bindings = crate::db::agents::load_agent_channel_bindings_pg(pool, id)
-        .await
-        .map_err(|error| format!("load agent channels: {error}"))?
-        .ok_or_else(|| "agent not found".to_string())?;
-    Ok((status, bindings))
-}
-
-fn role_map_entry_agent_id(value: &Value) -> Option<&str> {
-    value
-        .get("roleId")
-        .or_else(|| value.get("role_id"))
-        .and_then(Value::as_str)
-}
-
-fn remove_agent_from_role_map(
-    runtime_root: &FsPath,
-    agent_id: &str,
-) -> Result<Option<Value>, String> {
-    let path = crate::runtime_layout::role_map_path(runtime_root);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|error| format!("read role_map '{}': {error}", path.display()))?;
-    let original: Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("parse role_map '{}': {error}", path.display()))?;
-    let mut next = original.clone();
-    let mut changed = false;
-    for section in ["byChannelId", "byChannelName"] {
-        if let Some(map) = next.get_mut(section).and_then(Value::as_object_mut) {
-            let before = map.len();
-            map.retain(|_, entry| role_map_entry_agent_id(entry) != Some(agent_id));
-            changed |= map.len() != before;
-        }
-    }
-    if changed {
-        let rendered = serde_json::to_string_pretty(&next)
-            .map_err(|error| format!("serialize role_map '{}': {error}", path.display()))?;
-        std::fs::write(&path, rendered)
-            .map_err(|error| format!("write role_map '{}': {error}", path.display()))?;
-        Ok(Some(original))
-    } else {
-        Ok(None)
-    }
-}
-
-fn restore_role_map(runtime_root: &FsPath, snapshot: Option<&Value>) -> Result<(), String> {
-    let Some(snapshot) = snapshot else {
-        return Ok(());
-    };
-    let path = crate::runtime_layout::role_map_path(runtime_root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("create role_map dir '{}': {error}", parent.display()))?;
-    }
-    let rendered = serde_json::to_string_pretty(snapshot)
-        .map_err(|error| format!("serialize role_map '{}': {error}", path.display()))?;
-    std::fs::write(&path, rendered)
-        .map_err(|error| format!("write role_map '{}': {error}", path.display()))
-}
-
-fn remove_agent_from_config(
-    agent_id: &str,
-) -> Result<(Option<Value>, Option<String>, Option<Value>), String> {
-    let Some(runtime_root) = crate::config::runtime_root() else {
-        return Ok((None, None, None));
-    };
-    let (mut config, path, existed) =
-        crate::services::discord::agentdesk_config::load_agent_setup_config(&runtime_root)?;
-    let mut removed = None;
-    config.agents.retain(|agent| {
-        if agent.id == agent_id {
-            removed = Some(agent.clone());
-            false
-        } else {
-            true
-        }
-    });
-
-    let prompt_path = removed
-        .as_ref()
-        .and_then(|agent| agent_channel_for_provider(agent, None))
-        .and_then(crate::config::AgentChannel::prompt_file);
-
-    if removed.is_some() || existed {
-        crate::config::save_to_path(&path, &config)
-            .map_err(|error| format!("write config '{}': {error}", path.display()))?;
-    }
-
-    let role_map_snapshot = remove_agent_from_role_map(&runtime_root, agent_id)?;
-    let removed_json = removed
-        .map(serde_json::to_value)
-        .transpose()
-        .map_err(|error| format!("serialize config agent {agent_id}: {error}"))?;
-    Ok((removed_json, prompt_path, role_map_snapshot))
-}
-
-fn restore_agent_config(agent_id: &str, snapshot: Option<&Value>) -> Result<(), String> {
-    let Some(snapshot) = snapshot else {
-        return Ok(());
-    };
-    let Some(runtime_root) = crate::config::runtime_root() else {
-        return Ok(());
-    };
-    let agent: crate::config::AgentDef = serde_json::from_value(snapshot.clone())
-        .map_err(|error| format!("parse archived config for {agent_id}: {error}"))?;
-    let (mut config, path, _) =
-        crate::services::discord::agentdesk_config::load_agent_setup_config(&runtime_root)?;
-    if !config.agents.iter().any(|existing| existing.id == agent.id) {
-        config.agents.push(agent);
-        crate::config::save_to_path(&path, &config)
-            .map_err(|error| format!("write config '{}': {error}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn discord_archive_action(body: &ArchiveAgentBody) -> String {
-    clean_optional_text(body.discord_action.clone())
-        .unwrap_or_else(|| {
-            if body
-                .archive_category_id
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
-                "move".to_string()
-            } else {
-                "readonly".to_string()
-            }
-        })
-        .to_ascii_lowercase()
-}
-
-fn discord_bot_token(config: &crate::config::Config) -> Option<String> {
-    std::env::var("AGENTDESK_DISCORD_BOT_TOKEN")
-        .ok()
-        .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            config.discord.bots.iter().find_map(|(name, bot)| {
-                bot.token
-                    .clone()
-                    .or_else(|| crate::credential::read_bot_token(name))
-            })
-        })
-}
-
-async fn send_discord_json_with_retry(
-    client: &reqwest::Client,
-    url: &str,
-    token: &str,
-    payload: Value,
-) -> Result<(), String> {
-    for attempt in 0..3 {
-        let response = client
-            .patch(url)
-            .bearer_auth(token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|error| format!("discord request {url}: {error}"))?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        let body = response.text().await.unwrap_or_default();
-        if status.as_u16() == 429 && attempt < 2 {
-            let wait_ms = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|value| value.get("retry_after").and_then(Value::as_f64))
-                .map(|seconds| (seconds * 1000.0).ceil() as u64)
-                .unwrap_or(750);
-            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-            continue;
-        }
-        return Err(format!("discord {url} returned {status}: {body}"));
-    }
-    Err(format!("discord {url} retry limit reached"))
-}
-
-async fn apply_discord_archive_action(
-    config: &crate::config::Config,
-    body: &ArchiveAgentBody,
-    channels: &[String],
-) -> DiscordArchiveReport {
-    let action = discord_archive_action(body);
-    if action == "none" || channels.is_empty() {
-        return DiscordArchiveReport {
-            action,
-            status: "skipped".to_string(),
-            channels: channels.to_vec(),
-            errors: Vec::new(),
-        };
-    }
-    let Some(token) = discord_bot_token(config) else {
-        return DiscordArchiveReport {
-            action,
-            status: "skipped_missing_token".to_string(),
-            channels: channels.to_vec(),
-            errors: Vec::new(),
-        };
-    };
-
-    let api_base = std::env::var("AGENTDESK_DISCORD_API_BASE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "https://discord.com/api/v10".to_string());
-    let client = reqwest::Client::new();
-    let mut errors = Vec::new();
-
-    for channel in channels {
-        if channel.trim().parse::<u64>().is_err() {
-            errors.push(format!("channel '{channel}' is not a Discord snowflake"));
-            continue;
-        }
-        match action.as_str() {
-            "move" => {
-                let Some(category_id) = clean_optional_text(body.archive_category_id.clone())
-                else {
-                    errors.push("archive_category_id is required for move action".to_string());
-                    continue;
-                };
-                let url = format!("{api_base}/channels/{channel}");
-                if let Err(error) = send_discord_json_with_retry(
-                    &client,
-                    &url,
-                    &token,
-                    json!({ "parent_id": category_id }),
-                )
-                .await
-                {
-                    errors.push(error);
-                }
-            }
-            "readonly" => {
-                let Some(guild_id) = config
-                    .discord
-                    .guild_id
-                    .as_deref()
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-                else {
-                    errors.push("discord.guild_id is required for readonly action".to_string());
-                    continue;
-                };
-                let url = format!("{api_base}/channels/{channel}/permissions/{guild_id}");
-                if let Err(error) = send_discord_json_with_retry(
-                    &client,
-                    &url,
-                    &token,
-                    json!({
-                        "type": 0,
-                        "deny": "2048"
-                    }),
-                )
-                .await
-                {
-                    errors.push(error);
-                }
-            }
-            other => {
-                errors.push(format!("unsupported discord archive action '{other}'"));
-            }
-        }
-    }
-
-    DiscordArchiveReport {
-        action,
-        status: if errors.is_empty() {
-            "applied".to_string()
-        } else {
-            "partial_failure".to_string()
-        },
-        channels: channels.to_vec(),
-        errors,
-    }
-}
-
-async fn pg_agent_has_active_turn(pool: &sqlx::PgPool, id: &str) -> Result<bool, String> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)
-           FROM sessions
-          WHERE agent_id = $1
-            AND (status IN ('turn_active', 'awaiting_bg', 'working') OR active_dispatch_id IS NOT NULL)",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map(|count| count > 0)
-    .map_err(|error| format!("check active turns: {error}"))
-}
-
-pub(super) async fn archive_agent(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<ArchiveAgentBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        let (previous_status, bindings) = match pg_agent_channels(pool, &id).await {
-            Ok(value) => value,
-            Err(error) if error == "agent not found" => {
-                return (StatusCode::NOT_FOUND, Json(json!({"error": error})));
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        };
-        match pg_agent_has_active_turn(pool, &id).await {
-            Ok(true) => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({"error": "agent has an active turn"})),
-                );
-            }
-            Ok(false) => {}
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        }
-        let (config_agent, prompt_path, role_map_snapshot) = match remove_agent_from_config(&id) {
-            Ok(value) => value,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        };
-        let channels = bindings.all_channels();
-        let discord = apply_discord_archive_action(state.config.as_ref(), &body, &channels).await;
-        let discord_value = serde_json::to_value(&discord).unwrap_or_else(|_| json!({}));
-        if let Err(error) = sqlx::query(
-            "INSERT INTO agent_archive (
-                agent_id, state, reason, previous_status, config_agent_json, role_map_snapshot_json,
-                prompt_path, discord_channels_json, discord_action, discord_result_json,
-                archived_at, unarchived_at, updated_at
-             )
-             VALUES ($1, 'archived', $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NULL, NOW())
-             ON CONFLICT (agent_id) DO UPDATE
-             SET state = 'archived',
-                 reason = EXCLUDED.reason,
-                 previous_status = COALESCE(agent_archive.previous_status, EXCLUDED.previous_status),
-                 config_agent_json = COALESCE(EXCLUDED.config_agent_json, agent_archive.config_agent_json),
-                 role_map_snapshot_json = COALESCE(EXCLUDED.role_map_snapshot_json, agent_archive.role_map_snapshot_json),
-                 prompt_path = COALESCE(EXCLUDED.prompt_path, agent_archive.prompt_path),
-                 discord_channels_json = EXCLUDED.discord_channels_json,
-                 discord_action = EXCLUDED.discord_action,
-                 discord_result_json = EXCLUDED.discord_result_json,
-                 archived_at = COALESCE(agent_archive.archived_at, NOW()),
-                 unarchived_at = NULL,
-                 updated_at = NOW()",
-        )
-        .bind(&id)
-        .bind(clean_optional_text(body.reason.clone()))
-        .bind(previous_status.as_deref())
-        .bind(config_agent.clone())
-        .bind(role_map_snapshot.clone())
-        .bind(prompt_path.as_deref())
-        .bind(json!(channels))
-        .bind(&discord.action)
-        .bind(discord_value.clone())
-        .execute(pool)
-        .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("record archive: {error}")})),
-            );
-        }
-        if let Err(error) =
-            sqlx::query("UPDATE agents SET status = 'archived', updated_at = NOW() WHERE id = $1")
-                .bind(&id)
-                .execute(pool)
-                .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("update agent status: {error}")})),
-            );
-        }
-        return (
-            StatusCode::OK,
-            Json(
-                json!({"ok": true, "agent_id": id, "archive_state": "archived", "discord": discord_value}),
-            ),
-        );
-    }
-
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
-}
-
-pub(super) async fn unarchive_agent(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        let row = match sqlx::query(
-            "SELECT previous_status, config_agent_json, role_map_snapshot_json
-               FROM agent_archive
-              WHERE agent_id = $1 AND state = 'archived'",
-        )
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "archived agent state not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-        let config_agent = row
-            .try_get::<Option<Value>, _>("config_agent_json")
-            .ok()
-            .flatten();
-        let role_map_snapshot = row
-            .try_get::<Option<Value>, _>("role_map_snapshot_json")
-            .ok()
-            .flatten();
-        if let Err(error) = restore_agent_config(&id, config_agent.as_ref()) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
-        if let Some(runtime_root) = crate::config::runtime_root()
-            && let Err(error) = restore_role_map(&runtime_root, role_map_snapshot.as_ref())
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
-        let status = row
-            .try_get::<Option<String>, _>("previous_status")
-            .ok()
-            .flatten()
-            .filter(|value| value != "archived")
-            .unwrap_or_else(|| "idle".to_string());
-        if let Err(error) = sqlx::query(
-            "UPDATE agents
-                SET status = $2, updated_at = NOW()
-              WHERE id = $1",
-        )
-        .bind(&id)
-        .bind(&status)
-        .execute(pool)
-        .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-        if let Err(error) = sqlx::query(
-            "UPDATE agent_archive
-                SET state = 'unarchived', unarchived_at = NOW(), updated_at = NOW()
-              WHERE agent_id = $1",
-        )
-        .bind(&id)
-        .execute(pool)
-        .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-        return (
-            StatusCode::OK,
-            Json(
-                json!({"ok": true, "agent_id": id, "archive_state": "unarchived", "status": status}),
-            ),
-        );
     }
 
     (

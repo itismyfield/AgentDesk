@@ -63,7 +63,6 @@ export default function AgentManagerView({
 }: AgentManagerViewProps) {
   const {
     canShowDispatch,
-    confirmArchiveId,
     confirmDeleteId,
     deptModal,
     deptOrder,
@@ -76,7 +75,6 @@ export default function AgentManagerView({
     form,
     agentModal,
     handleCancelOrder,
-    handleArchiveAgent,
     handleDeleteAgent,
     handleDragEnd,
     handleDragOver,
@@ -86,7 +84,6 @@ export default function AgentManagerView({
     handleSaveAgent,
     handleSaveOrder,
     handleTabChange,
-    handleUnarchiveAgent,
     isKo,
     locale,
     openCreateAgent,
@@ -99,7 +96,6 @@ export default function AgentManagerView({
     saving,
     search,
     setAgentModal,
-    setConfirmArchiveId,
     setConfirmDeleteId,
     setDeptModal,
     setDeptTab,
@@ -375,15 +371,11 @@ export default function AgentManagerView({
             spriteMap={spriteMap}
             confirmDeleteId={confirmDeleteId}
             setConfirmDeleteId={setConfirmDeleteId}
-            confirmArchiveId={confirmArchiveId}
-            setConfirmArchiveId={setConfirmArchiveId}
             onOpenAgent={(agent) =>
               onSelectAgent ? onSelectAgent(agent) : openEditAgent(agent)
             }
             onEditAgent={openEditAgent}
             onDuplicateAgent={openDuplicateAgent}
-            onArchiveAgent={handleArchiveAgent}
-            onUnarchiveAgent={handleUnarchiveAgent}
             onEditDepartment={openEditDept}
             onDeleteAgent={handleDeleteAgent}
             saving={saving}

@@ -16,7 +16,7 @@ Baseline no-regression gates are **enabled** for 3 checks: `parent_test_residue`
 |---|---:|:--:|:--:|
 | `giant_files` | 0 | YES | no |
 | `giant_file_ratchet` | 0 | YES | no |
-| `parent_test_residue` | 6 | no | YES |
+| `parent_test_residue` | 5 | no | YES |
 | `namespace_size_caps` | 0 | YES | no |
 | `route_srp_violations` | 10 | no | YES |
 | `service_server_backflow` | 0 | no | YES |
@@ -47,10 +47,9 @@ Decomposition parents whose inline test LoC exceeds 3x their production LoC (fil
 
 | Severity | File | Line | Message |
 |---|---|---:|---|
-| warn | `src/services/discord/inflight.rs` |  | 5451 test LoC vs 590 prod LoC (ratio 9.24x > 3x, 6041 raw); migrate the stranded tests with the decomposed production code |
-| warn | `src/services/discord/inflight/save_store.rs` |  | 730 test LoC vs 235 prod LoC (ratio 3.11x > 3x, 965 raw); migrate the stranded tests with the decomposed production code |
-| warn | `src/services/discord/recovery_engine/manual_rebind/codex_tui_replay.rs` |  | 711 test LoC vs 233 prod LoC (ratio 3.05x > 3x, 944 raw); migrate the stranded tests with the decomposed production code |
-| warn | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` |  | 450 test LoC vs 131 prod LoC (ratio 3.44x > 3x, 581 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/inflight.rs` |  | 5205 test LoC vs 608 prod LoC (ratio 8.56x > 3x, 5813 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/inflight/save_store.rs` |  | 730 test LoC vs 241 prod LoC (ratio 3.03x > 3x, 971 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` |  | 450 test LoC vs 146 prod LoC (ratio 3.08x > 3x, 596 raw); migrate the stranded tests with the decomposed production code |
 | warn | `src/services/discord/turn_finalizer.rs` |  | 3992 test LoC vs 1048 prod LoC (ratio 3.81x > 3x, 5040 raw); migrate the stranded tests with the decomposed production code |
 | warn | `src/services/discord/turn_finalizer/delivery_lease.rs` |  | 428 test LoC vs 87 prod LoC (ratio 4.92x > 3x, 515 raw); migrate the stranded tests with the decomposed production code |
 
@@ -66,7 +65,7 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 
 | Severity | File | Line | Message |
 |---|---|---:|---|
-| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (40), json!() (77), and crate::services calls (7) |
+| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (25), json!() (56), and crate::services calls (5) |
 | warn | `src/server/routes/agents_setup.rs` |  | route file mixes SQL (7), json!() (12), and crate::services calls (2) |
 | warn | `src/server/routes/cron_api.rs` |  | route file mixes SQL (2), json!() (12), and crate::services calls (1) |
 | warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (24), json!() (24), and crate::services calls (3) |

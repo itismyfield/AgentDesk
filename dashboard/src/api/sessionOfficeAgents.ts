@@ -179,39 +179,6 @@ export async function setupAgent(
   });
 }
 
-export interface ArchiveAgentRequest {
-  reason?: string;
-  discord_action?: "none" | "readonly" | "move";
-  archive_category_id?: string;
-}
-
-export interface ArchiveAgentResponse {
-  ok: boolean;
-  agent_id: string;
-  status?: string;
-  archive_state?: string;
-  discord?: unknown;
-}
-
-export async function archiveAgent(
-  id: string,
-  body: ArchiveAgentRequest = {},
-): Promise<ArchiveAgentResponse> {
-  return request(`/api/agents/${id}/archive`, {
-    method: "POST",
-    body: JSON.stringify(body),
-    timeoutMs: 60_000,
-  });
-}
-
-export async function unarchiveAgent(id: string): Promise<ArchiveAgentResponse> {
-  return request(`/api/agents/${id}/unarchive`, {
-    method: "POST",
-    body: JSON.stringify({}),
-    timeoutMs: 60_000,
-  });
-}
-
 export interface DuplicateAgentRequest {
   new_agent_id: string;
   channel_id: string;
