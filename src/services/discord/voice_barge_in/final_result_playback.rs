@@ -88,7 +88,7 @@ impl VoiceBargeInRuntime {
     ) -> (u64, CancellationToken) {
         let id = self.id_sequences.next_spoken_result_playback_id();
         let cancellation = CancellationToken::new();
-        if let Some(previous) = self.spoken_result_playbacks.insert(
+        if let Some(previous) = self.channels.spoken_result_playbacks.insert(
             channel_id.get(),
             SpokenResultPlaybackSession {
                 id,
@@ -97,12 +97,15 @@ impl VoiceBargeInRuntime {
         ) {
             previous.cancellation.cancel();
         }
+        self.channels.playback_started(channel_id);
         (id, cancellation)
     }
 
     pub(super) fn clear_spoken_result_playback_if_current(&self, channel_id: ChannelId, id: u64) {
-        self.spoken_result_playbacks
+        self.channels
+            .spoken_result_playbacks
             .remove_if(&channel_id.get(), |_, session| session.id == id);
+        self.channels.playback_finished(channel_id);
     }
 
     pub(in crate::services::discord) async fn spawn_spoken_result_playback(
@@ -150,11 +153,7 @@ impl VoiceBargeInRuntime {
             return;
         }
 
-        let Some(guild_id) = self
-            .voice_guilds
-            .get(&channel_id.get())
-            .map(|entry| *entry.value())
-        else {
+        let Some(guild_id) = self.channels.guild_id(channel_id) else {
             crate::voice::metrics::discard(channel_id.get());
             // #4238: promote from debug — a voice turn with no registered guild
             // means the spoken reply is dropped; operators need to see why.
