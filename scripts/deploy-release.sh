@@ -1510,12 +1510,38 @@ _post_deploy_smoke_log_identity_and_size() {
     fi
 }
 
+_post_deploy_smoke_log_head_fingerprint() {
+    local log_path="$1"
+    local byte_count="$2"
+    case "$byte_count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if command -v shasum >/dev/null 2>&1; then
+        head -c "$byte_count" "$log_path" \
+            | shasum -a 256 \
+            | awk 'NF { print "sha256:" $1; found = 1 } END { if (!found) exit 1 }'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        head -c "$byte_count" "$log_path" \
+            | sha256sum \
+            | awk 'NF { print "sha256:" $1; found = 1 } END { if (!found) exit 1 }'
+    elif command -v cksum >/dev/null 2>&1; then
+        head -c "$byte_count" "$log_path" \
+            | cksum \
+            | awk 'NF >= 2 { print "cksum:" $1 ":" $2; found = 1 } END { if (!found) exit 1 }'
+    else
+        return 1
+    fi
+}
+
 # Watermark the stdout log only after the old dcserver has exited. The sampler
-# uses the byte offset while the inode is unchanged and the file has not shrunk;
-# after rotation or truncation it samples the entire current file (#4511).
+# uses the byte offset while inode, size, and the bounded head fingerprint still
+# prove append-only growth. Rotation, shrink, or a rewritten head selects the
+# entire current file (#4511).
 POST_DEPLOY_SMOKE_LOG_PATH="$ADK_REL/logs/dcserver.stdout.log"
+POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP=4096
 POST_DEPLOY_SMOKE_LOG_OFFSET=""
 POST_DEPLOY_SMOKE_LOG_INODE=""
+POST_DEPLOY_SMOKE_LOG_FINGERPRINT=""
 if [ ! -e "$POST_DEPLOY_SMOKE_LOG_PATH" ]; then
     POST_DEPLOY_SMOKE_LOG_OFFSET=0
     POST_DEPLOY_SMOKE_LOG_INODE=0
@@ -1525,7 +1551,28 @@ elif POST_DEPLOY_SMOKE_LOG_STAT=$(
     read -r POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET \
         <<< "$POST_DEPLOY_SMOKE_LOG_STAT"
 fi
+case "$POST_DEPLOY_SMOKE_LOG_OFFSET" in
+    ''|*[!0-9]*) ;;
+    *)
+        POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES="$POST_DEPLOY_SMOKE_LOG_OFFSET"
+        if [ "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES" -gt "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP" ]; then
+            POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES="$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP"
+        fi
+        POST_DEPLOY_SMOKE_LOG_FINGERPRINT_PATH="$POST_DEPLOY_SMOKE_LOG_PATH"
+        if [ ! -e "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_PATH" ]; then
+            POST_DEPLOY_SMOKE_LOG_FINGERPRINT_PATH=/dev/null
+        fi
+        if ! POST_DEPLOY_SMOKE_LOG_FINGERPRINT=$(
+            _post_deploy_smoke_log_head_fingerprint \
+                "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_PATH" \
+                "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES"
+        ); then
+            POST_DEPLOY_SMOKE_LOG_FINGERPRINT=""
+        fi
+        ;;
+esac
 unset POST_DEPLOY_SMOKE_LOG_STAT
+unset POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES POST_DEPLOY_SMOKE_LOG_FINGERPRINT_PATH
 
 # Promote the already signed staged binary atomically. In-place codesign can
 # corrupt the OS signing cache if it fails mid-write.
@@ -2022,7 +2069,8 @@ _post_deploy_smoke_check_wedges() {
 _post_deploy_smoke_check_fail_closed_warn_rate() {
     local log_path="$POST_DEPLOY_SMOKE_LOG_PATH"
     local sample_path="$POST_DEPLOY_SMOKE_TMP_DIR/recent-dcserver.log"
-    local current_log_stat current_inode current_size sample_start_byte
+    local current_log_stat current_inode current_size current_head_fingerprint
+    local fingerprint_bytes sample_start_byte
     local sampled_lines warn_lines fail_closed_warns
     case "$POST_DEPLOY_SMOKE_LOG_LINES" in
         ''|*[!0-9]*)
@@ -2056,6 +2104,10 @@ _post_deploy_smoke_check_fail_closed_warn_rate() {
             return 1
             ;;
     esac
+    if [ -z "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT" ]; then
+        _post_deploy_smoke_fail "fail-closed WARN sample: restart log fingerprint unavailable" || true
+        return 1
+    fi
     if ! current_log_stat=$(
         _post_deploy_smoke_log_identity_and_size "$log_path" 2>/dev/null
     ); then
@@ -2069,8 +2121,19 @@ _post_deploy_smoke_check_fail_closed_warn_rate() {
             return 1
             ;;
     esac
+    fingerprint_bytes="$POST_DEPLOY_SMOKE_LOG_OFFSET"
+    if [ "$fingerprint_bytes" -gt "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP" ]; then
+        fingerprint_bytes="$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP"
+    fi
+    if ! current_head_fingerprint=$(
+        _post_deploy_smoke_log_head_fingerprint "$log_path" "$fingerprint_bytes"
+    ); then
+        _post_deploy_smoke_fail "fail-closed WARN sample: could not fingerprint current log ${log_path}" || true
+        return 1
+    fi
     if [ "$current_inode" != "$POST_DEPLOY_SMOKE_LOG_INODE" ] \
-      || [ "$current_size" -lt "$POST_DEPLOY_SMOKE_LOG_OFFSET" ]; then
+      || [ "$current_size" -lt "$POST_DEPLOY_SMOKE_LOG_OFFSET" ] \
+      || [ "$current_head_fingerprint" != "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT" ]; then
         sample_start_byte=1
     else
         sample_start_byte=$((POST_DEPLOY_SMOKE_LOG_OFFSET + 1))
