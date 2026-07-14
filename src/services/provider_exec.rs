@@ -27,7 +27,7 @@ use std::time::Duration;
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::with_provider_execution_context;
 use crate::services::process::kill_pid_tree;
-use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::provider::{CancelToken, ProviderExecutionAdapter, ProviderKind};
 use crate::services::provider_cli::ProviderExecutionContext;
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
@@ -66,10 +66,7 @@ pub async fn execute_simple_with_timeout_and_context(
                 kill_pid_tree(pid);
             }
             let _ = tokio::time::timeout(Duration::from_secs(3), &mut handle).await;
-            Err(format!(
-                "{stage_label} timed out after {}s",
-                timeout.as_secs()
-            ))
+            Err(simple_timeout_error(&stage_label, timeout))
         }
     }
 }
@@ -93,23 +90,25 @@ fn execute_simple_blocking_inner(
     prompt: String,
     cancel_token: Option<Arc<CancelToken>>,
 ) -> Result<String, String> {
-    match provider {
-        ProviderKind::Claude => {
+    let Some(adapter) = provider.execution_adapter() else {
+        return Err(format!("Provider '{}' is not installed", provider.as_str()));
+    };
+    match adapter {
+        ProviderExecutionAdapter::Claude => {
             claude::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
         }
-        ProviderKind::Codex => {
+        ProviderExecutionAdapter::Codex => {
             codex::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
         }
-        ProviderKind::Gemini => {
+        ProviderExecutionAdapter::Gemini => {
             gemini::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
         }
-        ProviderKind::OpenCode => {
+        ProviderExecutionAdapter::OpenCode => {
             opencode::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
         }
-        ProviderKind::Qwen => {
+        ProviderExecutionAdapter::Qwen => {
             qwen::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
         }
-        ProviderKind::Unsupported(name) => Err(format!("Provider '{}' is not installed", name)),
     }
 }
 
@@ -148,6 +147,9 @@ pub async fn execute_structured_with_context(
     stage_label: &'static str,
     context: Option<ProviderExecutionContext>,
 ) -> Result<String, String> {
+    let Some(adapter) = provider.execution_adapter() else {
+        return Err(format!("Provider '{}' is not installed", provider.as_str()));
+    };
     let cancel_token = Arc::new(CancelToken::new());
     let cancel_for_timeout = Arc::clone(&cancel_token);
     let mut handle = tokio::task::spawn_blocking(move || {
@@ -156,8 +158,8 @@ pub async fn execute_structured_with_context(
             let system_prompt_ref = system_prompt.as_deref();
             let allowed_tools_ref = (!allowed_tools.is_empty()).then_some(allowed_tools.as_slice());
             let model_ref = model.as_deref();
-            let result = match provider {
-                ProviderKind::Claude => claude::execute_command_streaming(
+            let result = match adapter {
+                ProviderExecutionAdapter::Claude => claude::execute_command_streaming(
                     &prompt,
                     None,
                     &working_dir,
@@ -175,7 +177,7 @@ pub async fn execute_structured_with_context(
                     None,
                     None,
                 ),
-                ProviderKind::Codex => codex::execute_command_streaming(
+                ProviderExecutionAdapter::Codex => codex::execute_command_streaming(
                     &prompt,
                     None,
                     &working_dir,
@@ -193,7 +195,7 @@ pub async fn execute_structured_with_context(
                     None,
                     false,
                 ),
-                ProviderKind::Gemini => gemini::execute_command_streaming(
+                ProviderExecutionAdapter::Gemini => gemini::execute_command_streaming(
                     &prompt,
                     None,
                     &working_dir,
@@ -208,7 +210,7 @@ pub async fn execute_structured_with_context(
                     model_ref,
                     None,
                 ),
-                ProviderKind::OpenCode => opencode::execute_command_streaming(
+                ProviderExecutionAdapter::OpenCode => opencode::execute_command_streaming(
                     &prompt,
                     None,
                     &working_dir,
@@ -223,7 +225,7 @@ pub async fn execute_structured_with_context(
                     model_ref,
                     None,
                 ),
-                ProviderKind::Qwen => qwen::execute_command_streaming(
+                ProviderExecutionAdapter::Qwen => qwen::execute_command_streaming(
                     &prompt,
                     None,
                     &working_dir,
@@ -238,9 +240,6 @@ pub async fn execute_structured_with_context(
                     model_ref,
                     None,
                 ),
-                ProviderKind::Unsupported(name) => {
-                    Err(format!("Provider '{}' is not installed", name))
-                }
             };
             drop(sender);
             collect_stream_result(result, receiver)
@@ -267,9 +266,17 @@ pub async fn execute_structured_with_context(
             if tokio::time::timeout(Duration::from_secs(3), &mut handle).await.is_err() {
                 handle.abort();
             }
-            Err(format!("{stage_label} timeout after {timeout_secs}s"))
+            Err(structured_timeout_error(stage_label, timeout_secs))
         }
     }
+}
+
+pub(crate) fn simple_timeout_error(stage_label: &str, timeout: Duration) -> String {
+    format!("{stage_label} timed out after {}s", timeout.as_secs())
+}
+
+pub(crate) fn structured_timeout_error(stage_label: &str, timeout_secs: u64) -> String {
+    format!("{stage_label} timeout after {timeout_secs}s")
 }
 
 fn collect_stream_result(

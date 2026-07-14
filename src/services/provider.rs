@@ -43,6 +43,104 @@ pub struct ProviderCapabilities {
     pub supports_tool_stream: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderExecutionAdapter {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    Qwen,
+}
+
+impl ProviderExecutionAdapter {
+    pub const fn provider_id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
+            Self::Qwen => "qwen",
+        }
+    }
+
+    pub const fn supported_capabilities(self) -> ProviderCapabilities {
+        match self {
+            Self::Claude => ProviderCapabilities {
+                binary_name: "claude",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            },
+            Self::Codex => ProviderCapabilities {
+                binary_name: "codex",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            },
+            Self::Gemini => ProviderCapabilities {
+                binary_name: "gemini",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            },
+            Self::OpenCode => ProviderCapabilities {
+                binary_name: "opencode",
+                supports_structured_output: true,
+                supports_resume: false,
+                supports_tool_stream: true,
+            },
+            Self::Qwen => ProviderCapabilities {
+                binary_name: "qwen",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderCompactionAdapter {
+    ClaudeEnvironment,
+    CodexCli,
+    GeminiDisabled,
+    OpenCodeDisabled,
+    QwenDisabled,
+}
+
+impl ProviderCompactionAdapter {
+    pub const fn provider_id(self) -> &'static str {
+        match self {
+            Self::ClaudeEnvironment => "claude",
+            Self::CodexCli => "codex",
+            Self::GeminiDisabled => "gemini",
+            Self::OpenCodeDisabled => "opencode",
+            Self::QwenDisabled => "qwen",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderReadinessAdapter {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    Qwen,
+}
+
+impl ProviderReadinessAdapter {
+    pub const fn provider_id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
+            Self::Qwen => "qwen",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRuntimeProbe {
     pub provider: ProviderKind,
@@ -71,6 +169,9 @@ pub struct ProviderRegistryEntry {
     pub default_channel_provider: bool,
     pub counterpart_provider_ids: &'static [&'static str],
     pub capabilities: ProviderCapabilities,
+    pub execution_adapter: ProviderExecutionAdapter,
+    pub compaction_adapter: ProviderCompactionAdapter,
+    pub readiness_adapter: ProviderReadinessAdapter,
     pub default_behavior: ProviderDefaultBehavior,
     pub default_context_window: u64,
     pub managed_tmux_backend: bool,
@@ -140,6 +241,9 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             supports_resume: true,
             supports_tool_stream: true,
         },
+        execution_adapter: ProviderExecutionAdapter::Claude,
+        compaction_adapter: ProviderCompactionAdapter::ClaudeEnvironment,
+        readiness_adapter: ProviderReadinessAdapter::Claude,
         default_behavior: ProviderDefaultBehavior {
             resume_without_reset: true,
             runtime_model: None,
@@ -169,6 +273,9 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             supports_resume: true,
             supports_tool_stream: true,
         },
+        execution_adapter: ProviderExecutionAdapter::Codex,
+        compaction_adapter: ProviderCompactionAdapter::CodexCli,
+        readiness_adapter: ProviderReadinessAdapter::Codex,
         default_behavior: ProviderDefaultBehavior {
             resume_without_reset: true,
             runtime_model: None,
@@ -200,6 +307,9 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             supports_resume: true,
             supports_tool_stream: true,
         },
+        execution_adapter: ProviderExecutionAdapter::Gemini,
+        compaction_adapter: ProviderCompactionAdapter::GeminiDisabled,
+        readiness_adapter: ProviderReadinessAdapter::Gemini,
         default_behavior: ProviderDefaultBehavior {
             resume_without_reset: true,
             runtime_model: None,
@@ -229,6 +339,9 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             supports_resume: false,
             supports_tool_stream: true,
         },
+        execution_adapter: ProviderExecutionAdapter::OpenCode,
+        compaction_adapter: ProviderCompactionAdapter::OpenCodeDisabled,
+        readiness_adapter: ProviderReadinessAdapter::OpenCode,
         default_behavior: ProviderDefaultBehavior {
             resume_without_reset: false,
             runtime_model: None,
@@ -258,6 +371,9 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             supports_resume: true,
             supports_tool_stream: true,
         },
+        execution_adapter: ProviderExecutionAdapter::Qwen,
+        compaction_adapter: ProviderCompactionAdapter::QwenDisabled,
+        readiness_adapter: ProviderReadinessAdapter::Qwen,
         default_behavior: ProviderDefaultBehavior {
             resume_without_reset: true,
             runtime_model: None,
@@ -353,6 +469,18 @@ impl ProviderKind {
 
     pub fn capabilities(&self) -> Option<ProviderCapabilities> {
         self.registry_entry().map(|entry| entry.capabilities)
+    }
+
+    pub fn execution_adapter(&self) -> Option<ProviderExecutionAdapter> {
+        self.registry_entry().map(|entry| entry.execution_adapter)
+    }
+
+    pub fn compaction_adapter(&self) -> Option<ProviderCompactionAdapter> {
+        self.registry_entry().map(|entry| entry.compaction_adapter)
+    }
+
+    pub fn readiness_adapter(&self) -> Option<ProviderReadinessAdapter> {
+        self.registry_entry().map(|entry| entry.readiness_adapter)
     }
 
     /// Provider-specific behavior when AgentDesk clears its explicit model
@@ -465,13 +593,18 @@ impl ProviderKind {
     /// - Codex: uses CLI args instead (see compact_cli_config)
     #[allow(dead_code)]
     pub fn compact_env_vars(&self, percent: u64) -> Vec<(String, String)> {
-        match self {
-            Self::Claude => vec![(
+        let Some(adapter) = self.compaction_adapter() else {
+            return Vec::new();
+        };
+        match adapter {
+            ProviderCompactionAdapter::ClaudeEnvironment => vec![(
                 "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
                 percent.to_string(),
             )],
-            // Codex uses -c CLI arg, not env vars
-            _ => vec![],
+            ProviderCompactionAdapter::CodexCli
+            | ProviderCompactionAdapter::GeminiDisabled
+            | ProviderCompactionAdapter::OpenCodeDisabled
+            | ProviderCompactionAdapter::QwenDisabled => Vec::new(),
         }
     }
 
@@ -514,15 +647,21 @@ impl ProviderKind {
     /// Returns Codex-specific CLI config overrides for auto-compact.
     /// Codex uses model_auto_compact_token_limit (absolute token count).
     pub fn compact_cli_config(&self, percent: u64, context_window: u64) -> Vec<(String, String)> {
-        match self {
-            Self::Codex => {
+        let Some(adapter) = self.compaction_adapter() else {
+            return Vec::new();
+        };
+        match adapter {
+            ProviderCompactionAdapter::CodexCli => {
                 let token_limit = context_window * percent / 100;
                 vec![(
                     "model_auto_compact_token_limit".to_string(),
                     token_limit.to_string(),
                 )]
             }
-            _ => vec![],
+            ProviderCompactionAdapter::ClaudeEnvironment
+            | ProviderCompactionAdapter::GeminiDisabled
+            | ProviderCompactionAdapter::OpenCodeDisabled
+            | ProviderCompactionAdapter::QwenDisabled => Vec::new(),
         }
     }
 
@@ -1271,27 +1410,42 @@ pub(crate) fn tmux_capture_indicates_ready_for_input(
     capture: &str,
     provider: &ProviderKind,
 ) -> bool {
-    match provider {
-        ProviderKind::Claude => {
+    if let ProviderKind::Unsupported(_) = provider {
+        return crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
+            || tmux_capture_contains_wrapper_ready_marker(capture, provider);
+    }
+    let Some(adapter) = provider.readiness_adapter() else {
+        return false;
+    };
+    match adapter {
+        ProviderReadinessAdapter::Claude => {
             crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(capture)
         }
-        ProviderKind::Codex => {
+        ProviderReadinessAdapter::Codex => {
             crate::services::codex_tui::input::pane_looks_ready_for_codex_prompt(capture)
                 || crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(
                     capture,
                 )
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
         }
-        ProviderKind::Qwen => {
+        ProviderReadinessAdapter::Qwen => {
             crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
         }
-        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => {
+        ProviderReadinessAdapter::Gemini => {
+            crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
+                || tmux_capture_contains_wrapper_ready_marker(capture, provider)
+        }
+        ProviderReadinessAdapter::OpenCode => {
             crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
         }
     }
 }
+
+#[cfg(test)]
+#[path = "provider/provider_conformance_invariant_tests.rs"]
+mod provider_conformance_invariant_tests;
 
 fn tmux_capture_contains_wrapper_ready_marker(capture: &str, provider: &ProviderKind) -> bool {
     capture
