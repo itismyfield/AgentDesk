@@ -39,6 +39,9 @@ DEFAULT_API_URL = "http://127.0.0.1:8791/api/discord/send"
 LINEAGE_PATH_STATE_LIMIT = 10_000
 _FIX_SUBJECT_RE = re.compile(r"^fix(?:\([^)\r\n]+\))?!?:")
 _ISSUE_REFERENCE_RE = re.compile(r"(?<![\w#])#([1-9]\d*)\b")
+# Trailing (#N) groups are GitHub squash-merge PR numbers and are intentionally
+# excluded from lineage; including them would reintroduce the original
+# PR-number-as-generation bug.
 _SQUASH_PR_SUFFIX_RE = re.compile(r"(?:\s+\(#[1-9]\d*\))+\s*$")
 
 
@@ -133,12 +136,12 @@ def _require_git(result: subprocess.CompletedProcess[str], operation: str) -> st
 def collect_git_commits(repo_root: Path, since: str = DEFAULT_SINCE) -> list[GitCommit]:
     """Collect commit text and changed paths from the requested local git window."""
 
-    log = _require_git(
+    log_output = _require_git(
         _git(repo_root, ["log", f"--since={since}", "--format=%H"]),
         "read weekly git log",
     )
     commits: list[GitCommit] = []
-    for sha in (line.strip() for line in log.splitlines() if line.strip()):
+    for sha in (line.strip() for line in log_output.splitlines() if line.strip()):
         text = _require_git(
             _git(repo_root, ["show", "-s", "--format=%s%x00%b", sha]),
             f"read commit text for {sha}",

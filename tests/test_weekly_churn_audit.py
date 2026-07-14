@@ -86,6 +86,11 @@ class WeeklyChurnAuditTests(unittest.TestCase):
         self.assertTrue(is_fix_commit_subject(subject))
         self.assertEqual(issue_references(subject), (4262,))
         self.assertEqual(compute_issue_lineages([commit(subject)])[0].issues, (4262,))
+        self.assertEqual(issue_references("fix(deploy): #100 (#101) (#102)"), (100,))
+        self.assertEqual(
+            issue_references("fix: #100 see #99", "Regression-of: #98"),
+            (100, 99, 98),
+        )
 
     def test_issue_lineage_generation_count_spans_commit_text_edges(self) -> None:
         commits = [
