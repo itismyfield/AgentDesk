@@ -1763,7 +1763,7 @@ pub(super) async fn handle_text_message(
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
     }
-    if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
+    if let Some(ref knowledge) = memory_injection_plan.shared_knowledge_for_context {
         context_chunks.push(knowledge.to_string());
     }
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
@@ -1794,7 +1794,7 @@ pub(super) async fn handle_text_message(
 
     // Claude keeps SAK in the system prompt for prefix-cache stability.
     // Non-Claude providers receive SAK in the user context instead.
-    let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
+    let sak_for_system = memory_injection_plan.sak_for_system_prompt();
     let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let current_task_context = active_dispatch_info.as_ref().map(|info| {
         super::super::super::prompt_builder::CurrentTaskContext {

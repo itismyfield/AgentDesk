@@ -673,7 +673,7 @@
 | `services::discord::router::message_handler::voice_announcement_route` | `src/services/discord/router/message_handler/voice_announcement_route.rs` | 444 | 106 | 338 |  |
 | `services::discord::router::message_handler::voice_announcement_scope` | `src/services/discord/router/message_handler/voice_announcement_scope.rs` | 125 | 73 | 52 |  |
 | `services::discord::router::message_handler::watchdog` | `src/services/discord/router/message_handler/watchdog.rs` | 1255 | 960 | 295 |  |
-| `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 430 | 351 | 79 |  |
+| `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 470 | 358 | 112 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 130 | 130 | 0 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 526 | 526 | 0 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 907 | 299 | 608 |  |
@@ -706,7 +706,7 @@
 | `services::discord::session_runtime::worktree` | `src/services/discord/session_runtime/worktree.rs` | 601 | 601 | 0 |  |
 | `services::discord::settings` | `src/services/discord/settings.rs` | 345 | 345 | 0 |  |
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 539 | 506 | 33 |  |
-| `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 152 | 152 | 0 |  |
+| `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 205 | 153 | 52 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 449 | 449 | 0 |  |
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 520 | 258 | 262 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 386 | 386 | 0 |  |

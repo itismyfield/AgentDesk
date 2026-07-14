@@ -843,7 +843,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     if let Some(reply_context) = reply_context {
         context_chunks.push(reply_context);
     }
-    if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
+    if let Some(ref knowledge) = memory_injection_plan.shared_knowledge_for_context {
         context_chunks.push(knowledge.to_string());
     }
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
@@ -867,7 +867,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         true,
     );
 
-    let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
+    let sak_for_system = memory_injection_plan.sak_for_system_prompt();
     let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
     let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
