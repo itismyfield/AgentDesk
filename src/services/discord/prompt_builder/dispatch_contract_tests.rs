@@ -277,6 +277,8 @@ fn current_task_dispatch_layer_is_recorded_with_redacted_preview_only() {
 
 #[test]
 fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     let binding = test_role_binding("manifest-inventory-agent");
     let built = build_system_prompt_with_manifest(
         "ctx",
@@ -1132,6 +1134,8 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
 
 #[test]
 fn foreign_workspace_full_prompt_omits_repo_relative_doc_paths() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     // #4314 (end-to-end anchor): a Full-profile agent whose cwd is NOT an
     // AgentDesk checkout (no docs/source-of-truth.md / docs/memory-scope.md
     // under it) must never get the repo-relative doc references injected into
