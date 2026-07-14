@@ -786,9 +786,13 @@ src/
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   └── guarded_save.rs
 │   │   │   ├── stream_loop/
+│   │   │   │   ├── content_arms/
+│   │   │   │   │   └── provider_error_presentation.rs
 │   │   │   │   ├── content_arms.rs
 │   │   │   │   └── tool_arms.rs
 │   │   │   ├── terminal_outcome_delivery/
+│   │   │   │   ├── empty_response_recovery/
+│   │   │   │   │   └── guidance.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
