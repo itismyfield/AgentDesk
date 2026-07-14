@@ -12,6 +12,24 @@ pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::has_session(tmux_session_name)
 }
 
+/// Async-safe exact session-existence probe for request/reaper paths.
+///
+/// `tmux_session_exists` invokes the tmux CLI and is therefore blocking. Keep
+/// it off Tokio workers and bound the join so a wedged tmux server cannot
+/// wedge Discord intake. A timeout or join failure is treated conservatively
+/// as "present": stale-busy recovery must never release a turn unless absence
+/// was positively observed.
+pub async fn probe_tmux_session_exists(tmux_session_name: &str) -> bool {
+    let name = tmux_session_name.to_string();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || tmux_session_exists(&name)),
+    )
+    .await
+    .unwrap_or(Ok(true))
+    .unwrap_or(true)
+}
+
 pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::has_live_pane(tmux_session_name)
 }

@@ -2,7 +2,167 @@ use super::*;
 
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::tmux_common::current_tmux_owner_marker;
-use crate::services::tmux_diagnostics::{record_tmux_exit_reason, tmux_session_has_live_pane};
+use crate::services::tmux_diagnostics::{
+    probe_tmux_session_exists, record_tmux_exit_reason, tmux_session_has_live_pane,
+};
+
+/// The final race gate for stale-busy recovery. The first mailbox identity is
+/// captured before the yielding liveness probe; immediately before finalize we
+/// require the same identity still to own the mailbox and a second exact tmux
+/// probe still to report no session. `mailbox_finish_turn_if_matches` repeats
+/// the identity guard inside the mailbox actor at the actual release point.
+fn stale_busy_turn_is_still_reapable(
+    observed_user_msg_id: serenity::MessageId,
+    current_user_msg_id: Option<serenity::MessageId>,
+    has_session: bool,
+) -> bool {
+    !has_session && current_user_msg_id == Some(observed_user_msg_id)
+}
+
+async fn finalize_stale_busy_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    observed_user_msg_id: serenity::MessageId,
+    tmux_session_name: &str,
+    trigger: &'static str,
+) -> bool {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] stale-busy self-heal: finalizing turn {} in channel {} after tmux session {} disappeared (trigger={trigger})",
+        observed_user_msg_id.get(),
+        channel_id.get(),
+        tmux_session_name,
+    );
+    let outcome = shared
+        .turn_finalizer
+        .submit_terminal(
+            turn_finalizer::TurnKey::new(
+                channel_id,
+                observed_user_msg_id.get(),
+                shared.restart.current_generation,
+            ),
+            provider.clone(),
+            turn_finalizer::TerminalEvent::Cancel,
+            turn_finalizer::FinalizeContext::stale_busy_mailbox(),
+            shared.clone(),
+        )
+        .await;
+
+    let finalized_matching_turn = matches!(
+        outcome,
+        turn_finalizer::FinalizeOutcome::Finalized {
+            removed_token: Some(_),
+            ..
+        }
+    );
+    let released = finalized_matching_turn
+        && mailbox_snapshot(shared, channel_id)
+            .await
+            .active_user_message_id
+            != Some(observed_user_msg_id);
+    tracing::info!(
+        channel_id = channel_id.get(),
+        user_msg_id = observed_user_msg_id.get(),
+        trigger,
+        finalized = finalized_matching_turn,
+        released,
+        "stale-busy self-heal finalizer result"
+    );
+    released
+}
+
+/// Self-heal one busy mailbox whose managed tmux session may have been killed
+/// before emitting a terminal result. Returns true only when the observed turn
+/// no longer owns the mailbox after the identity-guarded finalizer submission,
+/// allowing intake to retry its claim exactly once.
+pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    trigger: &'static str,
+) -> bool {
+    if !provider.uses_managed_tmux_backend() {
+        return false;
+    }
+
+    let observed = mailbox_snapshot(shared, channel_id).await;
+    if observed.cancel_token.is_none() {
+        return false;
+    }
+    let Some(observed_user_msg_id) = observed.active_user_message_id else {
+        // An ambiguous id-0 release is explicitly forbidden for this recovery.
+        return false;
+    };
+
+    if probe_tmux_session_exists(tmux_session_name).await {
+        return false;
+    }
+
+    // Close both yielding windows: a newer mailbox owner or a respawned tmux
+    // session must survive. The finalizer/mailer actor closes the remaining
+    // identity race at the token mutation itself.
+    let current_user_msg_id = mailbox_snapshot(shared, channel_id)
+        .await
+        .active_user_message_id;
+    let has_session = probe_tmux_session_exists(tmux_session_name).await;
+    if !stale_busy_turn_is_still_reapable(observed_user_msg_id, current_user_msg_id, has_session) {
+        return false;
+    }
+
+    finalize_stale_busy_turn(
+        shared,
+        provider,
+        channel_id,
+        observed_user_msg_id,
+        tmux_session_name,
+        trigger,
+    )
+    .await
+}
+
+/// Idle-channel half of #4485: unlike the legacy dead-session pass below,
+/// this starts from active mailboxes, so a fully removed tmux session (absent
+/// from `list-sessions`) is still discoverable and its global concurrency slot
+/// is returned through TurnFinalizer.
+async fn reap_stale_busy_mailboxes(shared: &Arc<SharedData>) {
+    let provider = shared.settings.read().await.provider.clone();
+    if !provider.uses_managed_tmux_backend() {
+        return;
+    }
+
+    let active_mailboxes = shared.mailboxes.snapshot_all().await;
+    let candidates: Vec<_> = {
+        let data = shared.core.lock().await;
+        active_mailboxes
+            .into_iter()
+            .filter_map(|(channel_id, snapshot)| {
+                (snapshot.cancel_token.is_some() && snapshot.active_user_message_id.is_some())
+                    .then(|| {
+                        data.sessions
+                            .get(&channel_id)
+                            .and_then(|session| session.channel_name.as_deref())
+                            .map(|channel_name| {
+                                (channel_id, provider.build_tmux_session_name(channel_name))
+                            })
+                    })
+                    .flatten()
+            })
+            .collect()
+    };
+
+    for (channel_id, tmux_session_name) in candidates {
+        heal_stale_busy_mailbox(
+            shared,
+            &provider,
+            channel_id,
+            &tmux_session_name,
+            "periodic_reaper",
+        )
+        .await;
+    }
+}
 
 /// Kill orphan tmux sessions (AgentDesk-*) that don't map to any known channel.
 /// Called after restore_tmux_watchers to clean up sessions from renamed/deleted channels.
@@ -159,6 +319,8 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
 /// showing working/dispatched status. This catches cases where the watcher
 /// missed cleanup (e.g. crashed, or session died between watcher polls).
 pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
+    reap_stale_busy_mailboxes(shared).await;
+
     let provider = shared.settings.read().await.provider.clone();
     let current_owner_marker = current_tmux_owner_marker();
     let api_port = shared.api_port;
@@ -636,10 +798,142 @@ fn extract_tmux_session_name_from_wrapper_command(command: &str) -> Option<Strin
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        extract_tmux_session_name_from_wrapper_command, parse_orphan_tmux_wrapper_process_line,
-        provider_for_managed_tmux_wrapper_subcommand,
+        extract_tmux_session_name_from_wrapper_command, finalize_stale_busy_turn,
+        parse_orphan_tmux_wrapper_process_line, provider_for_managed_tmux_wrapper_subcommand,
+        stale_busy_turn_is_still_reapable,
     };
-    use crate::services::provider::ProviderKind;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    struct RuntimeRootGuard;
+
+    impl RuntimeRootGuard {
+        fn set(path: &std::path::Path) -> Self {
+            unsafe {
+                std::env::set_var("AGENTDESK_ROOT_DIR", path);
+            }
+            Self
+        }
+    }
+
+    impl Drop for RuntimeRootGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("AGENTDESK_ROOT_DIR");
+            }
+        }
+    }
+
+    #[test]
+    fn stale_busy_guard_preserves_respawned_or_reowned_turn() {
+        let observed = MessageId::new(4_485_101);
+
+        assert!(
+            !stale_busy_turn_is_still_reapable(observed, Some(observed), true),
+            "a respawned tmux session must prevent stale-busy finalization"
+        );
+        assert!(
+            !stale_busy_turn_is_still_reapable(observed, Some(MessageId::new(4_485_102)), false,),
+            "a newer mailbox identity must prevent stale-busy finalization"
+        );
+        assert!(
+            stale_busy_turn_is_still_reapable(observed, Some(observed), false),
+            "the same busy identity with a positively absent session must be reapable"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_busy_finalize_uses_identity_gate_and_returns_global_slot() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root = RuntimeRootGuard::set(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_485_201);
+        let user_msg_id = MessageId::new(4_485_202);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token.clone(),
+                UserId::new(7),
+                user_msg_id,
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        assert!(
+            finalize_stale_busy_turn(
+                &shared,
+                &ProviderKind::Claude,
+                channel_id,
+                user_msg_id,
+                "AgentDesk-claude-test-4485",
+                "test",
+            )
+            .await,
+            "the matching stale turn must be released by TurnFinalizer"
+        );
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .active_user_message_id,
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_busy_finalize_cannot_release_newer_mailbox_identity() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root = RuntimeRootGuard::set(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_485_301);
+        let stale_user_msg_id = MessageId::new(4_485_302);
+        let live_user_msg_id = MessageId::new(4_485_303);
+        let live_token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                live_token.clone(),
+                UserId::new(8),
+                live_user_msg_id,
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        assert!(
+            !finalize_stale_busy_turn(
+                &shared,
+                &ProviderKind::Claude,
+                channel_id,
+                stale_user_msg_id,
+                "AgentDesk-claude-test-4485",
+                "test",
+            )
+            .await,
+            "an identity mismatch must remain a finalizer no-op"
+        );
+        assert!(!live_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .active_user_message_id,
+            Some(live_user_msg_id)
+        );
+    }
 
     #[test]
     fn extracts_tmux_session_name_from_legacy_output_path() {

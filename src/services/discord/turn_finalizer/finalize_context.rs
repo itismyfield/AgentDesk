@@ -98,6 +98,20 @@ impl FinalizeContext {
         }
     }
 
+    /// #4485 stale-busy mailbox recovery. The detector has positively proved
+    /// the managed tmux session absent, so no live owner remains to clear the
+    /// inflight row. The finalizer must clear it while retaining watcher-style
+    /// cancellation semantics and completion-event queue admission.
+    pub(in crate::services::discord) fn stale_busy_mailbox() -> Self {
+        Self {
+            clear_inflight: true,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: true,
+            expected_idempotent_guard_miss: true,
+        }
+    }
+
     /// Deadline-armed gate-timeout backstop, fired from the reconciler with no
     /// caller to have cleared inflight: finalize fully (clear inflight here),
     /// no completion-cleanup or voice drain (watcher semantics), and preserve

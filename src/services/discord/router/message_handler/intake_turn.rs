@@ -1289,7 +1289,7 @@ pub(super) async fn handle_text_message(
     // because the async gap between check and insert allows interleaving.
     // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
-    let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
+    let mut started = mailbox_try_start_turn_with_terminal_marker_cleanup(
         shared,
         channel_id,
         cancel_token.clone(),
@@ -1298,6 +1298,34 @@ pub(super) async fn handle_text_message(
         adk_session_key.as_deref(),
     )
     .await;
+
+    // #4485: a provider killed before its terminal result leaves the mailbox
+    // busy forever. Only after losing the claim, prove the managed tmux session
+    // absent twice, finalize the captured real turn identity through the
+    // TurnFinalizer chokepoint, then retry this claim once. A live/respawned
+    // session or a changed mailbox owner falls through to the normal enqueue.
+    #[cfg(unix)]
+    if !started
+        && let Some(tmux_session_name) = tmux_session_name.as_deref()
+        && super::super::super::tmux_reaper::heal_stale_busy_mailbox(
+            shared,
+            &provider,
+            channel_id,
+            tmux_session_name,
+            "discord_intake",
+        )
+        .await
+    {
+        started = mailbox_try_start_turn_with_terminal_marker_cleanup(
+            shared,
+            channel_id,
+            cancel_token.clone(),
+            request_owner,
+            user_msg_id,
+            adk_session_key.as_deref(),
+        )
+        .await;
+    }
 
     // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
     // — see latency_spans.rs). Never `.log()`'d on the early returns below.

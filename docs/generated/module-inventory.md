@@ -662,7 +662,7 @@
 | `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 87 | 87 | 0 |  |
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 250 | 211 | 39 |  |
 | `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1561 | 1337 | 224 | giant-file |
-| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3070 | 2834 | 236 | giant-file |
+| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3098 | 2862 | 236 | giant-file |
 | `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 704 | 609 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 256 | 256 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::voice_intake` | `src/services/discord/router/message_handler/intake_turn/voice_intake.rs` | 155 | 155 | 0 |  |
@@ -741,7 +741,7 @@
 | `services::discord::tmux_placeholder_suppression` | `src/services/discord/tmux_placeholder_suppression/mod.rs` | 1377 | 348 | 1029 |  |
 | `services::discord::tmux_placeholder_suppression::evidence` | `src/services/discord/tmux_placeholder_suppression/evidence.rs` | 259 | 259 | 0 |  |
 | `services::discord::tmux_placeholder_suppression::ops` | `src/services/discord/tmux_placeholder_suppression/ops.rs` | 584 | 584 | 0 |  |
-| `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 781 | 676 | 105 |  |
+| `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 1075 | 838 | 237 |  |
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 82 | 82 | 0 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 602 | 479 | 123 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
@@ -868,7 +868,7 @@
 | `services::discord::turn_finalizer::completion_signal` | `src/services/discord/turn_finalizer/completion_signal.rs` | 310 | 54 | 256 |  |
 | `services::discord::turn_finalizer::delivery_lease` | `src/services/discord/turn_finalizer/delivery_lease.rs` | 515 | 87 | 428 |  |
 | `services::discord::turn_finalizer::finalize` | `src/services/discord/turn_finalizer/finalize.rs` | 578 | 250 | 328 |  |
-| `services::discord::turn_finalizer::finalize_context` | `src/services/discord/turn_finalizer/finalize_context.rs` | 165 | 134 | 31 |  |
+| `services::discord::turn_finalizer::finalize_context` | `src/services/discord/turn_finalizer/finalize_context.rs` | 179 | 148 | 31 |  |
 | `services::discord::turn_finalizer::reconcile` | `src/services/discord/turn_finalizer/reconcile.rs` | 221 | 221 | 0 |  |
 | `services::discord::turn_finalizer::watcher_backstop` | `src/services/discord/turn_finalizer/watcher_backstop.rs` | 273 | 210 | 63 |  |
 | `services::discord::turn_view_reconciler` | `src/services/discord/turn_view_reconciler.rs` | 2213 | 2213 | 0 | giant-file |
@@ -1042,7 +1042,7 @@
 | `services::slo` | `src/services/slo/mod.rs` | 535 | 508 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 1951 | 1099 | 852 | giant-file |
-| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 258 | 247 | 11 |  |
+| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 276 | 265 | 11 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 803 | 743 | 60 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 286 | 220 | 66 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4417 | 1966 | 2451 | giant-file |
