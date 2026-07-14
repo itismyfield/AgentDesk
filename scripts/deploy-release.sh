@@ -1501,16 +1501,31 @@ else
     sleep 2
 fi
 
-# Watermark the shared append-only stdout log only after the old dcserver has
-# exited. The post-deploy WARN-rate smoke must not count lines from the prior
-# process lifetime (#4511).
+_post_deploy_smoke_log_identity_and_size() {
+    local log_path="$1"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        stat -f '%i %z' "$log_path"
+    else
+        stat -c '%i %s' "$log_path"
+    fi
+}
+
+# Watermark the stdout log only after the old dcserver has exited. The sampler
+# uses the byte offset while the inode is unchanged and the file has not shrunk;
+# after rotation or truncation it samples the entire current file (#4511).
 POST_DEPLOY_SMOKE_LOG_PATH="$ADK_REL/logs/dcserver.stdout.log"
 POST_DEPLOY_SMOKE_LOG_OFFSET=""
+POST_DEPLOY_SMOKE_LOG_INODE=""
 if [ ! -e "$POST_DEPLOY_SMOKE_LOG_PATH" ]; then
     POST_DEPLOY_SMOKE_LOG_OFFSET=0
-elif POST_DEPLOY_SMOKE_LOG_OFFSET=$(wc -c < "$POST_DEPLOY_SMOKE_LOG_PATH" 2>/dev/null); then
-    POST_DEPLOY_SMOKE_LOG_OFFSET="${POST_DEPLOY_SMOKE_LOG_OFFSET//[[:space:]]/}"
+    POST_DEPLOY_SMOKE_LOG_INODE=0
+elif POST_DEPLOY_SMOKE_LOG_STAT=$(
+    _post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH" 2>/dev/null
+); then
+    read -r POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET \
+        <<< "$POST_DEPLOY_SMOKE_LOG_STAT"
 fi
+unset POST_DEPLOY_SMOKE_LOG_STAT
 
 # Promote the already signed staged binary atomically. In-place codesign can
 # corrupt the OS signing cache if it fails mid-write.
@@ -2007,6 +2022,7 @@ _post_deploy_smoke_check_wedges() {
 _post_deploy_smoke_check_fail_closed_warn_rate() {
     local log_path="$POST_DEPLOY_SMOKE_LOG_PATH"
     local sample_path="$POST_DEPLOY_SMOKE_TMP_DIR/recent-dcserver.log"
+    local current_log_stat current_inode current_size sample_start_byte
     local sampled_lines warn_lines fail_closed_warns
     case "$POST_DEPLOY_SMOKE_LOG_LINES" in
         ''|*[!0-9]*)
@@ -2034,7 +2050,32 @@ _post_deploy_smoke_check_fail_closed_warn_rate() {
             return 1
             ;;
     esac
-    if ! tail -c "+$((POST_DEPLOY_SMOKE_LOG_OFFSET + 1))" "$log_path" \
+    case "$POST_DEPLOY_SMOKE_LOG_INODE" in
+        ''|*[!0-9]*)
+            _post_deploy_smoke_fail "fail-closed WARN sample: restart log identity unavailable" || true
+            return 1
+            ;;
+    esac
+    if ! current_log_stat=$(
+        _post_deploy_smoke_log_identity_and_size "$log_path" 2>/dev/null
+    ); then
+        _post_deploy_smoke_fail "fail-closed WARN sample: could not stat current log ${log_path}" || true
+        return 1
+    fi
+    read -r current_inode current_size <<< "$current_log_stat"
+    case "$current_inode:$current_size" in
+        *[!0-9:]*|:*|*:)
+            _post_deploy_smoke_fail "fail-closed WARN sample: invalid current log identity or size" || true
+            return 1
+            ;;
+    esac
+    if [ "$current_inode" != "$POST_DEPLOY_SMOKE_LOG_INODE" ] \
+      || [ "$current_size" -lt "$POST_DEPLOY_SMOKE_LOG_OFFSET" ]; then
+        sample_start_byte=1
+    else
+        sample_start_byte=$((POST_DEPLOY_SMOKE_LOG_OFFSET + 1))
+    fi
+    if ! tail -c "+${sample_start_byte}" "$log_path" \
       | tail -n "$POST_DEPLOY_SMOKE_LOG_LINES" > "$sample_path"; then
         _post_deploy_smoke_fail "fail-closed WARN sample: could not read post-restart log lines" || true
         return 1

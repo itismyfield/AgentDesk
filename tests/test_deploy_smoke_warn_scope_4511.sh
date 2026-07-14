@@ -20,6 +20,7 @@ extract_function() {
 }
 
 # Exercise the production functions without executing the deploy script.
+eval "$(extract_function _post_deploy_smoke_log_identity_and_size)"
 eval "$(extract_function _post_deploy_smoke_note)"
 eval "$(extract_function _post_deploy_smoke_fail)"
 eval "$(extract_function _post_deploy_smoke_check_fail_closed_warn_rate)"
@@ -41,8 +42,9 @@ mkdir -p "$ADK_REL/logs" "$POST_DEPLOY_SMOKE_TMP_DIR"
 for index in 1 2 3 4 5; do
     printf '2026-07-14T08:03:4%sZ WARN fail-closed stale-before-restart\n' "$index"
 done > "$POST_DEPLOY_SMOKE_LOG_PATH"
-POST_DEPLOY_SMOKE_LOG_OFFSET=$(wc -c < "$POST_DEPLOY_SMOKE_LOG_PATH" | tr -d '[:space:]')
-export POST_DEPLOY_SMOKE_LOG_OFFSET
+read -r POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET \
+    <<< "$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH")"
+export POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET
 
 printf '%s\n' \
     '2026-07-14T09:16:54Z INFO dcserver started' \
@@ -70,5 +72,59 @@ if ! grep -q 'sample=7 warn_lines=5 fail_closed_warns=5 threshold=5' "$POST_DEPL
     echo "FAIL: post-restart WARN spike was not counted at the existing threshold" >&2
     exit 1
 fi
+
+POST_DEPLOY_SMOKE_FAILURES=()
+: > "$POST_DEPLOY_SMOKE_EVIDENCE"
+for ((index = 1; index <= 40; index++)); do
+    printf 'stale-before-truncation-%02d padding-padding-padding-padding-padding\n' "$index"
+done > "$POST_DEPLOY_SMOKE_LOG_PATH"
+read -r POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET \
+    <<< "$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH")"
+: > "$POST_DEPLOY_SMOKE_LOG_PATH"
+for index in 1 2 3 4 5; do
+    printf '2026-07-14T09:18:0%sZ WARN fail-closed new-after-truncation\n' "$index"
+done >> "$POST_DEPLOY_SMOKE_LOG_PATH"
+read -r current_inode current_size \
+    <<< "$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH")"
+if [ "$current_inode" != "$POST_DEPLOY_SMOKE_LOG_INODE" ] \
+  || [ "$current_size" -ge "$POST_DEPLOY_SMOKE_LOG_OFFSET" ]; then
+    echo "FAIL: truncation fixture did not retain inode and shrink below watermark" >&2
+    exit 1
+fi
+if _post_deploy_smoke_check_fail_closed_warn_rate; then
+    echo "FAIL: WARN spike after in-place truncation did not trip the threshold" >&2
+    exit 1
+fi
+if ! grep -q 'sample=5 warn_lines=5 fail_closed_warns=5 threshold=5' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+    echo "FAIL: sampler did not read the full truncated post-restart log" >&2
+    exit 1
+fi
+echo "truncate-then-WARN: $(grep 'sample=5 warn_lines=5 fail_closed_warns=5 threshold=5' "$POST_DEPLOY_SMOKE_EVIDENCE")"
+
+POST_DEPLOY_SMOKE_FAILURES=()
+: > "$POST_DEPLOY_SMOKE_EVIDENCE"
+printf 'stale-before-rotation\n' > "$POST_DEPLOY_SMOKE_LOG_PATH"
+read -r POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET \
+    <<< "$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH")"
+mv "$POST_DEPLOY_SMOKE_LOG_PATH" "$POST_DEPLOY_SMOKE_LOG_PATH.1"
+for index in 1 2 3 4 5; do
+    printf '2026-07-14T09:19:0%sZ WARN fail-closed new-after-rotation padding-padding\n' "$index"
+done > "$POST_DEPLOY_SMOKE_LOG_PATH"
+read -r current_inode current_size \
+    <<< "$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH")"
+if [ "$current_inode" = "$POST_DEPLOY_SMOKE_LOG_INODE" ] \
+  || [ "$current_size" -lt "$POST_DEPLOY_SMOKE_LOG_OFFSET" ]; then
+    echo "FAIL: rotation fixture did not replace inode with a larger file" >&2
+    exit 1
+fi
+if _post_deploy_smoke_check_fail_closed_warn_rate; then
+    echo "FAIL: WARN spike after log rotation did not trip the threshold" >&2
+    exit 1
+fi
+if ! grep -q 'sample=5 warn_lines=5 fail_closed_warns=5 threshold=5' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+    echo "FAIL: sampler did not read the full rotated post-restart log" >&2
+    exit 1
+fi
+echo "rotate-then-WARN: $(grep 'sample=5 warn_lines=5 fail_closed_warns=5 threshold=5' "$POST_DEPLOY_SMOKE_EVIDENCE")"
 
 echo "deploy smoke WARN post-restart scope tests passed"
