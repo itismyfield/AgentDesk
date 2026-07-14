@@ -81,11 +81,15 @@ fn stale_dispatch_queue_exit_kind(
     let result_says_superseded = result
         .map(str::to_ascii_lowercase)
         .is_some_and(|value| value.contains("superseded"));
-    if normalized_status == "superseded" || result_says_superseded {
-        Some(QueueExitKind::Superseded)
-    } else {
-        Some(QueueExitKind::Cancelled)
+    // Dispatch status tracks task lifecycle, not an authenticated queue-cancel
+    // action. Only explicit supersede evidence can discard the queued message;
+    // the mailbox cancellation path handles actual user queue cancellation.
+    if normalized_status == "superseded"
+        || (normalized_status == "cancelled" && result_says_superseded)
+    {
+        return Some(QueueExitKind::Superseded);
     }
+    None
 }
 
 pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
@@ -152,7 +156,7 @@ mod dispatch_turn_gate_tests {
     }
 
     #[test]
-    fn stale_dispatch_queue_exit_kind_classifies_terminal_statuses() {
+    fn stale_dispatch_queue_exit_kind_classifies_explicit_exit_evidence() {
         assert_eq!(stale_dispatch_queue_exit_kind(Some("pending"), None), None);
         assert_eq!(
             stale_dispatch_queue_exit_kind(
@@ -162,13 +166,37 @@ mod dispatch_turn_gate_tests {
             Some(QueueExitKind::Superseded)
         );
         assert_eq!(
-            stale_dispatch_queue_exit_kind(Some("failed"), Some("tmux session died")),
-            Some(QueueExitKind::Cancelled)
+            stale_dispatch_queue_exit_kind(Some("superseded"), None),
+            Some(QueueExitKind::Superseded)
         );
         assert_eq!(
             stale_dispatch_queue_exit_kind(None, None),
             Some(QueueExitKind::Superseded)
         );
+    }
+
+    #[test]
+    fn queued_user_instruction_survives_terminal_status_without_explicit_exit_cause() {
+        for (status, result) in [
+            (
+                "completed",
+                "ordinary result discussing a superseded prior attempt",
+            ),
+            ("failed", "tmux session died"),
+            (
+                "cancelled",
+                concat!(
+                    r#"{"completion_source":"force_transition","reason":"#,
+                    r#""auto_cancelled_on_terminal_card"}"#
+                ),
+            ),
+        ] {
+            assert_eq!(
+                stale_dispatch_queue_exit_kind(Some(status), Some(result)),
+                None,
+                "{status} lacks explicit queue-exit evidence"
+            );
+        }
     }
 }
 
