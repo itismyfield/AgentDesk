@@ -2,7 +2,7 @@
 
 use sqlx::PgPool;
 
-use super::{TaskCardScope, cleanup_old_rows_pg, db_id, stable_nonce};
+use super::{TaskCardScope, cleanup_old_rows_pg, db_id, find_terminal_delivery_pg, stable_nonce};
 
 pub(super) async fn record_footer_only_pg(
     pool: &PgPool,
@@ -10,6 +10,12 @@ pub(super) async fn record_footer_only_pg(
     content: &str,
     content_hash: &str,
 ) -> Result<(), String> {
+    if find_terminal_delivery_pg(pool, scope, content_hash)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
     let channel_id = db_id(scope.channel_id, "channel_id")?;
     let nonce = stable_nonce(scope, 1);
     sqlx::query(
@@ -33,7 +39,12 @@ pub(super) async fn record_footer_only_pg(
     .map_err(|error| format!("record footer-only task card state: {error}"))?;
     sqlx::query(
         "UPDATE task_notification_card_state
-         SET rendered_content = $6, content_hash = $7, updated_at = NOW()
+         SET rendered_content = $6,
+             content_hash = $7,
+             terminal_delivery_fingerprint = COALESCE(
+                 terminal_delivery_fingerprint, $5
+             ),
+             updated_at = NOW()
          WHERE channel_id = $1 AND provider = $2
            AND ((session_key = $3 AND event_key = $4)
                 OR ($5::VARCHAR IS NOT NULL AND terminal_delivery_fingerprint = $5))

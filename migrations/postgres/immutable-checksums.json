@@ -463,7 +463,7 @@
     },
     {
       "path": "migrations/postgres/0090_task_notification_terminal_delivery_fingerprint.sql",
-      "sha256": "bf4edff97d25772f942f7cd46357c8d78f859bb2daf757d530aba77a10ea6beb",
+      "sha256": "2d71a1a62b2b317a6e2286d089bc78e18cb6526de2ad3eaf7f61735409b80fa1",
       "version": 90
     }
   ],

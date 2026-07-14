@@ -39,16 +39,14 @@ impl TaskCardEvent {
             .map(str::trim)
             .filter(|source_event_id| !source_event_id.is_empty())
             .map(|source_event_id| terminal_source_fingerprint(provider, source_event_id));
-        let event_key = terminal_delivery_fingerprint
-            .as_ref()
-            .map(|fingerprint| format!("source:{fingerprint}"))
-            .unwrap_or_else(|| {
-                semantic_event_key(
-                    task_id.as_deref(),
-                    tool_use_id.as_deref(),
-                    &normalized_payload,
-                )
-            });
+        // The provider entry id is a supplementary replay identity, never the
+        // card's claim key. XML observation and stream-JSON promotion must keep
+        // converging on the same semantic row.
+        let event_key = semantic_event_key(
+            task_id.as_deref(),
+            tool_use_id.as_deref(),
+            &normalized_payload,
+        );
         Self {
             scope: source_bound_scope(
                 channel_id,
@@ -103,16 +101,11 @@ impl TaskCardEvent {
             .map(str::trim)
             .filter(|source_event_id| !source_event_id.is_empty())
             .map(|source_event_id| terminal_source_fingerprint(provider, source_event_id));
-        let event_key = terminal_delivery_fingerprint
-            .as_ref()
-            .map(|fingerprint| format!("source:{fingerprint}"))
-            .unwrap_or_else(|| {
-                semantic_event_key(
-                    semantic.task_id.as_deref(),
-                    semantic.tool_use_id.as_deref(),
-                    &semantic.payload_fingerprint,
-                )
-            });
+        let event_key = semantic_event_key(
+            semantic.task_id.as_deref(),
+            semantic.tool_use_id.as_deref(),
+            &semantic.payload_fingerprint,
+        );
         Self {
             scope: source_bound_scope(
                 channel_id,

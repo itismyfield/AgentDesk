@@ -172,13 +172,33 @@ pub(super) fn merge_context(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub(super) struct TaskCardScope {
     channel_id: u64,
     provider: String,
     session_key: String,
     event_key: String,
     terminal_delivery_fingerprint: Option<String>,
+}
+
+impl PartialEq for TaskCardScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.channel_id == other.channel_id
+            && self.provider == other.provider
+            && self.session_key == other.session_key
+            && self.event_key == other.event_key
+    }
+}
+
+impl Eq for TaskCardScope {}
+
+impl std::hash::Hash for TaskCardScope {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.channel_id.hash(state);
+        self.provider.hash(state);
+        self.session_key.hash(state);
+        self.event_key.hash(state);
+    }
 }
 
 impl TaskCardScope {
@@ -782,7 +802,7 @@ async fn deliver_claim<T: TaskCardTransport>(
             Ok(CardEnsureOutcome {
                 message_id,
                 bot_key: claimed.bot_key,
-                disposition: if claimed.revision > 1 {
+                disposition: if claimed.revision > 1 && !claimed.new_terminal_completion {
                     CardDisposition::Replaced
                 } else {
                     CardDisposition::Created
