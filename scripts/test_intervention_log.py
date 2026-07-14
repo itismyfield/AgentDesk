@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
+import threading
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from scripts.intervention_log import (
     INTERVENTION_RECURRENCE_THRESHOLD,
@@ -22,6 +26,10 @@ from scripts.intervention_log import (
 
 
 class InterventionLogTest(unittest.TestCase):
+    @staticmethod
+    def _schema_history(value: str) -> str:
+        return f"schema_version = {value}\n"
+
     def _seed(self, root: Path, count: int = 0) -> Path:
         path = root / "scripts" / "intervention_history.toml"
         path.parent.mkdir(parents=True)
@@ -78,6 +86,100 @@ class InterventionLogTest(unittest.TestCase):
             self.assertEqual(restart.event.count, 1)
             self.assertEqual(second.event.count, 2)
             self.assertEqual([event.count for event in parse_history(history.read_text())], [1, 1, 2])
+
+    def test_concurrent_records_serialize_read_count_append(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            history = self._seed(root)
+            second_lock_attempted = threading.Event()
+            counter_lock = threading.Lock()
+            lock_attempts = 0
+            first_parse = True
+            original_flock = fcntl.flock
+            original_parse = parse_history
+
+            def observed_flock(file_descriptor: int, operation: int) -> None:
+                nonlocal lock_attempts
+                if operation == fcntl.LOCK_EX:
+                    with counter_lock:
+                        lock_attempts += 1
+                        if lock_attempts == 2:
+                            second_lock_attempted.set()
+                original_flock(file_descriptor, operation)
+
+            def parse_after_both_lock_attempts(text: str):
+                nonlocal first_parse
+                with counter_lock:
+                    wait_for_second = first_parse
+                    first_parse = False
+                if wait_for_second and not second_lock_attempted.wait(timeout=5):
+                    raise AssertionError("second record did not attempt the store lock")
+                return original_parse(text)
+
+            with (
+                mock.patch(
+                    "scripts.intervention_log.fcntl.flock", side_effect=observed_flock
+                ),
+                mock.patch(
+                    "scripts.intervention_log.parse_history",
+                    side_effect=parse_after_both_lock_attempts,
+                ),
+                ThreadPoolExecutor(max_workers=2) as executor,
+            ):
+                futures = [
+                    executor.submit(
+                        self._record, root, history, "marker-clear", []
+                    )
+                    for _ in range(2)
+                ]
+                results = [future.result(timeout=10) for future in futures]
+
+            self.assertEqual(sorted(result.event.count for result in results), [1, 2])
+            stored = history.read_text(encoding="utf-8")
+            self.assertEqual(
+                [event.count for event in parse_history(stored)],
+                [1, 2],
+            )
+            self.assertIn("count = 2", stored)
+
+    def test_out_of_sequence_count_is_repaired_and_recording_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            history = self._seed(root, 2)
+            corrupted = history.read_text(encoding="utf-8").replace(
+                "count = 2", "count = 1"
+            )
+            history.write_text(corrupted, encoding="utf-8")
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                repaired = parse_history(corrupted)
+                result = self._record(root, history, "marker-clear", [])
+
+            self.assertEqual([event.count for event in repaired], [1, 2])
+            self.assertEqual(result.event.count, 3)
+            self.assertIn("using positional count 2", stderr.getvalue())
+            stored = history.read_text(encoding="utf-8")
+            self.assertIn("count = 3", stored)
+            self.assertEqual(
+                [event.count for event in parse_history(stored)],
+                [1, 2, 3],
+            )
+
+    def test_schema_version_true_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_history(self._schema_history("true"))
+
+    def test_schema_version_float_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_history(self._schema_history("1.0"))
+
+    def test_schema_version_string_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_history(self._schema_history('"1"'))
+
+    def test_schema_version_integer_is_accepted(self) -> None:
+        self.assertEqual(parse_history(self._schema_history("1")), [])
 
     def test_threshold_crossing_builds_redesign_candidate_draft(self) -> None:
         below = INTERVENTION_RECURRENCE_THRESHOLD

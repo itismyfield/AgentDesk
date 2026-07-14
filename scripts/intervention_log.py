@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
 import socket
@@ -43,8 +44,13 @@ class RecordResult:
 
 def parse_history(text: str) -> list[InterventionEvent]:
     parsed = tomllib.loads(text)
-    if parsed.get("schema_version") != 1:
-        raise ValueError("intervention history schema_version must be 1")
+    schema_version = parsed.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != 1
+    ):
+        raise ValueError("intervention history schema_version must be integer 1")
     rows = parsed.get("intervention", [])
     if not isinstance(rows, list):
         raise ValueError("intervention history [[intervention]] entries must be an array")
@@ -72,10 +78,16 @@ def parse_history(text: str) -> list[InterventionEvent]:
             raise ValueError(f"intervention event {index}: issue must be positive")
         count = row.get("count")
         expected = last_count.get(event_type, 0) + 1
-        if isinstance(count, bool) or not isinstance(count, int) or count != expected:
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
             raise ValueError(
-                f"intervention event {index} ({event_type}): count must be "
-                f"{expected}, got {count!r}"
+                f"intervention event {index} ({event_type}): count must be a "
+                f"positive integer, got {count!r}"
+            )
+        if count != expected:
+            print(
+                f"WARNING: intervention event {index} ({event_type}) has "
+                f"out-of-sequence count {count}; using positional count {expected}",
+                file=sys.stderr,
             )
         event = InterventionEvent(
             type=event_type,
@@ -83,10 +95,10 @@ def parse_history(text: str) -> list[InterventionEvent]:
             node=row["node"],
             note=row["note"],
             issue=issue,
-            count=count,
+            count=expected,
         )
         events.append(event)
-        last_count[event_type] = count
+        last_count[event_type] = expected
     return events
 
 
@@ -201,22 +213,26 @@ def record_intervention(
     ):
         raise ValueError("issue must be a positive integer")
 
-    history_text = history_path.read_text(encoding="utf-8")
-    events = parse_history(history_text)
-    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    event = InterventionEvent(
-        type=type,
-        timestamp=timestamp or now.replace("+00:00", "Z"),
-        node=node,
-        note=note,
-        issue=issue,
-        count=next_count(events, type),
-    )
-    separator = "" if history_text.endswith("\n\n") else "\n"
-    block = separator + _event_block(event)
-    parse_history(history_text + block)
-    with history_path.open("a", encoding="utf-8") as history_file:
+    with history_path.open("r+", encoding="utf-8") as history_file:
+        fcntl.flock(history_file.fileno(), fcntl.LOCK_EX)
+        history_text = history_file.read()
+        events = parse_history(history_text)
+        now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        event = InterventionEvent(
+            type=type,
+            timestamp=timestamp or now.replace("+00:00", "Z"),
+            node=node,
+            note=note,
+            issue=issue,
+            count=next_count(events, type),
+        )
+        separator = "" if history_text.endswith("\n\n") else "\n"
+        block = separator + _event_block(event)
+        parse_history(history_text + block)
+        history_file.seek(0, os.SEEK_END)
         history_file.write(block)
+        history_file.flush()
+        fcntl.flock(history_file.fileno(), fcntl.LOCK_UN)
 
     draft_path: Path | None = None
     invoked = False
