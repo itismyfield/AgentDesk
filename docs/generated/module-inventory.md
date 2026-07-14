@@ -466,7 +466,7 @@
 | `services::discord::commands::sidecar` | `src/services/discord/commands/sidecar.rs` | 41 | 41 | 0 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 381 | 381 | 0 |  |
 | `services::discord::commands::steer` | `src/services/discord/commands/steer.rs` | 147 | 147 | 0 |  |
-| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1496 | 1496 | 0 | giant-file |
+| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1493 | 1493 | 0 | giant-file |
 | `services::discord::commands::tui_passthrough` | `src/services/discord/commands/tui_passthrough.rs` | 412 | 357 | 55 |  |
 | `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 1056 | 998 | 58 |  |
 | `services::discord::delivery_lease_key` | `src/services/discord/delivery_lease_key.rs` | 156 | 156 | 0 |  |

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
 use super::super::*;
-use super::build_provider_skill_prompt;
+use super::{build_provider_skill_prompt, owner_error_response as err};
 use crate::services::provider::CancelToken;
 
 enum TextStopLookup {
@@ -1153,10 +1153,7 @@ Any other message is sent to {p}.
                     parts.join("\n")
                 }
                 Ok(Err(e)) => super::owner_error_response("셸 명령을 실행하지 못했어요.", &e),
-                Err(e) => super::owner_error_response(
-                    "셸 명령을 처리하는 중 오류가 발생했어요.",
-                    &e.to_string(),
-                ),
+                Err(e) => err("셸 명령을 처리하는 중 오류가 발생했어요.", &e.to_string()),
             };
 
             send_long_message_raw(&ctx.http, channel_id, &response, &data.shared).await?;
