@@ -44,6 +44,10 @@ _DYNAMIC_KEY_VALUE_RE = re.compile(
     r")\s*[:=]\s*(?:\"[^\"]+\"|'[^']+'|[^\s,;\]}]+)",
     re.IGNORECASE,
 )
+_MEASURED_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])\d+(?:\.\d+)?\s*(req/s|/s|kib|mib|gib|kb|mb|gb|ms|us|ns|b|s|m|h|%)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?(?![A-Za-z0-9])")
 _WHITESPACE_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[a-z][a-z0-9_-]{1,}")
@@ -70,6 +74,18 @@ _STOP_WORDS = {
     "with",
     "uuid",
 }
+
+# Known best-effort limits: labelled ports and HTTP/status numbers intentionally
+# remain distinct, so high-cardinality ephemeral values can fragment; collapsing
+# them would also collapse meaningful service ports and status codes. Open-issue
+# fuzzy matching can over-suppress a short unrelated signature or under-suppress
+# a long reworded duplicate, and signatures longer than the 120-character issue
+# title preview may fail to match their own title on a later run. Retuning the
+# candidate window, Jaccard/containment thresholds, or number preservation merely
+# trades precision for recall (and vice versa), so it is deliberately not done.
+# Drafts are advisory: independently of threshold/dedup, the summary exposes the
+# top three patterns per severity for human review; stable_draft_filename also
+# overwrites one path instead of accumulating redraft churn.
 
 
 @dataclass(frozen=True)
@@ -138,9 +154,19 @@ def normalize_signature(line: str) -> str:
     normalized = _HASH_RE.sub("<hash>", normalized)
     normalized = _EMBEDDED_ID_RE.sub(lambda match: f"{match.group(1)}<id>", normalized)
     normalized = _DYNAMIC_KEY_VALUE_RE.sub(lambda match: f"{match.group(1).lower()}=<id>", normalized)
+    normalized = _MEASURED_NUMBER_RE.sub(_normalize_measured_number, normalized)
     normalized = _NUMBER_RE.sub(_normalize_bare_number, normalized)
     normalized = _WHITESPACE_RE.sub(" ", normalized).strip(" -:|\t")
     return normalized.lower()[:500]
+
+
+def _normalize_measured_number(match: re.Match[str]) -> str:
+    unit = match.group(1).lower()
+    if unit in {"ms", "us", "ns", "s", "m", "h"}:
+        return "<dur>"
+    if unit in {"b", "kb", "mb", "gb", "kib", "mib", "gib"}:
+        return "<size>"
+    return "<rate>"
 
 
 def _normalize_bare_number(match: re.Match[str]) -> str:
@@ -377,6 +403,7 @@ def format_daily_summary(
             ))
         else:
             lines.append(f"{severity} top: none")
+    lines.append("ℹ best-effort signatures; verify top patterns manually")
 
     crossed = [decision for decision in decisions]
     lines.append(f"Threshold >{threshold}: {len(crossed)} crossed")

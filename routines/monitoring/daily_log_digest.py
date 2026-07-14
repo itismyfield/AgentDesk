@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import BinaryIO, Iterable
 
 from log_digest_issue_drafts import (
     CONFIRMED_APPROVAL,
@@ -28,7 +29,8 @@ from log_digest_issue_drafts import (
 
 REPOSITORY = "itismyfield/AgentDesk"
 OPEN_ISSUE_LIMIT = 1000
-UNDATED_CHECKPOINT_VERSION = 1
+UNDATED_CHECKPOINT_VERSION = 2
+UNDATED_FINGERPRINT_BYTES = 128
 _LINE_TIMESTAMP_RE = re.compile(
     r"(?<!\d)(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
 )
@@ -73,7 +75,9 @@ def _parse_line_timestamp(line: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _load_undated_offsets(checkpoint_path: Path | None) -> tuple[dict[str, dict[str, int]], list[str]]:
+def _load_undated_offsets(
+    checkpoint_path: Path | None,
+) -> tuple[dict[str, dict[str, int | str]], list[str]]:
     if checkpoint_path is None or not checkpoint_path.is_file():
         return {}, []
     try:
@@ -83,7 +87,7 @@ def _load_undated_offsets(checkpoint_path: Path | None) -> tuple[dict[str, dict[
         files = payload.get("files")
         if payload.get("version") != UNDATED_CHECKPOINT_VERSION or not isinstance(files, dict):
             raise ValueError("unsupported checkpoint shape")
-        offsets: dict[str, dict[str, int]] = {}
+        offsets: dict[str, dict[str, int | str]] = {}
         for path, entry in files.items():
             if not isinstance(path, str) or not isinstance(entry, dict):
                 raise ValueError("invalid checkpoint entry")
@@ -91,6 +95,8 @@ def _load_undated_offsets(checkpoint_path: Path | None) -> tuple[dict[str, dict[
                 "device": int(entry["device"]),
                 "inode": int(entry["inode"]),
                 "offset": int(entry["offset"]),
+                "tail_hash": str(entry["tail_hash"]),
+                "tail_length": int(entry["tail_length"]),
             }
         return offsets, []
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -98,7 +104,7 @@ def _load_undated_offsets(checkpoint_path: Path | None) -> tuple[dict[str, dict[
 
 
 def _save_undated_offsets(
-    checkpoint_path: Path | None, offsets: dict[str, dict[str, int]]
+    checkpoint_path: Path | None, offsets: dict[str, dict[str, int | str]]
 ) -> list[str]:
     if checkpoint_path is None:
         return []
@@ -119,6 +125,23 @@ def _save_undated_offsets(
     return []
 
 
+def _tail_fingerprint(stream: BinaryIO, offset: int) -> tuple[int, str]:
+    tail_length = min(offset, UNDATED_FINGERPRINT_BYTES)
+    stream.seek(offset - tail_length)
+    digest = hashlib.sha256(stream.read(tail_length)).hexdigest()
+    return tail_length, digest
+
+
+def _watermark_matches(stream: BinaryIO, previous: dict[str, int | str]) -> bool:
+    offset = int(previous["offset"])
+    tail_length = int(previous["tail_length"])
+    if tail_length != min(offset, UNDATED_FINGERPRINT_BYTES):
+        return False
+    stream.seek(offset - tail_length)
+    current = hashlib.sha256(stream.read(tail_length)).hexdigest()
+    return current == previous["tail_hash"]
+
+
 def recent_log_lines(
     paths: Iterable[Path],
     since: datetime,
@@ -126,7 +149,7 @@ def recent_log_lines(
     *,
     undated_checkpoint: Path | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Read the 24h window and consume each undated launchd byte range once."""
+    """Read the 24h window, baselining unseen undated launchd files at EOF."""
 
     lines: list[str] = []
     undated_offsets, warnings = _load_undated_offsets(undated_checkpoint)
@@ -143,15 +166,21 @@ def recent_log_lines(
             )
             checkpoint_key = str(path.resolve())
             previous = undated_offsets.get(checkpoint_key)
-            previous_offset = 0
-            if (
-                previous is not None
-                and previous["device"] == stat.st_dev
-                and previous["inode"] == stat.st_ino
-                and 0 <= previous["offset"] <= stat.st_size
-            ):
-                previous_offset = previous["offset"]
             with path.open("rb") as stream:
+                previous_offset = 0
+                if previous is None and undated_checkpoint is not None:
+                    # The first persisted observation establishes a watermark;
+                    # pre-existing undated history has no reliable 24h timestamp.
+                    previous_offset = stat.st_size
+                elif (
+                    previous is not None
+                    and previous["device"] == stat.st_dev
+                    and previous["inode"] == stat.st_ino
+                    and 0 <= int(previous["offset"]) <= stat.st_size
+                    and _watermark_matches(stream, previous)
+                ):
+                    previous_offset = int(previous["offset"])
+                stream.seek(0)
                 while raw_bytes := stream.readline():
                     line_end = stream.tell()
                     raw_line = raw_bytes.decode("utf-8", errors="replace")
@@ -163,15 +192,19 @@ def recent_log_lines(
                         if since <= timestamp <= now + timedelta(minutes=5):
                             lines.append(line)
                     elif include_undated and line_end > previous_offset:
-                        # launchd stderr is append-only and often undated. The
-                        # identity+offset watermark makes each byte range eligible
-                        # once; rotation or truncation starts a fresh identity/range.
+                        # Identity, offset, and tail fingerprint make appended
+                        # ranges eligible once. Rotation or detected rewrite
+                        # restarts at byte zero; first observation baselines EOF.
                         lines.append(line)
                 if path.name == "dcserver.launchd.stderr.log":
+                    final_offset = stream.tell()
+                    tail_length, tail_hash = _tail_fingerprint(stream, final_offset)
                     undated_offsets[checkpoint_key] = {
                         "device": stat.st_dev,
                         "inode": stat.st_ino,
-                        "offset": stream.tell(),
+                        "offset": final_offset,
+                        "tail_length": tail_length,
+                        "tail_hash": tail_hash,
                     }
         except OSError as error:
             warnings.append(f"could not read {path}: {error}")

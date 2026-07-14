@@ -93,7 +93,7 @@ class SignatureNormalizationTests(unittest.TestCase):
             ],
         )
 
-    def test_undated_launchd_lines_are_consumed_once_by_byte_offset(self) -> None:
+    def test_first_undated_observation_baselines_then_counts_only_append(self) -> None:
         now = datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc)
         since = now - timedelta(days=1)
         with tempfile.TemporaryDirectory() as temp:
@@ -126,10 +126,62 @@ class SignatureNormalizationTests(unittest.TestCase):
                 undated_checkpoint=checkpoint,
             )
 
-        self.assertEqual(len(baseline), 60)
+        self.assertEqual(baseline, [])
         self.assertEqual(fresh, ["WARN fresh append today"])
         self.assertEqual(repeated, [])
         self.assertEqual(baseline_warnings + fresh_warnings + repeated_warnings, [])
+
+    def test_corrupt_checkpoint_also_baselines_undated_history(self) -> None:
+        now = datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            launchd_stderr = root / "dcserver.launchd.stderr.log"
+            checkpoint = root / "runtime" / "undated-offsets.json"
+            launchd_stderr.write_text("ERROR old undated history\n" * 60, encoding="utf-8")
+            os.utime(launchd_stderr, (now.timestamp(), now.timestamp()))
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("{broken", encoding="utf-8")
+
+            baseline, warnings = recent_log_lines(
+                [launchd_stderr],
+                now - timedelta(days=1),
+                now,
+                undated_checkpoint=checkpoint,
+            )
+
+        self.assertEqual(baseline, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("could not load undated-line checkpoint", warnings[0])
+
+    def test_truncate_then_regrow_past_offset_resets_same_inode_watermark(self) -> None:
+        now = datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc)
+        since = now - timedelta(days=1)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            launchd_stderr = root / "dcserver.launchd.stderr.log"
+            checkpoint = root / "runtime" / "undated-offsets.json"
+            launchd_stderr.write_text("ERROR old history\n" * 8, encoding="utf-8")
+            os.utime(launchd_stderr, (now.timestamp(), now.timestamp()))
+            baseline, _ = recent_log_lines(
+                [launchd_stderr], since, now, undated_checkpoint=checkpoint
+            )
+            old_offset = launchd_stderr.stat().st_size
+            old_inode = launchd_stderr.stat().st_ino
+
+            with launchd_stderr.open("w", encoding="utf-8") as stream:
+                stream.write("ERROR new content after truncation\n" * 10)
+            os.utime(launchd_stderr, (now.timestamp(), now.timestamp()))
+            fresh, warnings = recent_log_lines(
+                [launchd_stderr], since, now, undated_checkpoint=checkpoint
+            )
+            new_offset = launchd_stderr.stat().st_size
+            new_inode = launchd_stderr.stat().st_ino
+
+        self.assertEqual(baseline, [])
+        self.assertEqual(new_inode, old_inode)
+        self.assertGreater(new_offset, old_offset)
+        self.assertEqual(fresh, ["ERROR new content after truncation"] * 10)
+        self.assertEqual(warnings, [])
 
     def test_different_ids_hashes_and_timestamps_collapse(self) -> None:
         first = (
@@ -170,6 +222,35 @@ class SignatureNormalizationTests(unittest.TestCase):
         self.assertEqual(patterns[0].count, 100)
         self.assertIn("req-<id>", patterns[0].signature)
         self.assertTrue(exceeds_threshold(patterns[0].count, 50))
+
+    def test_unit_suffixed_numbers_collapse_without_touching_identifiers(self) -> None:
+        duration_patterns = aggregate_normalized_signatures(
+            ["ERROR request took 123ms", "ERROR request took 456ms"]
+        )
+        size_patterns = aggregate_normalized_signatures(
+            ["WARN payload reached 512kb", "WARN payload reached 1mb"]
+        )
+
+        self.assertEqual(len(duration_patterns), 1)
+        self.assertEqual(duration_patterns[0].count, 2)
+        self.assertIn("<dur>", duration_patterns[0].signature)
+        self.assertEqual(len(size_patterns), 1)
+        self.assertEqual(size_patterns[0].count, 2)
+        self.assertIn("<size>", size_patterns[0].signature)
+        for value, placeholder in (
+            ("1.5s", "<dur>"),
+            ("20us", "<dur>"),
+            ("8gib", "<size>"),
+            ("99%", "<rate>"),
+            ("20/s", "<rate>"),
+            ("30req/s", "<rate>"),
+        ):
+            with self.subTest(value=value):
+                self.assertIn(placeholder, normalize_signature(f"ERROR measured {value}"))
+        self.assertEqual(
+            normalize_signature("ERROR error500handler failed"),
+            "error500handler failed",
+        )
 
     def test_http_status_codes_remain_distinct(self) -> None:
         self.assertNotEqual(
@@ -326,6 +407,7 @@ class DraftDecisionTests(unittest.TestCase):
 
         self.assertIn("ERROR top: 51× postgres pool timed out", summary)
         self.assertIn("WARN top: none", summary)
+        self.assertIn("best-effort signatures; verify top patterns manually", summary)
         self.assertIn("Threshold >50: 1 crossed", summary)
         self.assertIn("Crossed: 51× ERROR postgres pool timed out", summary)
         self.assertIn("Pending drafts:", summary)
