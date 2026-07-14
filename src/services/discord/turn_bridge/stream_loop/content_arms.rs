@@ -4,6 +4,20 @@ use super::super::thinking::{redacted_thinking_transcript_event, thinking_status
 use super::*;
 use std::sync::Arc;
 
+const PROMPT_TOO_LONG_GUIDANCE: &str = "⚠️ 현재 대화가 provider의 컨텍스트 한도를 넘었어요.\n`/compact`로 대화를 압축하거나 요청을 짧게 줄여 다시 보내 주세요.\n||__prompt too long__||";
+
+fn provider_error_guidance(message: &str, stderr: &str) -> String {
+    let detail = if stderr.trim().is_empty() {
+        format!("Error: {message}")
+    } else {
+        format!("Error: {message}\nstderr: {}", truncate_str(stderr, 500))
+    };
+    crate::services::discord::commands::owner_error_response(
+        "provider가 응답을 완료하지 못했어요.\n같은 요청을 다시 시도해 주세요. 문제가 반복되면 `!clear`로 세션을 초기화한 뒤 다시 보내 주세요.",
+        &detail,
+    )
+}
+
 pub(super) enum StreamContentArmMessage {
     RetryBoundary,
     Init {
@@ -501,29 +515,15 @@ pub(super) async fn handle_stream_content_message(
                                 // Prompt too long is not a terminal failure — user can retry
                                 // with a shorter message or /compact. Don't mark as transport error.
                                 transport_error = false;
-                                full_response = "⚠️ __prompt too long__".to_string();
+                                full_response = PROMPT_TOO_LONG_GUIDANCE.to_string();
                             } else if is_stale_resume {
                                 // Recoverable stale resume: auto-retry with a fresh provider
                                 // session instead of failing the current dispatch/turn.
                                 transport_error = false;
                                 resume_failure_detected = true;
-                                if !stderr.is_empty() {
-                                    full_response = format!(
-                                        "Error: {}\nstderr: {}",
-                                        message,
-                                        truncate_str(&stderr, 500)
-                                    );
-                                } else {
-                                    full_response = format!("Error: {}", message);
-                                }
-                            } else if !stderr.is_empty() {
-                                full_response = format!(
-                                    "Error: {}\nstderr: {}",
-                                    message,
-                                    truncate_str(&stderr, 500)
-                                );
+                                full_response = provider_error_guidance(&message, &stderr);
                             } else {
-                                full_response = format!("Error: {}", message);
+                                full_response = provider_error_guidance(&message, &stderr);
                             }
                             sync_terminal_error_delivery_state_for_bridge_owner(
                                 &full_response,
@@ -632,4 +632,33 @@ pub(super) async fn handle_stream_content_message(
     }
 
     finish!(StreamContentArmOutcome::ContinueDraining);
+}
+
+#[cfg(test)]
+mod guidance_message_tests {
+    use super::{PROMPT_TOO_LONG_GUIDANCE, provider_error_guidance};
+
+    #[test]
+    fn prompt_too_long_explains_cause_and_next_actions() {
+        assert!(PROMPT_TOO_LONG_GUIDANCE.contains("컨텍스트 한도"));
+        assert!(PROMPT_TOO_LONG_GUIDANCE.contains("`/compact`"));
+        assert!(PROMPT_TOO_LONG_GUIDANCE.contains("요청을 짧게"));
+        assert!(PROMPT_TOO_LONG_GUIDANCE.contains("||__prompt too long__||"));
+    }
+
+    #[test]
+    fn provider_error_guidance_folds_detail_and_suggests_recovery() {
+        let response = provider_error_guidance(
+            "request failed",
+            "private stderr with ``` fence and || spoiler",
+        );
+
+        assert!(response.starts_with("⚠️ provider가 응답을 완료하지 못했어요."));
+        assert!(response.contains("다시 시도"));
+        assert!(response.contains("`!clear`"));
+        assert!(response.contains("||**상세**\n```text\nError: request failed"));
+        assert!(response.ends_with("```||"));
+        assert!(!response.contains("``` fence"));
+        assert!(!response.contains("|| spoiler"));
+    }
 }
