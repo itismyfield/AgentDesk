@@ -2,6 +2,7 @@ pub mod hooks;
 pub mod intent;
 pub mod loader;
 pub mod ops;
+mod slow_hook_warn;
 pub mod sql_guard;
 pub mod transition;
 pub mod transition_executor_pg;
@@ -23,13 +24,11 @@ use crate::config::Config;
 
 use hooks::Hook;
 use loader::PolicyStore;
+use slow_hook_warn::should_emit;
 
 const POLICY_HOOK_WARN_THRESHOLD: Duration = Duration::from_millis(100);
-/// Tick hooks (onTick/onTick30s/onTick1min/onTick5min) routinely run auto-queue /
-/// timeout sweeps measured at 500-600ms, so the flat 100ms threshold produced a
-/// "policy hook slow" WARN every cycle. Use a dedicated, higher threshold for tick
-/// hooks (aligned with `POLICY_TICK_WARN_MS` in server/mod.rs) while keeping the
-/// tighter 100ms bound for non-tick hooks so their genuine slow-WARNs survive.
+/// Tick hooks routinely run 500-600ms sweeps, so use the server-aligned higher
+/// threshold while retaining the tighter bound for non-tick hooks.
 const POLICY_TICK_HOOK_WARN_THRESHOLD: Duration = Duration::from_millis(500);
 
 /// Inner state of the policy engine (not Clone).
@@ -821,7 +820,7 @@ impl PolicyEngine {
                 let elapsed = policy_start.elapsed();
                 let effects_after = Self::count_pending_effects(&ctx);
                 let effects_count = effects_after.saturating_sub(effects_before);
-                if elapsed >= POLICY_HOOK_WARN_THRESHOLD {
+                if should_emit(policy_name, hook_name, elapsed >= POLICY_HOOK_WARN_THRESHOLD) {
                     tracing::warn!(
                         policy_name,
                         hook_name,
@@ -985,7 +984,7 @@ impl PolicyEngine {
                 } else {
                     POLICY_HOOK_WARN_THRESHOLD
                 };
-                if elapsed >= warn_threshold {
+                if should_emit(policy_name, &hook_name_str, elapsed >= warn_threshold) {
                     tracing::warn!(
                         policy_name,
                         hook = %hook,
