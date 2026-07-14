@@ -53,13 +53,16 @@ routines/*
 !src/server/routes/routines/
 !src/server/routes/routines/*.rs
 
-# Exception: the automation-candidate pipeline routines are shipped engine code
-# (feat(pipeline-v2) #2064), loaded by name via RoutineScriptLoader's default
-# `./routines` dir and exercised by `npm run test:policies`. They were swept up
-# by mistake in the operator-routine untrack pass (#4076) — keep them tracked.
+# Exception: bundled monitoring routines are shipped engine code, loaded by
+# name via RoutineScriptLoader's default `./routines` dir, and exercised by CI.
+# The automation pipeline was swept up by mistake in the operator-routine
+# untrack pass (#4076); keep it and later bundled monitoring routines tracked.
 !routines/monitoring/
 routines/monitoring/*
 !routines/monitoring/automation-executor.js
 !routines/monitoring/automation-candidate-executor.js
 !routines/monitoring/automation-candidate-detector.js
 !routines/monitoring/automation-candidate-recommender.js
+!routines/monitoring/daily-log-digest.js
+!routines/monitoring/daily_log_digest.py
+!routines/monitoring/log_digest_issue_drafts.py
