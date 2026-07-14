@@ -47,6 +47,9 @@ use super::{SharedData, http, mailbox_has_active_turn, rate_limit_wait, settings
 
 #[path = "voice_barge_in/final_result_playback.rs"]
 mod final_result_playback;
+#[path = "voice_barge_in/channel_state.rs"]
+mod channel_state;
+use channel_state::VoiceChannelStateMachines;
 #[path = "voice_barge_in/foreground_decision.rs"]
 mod foreground_decision;
 // S8 (#3038): the foreground decision/parser cluster moved into the
@@ -928,12 +931,10 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     streaming_stt_enabled: AtomicBool,
     tts: RwLock<Option<TtsRuntime>>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
-    monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
-    playbacks: dashmap::DashMap<u64, Arc<LivePlaybackSession>>,
-    spoken_result_playbacks: dashmap::DashMap<u64, SpokenResultPlaybackSession>,
-    voice_guilds: dashmap::DashMap<u64, GuildId>,
-    active_voice_routes: dashmap::DashMap<u64, ActiveVoiceRoute>,
-    deferred_buffers: dashmap::DashMap<u64, Arc<Mutex<DeferredBargeInBuffer>>>,
+    // #4240: all channel-keyed connection/playback/routing/cancel state is
+    // owned by one explicit per-channel state-machine component. Its resource
+    // maps preserve the pre-extraction DashMap operations and lock ordering.
+    channels: VoiceChannelStateMachines,
     // #3038: monotonic ID 발급 관심사를 sub-struct 로 격리. 세 카운터(spoken
     // result / progress playback / internal message)의 seed 값과 memory
     // Ordering 을 그대로 보존한다.
@@ -951,8 +952,6 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // explicit-stop barge-in, supersession by a new utterance, or shutdown
     // can terminate the spawned child mid-flight rather than waiting for
     // natural exit.
-    inflight_foreground_cancels:
-        dashmap::DashMap<u64, Vec<Arc<crate::services::provider::CancelToken>>>,
     #[cfg(test)]
     test_state: Arc<VoiceBargeInTestState>,
 }
@@ -1036,16 +1035,10 @@ impl VoiceBargeInRuntime {
             streaming_stt: StreamingSttSessions::new(),
             tts: RwLock::new(tts),
             progress_tx,
-            monitors: dashmap::DashMap::new(),
-            playbacks: dashmap::DashMap::new(),
-            spoken_result_playbacks: dashmap::DashMap::new(),
-            voice_guilds: dashmap::DashMap::new(),
-            active_voice_routes: dashmap::DashMap::new(),
-            deferred_buffers: dashmap::DashMap::new(),
+            channels: VoiceChannelStateMachines::new(),
             id_sequences: VoiceIdSequences::new(),
             config_cache: ConfigSnapshotCache::new(),
             alias_collision_signature: std::sync::Mutex::new(None),
-            inflight_foreground_cancels: dashmap::DashMap::new(),
             #[cfg(test)]
             test_state: Arc::new(VoiceBargeInTestState::default()),
         }
@@ -1068,16 +1061,10 @@ impl VoiceBargeInRuntime {
             streaming_stt_enabled: AtomicBool::new(false),
             tts: RwLock::new(None),
             progress_tx,
-            monitors: dashmap::DashMap::new(),
-            playbacks: dashmap::DashMap::new(),
-            spoken_result_playbacks: dashmap::DashMap::new(),
-            voice_guilds: dashmap::DashMap::new(),
-            active_voice_routes: dashmap::DashMap::new(),
-            deferred_buffers: dashmap::DashMap::new(),
+            channels: VoiceChannelStateMachines::new(),
             id_sequences: VoiceIdSequences::new(),
             config_cache: ConfigSnapshotCache::new(),
             alias_collision_signature: std::sync::Mutex::new(None),
-            inflight_foreground_cancels: dashmap::DashMap::new(),
             #[cfg(test)]
             test_state: Arc::new(VoiceBargeInTestState::default()),
         }
