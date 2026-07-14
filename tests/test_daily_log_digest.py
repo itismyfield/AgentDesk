@@ -3,12 +3,18 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,10 +34,27 @@ from log_digest_issue_drafts import (  # noqa: E402
     normalize_signature,
     write_pending_drafts,
 )
-from daily_log_digest import dcserver_log_paths, recent_log_lines  # noqa: E402
+import daily_log_digest  # noqa: E402
+from daily_log_digest import (  # noqa: E402
+    OPEN_ISSUE_LIMIT,
+    dcserver_log_paths,
+    load_open_issues,
+    recent_log_lines,
+    runtime_root,
+)
 
 
 class SignatureNormalizationTests(unittest.TestCase):
+    def test_runtime_root_keeps_canonical_override_before_deploy_fallback(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AGENTDESK_ROOT_DIR": "/canonical", "ADK_REL": "/deploy-fallback"},
+            clear=False,
+        ):
+            self.assertEqual(runtime_root(), Path("/canonical"))
+        with patch.dict(os.environ, {"ADK_REL": "/deploy-fallback"}, clear=True):
+            self.assertEqual(runtime_root(), Path("/deploy-fallback"))
+
     def test_runtime_log_paths_include_internal_stdout_and_launchd_stderr(self) -> None:
         paths = dcserver_log_paths(Path("/srv/agentdesk"))
         self.assertIn(Path("/srv/agentdesk/logs/dcserver.stdout.log"), paths)
@@ -70,6 +93,44 @@ class SignatureNormalizationTests(unittest.TestCase):
             ],
         )
 
+    def test_undated_launchd_lines_are_consumed_once_by_byte_offset(self) -> None:
+        now = datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc)
+        since = now - timedelta(days=1)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            launchd_stderr = root / "dcserver.launchd.stderr.log"
+            checkpoint = root / "runtime" / "undated-offsets.json"
+            launchd_stderr.write_text(
+                "".join(f"ERROR panic stale-{index}\n" for index in range(60)),
+                encoding="utf-8",
+            )
+            old_run = now - timedelta(days=3)
+            os.utime(launchd_stderr, (old_run.timestamp(), old_run.timestamp()))
+
+            baseline, baseline_warnings = recent_log_lines(
+                [launchd_stderr],
+                old_run - timedelta(days=1),
+                old_run,
+                undated_checkpoint=checkpoint,
+            )
+            with launchd_stderr.open("a", encoding="utf-8") as stream:
+                stream.write("WARN fresh append today\n")
+            os.utime(launchd_stderr, (now.timestamp(), now.timestamp()))
+            fresh, fresh_warnings = recent_log_lines(
+                [launchd_stderr], since, now, undated_checkpoint=checkpoint
+            )
+            repeated, repeated_warnings = recent_log_lines(
+                [launchd_stderr],
+                now,
+                now + timedelta(days=1),
+                undated_checkpoint=checkpoint,
+            )
+
+        self.assertEqual(len(baseline), 60)
+        self.assertEqual(fresh, ["WARN fresh append today"])
+        self.assertEqual(repeated, [])
+        self.assertEqual(baseline_warnings + fresh_warnings + repeated_warnings, [])
+
     def test_different_ids_hashes_and_timestamps_collapse(self) -> None:
         first = (
             "2026-07-13T01:02:03.123Z WARN sqlx pool timed out while acquiring "
@@ -96,6 +157,31 @@ class SignatureNormalizationTests(unittest.TestCase):
 
         self.assertEqual(len(patterns), 2)
         self.assertNotEqual(patterns[0].signature, patterns[1].signature)
+
+    def test_short_embedded_request_ids_collapse_and_cross_threshold(self) -> None:
+        ids = ("4f2a", "8c1d", "0b7e", "9d3c")
+        lines = [
+            f"ERROR failed to open /tmp/req-{ids[index % len(ids)]}/data"
+            for index in range(100)
+        ]
+        patterns = aggregate_normalized_signatures(lines)
+
+        self.assertEqual(len(patterns), 1)
+        self.assertEqual(patterns[0].count, 100)
+        self.assertIn("req-<id>", patterns[0].signature)
+        self.assertTrue(exceeds_threshold(patterns[0].count, 50))
+
+    def test_http_status_codes_remain_distinct(self) -> None:
+        self.assertNotEqual(
+            normalize_signature("ERROR HTTP 500 upstream error"),
+            normalize_signature("ERROR HTTP 404 upstream error"),
+        )
+
+    def test_port_numbers_remain_distinct(self) -> None:
+        self.assertNotEqual(
+            normalize_signature("ERROR connection to port 5432 refused"),
+            normalize_signature("ERROR connection to port 6379 refused"),
+        )
 
 
 class DraftDecisionTests(unittest.TestCase):
@@ -134,14 +220,39 @@ class DraftDecisionTests(unittest.TestCase):
         self.assertEqual(decisions[0].matching_issue, issue)
         self.assertIsNone(decisions[0].draft)
 
-    def test_open_issue_dedup_considers_body_beyond_first_500_characters(self) -> None:
+    def test_unrelated_long_issue_body_does_not_suppress_short_signature(self) -> None:
+        pattern = SignatureCount(
+            severity="WARN",
+            signature="worker lease expired",
+            count=60,
+            sample="WARN worker lease expired",
+        )
         issue = OpenIssue(
             number=4250,
-            title="ops: recurring database degradation",
-            body="unrelated preface " * 40 + "postgres pool timed out while acquiring connection",
+            title="epic: routine runtime hardening",
+            body=(
+                "This broad epic discusses workers, scheduling, and resilience.\n"
+                + "unrelated planning context " * 80
+                + "worker ownership and lease cleanup after expired sessions"
+            ),
         )
 
-        self.assertTrue(issue_matches_signature(self.pattern.signature, issue))
+        self.assertFalse(issue_matches_signature(pattern.signature, issue))
+        decisions = decide_issue_drafts([pattern], [issue], threshold=50)
+        self.assertIsNotNone(decisions[0].draft)
+
+    def test_genuine_short_signature_duplicate_is_suppressed(self) -> None:
+        pattern = SignatureCount(
+            severity="WARN",
+            signature="worker lease expired",
+            count=60,
+            sample="WARN worker lease expired",
+        )
+        issue = OpenIssue(number=4251, title="fix(runtime): worker lease expired")
+
+        self.assertTrue(issue_matches_signature(pattern.signature, issue))
+        decisions = decide_issue_drafts([pattern], [issue], threshold=50)
+        self.assertIsNone(decisions[0].draft)
 
     def test_unavailable_dedup_fails_closed_without_draft(self) -> None:
         decisions = decide_issue_drafts(
@@ -165,16 +276,22 @@ class DraftDecisionTests(unittest.TestCase):
             body="draft body",
         )
 
-        decision = maybe_post_approved_drafts(
-            [draft],
-            "off",
-            lambda item: calls.append(item.title) or "https://example.test/1",
-        )
-
-        self.assertFalse(decision.attempted)
-        self.assertEqual(calls, [], "default mode must never invoke gh issue creation")
         with tempfile.TemporaryDirectory() as temp:
             written = write_pending_drafts([draft], Path(temp))[0]
+            Path(f"{written.path}.approved").touch()
+
+            with patch.dict(os.environ, {}, clear=True):
+                unset_mode = os.environ.get("AGENTDESK_LOG_DIGEST_CREATE_ISSUE", "off")
+            for mode in (unset_mode, "off", "invalid"):
+                disabled = maybe_post_approved_drafts(
+                    [written],
+                    mode,
+                    lambda item: calls.append(item.title) or "https://example.test/1",
+                )
+                self.assertFalse(disabled.attempted)
+                self.assertEqual(calls, [], f"mode {mode!r} must suppress an approved draft")
+
+            Path(f"{written.path}.approved").unlink()
             unreviewed = maybe_post_approved_drafts(
                 [written],
                 "confirmed",
@@ -213,6 +330,108 @@ class DraftDecisionTests(unittest.TestCase):
         self.assertIn("Crossed: 51× ERROR postgres pool timed out", summary)
         self.assertIn("Pending drafts:", summary)
         self.assertNotIn("Pending drafts: none", summary)
+
+
+class DailyDigestIntegrationTests(unittest.TestCase):
+    def _write_threshold_crossing(self, root: Path) -> None:
+        logs = root / "logs"
+        logs.mkdir(parents=True)
+        (logs / "dcserver.stdout.log").write_text(
+            "".join(
+                f"2026-07-13T12:00:{index % 60:02d}Z ERROR worker lease expired id={index}\n"
+                for index in range(51)
+            ),
+            encoding="utf-8",
+        )
+
+    def test_main_gh_failure_wires_dedup_unavailable_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._write_threshold_crossing(root)
+            completed = subprocess.CompletedProcess(
+                args=["gh"], returncode=1, stdout="", stderr="simulated gh failure"
+            )
+            output = StringIO()
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "daily_log_digest.py",
+                        "--root",
+                        str(root),
+                        "--now",
+                        "2026-07-14T00:00:00Z",
+                    ],
+                ),
+                patch.object(daily_log_digest.subprocess, "run", return_value=completed),
+                patch.dict(os.environ, {"AGENTDESK_LOG_DIGEST_CREATE_ISSUE": "off"}, clear=False),
+                redirect_stdout(output),
+            ):
+                rc = daily_log_digest.main()
+
+            drafts = list(
+                (root / "runtime" / "pending-issue-drafts" / "daily-log-digest").glob("*.md")
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(drafts, [])
+        self.assertIn("dedup unavailable", output.getvalue())
+        self.assertIn("drafts suppressed", output.getvalue())
+
+    def test_invalid_threshold_env_warns_and_falls_back_to_50(self) -> None:
+        for invalid in ("0", "-4", "not-a-number"):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self._write_threshold_crossing(root)
+                output = StringIO()
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "daily_log_digest.py",
+                            "--root",
+                            str(root),
+                            "--now",
+                            "2026-07-14T00:00:00Z",
+                        ],
+                    ),
+                    patch.object(daily_log_digest, "load_open_issues", return_value=([], None)),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "AGENTDESK_LOG_DIGEST_THRESHOLD": invalid,
+                            "AGENTDESK_LOG_DIGEST_CREATE_ISSUE": "off",
+                        },
+                        clear=False,
+                    ),
+                    redirect_stdout(output),
+                ):
+                    rc = daily_log_digest.main()
+
+                self.assertEqual(rc, 0)
+                self.assertIn("invalid AGENTDESK_LOG_DIGEST_THRESHOLD", output.getvalue())
+                self.assertIn("using default 50", output.getvalue())
+                self.assertIn("Threshold >50: 1 crossed", output.getvalue())
+
+    def test_open_issue_cap_is_fail_closed_with_warning(self) -> None:
+        payload = [
+            {"number": index, "title": f"issue {index}", "body": "", "url": ""}
+            for index in range(1, OPEN_ISSUE_LIMIT + 1)
+        ]
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        with patch.object(daily_log_digest.subprocess, "run", return_value=completed):
+            issues, warning = load_open_issues("owner/repo")
+
+        self.assertEqual(len(issues), OPEN_ISSUE_LIMIT)
+        self.assertIsNotNone(warning)
+        self.assertIn("may be truncated", warning)
+        pattern = SignatureCount("ERROR", "brand new failure pattern", 51, "ERROR sample")
+        decisions = decide_issue_drafts(
+            [pattern], issues, threshold=50, dedup_available=warning is None
+        )
+        self.assertIsNone(decisions[0].draft)
 
 
 if __name__ == "__main__":

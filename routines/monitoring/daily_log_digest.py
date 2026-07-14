@@ -27,14 +27,19 @@ from log_digest_issue_drafts import (
 
 
 REPOSITORY = "itismyfield/AgentDesk"
+OPEN_ISSUE_LIMIT = 1000
+UNDATED_CHECKPOINT_VERSION = 1
 _LINE_TIMESTAMP_RE = re.compile(
     r"(?<!\d)(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
 )
 
 
 def runtime_root() -> Path:
-    """Mirror AgentDesk's AGENTDESK_ROOT_DIR then release-root fallback."""
+    """Resolve the runtime root used by the release launcher."""
 
+    # src/config.rs owns AGENTDESK_ROOT_DIR as the canonical runtime override.
+    # ADK_REL remains a compatibility fallback because deploy-release.sh derives
+    # it from that override and the routine launcher may pass only ADK_REL.
     configured = os.environ.get("AGENTDESK_ROOT_DIR") or os.environ.get("ADK_REL")
     if configured:
         return Path(configured).expanduser()
@@ -68,23 +73,88 @@ def _parse_line_timestamp(line: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def recent_log_lines(paths: Iterable[Path], since: datetime, now: datetime) -> tuple[list[str], list[str]]:
-    """Read the 24h window; recent undated launchd lines use file mtime."""
+def _load_undated_offsets(checkpoint_path: Path | None) -> tuple[dict[str, dict[str, int]], list[str]]:
+    if checkpoint_path is None or not checkpoint_path.is_file():
+        return {}, []
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("unsupported checkpoint shape")
+        files = payload.get("files")
+        if payload.get("version") != UNDATED_CHECKPOINT_VERSION or not isinstance(files, dict):
+            raise ValueError("unsupported checkpoint shape")
+        offsets: dict[str, dict[str, int]] = {}
+        for path, entry in files.items():
+            if not isinstance(path, str) or not isinstance(entry, dict):
+                raise ValueError("invalid checkpoint entry")
+            offsets[path] = {
+                "device": int(entry["device"]),
+                "inode": int(entry["inode"]),
+                "offset": int(entry["offset"]),
+            }
+        return offsets, []
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        return {}, [f"could not load undated-line checkpoint {checkpoint_path}: {error}"]
+
+
+def _save_undated_offsets(
+    checkpoint_path: Path | None, offsets: dict[str, dict[str, int]]
+) -> list[str]:
+    if checkpoint_path is None:
+        return []
+    try:
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(
+                {"version": UNDATED_CHECKPOINT_VERSION, "files": offsets},
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(checkpoint_path)
+    except OSError as error:
+        return [f"could not save undated-line checkpoint {checkpoint_path}: {error}"]
+    return []
+
+
+def recent_log_lines(
+    paths: Iterable[Path],
+    since: datetime,
+    now: datetime,
+    *,
+    undated_checkpoint: Path | None = None,
+) -> tuple[list[str], list[str]]:
+    """Read the 24h window and consume each undated launchd byte range once."""
 
     lines: list[str] = []
-    warnings: list[str] = []
+    undated_offsets, warnings = _load_undated_offsets(undated_checkpoint)
     found_any = False
     for path in paths:
         if not path.is_file():
             continue
         found_any = True
         try:
+            stat = path.stat()
             include_undated = (
                 path.name == "dcserver.launchd.stderr.log"
-                and datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) >= since
+                and datetime.fromtimestamp(stat.st_mtime, timezone.utc) >= since
             )
-            with path.open(encoding="utf-8", errors="replace") as stream:
-                for raw_line in stream:
+            checkpoint_key = str(path.resolve())
+            previous = undated_offsets.get(checkpoint_key)
+            previous_offset = 0
+            if (
+                previous is not None
+                and previous["device"] == stat.st_dev
+                and previous["inode"] == stat.st_ino
+                and 0 <= previous["offset"] <= stat.st_size
+            ):
+                previous_offset = previous["offset"]
+            with path.open("rb") as stream:
+                while raw_bytes := stream.readline():
+                    line_end = stream.tell()
+                    raw_line = raw_bytes.decode("utf-8", errors="replace")
                     if extract_severity(raw_line) is None:
                         continue
                     line = raw_line.rstrip("\n")
@@ -92,15 +162,22 @@ def recent_log_lines(paths: Iterable[Path], since: datetime, now: datetime) -> t
                     if timestamp is not None:
                         if since <= timestamp <= now + timedelta(minutes=5):
                             lines.append(line)
-                    elif include_undated:
-                        # launchd bootstrap stderr is not guaranteed to carry a
-                        # timestamp. Its bounded current file is included only when
-                        # the file itself changed during the daily window.
+                    elif include_undated and line_end > previous_offset:
+                        # launchd stderr is append-only and often undated. The
+                        # identity+offset watermark makes each byte range eligible
+                        # once; rotation or truncation starts a fresh identity/range.
                         lines.append(line)
+                if path.name == "dcserver.launchd.stderr.log":
+                    undated_offsets[checkpoint_key] = {
+                        "device": stat.st_dev,
+                        "inode": stat.st_ino,
+                        "offset": stream.tell(),
+                    }
         except OSError as error:
             warnings.append(f"could not read {path}: {error}")
     if not found_any:
         warnings.append("no dcserver stdout or launchd stderr log files were found")
+    warnings.extend(_save_undated_offsets(undated_checkpoint, undated_offsets))
     return lines, warnings
 
 
@@ -114,7 +191,7 @@ def load_open_issues(repo: str) -> tuple[list[OpenIssue], str | None]:
         "--state",
         "open",
         "--limit",
-        "1000",
+        str(OPEN_ISSUE_LIMIT),
         "--json",
         "number,title,body,url",
     ]
@@ -138,6 +215,11 @@ def load_open_issues(repo: str) -> tuple[list[OpenIssue], str | None]:
         ]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         return [], f"open-issue dedup response invalid ({error}); drafts suppressed"
+    if len(issues) == OPEN_ISSUE_LIMIT:
+        return (
+            issues,
+            f"open-issue dedup may be truncated at {OPEN_ISSUE_LIMIT} results; drafts suppressed",
+        )
     return issues, None
 
 
@@ -171,17 +253,38 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def threshold_from_env(value: str | None) -> tuple[int, str | None]:
+    configured = value if value is not None else str(DEFAULT_DAILY_THRESHOLD)
+    try:
+        return positive_int(configured), None
+    except (ValueError, argparse.ArgumentTypeError):
+        return (
+            DEFAULT_DAILY_THRESHOLD,
+            "invalid AGENTDESK_LOG_DIGEST_THRESHOLD "
+            f"value {configured!r}; using default {DEFAULT_DAILY_THRESHOLD}",
+        )
+
+
 def parse_args() -> argparse.Namespace:
+    env_threshold, threshold_warning = threshold_from_env(
+        os.environ.get("AGENTDESK_LOG_DIGEST_THRESHOLD")
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=runtime_root())
     parser.add_argument("--repo", default=os.environ.get("AGENTDESK_LOG_DIGEST_REPO", REPOSITORY))
     parser.add_argument(
         "--threshold",
         type=positive_int,
-        default=positive_int(os.environ.get("AGENTDESK_LOG_DIGEST_THRESHOLD", str(DEFAULT_DAILY_THRESHOLD))),
+        default=None,
     )
     parser.add_argument("--now", help="RFC3339 test/diagnostic override")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.threshold is None:
+        args.threshold = env_threshold
+        args.threshold_warning = threshold_warning
+    else:
+        args.threshold_warning = None
+    return args
 
 
 def main() -> int:
@@ -193,7 +296,17 @@ def main() -> int:
     since = now - timedelta(days=1)
     window_label = f"{since:%Y-%m-%d %H:%M}–{now:%Y-%m-%d %H:%M} UTC"
 
-    lines, warnings = recent_log_lines(dcserver_log_paths(args.root), since, now)
+    lines, warnings = recent_log_lines(
+        dcserver_log_paths(args.root),
+        since,
+        now,
+        undated_checkpoint=args.root
+        / "runtime"
+        / "daily-log-digest"
+        / "undated-line-offsets.json",
+    )
+    if args.threshold_warning:
+        warnings.append(args.threshold_warning)
     patterns = aggregate_normalized_signatures(lines)
     open_issues, dedup_warning = load_open_issues(args.repo)
     if dedup_warning:

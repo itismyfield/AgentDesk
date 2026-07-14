@@ -32,6 +32,11 @@ _UUID_RE = re.compile(
     re.IGNORECASE,
 )
 _HASH_RE = re.compile(r"\b(?=[0-9a-f]{7,64}\b)(?=[0-9a-f]*[a-f])[0-9a-f]+\b", re.IGNORECASE)
+_EMBEDDED_ID_RE = re.compile(
+    r"\b((?:req(?:uest)?|trace|span|session|turn|task|card|dispatch|run|job|message|id)[_-])"
+    r"(?=[a-z0-9]{4,}\b)(?=[a-z0-9]*[a-z])(?=[a-z0-9]*\d)[a-z0-9]+\b",
+    re.IGNORECASE,
+)
 _DYNAMIC_KEY_VALUE_RE = re.compile(
     r"\b("
     r"(?:request|trace|span|session|turn|task|card|dispatch|run|job|message|channel|user|agent)"
@@ -119,9 +124,11 @@ def extract_severity(line: str) -> str | None:
 def normalize_signature(line: str) -> str:
     """Collapse volatile log fields while retaining the semantic message.
 
-    Timestamps, UUIDs, hashes, dynamic id/token key-values, and numeric values
-    become stable placeholders. The severity token is removed because callers
-    group severity independently.
+    Timestamps, UUIDs, hashes, and known dynamic identifiers become stable
+    placeholders. Bare numbers are treated as volatile except HTTP/status codes
+    and values explicitly labelled as ports. This deliberately narrow heuristic
+    preserves the common semantic cases without pretending every number's role
+    can be inferred from free-form text; unlabeled semantic numbers may collapse.
     """
 
     normalized = _ANSI_RE.sub("", line).strip()
@@ -129,10 +136,18 @@ def normalize_signature(line: str) -> str:
     normalized = _SEVERITY_RE.sub("", normalized)
     normalized = _UUID_RE.sub("<uuid>", normalized)
     normalized = _HASH_RE.sub("<hash>", normalized)
+    normalized = _EMBEDDED_ID_RE.sub(lambda match: f"{match.group(1)}<id>", normalized)
     normalized = _DYNAMIC_KEY_VALUE_RE.sub(lambda match: f"{match.group(1).lower()}=<id>", normalized)
-    normalized = _NUMBER_RE.sub("<n>", normalized)
+    normalized = _NUMBER_RE.sub(_normalize_bare_number, normalized)
     normalized = _WHITESPACE_RE.sub(" ", normalized).strip(" -:|\t")
     return normalized.lower()[:500]
+
+
+def _normalize_bare_number(match: re.Match[str]) -> str:
+    prefix = match.string[max(0, match.start() - 24) : match.start()]
+    if re.search(r"\b(?:http(?:\s+status)?|status|port)\s*$", prefix, re.IGNORECASE):
+        return match.group(0)
+    return "<n>"
 
 
 def aggregate_normalized_signatures(lines: Iterable[str]) -> list[SignatureCount]:
@@ -177,38 +192,40 @@ def _similarity_tokens_from_normalized(normalized: str) -> set[str]:
     }
 
 
-def _normalized_issue_text(issue: OpenIssue) -> str:
-    # Normalize the complete body in bounded chunks. ``normalize_signature``
-    # intentionally caps one log signature at 500 characters, but dedup must
-    # still consider issue-body evidence beyond the opening paragraph.
-    parts = [issue.title]
-    parts.extend(issue.body[offset : offset + 500] for offset in range(0, len(issue.body), 500))
-    return " ".join(normalize_signature(part) for part in parts if part)
+def _normalized_issue_candidates(issue: OpenIssue) -> list[str]:
+    """Return bounded, issue-defining text rather than an unbounded epic body."""
+
+    first_body_line = next((line.strip() for line in issue.body.splitlines() if line.strip()), "")
+    return [normalize_signature(part) for part in (issue.title, first_body_line) if part]
 
 
 def issue_matches_signature(signature: str, issue: OpenIssue) -> bool:
-    """Match a signature against normalized open-issue title/body similarity.
+    """Match against the issue title or first non-empty body line.
 
-    A direct normalized containment match wins. Otherwise at least three
-    meaningful tokens must overlap, with either 65% signature coverage or 50%
-    Jaccard similarity. Requiring both semantic overlap and a minimum token
-    count avoids deduping unrelated generic ERROR/WARN reports.
+    Each bounded candidate must share at least three meaningful tokens and reach
+    50% symmetric Jaccard similarity. Direct containment is accepted only when
+    the candidate is still signature-like (at most 3x the signature token count,
+    with a floor of 12 tokens). This avoids a three-token signature matching an
+    unrelated long epic that merely mentions those words. A duplicate described
+    only deep in a long issue body may therefore require human reconciliation.
     """
 
     normalized_signature = normalize_signature(signature)
-    normalized_issue = _normalized_issue_text(issue)
-    if len(normalized_signature) >= 16 and normalized_signature in normalized_issue:
-        return True
-
     signature_tokens = _similarity_tokens_from_normalized(normalized_signature)
-    issue_tokens = _similarity_tokens_from_normalized(normalized_issue)
-    overlap = signature_tokens & issue_tokens
-    if len(overlap) < 3 or not signature_tokens:
+    if len(signature_tokens) < 3:
         return False
-    coverage = len(overlap) / len(signature_tokens)
-    union = signature_tokens | issue_tokens
-    jaccard = len(overlap) / len(union) if union else 0.0
-    return coverage >= 0.65 or jaccard >= 0.50
+    for candidate in _normalized_issue_candidates(issue):
+        issue_tokens = _similarity_tokens_from_normalized(candidate)
+        overlap = signature_tokens & issue_tokens
+        if len(overlap) < 3:
+            continue
+        signature_like_limit = max(12, len(signature_tokens) * 3)
+        if normalized_signature in candidate and len(issue_tokens) <= signature_like_limit:
+            return True
+        union = signature_tokens | issue_tokens
+        if union and len(overlap) / len(union) >= 0.50:
+            return True
+    return False
 
 
 def build_issue_draft(pattern: SignatureCount, window_label: str, threshold: int) -> IssueDraft:
