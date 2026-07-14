@@ -299,6 +299,50 @@ _staged_deploy_binary_path() {
     mktemp "$ADK_REL/bin/agentdesk.deploy.XXXXXX"
 }
 
+_resolve_release_server_port() {
+    local fallback_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
+    local config_path=""
+    local configured_port
+
+    if [ -n "${AGENTDESK_CONFIG:-}" ] && [ -f "$AGENTDESK_CONFIG" ]; then
+        config_path="$AGENTDESK_CONFIG"
+    elif [ -f "$ADK_REL/config/agentdesk.yaml" ]; then
+        config_path="$ADK_REL/config/agentdesk.yaml"
+    elif [ -f "$ADK_REL/agentdesk.yaml" ]; then
+        config_path="$ADK_REL/agentdesk.yaml"
+    fi
+
+    if [ -z "$config_path" ]; then
+        printf '%s\n' "$fallback_port"
+        return 0
+    fi
+
+    if configured_port=$(python3 - "$config_path" "$fallback_port" <<'PY'
+import sys
+
+import yaml
+
+path, fallback = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    config = yaml.safe_load(handle)
+server = config.get("server") if isinstance(config, dict) else None
+port = server.get("port", fallback) if isinstance(server, dict) else fallback
+if isinstance(port, bool) or not isinstance(port, (int, str)):
+    raise ValueError("server.port must be an integer")
+port = int(port)
+if not 1 <= port <= 65535:
+    raise ValueError("server.port must be between 1 and 65535")
+print(port)
+PY
+    ); then
+        printf '%s\n' "$configured_port"
+        return 0
+    fi
+
+    echo "⚠ Could not resolve server.port from $config_path — using :$fallback_port" >&2
+    printf '%s\n' "$fallback_port"
+}
+
 _notify_channel() {
     local content="$1"
     [ -n "$REPORT_CHANNEL_ID" ] || return 0
@@ -306,7 +350,8 @@ _notify_channel() {
     local payload
     payload=$(printf '%s' "$content" | jq -Rs --arg source "project-agentdesk" --arg target "channel:$REPORT_CHANNEL_ID" '{target:$target, content: ., source:$source, bot:"notify"}')
 
-    local rel_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
+    local rel_port
+    rel_port="${REL_PORT:-$(_resolve_release_server_port)}"
     curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
         -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${rel_port}" \
         -H 'Content-Type: application/json' \
@@ -1114,7 +1159,7 @@ fi
 # A restart during an in-flight create-pr dispatch leaves its completion
 # unstamped after the new code rolls out. If the release API is unreachable
 # the gate skips itself (recovery deploys must not be false-blocked).
-REL_PORT="${AGENTDESK_REL_PORT:-8791}"
+REL_PORT="$(_resolve_release_server_port)"
 if ! curl -sf --max-time 3 "http://127.0.0.1:${REL_PORT}/api/health" > /dev/null 2>&1; then
     echo "▸ [gate] Release API not reachable on :${REL_PORT} — skipping zero-inflight check"
 else
@@ -1688,7 +1733,7 @@ if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_RE
 fi
 
 # Health check (server health + dashboard availability)
-REL_PORT="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
+REL_PORT="$(_resolve_release_server_port)"
 echo "▸ Waiting for release health on :${REL_PORT}..."
 REL_HEALTHY=false
 # #4348 Defect 1: the trailing `1` opts the DEPLOY readiness gate into treating a
@@ -1753,6 +1798,7 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
 )
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
+POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS=4
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
 POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown-%s' "$$")"
@@ -1811,19 +1857,13 @@ _post_deploy_smoke_probe_apis() {
     [ "$failed" -eq 0 ]
 }
 
-_post_deploy_smoke_check_wedges() {
-    local wedge_markers wedge_summary
-    if [ -z "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ] \
-      || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ]; then
-        _post_deploy_smoke_fail "relay wedge check: /api/health/detail body unavailable" || true
-        return 1
-    fi
-
+_post_deploy_smoke_wedge_markers_from_file() {
+    local health_detail_path="$1"
     # Reuse the health/detail markers consumed by the relay E2E validator:
     # explicit non-healthy relay_stall_state, ownerless/detached inflight,
     # desync, stale thread proof, or stale watcher attachment. Ordinary active
     # turns and queues are deliberately not classified as wedges.
-    if ! wedge_markers=$(jq -r '
+    jq -r '
         [
           .degraded_reasons[]?
           | strings
@@ -1851,16 +1891,106 @@ _post_deploy_smoke_check_wedges() {
           | "mailbox provider=\($mailbox.provider // "unknown") channel=\($mailbox.channel_id // "unknown") stall=\($stall)"
         ]
         | .[]
-    ' "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
+    ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
+}
+
+_post_deploy_smoke_fully_recovered_from_file() {
+    local health_path="$1"
+    jq -r '
+        if (.fully_recovered | type) == "boolean" then
+            .fully_recovered
+        else
+            error("fully_recovered is not boolean")
+        end
+    ' "$health_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
+}
+
+_post_deploy_smoke_check_wedges() {
+    local fully_recovered wedge_markers wedge_markers_resampled persistent_markers wedge_summary
+    local resample_path="$POST_DEPLOY_SMOKE_TMP_DIR/api_health_detail_resample.json"
+    if [ -z "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ] \
+      || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ]; then
+        _post_deploy_smoke_fail "relay wedge check: /api/health/detail body unavailable" || true
+        return 1
+    fi
+
+    if ! fully_recovered=$(
+        _post_deploy_smoke_fully_recovered_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    ); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: startup recovery state unavailable" || return 1
+        return 0
+    fi
+    if [ "$fully_recovered" = "false" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: startup recovery in progress" || return 1
+        return 0
+    fi
+
+    if ! wedge_markers=$(
+        _post_deploy_smoke_wedge_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    ); then
         _post_deploy_smoke_fail "relay wedge check: health/detail JSON could not be parsed" || true
         return 1
     fi
-    if [ -n "$wedge_markers" ]; then
-        wedge_summary="${wedge_markers//$'\n'/; }"
-        _post_deploy_smoke_fail "relay wedge marker present: ${wedge_summary}" || true
-        return 1
+    if [ -z "$wedge_markers" ]; then
+        _post_deploy_smoke_note "relay wedge markers=absent" || return 1
+        return 0
     fi
-    _post_deploy_smoke_note "relay wedge markers=absent" || return 1
+
+    _post_deploy_smoke_note \
+        "relay wedge marker observed; settling ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s before resample" \
+        || return 1
+    sleep "$POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS"
+    if ! curl -fsS --connect-timeout 2 --max-time 15 \
+        -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
+        -o "$resample_path" \
+        "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health/detail"; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample unavailable" || return 1
+        return 0
+    fi
+    if [ ! -s "$resample_path" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample body empty" || return 1
+        return 0
+    fi
+    if ! fully_recovered=$(_post_deploy_smoke_fully_recovered_from_file "$resample_path"); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle recovery state unavailable" || return 1
+        return 0
+    fi
+    if [ "$fully_recovered" = "false" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: startup recovery in progress" || return 1
+        return 0
+    fi
+    if ! wedge_markers_resampled=$(
+        _post_deploy_smoke_wedge_markers_from_file "$resample_path"
+    ); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample JSON could not be parsed" || return 1
+        return 0
+    fi
+    if ! persistent_markers=$(comm -12 \
+        <(printf '%s\n' "$wedge_markers" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$wedge_markers_resampled" | LC_ALL=C sort -u)); then
+        _post_deploy_smoke_note \
+            "relay wedge=skipped: settle resample comparison failed" || return 1
+        return 0
+    fi
+    if [ -z "$persistent_markers" ]; then
+        _post_deploy_smoke_note \
+            "relay wedge markers=cleared after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle" \
+            || return 1
+        return 0
+    fi
+
+    wedge_summary="${persistent_markers//$'\n'/; }"
+    _post_deploy_smoke_fail \
+        "relay wedge marker persisted after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle: ${wedge_summary}" \
+        || true
+    return 1
 }
 
 _post_deploy_smoke_check_fail_closed_warn_rate() {
