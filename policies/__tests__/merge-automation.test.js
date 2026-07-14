@@ -5,9 +5,10 @@ const { createSqlRouter, loadPolicy } = require("./support/harness");
 
 test("merge automation blocks tracked PR when required phase evidence is missing for head SHA", () => {
   const { module } = loadPolicy("policies/merge-automation.js", {
-    exec(cmd, args) {
+    exec(cmd, args, options) {
       assert.equal(cmd, "gh");
       assert.equal(JSON.stringify(args.slice(0, 3)), JSON.stringify(["run", "list", "--branch"]));
+      assert.equal(options.timeout_ms, module.__test.GH_MERGE_READINESS_TIMEOUT_MS);
       return JSON.stringify([{
         databaseId: 101,
         status: "completed",
@@ -380,14 +381,16 @@ test("onTick5min reads Codex snapshots from kv_meta and bounds slow gh refresh w
     card_id: `card-${number}`,
     repo_id: "itismyfield/AgentDesk",
     pr_number: number,
-    branch: `fix/${number}`
+    branch: `fix/${number}`,
+    head_sha: `head-${number}`
   }));
   const kvMeta = new Map();
   const events = [];
   for (const row of tracked) {
     kvMeta.set(
-      `codex_review_snapshot:itismyfield_AgentDesk:${row.pr_number}`,
+      `codex_review_snapshot:itismyfield_AgentDesk:${row.pr_number}:${row.head_sha}`,
       JSON.stringify({
+        head_sha: row.head_sha,
         snapshot: {
           latestReviewId: `cached-${row.pr_number}`,
           latestState: "COMMENTED",
@@ -485,7 +488,7 @@ test("onTick5min reads Codex snapshots from kv_meta and bounds slow gh refresh w
     .filter((event) => event.type === "kv-get" && event.key.startsWith("codex_review_snapshot:"));
   assert.equal(cacheReadsBeforeExec.length, tracked.length, "all tracked PR caches are read before refresh I/O");
   assert.match(
-    kvMeta.get("codex_review_snapshot:itismyfield_AgentDesk:1"),
+    kvMeta.get("codex_review_snapshot:itismyfield_AgentDesk:1:head-1"),
     /cached-1/,
     "a failed refresh must retain the last-known cached review state"
   );
@@ -508,4 +511,205 @@ test("onTick5min reads Codex snapshots from kv_meta and bounds slow gh refresh w
     ),
     "refreshed snapshots must be persisted in expiring kv_meta rows"
   );
+});
+
+function mergeGateTracking() {
+  return {
+    card_id: "card-4250",
+    repo_id: "itismyfield/AgentDesk",
+    worktree_path: "/tmp/adk-impl-4250",
+    branch: "fix/4250-merge-automation-gh-offtick",
+    pr_number: 4250,
+    head_sha: "head-4250",
+    state: "merge"
+  };
+}
+
+function mergeGateDbRouter(sql) {
+  if (sql.includes("SELECT required_phases FROM issue_specs")) return [];
+  if (sql.includes("SELECT value FROM kv_meta WHERE key = ?")) return [];
+  throw new Error(`unexpected query: ${sql}`);
+}
+
+test("enableAutoMerge cache miss fetches live Codex state and fails closed when it is unavailable", () => {
+  const ghKinds = [];
+  const tracking = mergeGateTracking();
+  const { module, state } = loadPolicy("policies/merge-automation.js", {
+    dbQuery: mergeGateDbRouter,
+    exec(cmd, args, options) {
+      assert.equal(cmd, "gh");
+      if (args[0] === "pr" && args[1] === "view") {
+        ghKinds.push("head");
+        assert.equal(options.timeout_ms, module.__test.GH_MERGE_READINESS_TIMEOUT_MS);
+        return tracking.head_sha;
+      }
+      if (args[0] === "run" && args[1] === "list") {
+        ghKinds.push("ci");
+        assert.equal(options.timeout_ms, module.__test.GH_MERGE_READINESS_TIMEOUT_MS);
+        return JSON.stringify([{
+          databaseId: 4250,
+          status: "completed",
+          conclusion: "success",
+          headSha: tracking.head_sha,
+          event: "push"
+        }]);
+      }
+      if (args[0] === "api" && args[1] !== "graphql") {
+        ghKinds.push("live-review-failed");
+        assert.equal(options.timeout_ms, module.__test.GH_EXEC_TIMEOUT_MS);
+        return "ERROR: gh timed out";
+      }
+      if (args[0] === "pr" && args[1] === "merge") {
+        throw new Error("mutation caught: cache miss/live failure must never reach gh pr merge");
+      }
+      throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+    },
+    extraAgentdesk: {
+      prTracking: {
+        load() { return tracking; },
+        upsert() { throw new Error("live review failure should defer without escalation"); },
+        findByRepoPr() { return null; }
+      }
+    }
+  });
+
+  assert.equal(state.kv.size, 0, "precondition: the review cache is empty");
+  assert.equal(module.__test.enableAutoMerge(4250, tracking.repo_id, tracking.card_id), false);
+  assert.deepEqual(ghKinds, ["head", "ci", "live-review-failed"]);
+  assert.equal(
+    state.execCalls.some((call) => call.args[0] === "pr" && call.args[1] === "merge"),
+    false
+  );
+});
+
+test("enableAutoMerge live blocking snapshot prevents merge and is cached by current head SHA", () => {
+  const tracking = mergeGateTracking();
+  const { module, state } = loadPolicy("policies/merge-automation.js", {
+    dbQuery: mergeGateDbRouter,
+    exec(cmd, args, options) {
+      assert.equal(cmd, "gh");
+      if (args[0] === "pr" && args[1] === "view") return tracking.head_sha;
+      if (args[0] === "run" && args[1] === "list") {
+        return JSON.stringify([{
+          databaseId: 4251,
+          status: "completed",
+          conclusion: "success",
+          headSha: tracking.head_sha,
+          event: "push"
+        }]);
+      }
+      if (args[0] === "api" && args[1] !== "graphql") {
+        assert.equal(options.timeout_ms, module.__test.GH_EXEC_TIMEOUT_MS);
+        return JSON.stringify([{
+          id: 900,
+          state: "COMMENTED",
+          body: "blocking review",
+          submitted_at: "2026-07-14T00:00:00Z",
+          user: { login: "chatgpt-codex-connector[bot]" }
+        }]);
+      }
+      if (args[0] === "api" && args[1] === "graphql") {
+        return JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [{
+                    id: "thread-900",
+                    isResolved: false,
+                    isOutdated: false,
+                    comments: {
+                      nodes: [{
+                        id: "comment-900",
+                        body: "P1 unresolved merge blocker",
+                        path: "policies/merge-automation.js",
+                        line: 1700,
+                        url: "https://example.invalid/comment-900",
+                        author: { login: "chatgpt-codex-connector[bot]" },
+                        pullRequestReview: {
+                          id: "900",
+                          state: "COMMENTED",
+                          author: { login: "chatgpt-codex-connector[bot]" }
+                        }
+                      }]
+                    }
+                  }]
+                }
+              }
+            }
+          }
+        });
+      }
+      if (args[0] === "pr" && args[1] === "merge") {
+        throw new Error("mutation caught: blocking live review must never reach gh pr merge");
+      }
+      throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+    },
+    extraAgentdesk: {
+      prTracking: {
+        load() { return tracking; },
+        upsert() { return tracking; },
+        findByRepoPr() { return null; }
+      }
+    }
+  });
+  state.kv.set("codex_merge_guard:itismyfield_AgentDesk:4250:900", "true");
+
+  assert.equal(module.__test.enableAutoMerge(4250, tracking.repo_id, tracking.card_id), false);
+  assert.equal(
+    state.execCalls.some((call) => call.args[0] === "pr" && call.args[1] === "merge"),
+    false
+  );
+  assert.ok(
+    state.kv.has("codex_review_snapshot:itismyfield_AgentDesk:4250:head-4250"),
+    "the live snapshot cache key must include the PR head SHA"
+  );
+});
+
+test("Codex review cache treats a different PR head SHA as a miss", () => {
+  const { module, state } = loadPolicy("policies/merge-automation.js");
+  state.kv.set(
+    "codex_review_snapshot:itismyfield_AgentDesk:4250:old-head",
+    JSON.stringify({
+      head_sha: "old-head",
+      snapshot: { latestState: "APPROVED", hasBlocking: false }
+    })
+  );
+
+  assert.equal(
+    module.__test.loadCachedCodexReviewSnapshot("itismyfield/AgentDesk", 4250, "old-head").found,
+    true
+  );
+  assert.equal(
+    module.__test.loadCachedCodexReviewSnapshot("itismyfield/AgentDesk", 4250, "new-head").found,
+    false,
+    "a stale approval from an older head must not be reusable"
+  );
+});
+
+test("enableAutoMerge treats a readiness timeout as retryable without escalation", () => {
+  const tracking = mergeGateTracking();
+  const upserts = [];
+  const { module, state } = loadPolicy("policies/merge-automation.js", {
+    dbQuery: mergeGateDbRouter,
+    exec(cmd, args, options) {
+      assert.equal(cmd, "gh");
+      assert.equal(options.timeout_ms, module.__test.GH_MERGE_READINESS_TIMEOUT_MS);
+      if (args[0] === "pr" && args[1] === "view") return tracking.head_sha;
+      if (args[0] === "run" && args[1] === "list") return "ERROR: gh timed out after 4999ms";
+      throw new Error(`retryable readiness timeout must stop before: ${JSON.stringify(args)}`);
+    },
+    extraAgentdesk: {
+      prTracking: {
+        load() { return tracking; },
+        upsert(...args) { upserts.push(args); },
+        findByRepoPr() { return null; }
+      }
+    }
+  });
+
+  assert.equal(module.__test.enableAutoMerge(4250, tracking.repo_id, tracking.card_id), false);
+  assert.equal(upserts.length, 0, "a timeout must not mark the PR escalated");
+  assert.equal(state.kv.has("merge_failed:card-4250"), false);
+  assert.equal(state.execCalls.length, 2, "retry must stop before live review or merge calls");
 });

@@ -16,13 +16,22 @@ var _CODEX_REVIEWERS = {
   "chatgpt-codex-connector[bot]": true
 };
 
-// #4250: Keep each synchronous GitHub CLI bridge call well inside the 5s
-// policy-hook budget. The Rust exec bridge also clamps this requested timeout
-// to the remaining hook deadline.
+// #4250: Review-snapshot reads are safe to abandon and retry, so keep their
+// individual timeout tight. Merge-readiness reads feed escalation decisions;
+// allow the pre-#4250 budget there and surface deadline timeouts as transient.
 var GH_EXEC_TIMEOUT_MS = 1500;
+var GH_MERGE_READINESS_TIMEOUT_MS = 30000;
 
-function execGh(args) {
-  return agentdesk.exec("gh", args, { timeout_ms: GH_EXEC_TIMEOUT_MS });
+function execGh(args, timeoutMs) {
+  return agentdesk.exec("gh", args, {
+    timeout_ms: timeoutMs || GH_EXEC_TIMEOUT_MS
+  });
+}
+
+function isGhTimeoutError(output) {
+  return typeof output === "string" &&
+    output.indexOf("ERROR") === 0 &&
+    /timed out|timeout|bridge deadline/i.test(output);
 }
 
 function isCodexReviewer(login) {
@@ -49,8 +58,9 @@ function getCurrentPrHeadSha(prNumber, repo) {
     "--json", "headRefOid",
     "--jq", ".headRefOid",
     "--repo", repo
-  ]);
+  ], GH_MERGE_READINESS_TIMEOUT_MS);
   if (json && json.indexOf("ERROR") !== 0) return json.trim();
+  if (isGhTimeoutError(json)) return undefined;
   return null;
 }
 
@@ -62,7 +72,10 @@ function getLatestCiRunForTrackedPr(repo, branch, headSha) {
     "--repo", repo,
     "--json", "databaseId,status,conclusion,headSha,event",
     "--limit", "5"
-  ]);
+  ], GH_MERGE_READINESS_TIMEOUT_MS);
+  if (isGhTimeoutError(runsJson)) {
+    return { transient: true, error: runsJson };
+  }
   if (!runsJson || runsJson.indexOf("ERROR") === 0) return null;
   try {
     var runs = JSON.parse(runsJson);
@@ -193,7 +206,9 @@ function ensureGitHubLabel(repo, name, color, description) {
 
 module.exports = {
   GH_EXEC_TIMEOUT_MS: GH_EXEC_TIMEOUT_MS,
+  GH_MERGE_READINESS_TIMEOUT_MS: GH_MERGE_READINESS_TIMEOUT_MS,
   execGh: execGh,
+  isGhTimeoutError: isGhTimeoutError,
   isCodexReviewer: isCodexReviewer,
   getPrAuthor: getPrAuthor,
   getCurrentPrHeadSha: getCurrentPrHeadSha,

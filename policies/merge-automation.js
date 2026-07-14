@@ -66,6 +66,7 @@ var fetchCodexReviewThreads = _githubPrAdapter.fetchCodexReviewThreads;
 var ensureGitHubLabel = _githubPrAdapter.ensureGitHubLabel;
 var execGh = _githubPrAdapter.execGh;
 var GH_EXEC_TIMEOUT_MS = _githubPrAdapter.GH_EXEC_TIMEOUT_MS;
+var GH_MERGE_READINESS_TIMEOUT_MS = _githubPrAdapter.GH_MERGE_READINESS_TIMEOUT_MS;
 
 var CODEX_NOTIFICATION_TTL_SECONDS = _mergeNotificationDispatcher.CODEX_NOTIFICATION_TTL_SECONDS;
 var codexNotificationDedupKey = _mergeNotificationDispatcher.codexNotificationDedupKey;
@@ -78,9 +79,11 @@ var notifyAgentMainChannel = _mergeNotificationDispatcher.notifyAgentMainChannel
 var prTracking = agentdesk.prTracking;
 
 var CODEX_REVIEW_TTL_SECONDS = 14 * 24 * 60 * 60;
-// #4250: onTick5min may spend at most one review+thread pair (2 × 1500ms)
-// refreshing Codex state. Every decision below reads this kv_meta cache; a
-// miss waits for a later round-robin tick instead of doing synchronous I/O.
+// #4250: Bound only the high-frequency review-signal fan-out to one
+// review+thread pair (2 × 1500ms) per tick. Merge authorization is rare and
+// always fetches a live snapshot for the candidate PR; this cache is never an
+// authority to merge. Other O(N) gh fan-outs in the tick retain their existing
+// deadline-defer behavior and are not claimed to make the whole tick bounded.
 var CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK = 1;
 var CODEX_REVIEW_SNAPSHOT_TTL_MINUTES = 30;
 var CODEX_REVIEW_REFRESH_CURSOR_KEY = "codex_review_snapshot_refresh_cursor";
@@ -1236,6 +1239,13 @@ function verifyTrackedPrMergeReadiness(tracking, currentSha) {
     };
   }
   var run = getLatestCiRunForTrackedPr(tracking.repo_id, tracking.branch, currentSha || tracking.head_sha);
+  if (run && run.transient) {
+    return {
+      ok: false,
+      transient: true,
+      reason: "CI readiness lookup timed out; retry next tick"
+    };
+  }
   if (!run) return { ok: false, reason: "no CI run found for tracked branch" };
   if (run.status !== "completed") {
     return { ok: false, reason: "CI still " + run.status + " for run " + run.databaseId };
@@ -1283,16 +1293,19 @@ function getReviewTargets(cardId) {
   };
 }
 
-function codexReviewSnapshotCacheKey(repo, prNumber) {
+function codexReviewSnapshotCacheKey(repo, prNumber, headSha) {
   return "codex_review_snapshot:" +
-    sanitizeKvKeyPart(repo) + ":" + sanitizeKvKeyPart(prNumber);
+    sanitizeKvKeyPart(repo) + ":" + sanitizeKvKeyPart(prNumber) + ":" +
+    sanitizeKvKeyPart(headSha);
 }
 
-function loadCachedCodexReviewSnapshot(repo, prNumber) {
-  var raw = agentdesk.kv.get(codexReviewSnapshotCacheKey(repo, prNumber));
+function loadCachedCodexReviewSnapshot(repo, prNumber, headSha) {
+  if (!headSha) return { found: false, snapshot: null };
+  var raw = agentdesk.kv.get(codexReviewSnapshotCacheKey(repo, prNumber, headSha));
   if (raw == null) return { found: false, snapshot: null };
   try {
     var cached = JSON.parse(raw);
+    if (cached.head_sha !== headSha) return { found: false, snapshot: null };
     return { found: true, snapshot: cached.snapshot || null };
   } catch (e) {
     agentdesk.log.warn(
@@ -1302,10 +1315,11 @@ function loadCachedCodexReviewSnapshot(repo, prNumber) {
   }
 }
 
-function storeCodexReviewSnapshot(repo, prNumber, snapshot) {
+function storeCodexReviewSnapshot(repo, prNumber, headSha, snapshot) {
+  if (!headSha) return;
   agentdesk.kv.set(
-    codexReviewSnapshotCacheKey(repo, prNumber),
-    JSON.stringify({ snapshot: snapshot }),
+    codexReviewSnapshotCacheKey(repo, prNumber, headSha),
+    JSON.stringify({ head_sha: headSha, snapshot: snapshot }),
     CODEX_REVIEW_SNAPSHOT_TTL_MINUTES * 60
   );
 }
@@ -1336,7 +1350,7 @@ function refreshCodexReviewSnapshotSlice(tracked) {
     // undefined means the refresh failed; retain the last-known cached state.
     // null is a successful response with no Codex review and is cacheable.
     if (snapshot !== undefined) {
-      storeCodexReviewSnapshot(row.repo_id, row.pr_number, snapshot);
+      storeCodexReviewSnapshot(row.repo_id, row.pr_number, row.head_sha, snapshot);
     }
     refreshed.push(row);
   }
@@ -1612,8 +1626,8 @@ function processCodexReviewSignals() {
   for (var i = 0; i < tracked.length; i++) {
     var cachedRow = tracked[i];
     if (!cachedRow.repo_id || !cachedRow.pr_number) continue;
-    cached[codexReviewSnapshotCacheKey(cachedRow.repo_id, cachedRow.pr_number)] =
-      loadCachedCodexReviewSnapshot(cachedRow.repo_id, cachedRow.pr_number);
+    cached[codexReviewSnapshotCacheKey(cachedRow.repo_id, cachedRow.pr_number, cachedRow.head_sha)] =
+      loadCachedCodexReviewSnapshot(cachedRow.repo_id, cachedRow.pr_number, cachedRow.head_sha);
   }
 
   // Refresh only a round-robin slice. Reload refreshed values from kv_meta so
@@ -1621,15 +1635,15 @@ function processCodexReviewSignals() {
   var refreshed = refreshCodexReviewSnapshotSlice(tracked);
   for (var r = 0; r < refreshed.length; r++) {
     var refreshedRow = refreshed[r];
-    cached[codexReviewSnapshotCacheKey(refreshedRow.repo_id, refreshedRow.pr_number)] =
-      loadCachedCodexReviewSnapshot(refreshedRow.repo_id, refreshedRow.pr_number);
+    cached[codexReviewSnapshotCacheKey(refreshedRow.repo_id, refreshedRow.pr_number, refreshedRow.head_sha)] =
+      loadCachedCodexReviewSnapshot(refreshedRow.repo_id, refreshedRow.pr_number, refreshedRow.head_sha);
   }
 
   for (var i = 0; i < tracked.length; i++) {
     var row = tracked[i];
     if (!row.repo_id || !row.pr_number) continue;
 
-    var cachedSnapshot = cached[codexReviewSnapshotCacheKey(row.repo_id, row.pr_number)];
+    var cachedSnapshot = cached[codexReviewSnapshotCacheKey(row.repo_id, row.pr_number, row.head_sha)];
     var snapshot = cachedSnapshot && cachedSnapshot.found ? cachedSnapshot.snapshot : null;
     if (!snapshot) continue;
 
@@ -1664,10 +1678,22 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
   }
   var trackingId = tracking ? tracking.card_id : trackingKey;
   var currentSha = getCurrentPrHeadSha(prNumber, repo);
+  if (currentSha === undefined) {
+    agentdesk.log.info(
+      "[merge] Deferring PR #" + prNumber + " because the live head SHA lookup timed out"
+    );
+    return false;
+  }
 
   if (tracking) {
     var readiness = verifyTrackedPrMergeReadiness(tracking, currentSha || tracking.head_sha);
     if (!readiness.ok) {
+      if (readiness.transient) {
+        agentdesk.log.info(
+          "[merge] Deferring PR #" + prNumber + " after transient merge pre-check: " + readiness.reason
+        );
+        return false;
+      }
       agentdesk.log.warn("[merge] Merge pre-check failed for PR #" + prNumber + ": " + readiness.reason);
       upsertPrTracking(
         tracking.card_id,
@@ -1689,8 +1715,23 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
     }
   }
 
-  var cachedReview = loadCachedCodexReviewSnapshot(repo, prNumber);
-  var snapshot = cachedReview.found ? cachedReview.snapshot : null;
+  // Merge authorization is deliberately live and fail-closed. The cache above
+  // serves notifications only: neither a miss nor a stale clean value can
+  // authorize `gh pr merge --auto`.
+  var snapshot = buildCodexReviewSnapshot(repo, prNumber);
+  if (snapshot === undefined) {
+    agentdesk.log.warn(
+      "[merge] Deferring PR #" + prNumber +
+      " because live Codex review state could not be confirmed"
+    );
+    return false;
+  }
+  storeCodexReviewSnapshot(
+    repo,
+    prNumber,
+    currentSha || (tracking && tracking.head_sha),
+    snapshot
+  );
   if (snapshot && snapshot.hasBlocking) {
     agentdesk.log.warn("[merge] Blocking auto-merge for PR #" + prNumber + " due to unresolved Codex P1/P2 comments");
     agentdesk.kv.set("merge_blocked:" + trackingId, JSON.stringify({
@@ -2193,6 +2234,8 @@ if (typeof module !== "undefined" && module.exports) {
       processCodexReviewSignals: processCodexReviewSignals,
       loadCachedCodexReviewSnapshot: loadCachedCodexReviewSnapshot,
       GH_EXEC_TIMEOUT_MS: GH_EXEC_TIMEOUT_MS,
+      GH_MERGE_READINESS_TIMEOUT_MS: GH_MERGE_READINESS_TIMEOUT_MS,
+      enableAutoMerge: enableAutoMerge,
       CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK: CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK
     }
   };

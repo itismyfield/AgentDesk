@@ -181,7 +181,7 @@
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 275 | 275 | 0 |  |
 | `engine::ops::timeouts_ops` | `src/engine/ops/timeouts_ops.rs` | 772 | 671 | 101 |  |
 | `engine::ops::turn_ops` | `src/engine/ops/turn_ops.rs` | 348 | 255 | 93 |  |
-| `engine::slow_hook_warn` | `src/engine/slow_hook_warn.rs` | 44 | 26 | 18 |  |
+| `engine::slow_hook_warn` | `src/engine/slow_hook_warn.rs` | 61 | 29 | 32 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 189 | 189 | 0 |  |
 | `engine::transition` | `src/engine/transition.rs` | 1485 | 835 | 650 |  |
 | `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 281 | 281 | 0 |  |

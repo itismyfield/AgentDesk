@@ -820,7 +820,7 @@ impl PolicyEngine {
                 let elapsed = policy_start.elapsed();
                 let effects_after = Self::count_pending_effects(&ctx);
                 let effects_count = effects_after.saturating_sub(effects_before);
-                if elapsed >= POLICY_HOOK_WARN_THRESHOLD && should_emit(policy_name, hook_name) {
+                if should_emit(policy_name, hook_name, elapsed >= POLICY_HOOK_WARN_THRESHOLD) {
                     tracing::warn!(
                         policy_name,
                         hook_name,
@@ -984,7 +984,7 @@ impl PolicyEngine {
                 } else {
                     POLICY_HOOK_WARN_THRESHOLD
                 };
-                if elapsed >= warn_threshold && should_emit(policy_name, &hook_name_str) {
+                if should_emit(policy_name, &hook_name_str, elapsed >= warn_threshold) {
                     tracing::warn!(
                         policy_name,
                         hook = %hook,
