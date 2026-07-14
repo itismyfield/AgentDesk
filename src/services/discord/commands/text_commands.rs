@@ -441,7 +441,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 "!clear",
                 super::SoftClearNotifyMode::Suppress,
             )
-            .await;
+            .await?;
             let _ = msg.reply(&ctx.http, super::SESSION_CLEARED_RESPONSE).await;
             return Ok(true);
         }

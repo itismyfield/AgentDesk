@@ -1431,3 +1431,10 @@
   that owns the provider session, and the CLI allowlist is a node-local startup
   compatibility check. No cross-node authority, lease, singleton, or routing
   behavior is introduced.
+- #4305 fresh-session channel recent-pairs context injection — **Shared durable
+  boundary, worker-local assembly**: `/clear` and routine-agent identity changes
+  upsert a monotonic, database-server-timestamped row in
+  `channel_session_clear_boundaries`; any worker may perform that idempotent
+  write. Per-turn prompt assembly joins the shared boundary while reading
+  `session_transcripts`, so restart or worker reassignment cannot cross a clear.
+  This adds no leader lease, singleton, or routing decision.

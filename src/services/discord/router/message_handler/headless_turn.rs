@@ -436,7 +436,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if metadata
+    let routine_targets_resolved_role = metadata
         .as_ref()
         .and_then(|value| value.get("routine_id"))
         .is_some()
@@ -446,16 +446,38 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                     .as_ref()
                     .map(|binding| binding.role_id.as_str()),
             )
-            .is_some_and(|(metadata_agent_id, role_id)| metadata_agent_id == role_id)
-        && let Some(channel_name_hint) = channel_name_hint
+            .is_some_and(|(metadata_agent_id, role_id)| metadata_agent_id == role_id);
+    let routine_agent_identity_changed = if routine_targets_resolved_role {
+        if let Some(channel_name_hint) = channel_name_hint
             .as_ref()
             .filter(|value| !value.trim().is_empty())
-    {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id)
-            && session.channel_name.as_deref() != Some(channel_name_hint.as_str())
         {
-            session.channel_name = Some(channel_name_hint.clone());
+            let data = shared.core.lock().await;
+            data.sessions.get(&channel_id).is_some_and(|session| {
+                session.channel_name.as_deref() != Some(channel_name_hint.as_str())
+            })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if routine_agent_identity_changed {
+        if let Err(error) = crate::db::session_transcripts::record_channel_clear_boundary(
+            shared.pg_pool.as_ref(),
+            &channel_id.get().to_string(),
+        )
+        .await
+        {
+            let _ =
+                release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+            return Err(HeadlessTurnStartError::Internal(format!(
+                "failed to persist routine agent identity context boundary: {error}"
+            )));
+        }
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.channel_name = channel_name_hint.clone();
             session.clear_provider_session();
             session_id = None;
             memento_context_loaded = false;
@@ -611,10 +633,21 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         });
     }
     let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
-    let reply_context = session_retry_context
-        .as_ref()
-        .map(|context| context.formatted_context.clone());
+    let retry_context = session_retry_context.as_ref();
+    let reply_context = retry_context.map(|c| c.formatted_context.clone());
     let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
+    // Routine metadata deterministically reasserts `dm_fresh` on routine runs,
+    // but a later user-authored turn in the same DM has no routine metadata.
+    // Persist both deliberate severances so that a later plain fresh turn cannot
+    // inject transcript pairs from before either one.
+    if (goal_fresh || dm_fresh)
+        && let Err(error) = record_fresh_session_context_boundary(shared, channel_id).await
+    {
+        let _ = release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+        return Err(HeadlessTurnStartError::Internal(format!(
+            "failed to persist fresh-session context boundary: {error}"
+        )));
+    }
     // #family-profile-probe (codex review P1/R2): a fresh DM routine turn must
     // route through the SAME proven fresh-session machinery as `/goal fresh`, so
     // it (a) thoroughly clears in-memory + DB + stale provider session via
@@ -625,8 +658,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // `!force_fresh_provider_session`). Clearing the in-memory id alone is
     // insufficient on all three counts. Only the `/goal fresh` PROMPT REWRITE is
     // gated separately (goal-only) — the probe prompt must be sent verbatim.
-    let force_fresh_provider_session = goal_fresh || dm_fresh;
-    let fresh_codex_goal_session_requested = force_fresh_provider_session;
+    let force_fresh_provider_session = goal_fresh || dm_fresh || routine_agent_identity_changed;
     if force_fresh_provider_session {
         clear_codex_goal_start_provider_session(
             shared,
@@ -654,10 +686,12 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         std::borrow::Cow::Borrowed(prompt)
     };
     if session_id.is_none() {
-        if fresh_codex_goal_session_requested {
+        if force_fresh_provider_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let reason = if goal_fresh {
                 "/goal fresh session request"
+            } else if routine_agent_identity_changed {
+                "routine agent identity change"
             } else {
                 "fresh DM routine turn"
             };
@@ -834,6 +868,17 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         dispatch_profile,
         &memory_recall,
     );
+    let channel_recent_context = load_channel_recent_context(
+        shared.pg_pool.as_ref(),
+        channel_id,
+        session_id.as_deref(),
+        force_fresh_provider_session,
+        session_was_cleared,
+        dispatch_profile,
+        None,
+        session_retry_context.as_ref(),
+    )
+    .await;
     if !pending_uploads.is_empty() {
         context_chunks.push(pending_uploads.join("\n"));
     }
@@ -842,6 +887,9 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     }
     if let Some(reply_context) = reply_context {
         context_chunks.push(reply_context);
+    }
+    if let Some(ref recent_context) = channel_recent_context {
+        recent_context.append_rendered_context_to(&mut context_chunks);
     }
     if let Some(ref knowledge) = memory_injection_plan.shared_knowledge_for_context {
         context_chunks.push(knowledge.to_string());
@@ -901,6 +949,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         memento_mcp_available,
         matches!(&provider, ProviderKind::Claude),
         recovery_context_for_manifest.as_ref(),
+        channel_recent_context.as_ref(),
         Some(&memory_recall_manifest),
         Some(&turn_id),
     );
@@ -1558,5 +1607,26 @@ mod dm_fresh_routine_tests {
     #[test]
     fn absent_metadata_is_not_reset() {
         assert!(!dm_fresh_routine_turn(None));
+    }
+
+    #[test]
+    fn fresh_dm_path_records_durable_boundary_before_provider_clear() {
+        let module_src = include_str!("headless_turn.rs");
+        let branch = module_src
+            .find("if (goal_fresh || dm_fresh)")
+            .expect("fresh DM/goal durable-boundary branch exists");
+        let branch_body = &module_src[branch..];
+        let boundary_call = format!("{}{}", "record_fresh_session_", "context_boundary(");
+        let boundary = branch_body
+            .find(&boundary_call)
+            .expect("fresh DM path records a durable transcript boundary");
+        let provider_clear = branch_body
+            .find("clear_codex_goal_start_provider_session(")
+            .expect("fresh DM path clears provider state");
+
+        assert!(
+            boundary < provider_clear,
+            "fresh DM durable boundary must be recorded before provider state is cleared"
+        );
     }
 }

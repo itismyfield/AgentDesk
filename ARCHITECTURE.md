@@ -567,6 +567,7 @@ src/
 │   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
 │   │   ├── prompt_builder/
+│   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
 │   │   │   ├── dispatch_contract_tests.rs
 │   │   │   ├── layer_rendering.rs

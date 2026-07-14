@@ -206,6 +206,7 @@ use formatting::{
 pub(crate) use inflight::clear_inflight_state;
 pub(crate) use inflight::lock_inflight_state_path;
 use inflight::{InflightTurnState, load_inflight_states, save_inflight_state};
+pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
 use queue_dispatch::{

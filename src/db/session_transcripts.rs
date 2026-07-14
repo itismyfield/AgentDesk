@@ -1,8 +1,29 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::future::Future;
 
 use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
+
+const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "SELECT transcript.user_message,
+            transcript.assistant_message,
+            transcript.created_at,
+            clear_boundary.cleared_at
+     FROM session_transcripts AS transcript
+     LEFT JOIN channel_session_clear_boundaries AS clear_boundary
+       ON clear_boundary.channel_id = transcript.channel_id
+     WHERE transcript.channel_id = $1
+       AND BTRIM(transcript.user_message) <> ''
+       AND BTRIM(transcript.assistant_message) <> ''
+     ORDER BY transcript.created_at DESC, transcript.id DESC
+     LIMIT $2";
+
+type ChannelTranscriptPairRow = (
+    String,
+    String,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +66,92 @@ pub struct PersistSessionTranscript<'a> {
     pub assistant_message: &'a str,
     pub events: &'a [SessionTranscriptEvent],
     pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChannelTranscriptPair {
+    pub(crate) user_message: String,
+    pub(crate) assistant_message: String,
+}
+
+pub(crate) async fn record_channel_clear_boundary(
+    pg_pool: Option<&PgPool>,
+    channel_id: &str,
+) -> Result<()> {
+    let pool = pg_pool
+        .ok_or_else(|| anyhow!("postgres pool is required to persist a channel clear boundary"))?;
+    let channel_id = channel_id.trim();
+    if channel_id.is_empty() {
+        return Err(anyhow!(
+            "channel clear boundary requires non-empty channel_id"
+        ));
+    }
+
+    sqlx::query(
+        "INSERT INTO channel_session_clear_boundaries (channel_id, cleared_at)
+         VALUES ($1, NOW())
+         ON CONFLICT (channel_id) DO UPDATE SET
+             cleared_at = GREATEST(
+                 channel_session_clear_boundaries.cleared_at,
+                 EXCLUDED.cleared_at
+             )",
+    )
+    .bind(channel_id)
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow!("record channel clear boundary failed: {error}"))?;
+
+    Ok(())
+}
+
+pub(crate) async fn fetch_recent_channel_pairs(
+    pool: &PgPool,
+    channel_id: &str,
+    limit: u64,
+) -> Result<Vec<ChannelTranscriptPair>> {
+    fetch_recent_channel_pairs_from_rows(async {
+        sqlx::query_as::<_, ChannelTranscriptPairRow>(FETCH_RECENT_CHANNEL_PAIRS_SQL)
+            .bind(channel_id)
+            .bind(limit.min(i64::MAX as u64) as i64)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| anyhow!("recent channel transcript lookup failed: {error}"))
+    })
+    .await
+}
+
+async fn fetch_recent_channel_pairs_from_rows<F>(rows: F) -> Result<Vec<ChannelTranscriptPair>>
+where
+    F: Future<Output = Result<Vec<ChannelTranscriptPairRow>>>,
+{
+    let rows = rows.await?;
+    Ok(chronological_channel_pairs_from_desc(
+        channel_pairs_after_clear_boundary(rows),
+    ))
+}
+
+fn channel_pairs_after_clear_boundary(
+    rows: Vec<ChannelTranscriptPairRow>,
+) -> Vec<ChannelTranscriptPair> {
+    rows.into_iter()
+        .filter(|(_, _, created_at, cleared_at)| match cleared_at {
+            None => true,
+            Some(cleared_at) => created_at.is_some_and(|created_at| created_at > *cleared_at),
+        })
+        .map(
+            |(user_message, assistant_message, _created_at, _cleared_at)| ChannelTranscriptPair {
+                user_message,
+                assistant_message,
+            },
+        )
+        .collect()
+}
+
+pub(crate) fn chronological_channel_pairs_from_desc(
+    mut pairs: Vec<ChannelTranscriptPair>,
+) -> Vec<ChannelTranscriptPair> {
+    pairs.reverse();
+    pairs
 }
 
 // reason: public transcript record for the read/fetch route; the pg-side load
@@ -415,4 +522,114 @@ fn normalized_opt(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_channel_pairs_query_breaks_created_at_ties_by_desc_id() {
+        assert!(
+            FETCH_RECENT_CHANNEL_PAIRS_SQL
+                .contains("ORDER BY transcript.created_at DESC, transcript.id DESC"),
+            "equal created_at values must use the primary key as a deterministic newest-first tie-breaker"
+        );
+    }
+
+    #[test]
+    fn persisted_clear_boundary_filters_preclear_pairs_without_in_memory_flag() {
+        let cleared_at = chrono::DateTime::parse_from_rfc3339("2026-07-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let before = cleared_at - chrono::Duration::seconds(1);
+        let after = cleared_at + chrono::Duration::seconds(1);
+        let rows = vec![
+            (
+                "post-clear".to_string(),
+                "allowed".to_string(),
+                Some(after),
+                Some(cleared_at),
+            ),
+            (
+                "at-boundary".to_string(),
+                "blocked".to_string(),
+                Some(cleared_at),
+                Some(cleared_at),
+            ),
+            (
+                "pre-clear".to_string(),
+                "blocked".to_string(),
+                Some(before),
+                Some(cleared_at),
+            ),
+        ];
+
+        // No in-memory `session_was_cleared` state is involved here: this
+        // models a fresh process loading only the persisted database boundary.
+        let pairs = chronological_channel_pairs_from_desc(channel_pairs_after_clear_boundary(rows));
+
+        assert_eq!(
+            pairs,
+            vec![ChannelTranscriptPair {
+                user_message: "post-clear".to_string(),
+                assistant_message: "allowed".to_string(),
+            }],
+            "a later fresh session must not cross the persisted /clear boundary"
+        );
+        assert!(
+            FETCH_RECENT_CHANNEL_PAIRS_SQL
+                .contains("LEFT JOIN channel_session_clear_boundaries AS clear_boundary")
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_fresh_boundary_blocks_prior_pairs_after_restart_through_fetch_pipeline() {
+        let cleared_at = chrono::DateTime::parse_from_rfc3339("2026-07-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = vec![
+            (
+                "at-goal-fresh".to_string(),
+                "blocked".to_string(),
+                Some(cleared_at),
+                Some(cleared_at),
+            ),
+            (
+                "before-goal-fresh".to_string(),
+                "blocked".to_string(),
+                Some(cleared_at - chrono::Duration::seconds(1)),
+                Some(cleared_at),
+            ),
+        ];
+
+        // This uses the same post-query pipeline as `fetch_recent_channel_pairs`
+        // with no in-memory force-fresh/session-cleared flag, modeling the first
+        // plain fresh turn after dcserver restarts during `/goal fresh`.
+        let pairs = fetch_recent_channel_pairs_from_rows(async { Ok(rows) })
+            .await
+            .unwrap();
+
+        assert!(
+            pairs.is_empty(),
+            "a restarted fresh session must not fetch pairs at or before the durable /goal fresh boundary"
+        );
+    }
+
+    #[test]
+    fn recent_channel_pairs_are_rendered_oldest_first_after_desc_fetch() {
+        let pairs = chronological_channel_pairs_from_desc(vec![
+            ChannelTranscriptPair {
+                user_message: "higher-id-at-tied-time".to_string(),
+                assistant_message: "newer".to_string(),
+            },
+            ChannelTranscriptPair {
+                user_message: "lower-id-at-tied-time".to_string(),
+                assistant_message: "older".to_string(),
+            },
+        ]);
+
+        assert_eq!(pairs[0].user_message, "lower-id-at-tied-time");
+        assert_eq!(pairs[1].user_message, "higher-id-at-tied-time");
+    }
 }

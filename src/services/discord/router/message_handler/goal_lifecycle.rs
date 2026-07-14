@@ -181,6 +181,17 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
     send_codex_goal_lifecycle_notice(http, shared, channel_id, command, active_turn).await;
 }
 
+pub(super) async fn record_fresh_session_context_boundary(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+) -> anyhow::Result<()> {
+    crate::db::session_transcripts::record_channel_clear_boundary(
+        shared.pg_pool.as_ref(),
+        &channel_id.get().to_string(),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod codex_goal_lifecycle_unit_tests {
     use super::*;
@@ -217,6 +228,58 @@ mod codex_goal_lifecycle_unit_tests {
         assert!(
             codex_goal_lifecycle_notice(GoalLifecycleCommand::Resume, false)
                 .contains("Codex TUI로 전달하지 않았습니다")
+        );
+    }
+
+    fn durable_boundary_call() -> String {
+        format!("{}{}", "record_fresh_session_", "context_boundary(")
+    }
+
+    fn assert_goal_fresh_records_before_provider_clear(source: &str, branch_start: &str) {
+        let branch = source
+            .find(branch_start)
+            .unwrap_or_else(|| panic!("missing goal-fresh branch: {branch_start}"));
+        let boundary = source[branch..]
+            .find(&durable_boundary_call())
+            .map(|offset| branch + offset)
+            .expect("goal-fresh branch must record a durable transcript boundary");
+        let provider_clear = source[branch..]
+            .find("clear_codex_goal_start_provider_session(")
+            .map(|offset| branch + offset)
+            .expect("goal-fresh branch must clear the provider session");
+
+        assert!(
+            boundary < provider_clear,
+            "durable /goal fresh boundary must be recorded before provider state is cleared"
+        );
+    }
+
+    #[test]
+    fn goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear() {
+        assert_goal_fresh_records_before_provider_clear(
+            include_str!("intake_turn.rs"),
+            "let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);",
+        );
+        assert_goal_fresh_records_before_provider_clear(
+            include_str!("headless_turn.rs"),
+            "let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);",
+        );
+
+        let helper_source = include_str!("goal_lifecycle.rs");
+        let helper_start = format!(
+            "{}{}",
+            "pub(super) async fn record_fresh_session_", "context_boundary("
+        );
+        let helper = helper_source
+            .find(&helper_start)
+            .expect("fresh-session boundary helper exists");
+        let db_boundary_call = format!(
+            "{}{}",
+            "crate::db::session_transcripts::record_channel_", "clear_boundary("
+        );
+        assert!(
+            helper_source[helper..].contains(&db_boundary_call),
+            "fresh-session helper must persist the durable channel boundary"
         );
     }
 }
