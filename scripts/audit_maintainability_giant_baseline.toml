@@ -9,7 +9,9 @@
 # Workflow:
 #   * As a file shrinks, LOWER its number here to lock in the win.
 #   * Growing a giant requires RAISING its number — a deliberate, reviewable
-#     admission in the diff that the giant got bigger. Prefer splitting instead.
+#     admission in the diff that the giant got bigger. Every raise must append a
+#     matching [[admission]] with decompose_issue to
+#     scripts/ratchet_admission_history.toml. Prefer splitting instead.
 #
 # Scope (this batch): the M2.x turn-lifecycle decomposition surface
 # (src/services/discord/** and src/services/turn_*), where re-inflation was

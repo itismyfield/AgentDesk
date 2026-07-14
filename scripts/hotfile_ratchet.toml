@@ -17,7 +17,9 @@
 # Workflow:
 #   * As a file shrinks, LOWER its number here to lock in the win.
 #   * Growing a hot file requires RAISING its number — a deliberate, reviewable
-#     admission in the diff that the file got bigger. Prefer splitting instead.
+#     admission in the diff that the file got bigger. Every raise must append a
+#     matching [[admission]] with decompose_issue to
+#     scripts/ratchet_admission_history.toml. Prefer splitting instead.
 #
 # Counts are raw `wc -l` (equivalently Python `str.splitlines()`) on the
 # LF-terminated source; the two agree exactly for this repo's LF-only files.

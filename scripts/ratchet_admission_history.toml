@@ -1,0 +1,31 @@
+# Ratchet cap admission history (#4269). Schema version 1.
+#
+# Append-only schema for every future giant-file or hot-file cap increase:
+#   ratchet = "giant_file_ratchet" or "hotfile_ratchet"
+#   file = repo-relative path
+#   old_cap/new_cap = exact cap change in the same diff
+#   decompose_issue = positive integer issue number (mandatory; no leading '#')
+#   count = previous admission count for this file across both ratchets + 1
+#
+# The checker warns (but does not fail or create an issue) when count exceeds
+# ADMISSION_WARN_THRESHOLD in scripts/ratchet_admission.py. Historical comments
+# before #4269 remain in their manifests; the two #3983 item4 admissions below
+# are migrated explicitly as the reviewable-admission compatibility examples.
+
+schema_version = 1
+
+[[admission]]
+ratchet = "giant_file_ratchet"
+file = "src/services/discord/tmux_watcher.rs"
+old_cap = 7120
+new_cap = 7122
+decompose_issue = 3983
+count = 1
+
+[[admission]]
+ratchet = "hotfile_ratchet"
+file = "src/services/discord/turn_bridge/mod.rs"
+old_cap = 6645
+new_cap = 6646
+decompose_issue = 3983
+count = 1

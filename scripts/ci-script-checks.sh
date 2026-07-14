@@ -71,6 +71,7 @@ echo "=== await_holding_lock ratchet guard ==="
 
 echo "=== Hotfile LOC ratchet guard (#3565) ==="
 "$PYTHON" scripts/check_hotfile_ratchet.py
+"$PYTHON" -m unittest scripts.test_ratchet_admission
 
 echo "=== Discord log field-key drift guard (#4218) ==="
 "$PYTHON" scripts/check_log_key_drift.py

@@ -55,6 +55,8 @@ if sys.version_info < MIN_PYTHON:
 
 import tomllib
 
+from ratchet_admission import audit_repository_admissions
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "scripts" / "hotfile_ratchet.toml"
 
@@ -106,6 +108,18 @@ def main() -> int:
         return 1
 
     failed = False
+    admission_audit = audit_repository_admissions(
+        repo_root=REPO_ROOT,
+        ratchet="hotfile_ratchet",
+        config_rel_path="scripts/hotfile_ratchet.toml",
+        table_name="hotfile_ratchet",
+    )
+    for warning in admission_audit.warnings:
+        print(warning, file=sys.stderr)
+    for error in admission_audit.errors:
+        print(f"FAIL: {error}", file=sys.stderr)
+        failed = True
+
     for rel, ceiling in sorted(ceilings.items()):
         path = REPO_ROOT / rel
         if not path.is_file():

@@ -16,6 +16,7 @@ Production LoC (test code excluded) is shared with ``giant_files`` via
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -23,6 +24,7 @@ from .. import common
 from ..common import Finding
 from . import CheckSpec
 from .giant_files import giant_production_loc
+from ratchet_admission import audit_repository_admissions
 
 CONFIG_REL_PATH = "scripts/audit_maintainability_giant_baseline.toml"
 
@@ -69,6 +71,25 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
 
     current = giant_production_loc()
     findings: list[Finding] = []
+    admission_audit = audit_repository_admissions(
+        repo_root=common.REPO_ROOT,
+        ratchet="giant_file_ratchet",
+        config_rel_path=CONFIG_REL_PATH,
+        table_name="giant_file_ratchet",
+    )
+    for warning in admission_audit.warnings:
+        print(warning, file=sys.stderr)
+    for message in admission_audit.errors:
+        findings.append(
+            Finding(
+                rule="giant_file_ratchet",
+                severity="error",
+                file=CONFIG_REL_PATH,
+                line=None,
+                message=message,
+                extra={"history": "scripts/ratchet_admission_history.toml"},
+            )
+        )
     for rel, frozen in baseline.items():
         if common.is_allowlisted(allowlist, rel):
             continue
