@@ -10,7 +10,7 @@ pub(in crate::services::discord::router) async fn handle_shell_command_raw(
     if cmd_str.is_empty() {
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id
-            .say(&ctx.http, "Usage: `!<command>`\nExample: `!ls -la`")
+            .say(&ctx.http, "사용법: `!<command>`\n예: `!ls -la`")
             .await;
         return Ok(());
     }
@@ -49,22 +49,16 @@ pub(in crate::services::discord::router) async fn handle_shell_command_raw(
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
-            let mut parts = Vec::new();
-            if !stdout.is_empty() {
-                parts.push(format!("```\n{}\n```", stdout.trim_end()));
-            }
-            if !stderr.is_empty() {
-                parts.push(format!("stderr:\n```\n{}\n```", stderr.trim_end()));
-            }
-            if parts.is_empty() {
-                parts.push(format!("(exit code: {})", exit_code));
-            } else if exit_code != 0 {
-                parts.push(format!("(exit code: {})", exit_code));
-            }
-            parts.join("\n")
+            crate::services::discord::commands::shell_command_output_response(
+                &stdout, &stderr, exit_code,
+            )
         }
-        Ok(Err(e)) => format!("Failed to execute: {}", e),
-        Err(e) => format!("Task error: {}", e),
+        Ok(Err(e)) => crate::services::discord::commands::shell_command_execution_error_response(
+            &e.to_string(),
+        ),
+        Err(e) => {
+            crate::services::discord::commands::shell_command_task_error_response(&e.to_string())
+        }
     };
 
     send_long_message_raw(&ctx.http, channel_id, &response, shared).await?;

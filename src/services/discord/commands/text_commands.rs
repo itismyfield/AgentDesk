@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
 use super::super::*;
-use super::{build_provider_skill_prompt, owner_error_response as err};
+use super::build_provider_skill_prompt;
 use crate::services::provider::CancelToken;
 
 enum TextStopLookup {
@@ -1127,33 +1127,22 @@ Any other message is sent to {p}.
                     let stdout = String::from_utf8_lossy(&outcome.stdout);
                     let stderr = String::from_utf8_lossy(&outcome.stderr);
                     let exit_code = outcome.exit_code;
-                    let mut parts = Vec::new();
-                    if !stdout.is_empty() {
-                        parts.push(format!("```\n{}\n```", stdout.trim_end()));
-                    }
-                    if !stderr.is_empty() {
-                        parts.push(super::owner_error_response(
-                            "셸 명령이 오류 출력을 반환했어요.",
-                            stderr.trim_end(),
-                        ));
-                    }
                     if let Some(cause) = outcome.timed_out {
-                        parts.push(format!(
-                            "⚠️ 셸 명령이 제한 시간을 초과해 중지됐어요.\n명령을 나누거나 경로 범위를 좁힌 뒤, `--exclude-dir`/`-name` 필터를 추가해 다시 시도해 주세요.\n{}",
-                            super::owner_error_response(
-                                "중지 원인 상세를 확인해 주세요.",
-                                cause.as_str(),
-                            )
-                        ));
-                    } else if parts.is_empty() {
-                        parts.push(format!("(종료 코드: {})", exit_code));
-                    } else if exit_code != 0 {
-                        parts.push(format!("(종료 코드: {})", exit_code));
+                        let mut parts = Vec::new();
+                        if !stdout.is_empty() {
+                            parts.push(format!("```\n{}\n```", stdout.trim_end()));
+                        }
+                        if !stderr.is_empty() {
+                            parts.push(super::shell_command_stderr_response(&stderr));
+                        }
+                        parts.push(super::shell_command_timeout_response(cause.as_str()));
+                        parts.join("\n")
+                    } else {
+                        super::shell_command_output_response(&stdout, &stderr, exit_code)
                     }
-                    parts.join("\n")
                 }
-                Ok(Err(e)) => super::owner_error_response("셸 명령을 실행하지 못했어요.", &e),
-                Err(e) => err("셸 명령을 처리하는 중 오류가 발생했어요.", &e.to_string()),
+                Ok(Err(e)) => super::shell_command_execution_error_response(&e),
+                Err(e) => super::shell_command_task_error_response(&e.to_string()),
             };
 
             send_long_message_raw(&ctx.http, channel_id, &response, &data.shared).await?;

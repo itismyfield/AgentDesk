@@ -34,7 +34,7 @@ pub(super) fn session_restored_response(path: &str) -> String {
     format!("`{path}`에서 세션을 복원했어요.")
 }
 
-pub(super) fn owner_error_response(summary: &str, detail: &str) -> String {
+pub(in crate::services::discord) fn owner_error_response(summary: &str, detail: &str) -> String {
     const DETAIL_PREVIEW_CHARS: usize = 1_400;
 
     let detail = detail.trim();
@@ -48,6 +48,43 @@ pub(super) fn owner_error_response(summary: &str, detail: &str) -> String {
     };
 
     format!("⚠️ {summary}\n||**상세**\n```text\n{preview}{suffix}\n```||")
+}
+
+pub(in crate::services::discord) fn shell_command_output_response(
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+) -> String {
+    let mut parts = Vec::new();
+    if !stdout.is_empty() {
+        parts.push(format!("```\n{}\n```", stdout.trim_end()));
+    }
+    if !stderr.is_empty() {
+        parts.push(shell_command_stderr_response(stderr));
+    }
+    if parts.is_empty() || exit_code != 0 {
+        parts.push(format!("(종료 코드: {exit_code})"));
+    }
+    parts.join("\n")
+}
+
+pub(in crate::services::discord) fn shell_command_stderr_response(stderr: &str) -> String {
+    owner_error_response("셸 명령이 오류 출력을 반환했어요.", stderr)
+}
+
+pub(in crate::services::discord) fn shell_command_execution_error_response(detail: &str) -> String {
+    owner_error_response("셸 명령을 실행하지 못했어요.", detail)
+}
+
+pub(in crate::services::discord) fn shell_command_task_error_response(detail: &str) -> String {
+    owner_error_response("셸 명령을 처리하는 중 오류가 발생했어요.", detail)
+}
+
+pub(super) fn shell_command_timeout_response(detail: &str) -> String {
+    owner_error_response(
+        "셸 명령이 제한 시간을 초과해 중지됐어요.\n명령을 나누거나 경로 범위를 좁힌 뒤, `--exclude-dir`/`-name` 필터를 추가해 다시 시도해 주세요.",
+        detail,
+    )
 }
 
 #[allow(unused_imports)]
@@ -112,7 +149,8 @@ mod response_wording_tests {
     use super::{
         ALREADY_STOPPING_RESPONSE, NO_ACTIVE_TURN_RESPONSE, SESSION_CLEARED_RESPONSE,
         STOPPING_RESPONSE, owner_error_response, session_restored_response,
-        session_started_response,
+        session_started_response, shell_command_execution_error_response,
+        shell_command_output_response, shell_command_task_error_response,
     };
 
     #[test]
@@ -139,6 +177,30 @@ mod response_wording_tests {
         assert!(response.ends_with("```||"));
         assert!(!response.contains("bad ``` fence"));
         assert!(!response.contains("|| leak"));
+    }
+
+    #[test]
+    fn bare_shell_command_error_uses_shared_folded_korean_rendering() {
+        let stderr = "bad ``` fence || leak";
+        let bare_command_response = shell_command_output_response("", stderr, 1);
+        let explicit_shell_response = shell_command_output_response("", stderr, 1);
+
+        assert_eq!(bare_command_response, explicit_shell_response);
+        assert!(
+            bare_command_response
+                .starts_with("⚠️ 셸 명령이 오류 출력을 반환했어요.\n||**상세**\n```text\n")
+        );
+        assert!(bare_command_response.ends_with("```||\n(종료 코드: 1)"));
+        assert!(!bare_command_response.contains("bad ``` fence"));
+        assert!(!bare_command_response.contains("|| leak"));
+
+        let execution_error = shell_command_execution_error_response(stderr);
+        assert!(execution_error.starts_with("⚠️ 셸 명령을 실행하지 못했어요."));
+        assert!(execution_error.ends_with("```||"));
+
+        let task_error = shell_command_task_error_response(stderr);
+        assert!(task_error.starts_with("⚠️ 셸 명령을 처리하는 중 오류가 발생했어요."));
+        assert!(task_error.ends_with("```||"));
     }
 }
 
