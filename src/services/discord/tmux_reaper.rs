@@ -1,5 +1,7 @@
 use super::*;
 
+use futures::future::BoxFuture;
+
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::tmux_common::current_tmux_owner_marker;
 use crate::services::tmux_diagnostics::{
@@ -76,12 +78,14 @@ async fn finalize_stale_busy_turn(
 /// before emitting a terminal result. Returns true only when the observed turn
 /// no longer owns the mailbox after the identity-guarded finalizer submission,
 /// allowing intake to retry its claim exactly once.
-pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
+async fn heal_stale_busy_mailbox_with_probe(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     tmux_session_name: &str,
     trigger: &'static str,
+    respect_watcher_authority: bool,
+    probe: &(dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync),
 ) -> bool {
     if !provider.uses_managed_tmux_backend() {
         return false;
@@ -96,7 +100,7 @@ pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
         return false;
     };
 
-    if probe_tmux_session_exists(tmux_session_name).await {
+    if probe(tmux_session_name.to_string()).await {
         return false;
     }
 
@@ -106,8 +110,10 @@ pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
     let current_user_msg_id = mailbox_snapshot(shared, channel_id)
         .await
         .active_user_message_id;
-    let has_session = probe_tmux_session_exists(tmux_session_name).await;
-    if !stale_busy_turn_is_still_reapable(observed_user_msg_id, current_user_msg_id, has_session) {
+    let has_session = probe(tmux_session_name.to_string()).await;
+    if !stale_busy_turn_is_still_reapable(observed_user_msg_id, current_user_msg_id, has_session)
+        || (respect_watcher_authority && shared.tmux_watchers.contains_key(&channel_id))
+    {
         return false;
     }
 
@@ -118,6 +124,28 @@ pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
         observed_user_msg_id,
         tmux_session_name,
         trigger,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    trigger: &'static str,
+) -> bool {
+    let probe = |name: String| -> BoxFuture<'static, bool> {
+        Box::pin(async move { probe_tmux_session_exists(&name).await })
+    };
+    heal_stale_busy_mailbox_with_probe(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        trigger,
+        false,
+        &probe,
     )
     .await
 }
@@ -204,14 +232,13 @@ pub(in crate::services::discord) async fn resolve_channel_tmux_names(
 /// this starts from active mailboxes, so a fully removed tmux session (absent
 /// from `list-sessions`) is still discoverable and its global concurrency slot
 /// is returned through TurnFinalizer.
-async fn reap_stale_busy_mailboxes(shared: &Arc<SharedData>) {
-    let provider = shared.settings.read().await.provider.clone();
-    if !provider.uses_managed_tmux_backend() {
-        return;
-    }
-
+async fn reap_stale_busy_mailboxes_with_probe(
+    shared: &Arc<SharedData>,
+    probe: &(dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync),
+) {
+    let fallback_provider = shared.settings.read().await.provider.clone();
     let active_mailboxes = shared.mailboxes.snapshot_all().await;
-    let candidates: Vec<_> = {
+    let busy_channels: Vec<_> = {
         let data = shared.core.lock().await;
         active_mailboxes
             .into_iter()
@@ -220,26 +247,47 @@ async fn reap_stale_busy_mailboxes(shared: &Arc<SharedData>) {
                     .then(|| {
                         data.sessions
                             .get(&channel_id)
-                            .and_then(|session| session.channel_name.as_deref())
-                            .map(|channel_name| {
-                                (channel_id, provider.build_tmux_session_name(channel_name))
-                            })
+                            .and_then(|session| session.channel_name.clone())
+                            .map(|channel_name| (channel_id, channel_name))
                     })
                     .flatten()
             })
             .collect()
     };
 
-    for (channel_id, tmux_session_name) in candidates {
-        heal_stale_busy_mailbox(
+    for (channel_id, channel_name) in busy_channels {
+        if shared.tmux_watchers.contains_key(&channel_id) {
+            continue;
+        }
+        let provider: ProviderKind = super::commands::effective_provider_for_channel(
+            shared,
+            channel_id,
+            &fallback_provider,
+            Some(&channel_name),
+        )
+        .await;
+        if !provider.uses_managed_tmux_backend() {
+            continue;
+        }
+        let tmux_session_name = provider.build_tmux_session_name(&channel_name);
+        heal_stale_busy_mailbox_with_probe(
             shared,
             &provider,
             channel_id,
             &tmux_session_name,
             "periodic_reaper",
+            true,
+            probe,
         )
         .await;
     }
+}
+
+async fn reap_stale_busy_mailboxes(shared: &Arc<SharedData>) {
+    let probe = |name: String| -> BoxFuture<'static, bool> {
+        Box::pin(async move { probe_tmux_session_exists(&name).await })
+    };
+    reap_stale_busy_mailboxes_with_probe(shared, &probe).await;
 }
 
 /// Kill orphan tmux sessions (AgentDesk-*) that don't map to any known channel.
@@ -878,9 +926,10 @@ mod tests {
     use super::{
         extract_tmux_session_name_from_wrapper_command, finalize_stale_busy_turn,
         parse_orphan_tmux_wrapper_process_line, provider_for_managed_tmux_wrapper_subcommand,
-        stale_busy_turn_is_still_reapable,
+        reap_stale_busy_mailboxes_with_probe, stale_busy_turn_is_still_reapable,
     };
     use crate::services::provider::{CancelToken, ProviderKind};
+    use futures::future::BoxFuture;
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -1010,6 +1059,104 @@ mod tests {
                 .await
                 .active_user_message_id,
             Some(live_user_msg_id)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_reaper_preserves_live_turn_for_role_override_provider() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root = RuntimeRootGuard::set(root.path());
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("agentdesk.yaml"),
+            r#"
+server:
+  port: 8791
+agents:
+  - id: counter-reviewer
+    name: Counter Reviewer
+    provider: codex
+    channels:
+      codex:
+        id: "4485402"
+        name: "review-cdx"
+"#,
+        )
+        .expect("agentdesk config");
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_485_401);
+        let override_channel_id = ChannelId::new(4_485_402);
+        let user_msg_id = MessageId::new(4_485_403);
+        let channel_name = "review-thread-4485";
+        let live_tmux_name = ProviderKind::Codex.build_tmux_session_name(channel_name);
+        shared.settings.write().await.provider = ProviderKind::Claude;
+        shared
+            .dispatch
+            .role_overrides
+            .insert(channel_id, override_channel_id);
+        shared.core.lock().await.sessions.insert(
+            channel_id,
+            crate::services::discord::DiscordSession {
+                session_id: Some("live-codex-turn".to_string()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: Some(channel_name.to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: shared.restart.current_generation,
+            },
+        );
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token.clone(),
+                UserId::new(9),
+                user_msg_id,
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let probed_names = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_names = probed_names.clone();
+        let expected_live_name = live_tmux_name.clone();
+        let probe = move |name: String| -> BoxFuture<'static, bool> {
+            recorded_names
+                .lock()
+                .expect("probe names lock")
+                .push(name.clone());
+            let is_live = name == expected_live_name;
+            Box::pin(async move { is_live })
+        };
+        reap_stale_busy_mailboxes_with_probe(&shared, &probe).await;
+
+        assert_eq!(
+            probed_names.lock().expect("probe names lock").as_slice(),
+            &[live_tmux_name],
+            "the reaper must probe the effective override provider's live session"
+        );
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .active_user_message_id,
+            Some(user_msg_id),
+            "the live override-provider turn must retain mailbox ownership"
         );
     }
 

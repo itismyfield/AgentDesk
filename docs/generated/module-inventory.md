@@ -741,7 +741,7 @@
 | `services::discord::tmux_placeholder_suppression` | `src/services/discord/tmux_placeholder_suppression/mod.rs` | 1377 | 348 | 1029 |  |
 | `services::discord::tmux_placeholder_suppression::evidence` | `src/services/discord/tmux_placeholder_suppression/evidence.rs` | 259 | 259 | 0 |  |
 | `services::discord::tmux_placeholder_suppression::ops` | `src/services/discord/tmux_placeholder_suppression/ops.rs` | 584 | 584 | 0 |  |
-| `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 1153 | 916 | 237 |  |
+| `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 1300 | 964 | 336 |  |
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 82 | 82 | 0 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 602 | 479 | 123 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
