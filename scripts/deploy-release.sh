@@ -1516,6 +1516,21 @@ _post_deploy_smoke_log_head_fingerprint() {
     case "$byte_count" in
         ''|*[!0-9]*) return 1 ;;
     esac
+    if [ "$byte_count" -eq 0 ]; then
+        if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 < /dev/null \
+                | awk 'NF { print "sha256:" $1; found = 1 } END { if (!found) exit 1 }'
+        elif command -v sha256sum >/dev/null 2>&1; then
+            sha256sum < /dev/null \
+                | awk 'NF { print "sha256:" $1; found = 1 } END { if (!found) exit 1 }'
+        elif command -v cksum >/dev/null 2>&1; then
+            cksum < /dev/null \
+                | awk 'NF >= 2 { print "cksum:" $1 ":" $2; found = 1 } END { if (!found) exit 1 }'
+        else
+            return 1
+        fi
+        return
+    fi
     if command -v shasum >/dev/null 2>&1; then
         head -c "$byte_count" "$log_path" \
             | shasum -a 256 \

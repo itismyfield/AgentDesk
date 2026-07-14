@@ -27,16 +27,23 @@ eval "$(extract_function _post_deploy_smoke_fail)"
 eval "$(extract_function _post_deploy_smoke_check_fail_closed_warn_rate)"
 
 capture_log_watermark() {
-    local fingerprint_bytes
-    read -r POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET \
-        <<< "$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH")"
+    local fingerprint_bytes fingerprint_path
+    if [ ! -e "$POST_DEPLOY_SMOKE_LOG_PATH" ]; then
+        POST_DEPLOY_SMOKE_LOG_INODE=0
+        POST_DEPLOY_SMOKE_LOG_OFFSET=0
+        fingerprint_path=/dev/null
+    else
+        read -r POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET \
+            <<< "$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH")"
+        fingerprint_path="$POST_DEPLOY_SMOKE_LOG_PATH"
+    fi
     fingerprint_bytes="$POST_DEPLOY_SMOKE_LOG_OFFSET"
     if [ "$fingerprint_bytes" -gt "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP" ]; then
         fingerprint_bytes="$POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP"
     fi
     POST_DEPLOY_SMOKE_LOG_FINGERPRINT=$(
         _post_deploy_smoke_log_head_fingerprint \
-            "$POST_DEPLOY_SMOKE_LOG_PATH" "$fingerprint_bytes"
+            "$fingerprint_path" "$fingerprint_bytes"
     )
     export POST_DEPLOY_SMOKE_LOG_INODE POST_DEPLOY_SMOKE_LOG_OFFSET
     export POST_DEPLOY_SMOKE_LOG_FINGERPRINT
@@ -57,6 +64,37 @@ export POST_DEPLOY_SMOKE_LOG_LINES POST_DEPLOY_SMOKE_WARN_LIMIT
 mkdir -p "$ADK_REL/logs" "$POST_DEPLOY_SMOKE_TMP_DIR"
 : > "$POST_DEPLOY_SMOKE_EVIDENCE"
 
+capture_log_watermark
+if [ "$POST_DEPLOY_SMOKE_LOG_INODE" -ne 0 ] \
+  || [ "$POST_DEPLOY_SMOKE_LOG_OFFSET" -ne 0 ] \
+  || [ -z "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT" ]; then
+    echo "FAIL: absent log did not produce a complete offset-zero watermark" >&2
+    exit 1
+fi
+if [ "$(_post_deploy_smoke_log_head_fingerprint "$POST_DEPLOY_SMOKE_LOG_PATH" 0)" \
+  != "$POST_DEPLOY_SMOKE_LOG_FINGERPRINT" ]; then
+    echo "FAIL: offset-zero fingerprint did not bypass the absent log path" >&2
+    exit 1
+fi
+for index in 1 2 3 4 5; do
+    printf '2026-07-14T09:15:0%sZ WARN fail-closed new-after-absent-log\n' "$index"
+done > "$POST_DEPLOY_SMOKE_LOG_PATH"
+if _post_deploy_smoke_check_fail_closed_warn_rate; then
+    echo "FAIL: WARN spike after an absent-log watermark did not trip the threshold" >&2
+    exit 1
+fi
+if ! grep -q 'sample=5 warn_lines=5 fail_closed_warns=5 threshold=5' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+    echo "FAIL: offset-zero sampler did not read the full new log" >&2
+    exit 1
+fi
+if grep -q 'restart log fingerprint unavailable\|could not fingerprint current log' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+    echo "FAIL: offset-zero watermark raised a spurious fingerprint failure" >&2
+    exit 1
+fi
+echo "absent-log-then-WARN: $(grep 'sample=5 warn_lines=5 fail_closed_warns=5 threshold=5' "$POST_DEPLOY_SMOKE_EVIDENCE")"
+
+POST_DEPLOY_SMOKE_FAILURES=()
+: > "$POST_DEPLOY_SMOKE_EVIDENCE"
 for index in 1 2 3 4 5; do
     printf '2026-07-14T08:03:4%sZ WARN fail-closed stale-before-restart\n' "$index"
 done > "$POST_DEPLOY_SMOKE_LOG_PATH"
