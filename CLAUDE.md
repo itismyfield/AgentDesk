@@ -5,6 +5,7 @@
 ## 코드 수정 전 필독
 
 - **어디를 건드릴지 결정표**: [`docs/agent-maintenance/change-surfaces.md`](docs/agent-maintenance/change-surfaces.md) — 변경 표면별 필수 동반 수정·검증을 정의. 프로덕션 라인수는 [`docs/generated/module-inventory.md`](docs/generated/module-inventory.md)가 진실값.
+- **코드 주석 언어 정책**: [`docs/agent-maintenance/comment-language-policy.md`](docs/agent-maintenance/comment-language-policy.md) — 신규·수정 코드 주석 및 문서 주석의 작성 언어와 적용 범위.
 - **agent-maintenance 인덱스**: [`docs/agent-maintenance/index.md`](docs/agent-maintenance/index.md)
 - **아키텍처 개요**: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - **릴레이 불변식(디스코드 릴레이 상태 계약)**: [`docs/relay-state-contract.md`](docs/relay-state-contract.md)

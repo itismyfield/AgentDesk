@@ -23,6 +23,8 @@
 - [`change-surfaces.md`](change-surfaces.md) — change-allowed surfaces, with
   canonical modules, giant-file flags, and `do_not_edit_without_migration_plan`
   list. Use this before adding logic to any new file.
+- [`comment-language-policy.md`](comment-language-policy.md) — authoring policy
+  for the language and review scope of code comments and doc-comments.
 - [`dispatch-mod-extraction-plan.md`](dispatch-mod-extraction-plan.md) —
   subdomain map and ordered extraction issues for shrinking
   `src/dispatch/mod.rs` into a facade (#1785).
