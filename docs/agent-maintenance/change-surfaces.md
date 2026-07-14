@@ -153,7 +153,7 @@
 - legacy_modules: none — there is no parallel engine. The whole surface is
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:
-  - `src/engine/mod.rs` (1279 lines, giant-file).
+  - `src/engine/mod.rs` (1278 lines, giant-file).
   - `src/engine/ops/db_ops.rs` (1212 lines, giant-file).
   - `src/engine/loader.rs` (1332 lines, giant-file) — engine loader / QuickJS
     validator surface; split before adding non-bugfix behavior.

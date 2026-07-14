@@ -65,6 +65,9 @@ echo "=== Policy DB capability manifest guard (#3734) ==="
   --require-manifest policies/merge-automation.cap.yaml
 "$PYTHON" -m unittest tests.test_policy_db_capabilities
 
+echo "=== Merge automation policy tests (#4250) ==="
+node --test policies/__tests__/merge-automation.test.js
+
 echo "=== await_holding_lock ratchet guard ==="
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
 "$PYTHON" -m unittest tests.test_await_holding_lock_ratchet

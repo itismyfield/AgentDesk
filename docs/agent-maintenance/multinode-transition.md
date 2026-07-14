@@ -449,6 +449,19 @@
   issue draft before peer propagation/source-manifest work continues. Core API
   probes and the alert POST use same-port loopback `Origin` authentication
   without reading or exposing `server.auth_token`.
+- #4250 merge-automation gh-off-tick cache + slow-hook WARN de-noise: the
+  `merge-automation` policy 5-minute tick now reads Codex-review snapshots from a
+  `kv_meta`-backed cache (30-minute TTL) and refreshes at most one PR per tick via
+  a persistent round-robin cursor, instead of fanning out synchronous `gh` API
+  calls every tick; each `gh` exec is bounded to 1500 ms; the engine's repeating
+  "policy hook slow" WARN is rate-limited to every Nth occurrence.
+  Classification: **leader-only / singleton-tick** — the merge-automation policy
+  tick is a single control-plane owner, and the new review-snapshot cache and
+  round-robin cursor live in `kv_meta` under the same ownership as the policy's
+  existing `kv_meta` state (merge-request queue, allowed authors); no new PG
+  lease, cross-node routing rule, or leader-election authority is introduced, and
+  the WARN de-noise counter is per-process worker-local.
+
 - #4237 DAVE/E2EE voice-close observability: the existing worker-local
   `DriverDisconnect` handler now classifies Discord voice close codes 4016/4017,
   records a structured counter event, and routes a deduplicated operator alert

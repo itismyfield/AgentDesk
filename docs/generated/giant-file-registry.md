@@ -63,7 +63,7 @@
 | `src/dispatch/dispatch_create.rs` | 1334 |
 | `src/dispatch/dispatch_status.rs` | 1445 |
 | `src/engine/loader.rs` | 1332 |
-| `src/engine/mod.rs` | 1279 |
+| `src/engine/mod.rs` | 1278 |
 | `src/engine/ops/db_ops.rs` | 1212 |
 | `src/github/sync.rs` | 1504 |
 | `src/pipeline.rs` | 1383 |

@@ -64,6 +64,8 @@ var listOpenPrs = _githubPrAdapter.listOpenPrs;
 var fetchCodexReviews = _githubPrAdapter.fetchCodexReviews;
 var fetchCodexReviewThreads = _githubPrAdapter.fetchCodexReviewThreads;
 var ensureGitHubLabel = _githubPrAdapter.ensureGitHubLabel;
+var execGh = _githubPrAdapter.execGh;
+var GH_EXEC_TIMEOUT_MS = _githubPrAdapter.GH_EXEC_TIMEOUT_MS;
 
 var CODEX_NOTIFICATION_TTL_SECONDS = _mergeNotificationDispatcher.CODEX_NOTIFICATION_TTL_SECONDS;
 var codexNotificationDedupKey = _mergeNotificationDispatcher.codexNotificationDedupKey;
@@ -76,6 +78,12 @@ var notifyAgentMainChannel = _mergeNotificationDispatcher.notifyAgentMainChannel
 var prTracking = agentdesk.prTracking;
 
 var CODEX_REVIEW_TTL_SECONDS = 14 * 24 * 60 * 60;
+// #4250: onTick5min may spend at most one review+thread pair (2 × 1500ms)
+// refreshing Codex state. Every decision below reads this kv_meta cache; a
+// miss waits for a later round-robin tick instead of doing synchronous I/O.
+var CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK = 1;
+var CODEX_REVIEW_SNAPSHOT_TTL_MINUTES = 30;
+var CODEX_REVIEW_REFRESH_CURSOR_KEY = "codex_review_snapshot_refresh_cursor";
 
 // notifyMergeFailure needs loadCardContext from this scope; thin wrapper
 // below forwards to the extracted dispatcher.
@@ -945,7 +953,7 @@ function createOrLocateTrackedPr(candidate, options) {
 
   execGitOrThrow(["-C", candidate.worktree_path, "push", "-u", "origin", candidate.branch]);
 
-  var createOutput = agentdesk.exec("gh", [
+  var createOutput = execGh([
     "pr", "create",
     "--repo", candidate.repo_id,
     "--base", (options && options.main_branch) || "main",
@@ -997,7 +1005,7 @@ function closeGithubIssueAfterDirectMerge(candidate, mergeResult) {
   var issueArg = String(issueNumber);
 
   // 멱등성 가드: 이미 CLOSED 상태면 comment + close 둘 다 skip.
-  var stateResult = agentdesk.exec("gh", [
+  var stateResult = execGh([
     "issue", "view", issueArg,
     "--repo", candidate.repo_id,
     "--json", "state",
@@ -1025,7 +1033,7 @@ function closeGithubIssueAfterDirectMerge(candidate, mergeResult) {
     "(commit " + shortSha + ") into `" + mainBranch + "`.\n\n" +
     "Auto-close mechanism: see retro #1946.";
 
-  var commentResult = agentdesk.exec("gh", [
+  var commentResult = execGh([
     "issue", "comment", issueArg,
     "--repo", candidate.repo_id,
     "--body", commentBody
@@ -1043,7 +1051,7 @@ function closeGithubIssueAfterDirectMerge(candidate, mergeResult) {
     "--repo", candidate.repo_id,
     "--reason", "completed"
   ];
-  var closeResult = agentdesk.exec("gh", closeArgs);
+  var closeResult = execGh(closeArgs);
   if (closeResult && closeResult.indexOf("ERROR") === 0) {
     agentdesk.log.warn(
       "[merge] direct-merge close-issue: close failed for #" + issueArg +
@@ -1275,12 +1283,75 @@ function getReviewTargets(cardId) {
   };
 }
 
+function codexReviewSnapshotCacheKey(repo, prNumber) {
+  return "codex_review_snapshot:" +
+    sanitizeKvKeyPart(repo) + ":" + sanitizeKvKeyPart(prNumber);
+}
+
+function loadCachedCodexReviewSnapshot(repo, prNumber) {
+  var raw = agentdesk.kv.get(codexReviewSnapshotCacheKey(repo, prNumber));
+  if (raw == null) return { found: false, snapshot: null };
+  try {
+    var cached = JSON.parse(raw);
+    return { found: true, snapshot: cached.snapshot || null };
+  } catch (e) {
+    agentdesk.log.warn(
+      "[merge] Invalid cached Codex review snapshot for PR #" + prNumber + ": " + e
+    );
+    return { found: false, snapshot: null };
+  }
+}
+
+function storeCodexReviewSnapshot(repo, prNumber, snapshot) {
+  agentdesk.kv.set(
+    codexReviewSnapshotCacheKey(repo, prNumber),
+    JSON.stringify({ snapshot: snapshot }),
+    CODEX_REVIEW_SNAPSHOT_TTL_MINUTES * 60
+  );
+}
+
+function loadCodexReviewRefreshCursor() {
+  var raw = agentdesk.kv.get(CODEX_REVIEW_REFRESH_CURSOR_KEY);
+  if (raw == null) return 0;
+  var cursor = parseInt(raw, 10);
+  return isFinite(cursor) && cursor >= 0 ? cursor : 0;
+}
+
+function storeCodexReviewRefreshCursor(cursor) {
+  agentdesk.kv.set(CODEX_REVIEW_REFRESH_CURSOR_KEY, String(cursor));
+}
+
+function refreshCodexReviewSnapshotSlice(tracked) {
+  if (!tracked || tracked.length === 0) return [];
+
+  var cursor = loadCodexReviewRefreshCursor() % tracked.length;
+  var refreshed = [];
+  var scanned = 0;
+  while (scanned < tracked.length && refreshed.length < CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK) {
+    var row = tracked[(cursor + scanned) % tracked.length];
+    scanned += 1;
+    if (!row || !row.repo_id || !row.pr_number) continue;
+
+    var snapshot = buildCodexReviewSnapshot(row.repo_id, row.pr_number);
+    // undefined means the refresh failed; retain the last-known cached state.
+    // null is a successful response with no Codex review and is cacheable.
+    if (snapshot !== undefined) {
+      storeCodexReviewSnapshot(row.repo_id, row.pr_number, snapshot);
+    }
+    refreshed.push(row);
+  }
+  storeCodexReviewRefreshCursor((cursor + scanned) % tracked.length);
+  return refreshed;
+}
+
 function buildCodexReviewSnapshot(repo, prNumber) {
   var reviews = fetchCodexReviews(repo, prNumber);
+  if (reviews === null) return undefined;
   if (!reviews.length) return null;
 
   var latest = reviews[reviews.length - 1];
   var threads = fetchCodexReviewThreads(repo, prNumber);
+  if (threads === null) return undefined;
   var blockingComments = [];
   var blockingReviewIds = {};
   var blockingFiles = [];
@@ -1429,10 +1500,10 @@ function createCodexFollowupIssue(card, pr, snapshot) {
   if (agentLabel) {
     args.push("--label", agentLabel);
   }
-  var output = agentdesk.exec("gh", args);
+  var output = execGh(args);
   if (agentLabel && typeof output === "string" && output.indexOf("ERROR") === 0) {
     agentdesk.log.warn("[merge] Codex follow-up issue create with label failed for PR #" + pr.number + ": " + output);
-    output = agentdesk.exec("gh", [
+    output = execGh([
       "issue", "create",
       "--repo", repo,
       "--title", title,
@@ -1537,11 +1608,29 @@ function processCodexReviewSignals() {
     "pr_number IS NOT NULL AND state IN ('wait-ci', 'merge')",
     []
   );
+  var cached = {};
+  for (var i = 0; i < tracked.length; i++) {
+    var cachedRow = tracked[i];
+    if (!cachedRow.repo_id || !cachedRow.pr_number) continue;
+    cached[codexReviewSnapshotCacheKey(cachedRow.repo_id, cachedRow.pr_number)] =
+      loadCachedCodexReviewSnapshot(cachedRow.repo_id, cachedRow.pr_number);
+  }
+
+  // Refresh only a round-robin slice. Reload refreshed values from kv_meta so
+  // review handling never consumes a network result directly.
+  var refreshed = refreshCodexReviewSnapshotSlice(tracked);
+  for (var r = 0; r < refreshed.length; r++) {
+    var refreshedRow = refreshed[r];
+    cached[codexReviewSnapshotCacheKey(refreshedRow.repo_id, refreshedRow.pr_number)] =
+      loadCachedCodexReviewSnapshot(refreshedRow.repo_id, refreshedRow.pr_number);
+  }
+
   for (var i = 0; i < tracked.length; i++) {
     var row = tracked[i];
     if (!row.repo_id || !row.pr_number) continue;
 
-    var snapshot = buildCodexReviewSnapshot(row.repo_id, row.pr_number);
+    var cachedSnapshot = cached[codexReviewSnapshotCacheKey(row.repo_id, row.pr_number)];
+    var snapshot = cachedSnapshot && cachedSnapshot.found ? cachedSnapshot.snapshot : null;
     if (!snapshot) continue;
 
     var card = loadCardContext(row.card_id);
@@ -1600,7 +1689,8 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
     }
   }
 
-  var snapshot = buildCodexReviewSnapshot(repo, prNumber);
+  var cachedReview = loadCachedCodexReviewSnapshot(repo, prNumber);
+  var snapshot = cachedReview.found ? cachedReview.snapshot : null;
   if (snapshot && snapshot.hasBlocking) {
     agentdesk.log.warn("[merge] Blocking auto-merge for PR #" + prNumber + " due to unresolved Codex P1/P2 comments");
     agentdesk.kv.set("merge_blocked:" + trackingId, JSON.stringify({
@@ -1655,7 +1745,7 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
   }
 
   var strategy = agentdesk.config.get("merge_strategy") || "squash";
-  var result = agentdesk.exec("gh", [
+  var result = execGh([
     "pr", "merge", String(prNumber),
     "--auto", "--" + strategy,
     "--repo", repo
@@ -1856,7 +1946,7 @@ function cleanupMergedWorktrees() {
   for (var i = 0; i < tracked.length; i++) {
     var row = tracked[i];
     try {
-      var prJson = agentdesk.exec("gh", [
+      var prJson = execGh([
         "pr", "view", String(row.pr_number),
         "--json", "mergedAt,headRefName",
         "--repo", row.repo_id
@@ -1969,7 +2059,7 @@ function detectConflictingPrs() {
   );
   for (var i = 0; i < tracked.length; i++) {
     var row = tracked[i];
-    var prJson = agentdesk.exec("gh", [
+    var prJson = execGh([
       "pr", "view", String(row.pr_number),
       "--json", "number,headRefName,mergeable,title",
       "--repo", row.repo_id
@@ -2099,7 +2189,11 @@ if (typeof module !== "undefined" && module.exports) {
       closeGithubIssueAfterDirectMerge: closeGithubIssueAfterDirectMerge,
       inspectLatestCompletedWorkTarget: inspectLatestCompletedWorkTarget,
       withGitFallbackCache: withGitFallbackCache,
-      isBridgeDeadlineError: isBridgeDeadlineError
+      isBridgeDeadlineError: isBridgeDeadlineError,
+      processCodexReviewSignals: processCodexReviewSignals,
+      loadCachedCodexReviewSnapshot: loadCachedCodexReviewSnapshot,
+      GH_EXEC_TIMEOUT_MS: GH_EXEC_TIMEOUT_MS,
+      CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK: CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK
     }
   };
 }

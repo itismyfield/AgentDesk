@@ -372,3 +372,140 @@ test("onTick5min rethrows non-deadline errors", () => {
 
   assert.throws(() => policy.onTick5min(), /schema mismatch/);
 });
+
+// ── #4250: cached, bounded Codex-review refresh ───────────────────────
+
+test("onTick5min reads Codex snapshots from kv_meta and bounds slow gh refresh work", () => {
+  const tracked = [1, 2, 3].map((number) => ({
+    card_id: `card-${number}`,
+    repo_id: "itismyfield/AgentDesk",
+    pr_number: number,
+    branch: `fix/${number}`
+  }));
+  const kvMeta = new Map();
+  const events = [];
+  for (const row of tracked) {
+    kvMeta.set(
+      `codex_review_snapshot:itismyfield_AgentDesk:${row.pr_number}`,
+      JSON.stringify({
+        snapshot: {
+          latestReviewId: `cached-${row.pr_number}`,
+          latestState: "COMMENTED",
+          blockingComments: [],
+          blockingFiles: [],
+          hasBlocking: false
+        }
+      })
+    );
+  }
+
+  let simulatedExecMs = 0;
+  let failThreads = true;
+  const { module, policy, state } = loadPolicy("policies/merge-automation.js", {
+    config: { merge_automation_enabled: "true" },
+    exec(cmd, args, options) {
+      events.push({ type: "exec", cmd, args: args.slice(), options });
+      assert.equal(cmd, "gh");
+      assert.equal(options.timeout_ms, module.__test.GH_EXEC_TIMEOUT_MS);
+      simulatedExecMs += options.timeout_ms;
+      if (args[0] === "api" && args[1] !== "graphql") {
+        return JSON.stringify([{
+          id: 4250,
+          state: "COMMENTED",
+          body: "cached refresh",
+          submitted_at: "2026-07-14T00:00:00Z",
+          user: { login: "chatgpt-codex-connector[bot]" }
+        }]);
+      }
+      if (args[0] === "api" && args[1] === "graphql") {
+        // Simulate the second call consuming its full timeout before the
+        // bridge returns its ordinary ERROR string.
+        return failThreads
+          ? "ERROR: gh timed out"
+          : JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
+      }
+      throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+    },
+    dbQuery(sql, params) {
+      events.push({ type: "query", sql, params: params.slice() });
+      if (sql.includes("FROM kanban_cards WHERE id = ?")) {
+        return [{
+          id: params[0],
+          status: "review",
+          assigned_agent_id: "TD",
+          title: params[0],
+          repo_id: "itismyfield/AgentDesk"
+        }];
+      }
+      if (sql.includes("key LIKE 'merge_request:%'")) return [];
+      throw new Error(`unexpected query: ${sql} :: ${JSON.stringify(params)}`);
+    },
+    extraAgentdesk: {
+      kv: {
+        get(key) {
+          events.push({ type: "kv-get", key });
+          return kvMeta.has(key) ? kvMeta.get(key) : null;
+        },
+        set(key, value, ttlSeconds) {
+          events.push({ type: "kv-set", key, value, ttlSeconds: ttlSeconds || 0 });
+          kvMeta.set(key, value);
+        },
+        delete(key) {
+          kvMeta.delete(key);
+        }
+      },
+      prTracking: {
+        list(whereClause) {
+          if (whereClause === "pr_number IS NOT NULL AND state IN ('wait-ci', 'merge')") {
+            return tracked;
+          }
+          return [];
+        }
+      }
+    }
+  });
+
+  assert.doesNotThrow(() => policy.onTick5min());
+
+  const ghCalls = state.execCalls.filter((call) => call.cmd === "gh");
+  assert.equal(
+    ghCalls.length,
+    module.__test.CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK * 2,
+    "only one bounded review+thread refresh pair may run per tick"
+  );
+  assert.ok(
+    simulatedExecMs <=
+      module.__test.CODEX_REVIEW_REFRESH_MAX_PRS_PER_TICK * 2 * module.__test.GH_EXEC_TIMEOUT_MS
+  );
+  assert.ok(simulatedExecMs < 5000, `simulated gh budget must stay below hook budget: ${simulatedExecMs}ms`);
+
+  const firstExec = events.findIndex((event) => event.type === "exec");
+  const cacheReadsBeforeExec = events
+    .slice(0, firstExec)
+    .filter((event) => event.type === "kv-get" && event.key.startsWith("codex_review_snapshot:"));
+  assert.equal(cacheReadsBeforeExec.length, tracked.length, "all tracked PR caches are read before refresh I/O");
+  assert.match(
+    kvMeta.get("codex_review_snapshot:itismyfield_AgentDesk:1"),
+    /cached-1/,
+    "a failed refresh must retain the last-known cached review state"
+  );
+
+  // The next round-robin tick succeeds for PR #2 and proves the cache write
+  // carries the kv_meta expiry TTL while retaining the same <5s exec bound.
+  failThreads = false;
+  simulatedExecMs = 0;
+  events.length = 0;
+  state.execCalls.length = 0;
+  assert.doesNotThrow(() => policy.onTick5min());
+  assert.equal(state.execCalls.filter((call) => call.cmd === "gh").length, 2);
+  assert.equal(simulatedExecMs, 2 * module.__test.GH_EXEC_TIMEOUT_MS);
+  assert.ok(simulatedExecMs < 5000);
+  assert.ok(
+    events.some((event) =>
+      event.type === "kv-set" &&
+      event.key.startsWith("codex_review_snapshot:") &&
+      event.ttlSeconds === 30 * 60
+    ),
+    "refreshed snapshots must be persisted in expiring kv_meta rows"
+  );
+});

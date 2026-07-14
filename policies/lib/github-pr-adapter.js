@@ -16,13 +16,22 @@ var _CODEX_REVIEWERS = {
   "chatgpt-codex-connector[bot]": true
 };
 
+// #4250: Keep each synchronous GitHub CLI bridge call well inside the 5s
+// policy-hook budget. The Rust exec bridge also clamps this requested timeout
+// to the remaining hook deadline.
+var GH_EXEC_TIMEOUT_MS = 1500;
+
+function execGh(args) {
+  return agentdesk.exec("gh", args, { timeout_ms: GH_EXEC_TIMEOUT_MS });
+}
+
 function isCodexReviewer(login) {
   if (!login) return false;
   return !!_CODEX_REVIEWERS[String(login).toLowerCase()];
 }
 
 function getPrAuthor(prNumber, repo) {
-  var json = agentdesk.exec("gh", [
+  var json = execGh([
     "pr", "view", String(prNumber),
     "--json", "author",
     "--jq", ".author.login",
@@ -35,7 +44,7 @@ function getPrAuthor(prNumber, repo) {
 }
 
 function getCurrentPrHeadSha(prNumber, repo) {
-  var json = agentdesk.exec("gh", [
+  var json = execGh([
     "pr", "view", String(prNumber),
     "--json", "headRefOid",
     "--jq", ".headRefOid",
@@ -47,7 +56,7 @@ function getCurrentPrHeadSha(prNumber, repo) {
 
 function getLatestCiRunForTrackedPr(repo, branch, headSha) {
   if (!repo || !branch) return null;
-  var runsJson = agentdesk.exec("gh", [
+  var runsJson = execGh([
     "run", "list",
     "--branch", branch,
     "--repo", repo,
@@ -70,7 +79,7 @@ function getLatestCiRunForTrackedPr(repo, branch, headSha) {
 }
 
 function listOpenPrs(repo) {
-  var prsJson = agentdesk.exec("gh", [
+  var prsJson = execGh([
     "pr", "list",
     "--state", "open",
     "--json", "number,headRefName,title,mergeable",
@@ -86,11 +95,11 @@ function listOpenPrs(repo) {
 }
 
 function fetchCodexReviews(repo, prNumber) {
-  var json = agentdesk.exec("gh", [
+  var json = execGh([
     "api",
     "repos/" + repo + "/pulls/" + prNumber + "/reviews"
   ]);
-  if (!json || json.indexOf("ERROR") === 0) return [];
+  if (!json || json.indexOf("ERROR") === 0) return null;
 
   try {
     var reviews = JSON.parse(json);
@@ -117,7 +126,7 @@ function fetchCodexReviews(repo, prNumber) {
     return filtered;
   } catch (e) {
     agentdesk.log.warn("[merge] Failed to parse Codex reviews for PR #" + prNumber + ": " + e);
-    return [];
+    return null;
   }
 }
 
@@ -145,14 +154,14 @@ function fetchCodexReviewThreads(repo, prNumber) {
     " }" +
     "}";
 
-  var json = agentdesk.exec("gh", [
+  var json = execGh([
     "api", "graphql",
     "-f", "query=" + query,
     "-f", "owner=" + parts[0],
     "-f", "name=" + parts[1],
     "-F", "number=" + String(prNumber)
   ]);
-  if (!json || json.indexOf("ERROR") === 0) return [];
+  if (!json || json.indexOf("ERROR") === 0) return null;
 
   try {
     var parsed = JSON.parse(json);
@@ -162,13 +171,13 @@ function fetchCodexReviewThreads(repo, prNumber) {
     return reviewThreads.nodes || [];
   } catch (e) {
     agentdesk.log.warn("[merge] Failed to parse Codex review threads for PR #" + prNumber + ": " + e);
-    return [];
+    return null;
   }
 }
 
 function ensureGitHubLabel(repo, name, color, description) {
   if (!repo || !name) return false;
-  var output = agentdesk.exec("gh", [
+  var output = execGh([
     "label", "create", name,
     "--repo", repo,
     "--force",
@@ -183,6 +192,8 @@ function ensureGitHubLabel(repo, name, color, description) {
 }
 
 module.exports = {
+  GH_EXEC_TIMEOUT_MS: GH_EXEC_TIMEOUT_MS,
+  execGh: execGh,
   isCodexReviewer: isCodexReviewer,
   getPrAuthor: getPrAuthor,
   getCurrentPrHeadSha: getCurrentPrHeadSha,
