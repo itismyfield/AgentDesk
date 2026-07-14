@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ ROUTINE_DIR = ROOT / "routines" / "monitoring"
 sys.path.insert(0, str(ROUTINE_DIR))
 
 import weekly_churn_audit  # noqa: E402
-from log_digest_issue_drafts import OpenIssue  # noqa: E402
+from log_digest_issue_drafts import OpenIssue, stable_draft_filename  # noqa: E402
 from weekly_churn_audit import (  # noqa: E402
     GitCommit,
     analyze_churn,
@@ -45,6 +46,8 @@ class WeeklyChurnAuditTests(unittest.TestCase):
         for subject in (
             "fix: stop duplicate relay",
             "fix(discord): stop duplicate relay",
+            "fix!: stop breaking duplicate relay",
+            "fix(discord)!: stop breaking duplicate relay",
         ):
             with self.subTest(subject=subject):
                 self.assertTrue(is_fix_commit_subject(subject))
@@ -77,19 +80,18 @@ class WeeklyChurnAuditTests(unittest.TestCase):
         self.assertEqual([candidate.file for candidate in audit.candidates], [repeated])
         self.assertEqual(audit.module_counts["src/services/discord"], 3)
 
-    def test_squash_subject_parses_all_issue_references_in_order(self) -> None:
-        subject = (
-            "fix(deploy): #4262 post-deploy scope (#4511) (#4523)"
-        )
+    def test_squash_pr_suffixes_do_not_create_issue_generations(self) -> None:
+        subject = "fix(deploy): #4262 post-deploy scope (#4511) (#4523)"
 
         self.assertTrue(is_fix_commit_subject(subject))
-        self.assertEqual(issue_references(subject), (4262, 4511, 4523))
+        self.assertEqual(issue_references(subject), (4262,))
+        self.assertEqual(compute_issue_lineages([commit(subject)])[0].issues, (4262,))
 
     def test_issue_lineage_generation_count_spans_commit_text_edges(self) -> None:
         commits = [
-            commit("fix: first regression (#100) (#200)"),
-            commit("fix: follow-up (#200)", body="Regression-of cross-reference: #300"),
-            commit("fix: independent (#900)"),
+            commit("fix: #100 first regression", body="Regression-of cross-reference: #200"),
+            commit("fix: #200 follow-up", body="Regression-of cross-reference: #300"),
+            commit("fix: independent #900"),
         ]
 
         lineages = compute_issue_lineages(commits)
@@ -106,26 +108,155 @@ class WeeklyChurnAuditTests(unittest.TestCase):
             ],
             threshold=3,
         ).candidates[0]
-        matching = OpenIssue(
-            number=4265,
-            title=(
-                "ops(process): repeated fix churn redesign candidate "
-                "src/services/discord/example.rs"
-            ),
-        )
+        created = weekly_churn_audit.build_candidate_draft(candidate, "7 days", 3)
+        matching = OpenIssue(number=4265, title=created.title, body=created.body)
 
-        with patch.object(
-            weekly_churn_audit,
-            "issue_matches_signature",
-            wraps=weekly_churn_audit.issue_matches_signature,
-        ) as matcher:
-            drafts, matches = candidate_drafts(
-                [candidate], [matching], since="7 days", threshold=3
-            )
+        drafts, matches = candidate_drafts(
+            [candidate], [matching], since="7 days", threshold=3
+        )
 
         self.assertEqual(drafts, [])
         self.assertEqual(matches, [(candidate, matching)])
-        matcher.assert_called_once()
+
+    def test_created_issue_marker_prevents_duplicate_on_second_run(self) -> None:
+        audit_commits = [
+            commit(f"fix: repeat {index}", ("justfile",), sha=str(index) * 40)
+            for index in range(1, 4)
+        ]
+        candidate = analyze_churn(audit_commits, threshold=3).candidates[0]
+        draft = weekly_churn_audit.build_candidate_draft(candidate, "7 days", 3)
+        open_issues: list[OpenIssue] = []
+
+        def load_open(_repo: str) -> tuple[list[OpenIssue], None]:
+            return list(open_issues), None
+
+        def create_issue(_repo: str, approved) -> str:
+            open_issues.append(
+                OpenIssue(number=4265, title=approved.title, body=approved.body)
+            )
+            return "https://example.test/issues/4265"
+
+        with tempfile.TemporaryDirectory() as temp:
+            pending = (
+                Path(temp)
+                / "runtime"
+                / "pending-issue-drafts"
+                / "weekly-churn-audit"
+            )
+            pending.mkdir(parents=True)
+            draft_name = stable_draft_filename(draft)
+            Path(f"{pending / draft_name}.approved").touch()
+            argv = [
+                "weekly_churn_audit.py",
+                "--repo-root",
+                str(ROOT),
+                "--runtime-root",
+                temp,
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(
+                    os.environ,
+                    {"AGENTDESK_CHURN_AUDIT_CREATE_ISSUE": "confirmed"},
+                    clear=True,
+                ),
+                patch.object(
+                    weekly_churn_audit,
+                    "collect_git_commits",
+                    return_value=audit_commits,
+                ),
+                patch.object(
+                    weekly_churn_audit, "load_open_issues", side_effect=load_open
+                ),
+                patch.object(
+                    weekly_churn_audit, "create_github_issue", side_effect=create_issue
+                ) as create,
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(weekly_churn_audit.main(), 0)
+                self.assertEqual(weekly_churn_audit.main(), 0)
+
+        create.assert_called_once()
+
+    def test_git_replaces_non_utf8_commit_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.name", "Audit Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "audit@example.test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "config",
+                    "i18n.commitEncoding",
+                    "ISO-8859-1",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "config",
+                    "i18n.logOutputEncoding",
+                    "ISO-8859-1",
+                ],
+                check=True,
+            )
+            (repo / "sample.txt").write_text("sample\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "sample.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-q", "-F", "-"],
+                input=b"fix: latin-1 \xff message\n",
+                check=True,
+            )
+
+            commits = weekly_churn_audit.collect_git_commits(repo, "7 days")
+
+        self.assertEqual(len(commits), 1)
+        self.assertIn("\ufffd", commits[0].subject)
+        self.assertEqual(commits[0].files, ("sample.txt",))
+
+    def test_invalid_env_thresholds_fall_back_and_log(self) -> None:
+        for value in ("abc", "0", "-1"):
+            with (
+                self.subTest(value=value),
+                patch.object(sys, "argv", ["weekly_churn_audit.py"]),
+                patch.dict(
+                    os.environ,
+                    {"AGENTDESK_CHURN_AUDIT_THRESHOLD": value},
+                    clear=True,
+                ),
+                patch.object(weekly_churn_audit, "log") as audit_log,
+            ):
+                args = weekly_churn_audit.parse_args()
+
+            self.assertEqual(args.threshold, weekly_churn_audit.DEFAULT_THRESHOLD)
+            audit_log.assert_called_once()
+            self.assertIn(value, audit_log.call_args.args[0])
+
+    def test_dense_cyclic_lineage_search_is_bounded_and_logged(self) -> None:
+        component = set(range(1, 8))
+        edges = {node: component - {node} for node in component}
+        with (
+            patch.object(weekly_churn_audit, "LINEAGE_PATH_STATE_LIMIT", 25),
+            patch.object(weekly_churn_audit, "log") as audit_log,
+        ):
+            lineage = weekly_churn_audit._longest_lineage(component, edges)
+
+        self.assertTrue(lineage)
+        self.assertLessEqual(len(lineage), len(component))
+        audit_log.assert_called_once()
+        self.assertIn("truncated at 25 path states", audit_log.call_args.args[0])
 
     def test_channel_post_gate_is_default_off_and_confirmed_is_idempotent(self) -> None:
         calls: list[str] = []

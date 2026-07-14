@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -27,7 +28,6 @@ from log_digest_issue_drafts import (
     IssueDraft,
     OpenIssue,
     PostDecision,
-    issue_matches_signature,
     maybe_post_approved_drafts,
     write_pending_drafts,
 )
@@ -36,8 +36,10 @@ from log_digest_issue_drafts import (
 DEFAULT_THRESHOLD = 3
 DEFAULT_SINCE = "7 days"
 DEFAULT_API_URL = "http://127.0.0.1:8791/api/discord/send"
-_FIX_SUBJECT_RE = re.compile(r"^fix(?:\([^)\r\n]+\))?:")
+LINEAGE_PATH_STATE_LIMIT = 10_000
+_FIX_SUBJECT_RE = re.compile(r"^fix(?:\([^)\r\n]+\))?!?:")
 _ISSUE_REFERENCE_RE = re.compile(r"(?<![\w#])#([1-9]\d*)\b")
+_SQUASH_PR_SUFFIX_RE = re.compile(r"(?:\s+\(#[1-9]\d*\))+\s*$")
 
 
 @dataclass(frozen=True)
@@ -76,17 +78,18 @@ class ChurnAudit:
 
 
 def is_fix_commit_subject(subject: str) -> bool:
-    """Recognize only conventional ``fix:`` and ``fix(scope):`` subjects."""
+    """Recognize conventional fix subjects, including breaking-change markers."""
 
     return _FIX_SUBJECT_RE.match(subject) is not None
 
 
 def issue_references(subject: str, body: str = "") -> tuple[int, ...]:
-    """Return issue references in commit-text order, removing repeats."""
+    """Return genuine issue references in text order, excluding squash PR suffixes."""
 
     ordered: list[int] = []
     seen: set[int] = set()
-    for match in _ISSUE_REFERENCE_RE.finditer(f"{subject}\n{body}"):
+    issue_text = f"{_SQUASH_PR_SUFFIX_RE.sub('', subject)}\n{body}"
+    for match in _ISSUE_REFERENCE_RE.finditer(issue_text):
         number = int(match.group(1))
         if number not in seen:
             seen.add(number)
@@ -105,12 +108,18 @@ def module_for_file(file: str) -> str:
     return path.stem
 
 
+def log(message: str) -> None:
+    print(f"weekly-churn-audit: {message}", file=sys.stderr)
+
+
 def _git(repo_root: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo_root), *args],
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -156,18 +165,28 @@ def _longest_lineage(
     component: set[int], edges: Mapping[int, set[int]]
 ) -> tuple[int, ...]:
     best: tuple[int, ...] = ()
-
-    def visit(node: int, path: tuple[int, ...]) -> None:
-        nonlocal best
+    starts = sorted(component)
+    pending = [(node, ()) for node in reversed(starts[:LINEAGE_PATH_STATE_LIMIT])]
+    scheduled = len(pending)
+    truncated = len(starts) > LINEAGE_PATH_STATE_LIMIT
+    while pending:
+        node, path = pending.pop()
         extended = (*path, node)
         if len(extended) > len(best) or (len(extended) == len(best) and extended < best):
             best = extended
-        for child in sorted(edges.get(node, set())):
-            if child not in extended:
-                visit(child, extended)
-
-    for start in sorted(component):
-        visit(start, ())
+        for child in reversed(sorted(edges.get(node, set()))):
+            if child in extended:
+                continue
+            if scheduled >= LINEAGE_PATH_STATE_LIMIT:
+                truncated = True
+                break
+            pending.append((child, extended))
+            scheduled += 1
+    if truncated:
+        log(
+            "issue-lineage search truncated at "
+            f"{LINEAGE_PATH_STATE_LIMIT} path states for a {len(component)}-issue component"
+        )
     return best
 
 
@@ -238,8 +257,8 @@ def analyze_churn(
     )
 
 
-def _candidate_signature(candidate: ChurnCandidate) -> str:
-    return f"repeated fix churn redesign candidate {candidate.file}"
+def _candidate_marker(candidate: ChurnCandidate) -> str:
+    return f"<!-- churn-audit:candidate={candidate.file} -->"
 
 
 def build_candidate_draft(candidate: ChurnCandidate, since: str, threshold: int) -> IssueDraft:
@@ -248,6 +267,7 @@ def build_candidate_draft(candidate: ChurnCandidate, since: str, threshold: int)
     ]
     body = "\n".join(
         [
+            _candidate_marker(candidate),
             "# 주간 회귀 churn 재설계 후보",
             "",
             "This is a pending draft generated for human review. It has not been posted to GitHub.",
@@ -268,7 +288,7 @@ def build_candidate_draft(candidate: ChurnCandidate, since: str, threshold: int)
     )
     return IssueDraft(
         severity="CHURN",
-        signature=_candidate_signature(candidate),
+        signature=_candidate_marker(candidate),
         count=candidate.count,
         title=f"ops(process): redesign candidate for {candidate.file}",
         body=body,
@@ -292,7 +312,7 @@ def candidate_drafts(
             (
                 issue
                 for issue in open_issues
-                if issue_matches_signature(_candidate_signature(candidate), issue)
+                if _candidate_marker(candidate) in issue.body
             ),
             None,
         )
@@ -408,8 +428,23 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def threshold_from_env(value: str | None) -> tuple[int, str | None]:
+    configured = value if value is not None else str(DEFAULT_THRESHOLD)
+    try:
+        return positive_int(configured), None
+    except (ValueError, argparse.ArgumentTypeError):
+        return (
+            DEFAULT_THRESHOLD,
+            "invalid AGENTDESK_CHURN_AUDIT_THRESHOLD "
+            f"value {configured!r}; using default {DEFAULT_THRESHOLD}",
+        )
+
+
 def parse_args() -> argparse.Namespace:
     script_repo_root = Path(__file__).resolve().parents[2]
+    env_threshold, threshold_warning = threshold_from_env(
+        os.environ.get("AGENTDESK_CHURN_AUDIT_THRESHOLD")
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=script_repo_root)
     parser.add_argument("--runtime-root", type=Path, default=runtime_root())
@@ -422,11 +457,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=positive_int,
-        default=positive_int(
-            os.environ.get("AGENTDESK_CHURN_AUDIT_THRESHOLD", str(DEFAULT_THRESHOLD))
-        ),
+        default=None,
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.threshold is None:
+        args.threshold = env_threshold
+        if threshold_warning:
+            log(threshold_warning)
+    return args
 
 
 def main() -> int:
