@@ -5,7 +5,7 @@ Covers ``scripts/generate_inventory_docs.py``:
     (inline ``#[cfg(test)]`` guards on production items stay production);
   * the giant-file flag keys off production LoC;
   * the registry loader and validator reject ghosts, unregistered new giants,
-    and deadline-less entries.
+    deadline-less entries, and incomplete grandfather metadata.
 """
 
 from __future__ import annotations
@@ -599,12 +599,27 @@ class RegistryValidationTest(unittest.TestCase):
             flags=flags,
         )
 
+    def _grandfather(self, path: str, **overrides: str) -> dict[str, str]:
+        record = {
+            "file": path,
+            "owner": "legacy-owner",
+            "disposition": "keep",
+            "keep_reason": "Frozen legacy giant; no dedicated shrink is scheduled.",
+            "decompose_issue": "TBD",
+        }
+        record.update(overrides)
+        return record
+
     def _patch_registry(self, grandfathered, entries, baseline_paths=None):
+        grandfathered = [
+            self._grandfather(item) if isinstance(item, str) else dict(item)
+            for item in grandfathered
+        ]
         if baseline_paths is None:
-            baseline_paths = list(grandfathered)
+            baseline_paths = [record["file"] for record in grandfathered]
         return (
             lambda: (
-                list(grandfathered),
+                [dict(record) for record in grandfathered],
                 [dict(e) for e in entries],
                 list(baseline_paths) if baseline_paths is not None else None,
             )
@@ -680,13 +695,52 @@ class RegistryValidationTest(unittest.TestCase):
     def test_missing_baseline_paths_fails(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         orig = GEN.load_giant_file_registry
-        GEN.load_giant_file_registry = lambda: (["src/a.rs"], [], None)
+        GEN.load_giant_file_registry = lambda: ([self._grandfather("src/a.rs")], [], None)
         try:
             with self.assertRaises(GEN.ParseError) as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("grandfathered_baseline_paths", str(ctx.exception))
+
+    def test_grandfather_missing_owner_fails(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        record = self._grandfather("src/a.rs")
+        record.pop("owner")
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([record], [])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("owner", str(ctx.exception))
+
+    def test_grandfather_keep_requires_reason(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        record = self._grandfather("src/a.rs")
+        record.pop("keep_reason")
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([record], [])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("keep_reason", str(ctx.exception))
+
+    def test_grandfather_shrink_requires_deadline(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        record = self._grandfather("src/a.rs", disposition="shrink")
+        record.pop("keep_reason")
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([record], [])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("requires deadline", str(ctx.exception))
 
     def test_valid_registry_builds_rows(self) -> None:
         modules = [
@@ -707,6 +761,8 @@ class RegistryValidationTest(unittest.TestCase):
             GEN.load_giant_file_registry = orig
         by_path = {r.file_path: r for r in regs}
         self.assertEqual(by_path["src/grand.rs"].deadline, "")
+        self.assertEqual(by_path["src/grand.rs"].owner, "legacy-owner")
+        self.assertEqual(by_path["src/grand.rs"].disposition, "keep")
         self.assertEqual(by_path["src/tracked.rs"].deadline, "2026-08-31")
         self.assertEqual(by_path["src/tracked.rs"].owner, "team")
 

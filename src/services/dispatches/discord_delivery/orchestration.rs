@@ -605,6 +605,7 @@ pub(crate) async fn send_dispatch_to_discord_with_pg_result(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_dispatch_to_discord_inner_with_context_pg(
     agent_id: &str,
     title: &str,
@@ -1443,6 +1444,7 @@ fn create_review_decision_followup_dispatch(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_review_result_message_via_http(
     pg_pool: Option<&PgPool>,
     review_dispatch_id: &str,

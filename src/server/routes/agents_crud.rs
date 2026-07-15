@@ -286,6 +286,7 @@ fn attach_management_fields(mut agent: Value, fields: AgentManagementFields) -> 
     agent
 }
 
+#[allow(clippy::result_large_err)]
 async fn run_prompt_auto_commit(
     prompt_path: &FsPath,
     message: Option<&str>,
@@ -761,6 +762,7 @@ pub(super) async fn create_agent(
     )
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) async fn update_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,

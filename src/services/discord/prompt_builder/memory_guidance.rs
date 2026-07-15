@@ -46,6 +46,7 @@ pub(super) fn proactive_memory_guidance(
 /// (#4314) can be tested deterministically. The `exists` closure decides
 /// whether the current workspace is an AgentDesk checkout; everything else
 /// (scope hints, the always-on `tool_feedback` contract) is unchanged.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn proactive_memory_guidance_with(
     memory_settings: Option<&ResolvedMemorySettings>,
     current_path: &str,

@@ -619,6 +619,7 @@ pub fn execute_command_simple_cancellable(
     Err("Empty response from OpenCode".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     _session_id: Option<&str>,
@@ -651,6 +652,7 @@ pub fn execute_command_streaming(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_command_streaming_inner(
     prompt: &str,
     _session_id: Option<&str>,
@@ -1139,6 +1141,7 @@ fn shutdown_server(server: &mut OpenCodeServerProcess, base_url: &str, auth: &st
 // Session flow
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_session(
     prompt: &str,
     system_prompt: Option<&str>,
@@ -1283,6 +1286,7 @@ fn create_session(
         .ok_or_else(|| format!("Session response missing ID field: {json}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_prompt(
     base_url: &str,
     auth: &str,

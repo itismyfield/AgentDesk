@@ -277,6 +277,7 @@ fn claude_transcript_line_timestamp(value: &serde_json::Value) -> Option<DateTim
 /// Return the first and last parseable Claude JSONL timestamps. Continuation
 /// discovery uses these semantic activity bounds instead of filesystem mtime
 /// alone so a newer same-cwd transcript cannot steal another session's relay.
+#[allow(clippy::type_complexity)]
 pub(crate) fn claude_transcript_timestamp_bounds(
     transcript_path: &Path,
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, String> {

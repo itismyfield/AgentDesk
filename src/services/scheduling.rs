@@ -12,6 +12,7 @@ use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 use std::str::FromStr;
 
+#[allow(clippy::large_enum_variant)]
 enum ParsedSchedule {
     Every(Duration),
     Cron(Cron),

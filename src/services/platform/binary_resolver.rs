@@ -609,6 +609,7 @@ fn unresolved_provider_binary_with_error(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_candidate_source(
     requested_binary: &str,
     source: &str,

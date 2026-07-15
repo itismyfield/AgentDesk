@@ -10,6 +10,7 @@ pub(super) fn failed_entry_alert_session_key(entry_id: &str, transition_id: i64)
     format!("auto_queue.entry:{entry_id}:failure-transition:{transition_id}")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn failed_entry_alert(
     target: &str,
     run_id: &str,
@@ -105,6 +106,7 @@ pub(super) fn compact_failure_summary(message: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_entry_dispatch_failure(
     deps: &AutoQueueActivateDeps,
     run_id: &str,

@@ -7,21 +7,25 @@
 # >= 1000.
 #
 # Enforcement (generation fails otherwise):
-#   * Every current prod-giant must appear either in `grandfathered` below or as
-#     an `[[entry]]` table. A new giant with neither is rejected — register it
-#     with an owner, deadline, and decompose issue first.
+#   * Every current prod-giant must appear either in a `[[grandfathered]]` table
+#     below or as an `[[entry]]` table. A new giant with neither is rejected —
+#     register it with an owner, deadline, and decompose issue first.
 #   * Each `[[entry]]` must carry owner, deadline (YYYY-MM-DD), and
 #     decompose_issue. Deadline-less registration is forbidden.
-#   * A `grandfathered` path or `[[entry]]` whose module is no longer a
+#   * Each `[[grandfathered]]` must carry owner, keep/shrink disposition, and a
+#     candidate decompose_issue. Keep requires a reason; shrink requires a
+#     YYYY-MM-DD deadline.
+#   * A `[[grandfathered]]` path or `[[entry]]` whose module is no longer a
 #     prod-giant is a ghost registration and must be removed (decomposition
 #     complete).
-#   * `grandfathered` must be a SUBSET of `grandfathered_baseline_paths`; a path
-#     not already in the frozen baseline cannot be grandfathered (no swap-ins).
+#   * `[[grandfathered]]` paths must be a SUBSET of
+#     `grandfathered_baseline_paths`; a path not already in the frozen baseline
+#     cannot be grandfathered (no swap-ins).
 #
-# Migration intent: drain `grandfathered` over time by either decomposing the
-# module (drops below threshold -> remove the path here) or promoting it to a
-# full `[[entry]]` with owner + deadline + decompose_issue. New giant files are
-# never grandfathered; they must land as `[[entry]]` in the same PR.
+# Migration intent: drain `[[grandfathered]]` over time by either decomposing
+# the module (drops below threshold -> remove the record here) or promoting it
+# to a scheduled `[[entry]]` with deadline + filed decompose_issue. New giant
+# files are never grandfathered; they must land as `[[entry]]` in the same PR.
 
 # Closed baseline (#3036). `grandfathered` may only ever be a SUBSET of
 # `grandfathered_baseline_paths`: a path may be removed from
@@ -156,59 +160,318 @@ grandfathered_baseline_paths = [
   "src/voice/receiver.rs",
 ]
 
-# Paths that predate the deadline mandate. No owner/deadline required yet,
-# but each must be either decomposed (removed) or promoted to an [[entry]]
-# over time. New giants must NOT be added here.
-grandfathered = [
-  "src/cli/client.rs",
-  "src/cli/dcserver.rs",
-  "src/cli/direct.rs",
-  "src/cli/doctor/orchestrator.rs",
-  "src/cli/init.rs",
-  "src/cli/migrate/apply.rs",
-  "src/cli/migrate/plan.rs",
-  "src/cli/migrate/source.rs",
-  "src/cli/provider_cli/mod.rs",
-  "src/config.rs",
-  "src/db/auto_queue/entries.rs",
-  "src/db/auto_queue/phase_gates.rs",
-  "src/db/dispatched_sessions.rs",
-  "src/db/dispatches/mod.rs",
-  "src/db/postgres.rs",
-  "src/dispatch/dispatch_context.rs",
-  "src/dispatch/dispatch_create.rs",
-  "src/dispatch/dispatch_status.rs",
-  "src/engine/loader.rs",
-  "src/engine/mod.rs",
-  "src/engine/ops/db_ops.rs",
-  "src/github/sync.rs",
-  "src/pipeline.rs",
-  "src/receipt.rs",
-  "src/reconcile.rs",
-  "src/server/mod.rs",
-  "src/server/routes/agents.rs",
-  "src/server/routes/agents_crud.rs",
-  "src/server/routes/agents_setup.rs",
-  "src/server/routes/escalation.rs",
-  "src/server/routes/health_api.rs",
-  "src/server/routes/kanban.rs",
-  "src/server/routes/meetings.rs",
-  "src/server/routes/resume.rs",
+# Paths that predate the deadline mandate. Every record carries an owner,
+# an explicit keep/shrink disposition, and a candidate decomposition issue.
+# New giants must NOT be added here; the frozen baseline below remains the
+# admission boundary. A shrink disposition additionally requires a deadline;
+# a keep disposition requires a reason.
+
+[[grandfathered]]
+file = "src/cli/client.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/dcserver.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/direct.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/doctor/orchestrator.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/init.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/migrate/apply.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/migrate/plan.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/migrate/source.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/cli/provider_cli/mod.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/config.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/db/auto_queue/entries.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/db/auto_queue/phase_gates.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/db/dispatched_sessions.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/db/dispatches/mod.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/db/postgres.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/dispatch/dispatch_context.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/dispatch/dispatch_create.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/dispatch/dispatch_status.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/engine/loader.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/engine/mod.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/engine/ops/db_ops.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/github/sync.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/pipeline.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/receipt.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/reconcile.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/mod.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/agents.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/agents_crud.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/agents_setup.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/escalation.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/health_api.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/kanban.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/meetings.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/server/routes/resume.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
   # decision_route.rs was decomposed in #3038 slice 1 and then S1-relocated in
   # #3038 review-decision S1 (4392 prod LoC -> 26-line route shim +
   # sub-1000-LoC modules under services/review_decision/); no longer a
   # prod-giant, so it is removed from `grandfathered` (kept in the frozen
   # baseline above) and the split outputs are ratcheted in
   # scripts/audit_maintainability_giant_baseline.toml.
-  "src/server/routes/v1.rs",
-  "src/services/auto_queue.rs",
-  "src/services/auto_queue/activate_command.rs",
-  "src/services/auto_queue/cancel_run.rs",
-  "src/services/claude.rs",
-  "src/services/claude_tui/input.rs",
-  "src/services/codex.rs",
-  "src/services/codex_tmux_wrapper.rs",
-  "src/services/codex_tui/input.rs",
+
+[[grandfathered]]
+file = "src/server/routes/v1.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/auto_queue.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/auto_queue/activate_command.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/auto_queue/cancel_run.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/claude.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/claude_tui/input.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/codex.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/codex_tmux_wrapper.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/codex_tui/input.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
   # commands/config.rs dropped to 954 prod LoC in #3038 S2 (session-override
   # bookkeeping helpers moved to discord/shared_state.rs); no longer a
   # prod-giant, so it is removed from `grandfathered` and from the baseline
@@ -220,16 +483,46 @@ grandfathered = [
   # and from the baseline guard above (win-locked: a re-expanded diagnostics
   # cannot be re-grandfathered — it would have to land as a full [[entry]] or
   # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/commands/text_commands.rs",
-  "src/services/discord/formatting.rs",
+
+[[grandfathered]]
+file = "src/services/discord/commands/text_commands.rs"
+owner = "discord-relay"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/discord/formatting.rs"
+owner = "discord-relay"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
   # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line
   # module root + 6 sub-1000-LoC directory modules under health/); no longer
   # a prod-giant, so it is removed here AND from the frozen baseline above
   # (win-locked: a re-expanded health.rs cannot be re-grandfathered). The
   # split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/meeting_orchestrator.rs",
-  "src/services/discord/mod.rs",
-  "src/services/discord/router/message_handler/headless_turn.rs",
+
+[[grandfathered]]
+file = "src/services/discord/meeting_orchestrator.rs"
+owner = "discord-relay"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/discord/mod.rs"
+owner = "discord-relay"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/discord/router/message_handler/headless_turn.rs"
+owner = "discord-relay"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
   # completion_guard.rs was decomposed in #3479 (1834 prod LoC -> 872-line
   # module root + completion_guard/{completion_postgres,completion_context}.rs,
   # both sub-1000-LoC); no longer a prod-giant, so it is removed here AND from
@@ -242,28 +535,135 @@ grandfathered = [
   # and from the baseline guard above (win-locked: a re-expanded tmux_runtime
   # cannot be re-grandfathered — it would have to land as a full [[entry]] or
   # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord_config_audit.rs",
-  "src/services/dispatched_sessions.rs",
-  "src/services/dispatches/discord_delivery/orchestration.rs",
-  "src/services/dispatches/outbox_route.rs",
-  "src/services/gemini.rs",
-  "src/services/memory/memento.rs",
-  "src/services/onboarding/mod.rs",
-  "src/services/opencode.rs",
-  "src/services/platform/binary_resolver.rs",
-  "src/services/provider.rs",
-  "src/services/qwen.rs",
-  "src/services/routines/agent_executor.rs",
-  "src/services/routines/discord_log.rs",
+
+[[grandfathered]]
+file = "src/services/discord_config_audit.rs"
+owner = "discord-relay"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/dispatched_sessions.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/dispatches/discord_delivery/orchestration.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/dispatches/outbox_route.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/gemini.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/memory/memento.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/onboarding/mod.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/opencode.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/platform/binary_resolver.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/provider.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/qwen.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/routines/agent_executor.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/routines/discord_log.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
   # migrated.rs dropped to 883 prod LoC after the #3028 splitter fix (its inline
   # test mod was previously miscounted as production); no longer a prod-giant, so
   # it is removed from `grandfathered` (kept in the frozen baseline above).
-  "src/services/routines/store.rs",
-  "src/services/settings.rs",
-  "src/services/tui_prompt_dedupe.rs",
-  "src/services/turn_orchestrator.rs",
-  "src/voice/receiver.rs",
-]
+
+[[grandfathered]]
+file = "src/services/routines/store.rs"
+owner = "automation-pipeline"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/settings.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/tui_prompt_dedupe.rs"
+owner = "discord-relay"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/services/turn_orchestrator.rs"
+owner = "server-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
+
+[[grandfathered]]
+file = "src/voice/receiver.rs"
+owner = "voice-runtime"
+disposition = "keep"
+keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
+decompose_issue = "TBD"
 
 # Tracked decompositions. Each requires owner + deadline (YYYY-MM-DD) +
 # decompose_issue. The generator renders these into the registry doc and the

@@ -179,6 +179,7 @@ pub(crate) async fn mark_outbox_done_pg(
 
 /// Mark an outbox row as permanently `failed` after the retry budget is
 /// exhausted.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn mark_outbox_failed_pg(
     pool: &PgPool,
     outbox_id: i64,

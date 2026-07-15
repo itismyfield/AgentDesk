@@ -148,6 +148,7 @@ pub(super) fn record_provider_overload_retry(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn schedule_provider_overload_retry(
     shared: Arc<SharedData>,
     http: Arc<serenity::Http>,

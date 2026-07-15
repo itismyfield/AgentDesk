@@ -41,6 +41,7 @@ pub fn emit_turn_started(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_turn_finished_with_dispatch_kind(
     provider: &str,
     channel_id: u64,
@@ -569,6 +570,7 @@ pub fn emit_bridge_latency_spans(
 /// The bridge-side delivery decision is NOT covered by the watcher-side
 /// `relay_flight_recorder` tracing, so this closes that observability gap
 /// before the delivery-lease consolidation touches the hot path.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_relay_delivery(
     provider: &str,
     channel_id: u64,
@@ -737,6 +739,7 @@ pub fn emit_agent_quality_event(event: AgentQualityEvent) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_event(
     event_type: &str,
     provider: Option<&str>,

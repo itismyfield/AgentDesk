@@ -102,6 +102,7 @@ impl StandbyRelayTurnBinding {
 /// - `cancel` or `shared.restart.shutting_down` flips to true,
 /// - the JSONL emits a `{"type":"result"}` event and we deliver the response,
 /// - or `timeout` elapses.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_standby_relay(
     http: Arc<serenity::http::Http>,
     channel_id: ChannelId,
@@ -480,6 +481,7 @@ fn clear_outcome_label(outcome: GuardedClearOutcome) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_standby_completion_event(
     provider: &ProviderKind,
     channel_id: ChannelId,

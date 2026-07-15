@@ -520,6 +520,7 @@ pub(crate) async fn allocate_manual_slot_binding_pg(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_slot_thread_binding_pg(
     pool: &PgPool,
     agent_id: &str,

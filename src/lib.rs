@@ -3,8 +3,9 @@
 // style/complexity debt explicit here so this change can remove the crate-wide
 // dead_code blanket without rewriting unrelated modules.
 //
-// `too_many_arguments` is governed solely by this crate-wide allow; per-function
-// `#[allow(clippy::too_many_arguments)]` attributes are redundant and removed.
+// Structural complexity lints are denied crate-wide through Cargo.toml. Legacy
+// occurrences carry narrow item/module allows so newly introduced debt remains
+// visible to Clippy.
 //
 // `await_holding_lock` is intentionally NOT suppressed here (#3034): production
 // lock-across-await races must surface in clippy. The only legitimate holders
@@ -31,7 +32,6 @@
     clippy::if_same_then_else,
     clippy::items_after_test_module,
     clippy::iter_cloned_collect,
-    clippy::large_enum_variant,
     clippy::let_and_return,
     clippy::let_unit_value,
     clippy::let_underscore_future,
@@ -67,13 +67,10 @@
     clippy::redundant_guards,
     clippy::redundant_locals,
     clippy::redundant_pattern_matching,
-    clippy::result_large_err,
     clippy::single_char_add_str,
     clippy::single_match,
     clippy::suspicious_open_options,
-    clippy::too_many_arguments,
     clippy::trim_split_whitespace,
-    clippy::type_complexity,
     clippy::unnecessary_cast,
     clippy::unnecessary_filter_map,
     clippy::unnecessary_lazy_evaluations,

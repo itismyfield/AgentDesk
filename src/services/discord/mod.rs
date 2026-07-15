@@ -118,6 +118,7 @@ mod tui_direct_pending_start;
 mod tui_prompt_relay;
 mod tui_task_card;
 mod turn_bridge;
+#[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
 mod turn_view_reconciler;
 mod voice_acknowledgement;
@@ -130,7 +131,6 @@ mod voice_routing;
 mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
-
 pub(in crate::services::discord) use delivery_lease_key::DeliveryLeaseKey;
 pub(crate) use meeting_orchestrator as meeting;
 // #3479 item-2: re-export the catch-up subsystem entry points referenced

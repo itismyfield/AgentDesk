@@ -483,6 +483,7 @@ impl super::SessionBoundDiscordRelaySink {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn confirm_task_context_card<T: TaskCardTransport>(
     pool: Option<&PgPool>,
     clients: &CardDeliveryClients,

@@ -155,8 +155,11 @@ class ModuleEntry:
 class GiantFileRegistration:
     file_path: str
     owner: str
+    grandfathered: bool
+    disposition: str
     deadline: str
     decompose_issue: str
+    decision_reason: str
     prod_line_count: int
 
 
@@ -881,7 +884,9 @@ _REGISTRY_KV_RE = re.compile(r'^(?P<key>[A-Za-z0-9_]+)\s*=\s*"(?P<value>[^"]*)"$
 _REGISTRY_ARRAY_RE = re.compile(r"^(?P<name>[A-Za-z0-9_]+)\s*=\s*\[\s*(?P<rest>.*)$")
 _DEADLINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _REGISTRY_ENTRY_FIELDS = ("file", "owner", "deadline", "decompose_issue")
-_REGISTRY_ARRAY_NAMES = ("grandfathered", "grandfathered_baseline_paths")
+_REGISTRY_GRANDFATHERED_FIELDS = ("file", "owner", "disposition", "decompose_issue")
+_REGISTRY_ARRAY_NAMES = ("grandfathered_baseline_paths",)
+_GRANDFATHERED_DISPOSITIONS = {"keep", "shrink"}
 
 
 def _strip_toml_comment(line: str) -> str:
@@ -894,15 +899,17 @@ def _strip_toml_comment(line: str) -> str:
     return line.rstrip()
 
 
-def load_giant_file_registry() -> tuple[list[str], list[dict[str, str]], list[str] | None]:
+def load_giant_file_registry() -> tuple[
+    list[dict[str, str]], list[dict[str, str]], list[str] | None
+]:
     """Parse the tiny TOML subset used by the giant-file registry.
 
-    Supports the ``grandfathered`` and ``grandfathered_baseline_paths`` string
-    arrays (each possibly spread over multiple lines) and any number of
-    ``[[entry]]`` tables with quoted string values. Avoids a hard dependency on
-    ``tomllib`` so the check runs on the same interpreters as the existing audit
-    scripts. Returns ``(grandfathered, entries, baseline_paths)`` where
-    ``baseline_paths`` is ``None`` if the array is absent.
+    Supports the ``grandfathered_baseline_paths`` string array (possibly spread
+    over multiple lines) and any number of ``[[grandfathered]]`` / ``[[entry]]``
+    tables with quoted string values. Avoids a hard dependency on ``tomllib`` so
+    the check runs on the same interpreters as the existing audit scripts.
+    Returns ``(grandfathered, entries, baseline_paths)`` where ``baseline_paths``
+    is ``None`` if the array is absent.
     """
 
     if not GIANT_FILE_REGISTRY.is_file():
@@ -910,6 +917,7 @@ def load_giant_file_registry() -> tuple[list[str], list[dict[str, str]], list[st
 
     arrays: dict[str, list[str]] = {}
     seen_arrays: set[str] = set()
+    grandfathered: list[dict[str, str]] = []
     entries: list[dict[str, str]] = []
     current_entry: dict[str, str] | None = None
     active_array: str | None = None
@@ -946,6 +954,9 @@ def load_giant_file_registry() -> tuple[list[str], list[dict[str, str]], list[st
             if name == "[entry]":
                 current_entry = {}
                 entries.append(current_entry)
+            elif name == "[grandfathered]":
+                current_entry = {}
+                grandfathered.append(current_entry)
             else:
                 current_entry = None
             continue
@@ -969,7 +980,7 @@ def load_giant_file_registry() -> tuple[list[str], list[dict[str, str]], list[st
             current_entry[kv.group("key")] = kv.group("value")
 
     baseline_paths = arrays.get("grandfathered_baseline_paths")
-    return arrays.get("grandfathered", []), entries, baseline_paths
+    return grandfathered, entries, baseline_paths
 
 
 def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegistration]:
@@ -983,6 +994,9 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
       * a registered path is no longer a prod-giant (ghost registration left
         behind after decomposition);
       * an ``[[entry]]`` is missing a required field or has a malformed
+        deadline;
+      * a ``[[grandfathered]]`` record is missing owner/disposition/candidate
+        issue metadata, or a keep/shrink decision lacks its required reason or
         deadline;
       * a grandfathered path is absent from the frozen
         ``grandfathered_baseline_paths`` baseline, which would let a new giant
@@ -1010,7 +1024,10 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
         )
     else:
         baseline_set = set(baseline_paths)
-        for path in sorted(set(grandfathered) - baseline_set):
+        grandfathered_paths = {
+            record["file"] for record in grandfathered if record.get("file")
+        }
+        for path in sorted(grandfathered_paths - baseline_set):
             problems.append(
                 f"grandfathered path {path!r} is not in the frozen "
                 "`grandfathered_baseline_paths` baseline; new giants must be "
@@ -1046,13 +1063,53 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             GiantFileRegistration(
                 file_path=path,
                 owner=entry["owner"],
+                grandfathered=False,
+                disposition="shrink",
                 deadline=entry["deadline"],
                 decompose_issue=entry["decompose_issue"],
+                decision_reason="",
                 prod_line_count=prod,
             )
         )
 
-    for path in grandfathered:
+    for record in grandfathered:
+        missing = [
+            field for field in _REGISTRY_GRANDFATHERED_FIELDS if not record.get(field)
+        ]
+        if missing:
+            problems.append(
+                f"[[grandfathered]] {record.get('file', '<no file>')!r} missing "
+                f"required field(s): {', '.join(missing)}"
+            )
+            continue
+        path = record["file"]
+        disposition = record["disposition"]
+        deadline = record.get("deadline", "")
+        keep_reason = record.get("keep_reason", "")
+        if disposition not in _GRANDFATHERED_DISPOSITIONS:
+            problems.append(
+                f"[[grandfathered]] {path!r} disposition {disposition!r} must be "
+                "'keep' or 'shrink'"
+            )
+        elif disposition == "keep":
+            if not keep_reason:
+                problems.append(
+                    f"[[grandfathered]] {path!r} keep disposition requires "
+                    "keep_reason"
+                )
+            if deadline:
+                problems.append(
+                    f"[[grandfathered]] {path!r} keep disposition must not set "
+                    "deadline; use disposition = 'shrink' for scheduled work"
+                )
+        elif not deadline:
+            problems.append(
+                f"[[grandfathered]] {path!r} shrink disposition requires deadline"
+            )
+        elif not _DEADLINE_RE.fullmatch(deadline):
+            problems.append(
+                f"[[grandfathered]] {path!r} deadline {deadline!r} is not YYYY-MM-DD"
+            )
         if path in seen:
             problems.append(f"duplicate registry path: {path!r}")
             continue
@@ -1067,9 +1124,12 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
         registrations.append(
             GiantFileRegistration(
                 file_path=path,
-                owner="",
-                deadline="",
-                decompose_issue="",
+                owner=record["owner"],
+                grandfathered=True,
+                disposition=disposition,
+                deadline=deadline,
+                decompose_issue=record["decompose_issue"],
+                decision_reason=keep_reason,
                 prod_line_count=prod,
             )
         )
@@ -1093,8 +1153,8 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
 
 
 def render_giant_file_registry(registrations: list[GiantFileRegistration]) -> str:
-    tracked = [reg for reg in registrations if reg.deadline]
-    grandfathered = [reg for reg in registrations if not reg.deadline]
+    tracked = [reg for reg in registrations if not reg.grandfathered]
+    grandfathered = [reg for reg in registrations if reg.grandfathered]
     lines = [
         "# Giant-file Registry",
         "",
@@ -1105,7 +1165,7 @@ def render_giant_file_registry(registrations: list[GiantFileRegistration]) -> st
         "(excludes `#[cfg(test)] mod` blocks).",
         f"- Registered giant files: `{len(registrations)}`",
         f"- Tracked (owner + deadline + decompose issue): `{len(tracked)}`",
-        f"- Grandfathered (awaiting owner/deadline backfill or decomposition): "
+        f"- Grandfathered (owner + keep/shrink decision + candidate issue): "
         f"`{len(grandfathered)}`",
         "",
         "## Tracked Decompositions",
@@ -1126,16 +1186,20 @@ def render_giant_file_registry(registrations: list[GiantFileRegistration]) -> st
             "",
             "## Grandfathered",
             "",
-            "> Predate the deadline mandate (#3036). Each must be decomposed "
-            "(drops off this list) or promoted to a tracked decomposition with "
-            "an owner and deadline.",
+            "> Predate the deadline mandate (#3036). Every row now has an "
+            "accountable owner, an explicit keep/shrink decision, and a candidate "
+            "decomposition issue. Shrink decisions additionally require a deadline.",
             "",
-            "| Path | Prod |",
-            "| --- | ---: |",
+            "| Path | Prod | Owner | Decision | Deadline | Candidate Issue | Reason |",
+            "| --- | ---: | --- | --- | --- | --- | --- |",
         ]
     )
     for reg in grandfathered:
-        lines.append(f"| `{reg.file_path}` | {reg.prod_line_count} |")
+        lines.append(
+            f"| `{reg.file_path}` | {reg.prod_line_count} | {reg.owner} | "
+            f"{reg.disposition} | {reg.deadline or '—'} | {reg.decompose_issue} | "
+            f"{reg.decision_reason or '—'} |"
+        )
     lines.append("")
     return "\n".join(lines)
 

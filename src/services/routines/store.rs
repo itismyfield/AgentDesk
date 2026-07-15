@@ -3255,6 +3255,7 @@ impl RoutineStore {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     async fn close_run(&self, run_id: &str, close: CloseRun<'_>) -> Result<bool> {
         let checkpoint_size_error = match close.checkpoint.as_ref() {
             Some(checkpoint) => checkpoint_size_error(checkpoint, self.max_checkpoint_bytes)?,

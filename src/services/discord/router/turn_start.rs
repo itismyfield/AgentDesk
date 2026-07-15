@@ -283,6 +283,7 @@ pub(super) fn put_back_voluntary_feedback_reminder(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn emit_session_strategy_lifecycle(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -378,6 +379,7 @@ pub(super) fn cli_just_spawned_for_emit(tmux_session_name: Option<&str>) -> bool
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn log_session_strategy_diagnostic(
     channel_id: ChannelId,
     provider: &ProviderKind,

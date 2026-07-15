@@ -67,6 +67,7 @@ fn mix_finalizer_hash(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
+#[allow(clippy::too_many_arguments)]
 fn synthetic_finalizer_turn_id(
     provider: &str,
     channel_id: u64,
@@ -923,6 +924,7 @@ mod turn_source_tests {
 }
 
 impl InflightTurnState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: ProviderKind,
         channel_id: u64,

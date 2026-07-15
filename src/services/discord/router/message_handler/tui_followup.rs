@@ -876,6 +876,7 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn enqueue_busy_tui_followup_for_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -954,6 +955,7 @@ mod readiness_wait_status_tests {
 /// #4139: the enqueue-refusal branch restores the taken recovery context and
 /// rewrites the placeholder into the refusal notice. Lives here (non-baselined
 /// sibling) so the baselined intake root carries only the call.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_tui_busy_enqueue_refusal(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,

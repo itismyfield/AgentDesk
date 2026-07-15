@@ -397,6 +397,7 @@ fn persist_codex_tui_rebind_rollout_cursor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_codex_tui_rebind_relay_output(
     tmux_session_name: &str,
     rollout_path: &str,

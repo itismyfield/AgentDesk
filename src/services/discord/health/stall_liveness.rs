@@ -299,6 +299,7 @@ impl StallWatchdogJudgmentBasis {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn evaluate_stall_watchdog_liveness(
     provider: &ProviderKind,
     channel_id: ChannelId,

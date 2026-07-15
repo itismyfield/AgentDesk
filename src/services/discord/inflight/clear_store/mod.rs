@@ -633,6 +633,7 @@ pub(super) fn normalize_response_sent_offset(
     offset
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,

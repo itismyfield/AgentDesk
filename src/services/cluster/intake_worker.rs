@@ -196,6 +196,7 @@ pub(crate) async fn run_intake_worker_tick(
 /// also queues new turns into the mailbox during drain. The worker
 /// stops when the actual restart happens and the new process flips
 /// `shutting_down` on the OLD process via the kill path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_intake_worker_loop(
     pool: PgPool,
     http: Arc<serenity::http::Http>,
