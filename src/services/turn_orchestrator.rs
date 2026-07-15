@@ -44,11 +44,11 @@ pub(crate) use pending_queue_persistence::{
     remove_channel_pending_queue_files_all_tokens, save_channel_queue,
     warn_legacy_pending_queue_files,
 };
-pub(crate) use source_generation::SourceMessageQueuedGeneration;
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+pub(crate) use source_generation::SourceMessageQueuedGeneration;
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
 use turn_finished_signal::{
     GLOBAL_TURN_FINISHED_SIGNALS, mark_turn_finished_signal_done, reset_turn_finished_signal,
