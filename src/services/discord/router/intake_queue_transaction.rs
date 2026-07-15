@@ -484,6 +484,37 @@ fn log_commit_outcome(outcome: &IntakeQueueCommitOutcome) {
 mod tests {
     use super::*;
 
+    struct EnvRootGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvRootGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            // SAFETY: the crate-wide env lock serializes test environment
+            // mutations, and Drop restores the previous value while locked.
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvRootGuard {
+        fn drop(&mut self) {
+            // SAFETY: this guard still owns the crate-wide env lock.
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
     struct FakeEffects {
         enqueue_outcome: MailboxEnqueueOutcome,
         enqueued_specs: Vec<SoftInterventionSpec>,
@@ -587,6 +618,9 @@ mod tests {
 
     #[test]
     fn false_flag_allowed_automation_dispatch_is_not_cancel_preserved() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+
         let mut automation = request(Default::default()).intervention;
         automation.author_is_allowed_automation = true;
         automation.text = "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000".to_string();
