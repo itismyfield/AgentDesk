@@ -286,7 +286,7 @@ pub struct ClaudeTuiLaunchConfig {
     /// `--resume` TUI spawns honour the configured override. Mirrors the
     /// `p > 0` guard used by the non-TUI tmux/process spawn paths.
     pub compact_percent: Option<u64>,
-    pub(crate) gateway_proxy_env: Option<ClaudeGatewayProxyEnv>,
+    pub(crate) gateway_proxy_env: ClaudeGatewayProxyEnv,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -417,9 +417,9 @@ fn write_launch_script(
         None => String::new(),
     };
     let mut gateway_exports = String::new();
-    if let Some(gateway_proxy_env) = config.gateway_proxy_env.as_ref() {
-        gateway_proxy_env.append_shell_exports(&mut gateway_exports);
-    }
+    config
+        .gateway_proxy_env
+        .append_shell_env(&mut gateway_exports);
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
@@ -453,7 +453,11 @@ mod tests {
             model: Some("sonnet".to_string()),
             resume: false,
             compact_percent: None,
-            gateway_proxy_env: None,
+            gateway_proxy_env: crate::services::claude_gateway_proxy::launch_env_for_test(
+                false,
+                "http://127.0.0.1:10100",
+                true,
+            ),
         }
     }
 
@@ -592,7 +596,11 @@ mod tests {
             "compact override must be exported before exec"
         );
 
-        config.gateway_proxy_env = None;
+        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
+            false,
+            "http://foreign.example",
+            true,
+        );
         write_launch_script(
             &launch_script_path,
             &config,
@@ -601,8 +609,8 @@ mod tests {
         .unwrap();
         let disabled_script = std::fs::read_to_string(&launch_script_path).unwrap();
         assert!(disabled_script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
-        assert!(!disabled_script.contains("ANTHROPIC_BASE_URL"));
-        assert!(!disabled_script.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"));
+        assert!(disabled_script.contains("unset ANTHROPIC_BASE_URL\n"));
+        assert!(disabled_script.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
     }
 
     #[test]

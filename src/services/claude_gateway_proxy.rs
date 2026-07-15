@@ -9,33 +9,45 @@ const ANTHROPIC_BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
 const GATEWAY_MODEL_DISCOVERY_ENV: &str = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClaudeGatewayProxyEnv {
-    base_url: String,
+pub(crate) enum ClaudeGatewayProxyEnv {
+    Inject { base_url: String },
+    Scrub,
 }
 
 impl ClaudeGatewayProxyEnv {
-    pub(crate) fn append_shell_exports(&self, output: &mut String) {
-        output.push_str(&format!(
-            "export {ANTHROPIC_BASE_URL_ENV}='{}'\n",
-            self.base_url.replace('\'', "'\\''")
-        ));
-        output.push_str(&format!("export {GATEWAY_MODEL_DISCOVERY_ENV}=1\n"));
+    pub(crate) fn append_shell_env(&self, output: &mut String) {
+        match self {
+            Self::Inject { base_url } => {
+                output.push_str(&format!(
+                    "export {ANTHROPIC_BASE_URL_ENV}='{}'\n",
+                    base_url.replace('\'', "'\\''")
+                ));
+                output.push_str(&format!("export {GATEWAY_MODEL_DISCOVERY_ENV}=1\n"));
+            }
+            Self::Scrub => {
+                output.push_str(&format!("unset {ANTHROPIC_BASE_URL_ENV}\n"));
+                output.push_str(&format!("unset {GATEWAY_MODEL_DISCOVERY_ENV}\n"));
+            }
+        }
     }
 
     pub(crate) fn apply_to_command(&self, command: &mut Command) {
-        command.env(ANTHROPIC_BASE_URL_ENV, &self.base_url);
-        command.env(GATEWAY_MODEL_DISCOVERY_ENV, "1");
-    }
-
-    pub(crate) fn append_to_env_vars(&self, env_vars: &mut Vec<(String, String)>) {
-        env_vars.push((ANTHROPIC_BASE_URL_ENV.to_string(), self.base_url.clone()));
-        env_vars.push((GATEWAY_MODEL_DISCOVERY_ENV.to_string(), "1".to_string()));
+        match self {
+            Self::Inject { base_url } => {
+                command.env(ANTHROPIC_BASE_URL_ENV, base_url);
+                command.env(GATEWAY_MODEL_DISCOVERY_ENV, "1");
+            }
+            Self::Scrub => {
+                command.env_remove(ANTHROPIC_BASE_URL_ENV);
+                command.env_remove(GATEWAY_MODEL_DISCOVERY_ENV);
+            }
+        }
     }
 }
 
-pub(crate) fn resolve_for_launch() -> Option<ClaudeGatewayProxyEnv> {
+pub(crate) fn resolve_for_launch() -> ClaudeGatewayProxyEnv {
     let Some(config) = crate::config_live_reload::current() else {
-        return None;
+        return ClaudeGatewayProxyEnv::Scrub;
     };
     let enabled = config.runtime.claude_gateway_proxy_enabled;
     let proxy_url = config.runtime.resolved_claude_gateway_proxy_url();
@@ -46,7 +58,7 @@ pub(crate) fn resolve_for_launch() -> Option<ClaudeGatewayProxyEnv> {
         |url| {
             tracing::warn!(
                 proxy_url = url,
-                "Claude gateway proxy is enabled but unreachable; skipping gateway env injection; Claude will run native"
+                "Claude gateway proxy is enabled but unreachable; scrubbing gateway env; Claude will run native"
             );
         },
     )
@@ -57,17 +69,17 @@ fn decide_launch_env(
     proxy_url: &str,
     probe: impl FnOnce() -> bool,
     warn_unreachable: impl FnOnce(&str),
-) -> Option<ClaudeGatewayProxyEnv> {
+) -> ClaudeGatewayProxyEnv {
     if !enabled {
-        return None;
+        return ClaudeGatewayProxyEnv::Scrub;
     }
     if !probe() {
         warn_unreachable(proxy_url);
-        return None;
+        return ClaudeGatewayProxyEnv::Scrub;
     }
-    Some(ClaudeGatewayProxyEnv {
+    ClaudeGatewayProxyEnv::Inject {
         base_url: proxy_url.to_string(),
-    })
+    }
 }
 
 fn proxy_reachable(proxy_url: &str) -> bool {
@@ -86,16 +98,22 @@ fn proxy_reachable_with_hostname_probe(
     let Ok(parsed) = url::Url::parse(proxy_url) else {
         return false;
     };
-    let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
+    let (Some(host), Some(port)) = (parsed.host(), parsed.port_or_known_default()) else {
         return false;
     };
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok();
+    match host {
+        url::Host::Ipv4(address) => connect_ip_literal(IpAddr::V4(address), port, timeout),
+        url::Host::Ipv6(address) => connect_ip_literal(IpAddr::V6(address), port, timeout),
+        url::Host::Domain(host) => {
+            let host = host.to_string();
+            run_probe_with_deadline(timeout, move || hostname_probe(host, port, timeout))
+        }
     }
+}
 
-    let host = host.to_string();
-    run_probe_with_deadline(timeout, move || hostname_probe(host, port, timeout))
+fn connect_ip_literal(ip: IpAddr, port: u16, timeout: Duration) -> bool {
+    TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok()
 }
 
 fn resolve_hostname_and_connect(host: String, port: u16, timeout: Duration) -> bool {
@@ -136,7 +154,7 @@ pub(crate) fn launch_env_for_test(
     enabled: bool,
     proxy_url: &str,
     reachable: bool,
-) -> Option<ClaudeGatewayProxyEnv> {
+) -> ClaudeGatewayProxyEnv {
     decide_launch_env(enabled, proxy_url, || reachable, |_| {})
 }
 
@@ -146,12 +164,29 @@ mod tests {
     use std::cell::Cell;
     use std::net::TcpListener;
 
-    fn rendered_env(env: Option<&ClaudeGatewayProxyEnv>) -> String {
+    fn rendered_env(env: &ClaudeGatewayProxyEnv) -> String {
         let mut rendered = String::new();
-        if let Some(env) = env {
-            env.append_shell_exports(&mut rendered);
-        }
+        env.append_shell_env(&mut rendered);
         rendered
+    }
+
+    fn command_env(
+        env: &ClaudeGatewayProxyEnv,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        let mut command = Command::new("claude");
+        command
+            .env(ANTHROPIC_BASE_URL_ENV, "http://inherited.example:9999")
+            .env(GATEWAY_MODEL_DISCOVERY_ENV, "foreign-value");
+        env.apply_to_command(&mut command);
+        command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -163,15 +198,24 @@ mod tests {
             || true,
             |_| warned.set(true),
         );
-        let rendered = rendered_env(env.as_ref());
+        let rendered = rendered_env(&env);
+        let command_env = command_env(&env);
 
         assert!(rendered.contains(ANTHROPIC_BASE_URL_ENV));
         assert!(rendered.contains(GATEWAY_MODEL_DISCOVERY_ENV));
+        assert_eq!(
+            command_env.get(ANTHROPIC_BASE_URL_ENV),
+            Some(&Some("http://127.0.0.1:10100".to_string()))
+        );
+        assert_eq!(
+            command_env.get(GATEWAY_MODEL_DISCOVERY_ENV),
+            Some(&Some("1".to_string()))
+        );
         assert!(!warned.get());
     }
 
     #[test]
-    fn enabled_and_unreachable_skips_both_proxy_vars_and_warns() {
+    fn enabled_and_unreachable_scrubs_both_proxy_vars_and_warns() {
         let warned = Cell::new(false);
         let env = decide_launch_env(
             true,
@@ -179,15 +223,18 @@ mod tests {
             || false,
             |_| warned.set(true),
         );
-        let rendered = rendered_env(env.as_ref());
+        let rendered = rendered_env(&env);
+        let command_env = command_env(&env);
 
-        assert!(!rendered.contains(ANTHROPIC_BASE_URL_ENV));
-        assert!(!rendered.contains(GATEWAY_MODEL_DISCOVERY_ENV));
+        assert!(rendered.contains(&format!("unset {ANTHROPIC_BASE_URL_ENV}\n")));
+        assert!(rendered.contains(&format!("unset {GATEWAY_MODEL_DISCOVERY_ENV}\n")));
+        assert_eq!(command_env.get(ANTHROPIC_BASE_URL_ENV), Some(&None));
+        assert_eq!(command_env.get(GATEWAY_MODEL_DISCOVERY_ENV), Some(&None));
         assert!(warned.get());
     }
 
     #[test]
-    fn disabled_skips_proxy_vars_without_probing_or_warning() {
+    fn disabled_scrubs_pre_set_proxy_vars_without_probing_or_warning() {
         for reachable in [false, true] {
             let probed = Cell::new(false);
             let warned = Cell::new(false);
@@ -200,10 +247,13 @@ mod tests {
                 },
                 |_| warned.set(true),
             );
-            let rendered = rendered_env(env.as_ref());
+            let rendered = rendered_env(&env);
+            let command_env = command_env(&env);
 
-            assert!(!rendered.contains(ANTHROPIC_BASE_URL_ENV));
-            assert!(!rendered.contains(GATEWAY_MODEL_DISCOVERY_ENV));
+            assert!(rendered.contains(&format!("unset {ANTHROPIC_BASE_URL_ENV}\n")));
+            assert!(rendered.contains(&format!("unset {GATEWAY_MODEL_DISCOVERY_ENV}\n")));
+            assert_eq!(command_env.get(ANTHROPIC_BASE_URL_ENV), Some(&None));
+            assert_eq!(command_env.get(GATEWAY_MODEL_DISCOVERY_ENV), Some(&None));
             assert!(!probed.get());
             assert!(!warned.get());
         }
@@ -218,6 +268,20 @@ mod tests {
             &format!("http://{address}"),
             Duration::from_millis(200),
             |_, _, _| panic!("IP literals must not invoke hostname resolution"),
+        );
+
+        assert!(reachable);
+    }
+
+    #[test]
+    fn ipv6_literal_uses_direct_connect_fast_path() {
+        let listener = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let reachable = proxy_reachable_with_hostname_probe(
+            &format!("http://[::1]:{port}"),
+            Duration::from_millis(200),
+            |_, _, _| panic!("IPv6 literals must not invoke hostname resolution"),
         );
 
         assert!(reachable);

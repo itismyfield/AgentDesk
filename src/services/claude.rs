@@ -207,7 +207,7 @@ fn build_tmux_launch_env_lines(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_percent: Option<u64>,
-    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> String {
     let mut env_lines = String::from("unset CLAUDECODE\n");
     if let Some(exec_path) = exec_path {
@@ -241,9 +241,7 @@ fn build_tmux_launch_env_lines(
     if let Some(pct) = compact_percent.filter(|&p| p > 0) {
         env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
     }
-    if let Some(gateway_proxy_env) = gateway_proxy_env {
-        gateway_proxy_env.append_shell_exports(&mut env_lines);
-    }
+    gateway_proxy_env.append_shell_env(&mut env_lines);
 
     env_lines
 }
@@ -256,16 +254,17 @@ mod launch_env_tests {
     #[test]
     fn launch_env_restores_compact_override_and_gates_gateway_proxy() {
         let gateway_env = launch_env_for_test(true, "http://proxy.example/it's-ready", true);
-        let enabled = build_tmux_launch_env_lines(None, None, None, Some(70), gateway_env.as_ref());
+        let enabled = build_tmux_launch_env_lines(None, None, None, Some(70), &gateway_env);
         assert!(enabled.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70\n"));
         assert!(
             enabled.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
         assert!(enabled.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
 
-        let disabled = build_tmux_launch_env_lines(None, None, None, None, None);
-        assert!(!disabled.contains("ANTHROPIC_BASE_URL"));
-        assert!(!disabled.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"));
+        let scrub = launch_env_for_test(false, "http://foreign.example", true);
+        let disabled = build_tmux_launch_env_lines(None, None, None, None, &scrub);
+        assert!(disabled.contains("unset ANTHROPIC_BASE_URL\n"));
+        assert!(disabled.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
 
         assert!(!disabled.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
         assert!(!enabled.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
@@ -958,9 +957,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", pct.to_string());
     }
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
-    if let Some(gateway_proxy_env) = gateway_proxy_env.as_ref() {
-        gateway_proxy_env.apply_to_command(&mut command);
-    }
+    gateway_proxy_env.apply_to_command(&mut command);
 
     let mut child = command.spawn().map_err(|e| {
         debug_log(&format!(
@@ -1836,7 +1833,7 @@ fn execute_streaming_local_tui_tmux(
         hook_endpoint,
         resume,
         compact_percent,
-        gateway_proxy_env.as_ref(),
+        &gateway_proxy_env,
     )?;
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
@@ -2024,7 +2021,7 @@ fn prepare_and_create_claude_tui_session(
     hook_endpoint: String,
     resume: bool,
     compact_percent: Option<u64>,
-    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> Result<String, String> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
@@ -2053,7 +2050,7 @@ fn prepare_and_create_claude_tui_session(
             model: model_override.map(str::to_string),
             resume,
             compact_percent,
-            gateway_proxy_env: gateway_proxy_env.cloned(),
+            gateway_proxy_env: gateway_proxy_env.clone(),
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
@@ -2819,7 +2816,7 @@ fn execute_streaming_local_tmux(
         report_channel_id,
         report_provider,
         compact_percent,
-        gateway_proxy_env.as_ref(),
+        &gateway_proxy_env,
     );
 
     let script_content = format!(
@@ -3109,9 +3106,6 @@ pub(crate) fn execute_streaming_local_process(
     // The follow-up path returned above when the existing process was healthy,
     // so probing here cannot emit one warning per warm turn.
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
-    if let Some(gateway_proxy_env) = gateway_proxy_env.as_ref() {
-        gateway_proxy_env.append_to_env_vars(&mut env_vars);
-    }
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),
@@ -3124,7 +3118,9 @@ pub(crate) fn execute_streaming_local_process(
     };
 
     let backend = ProcessBackend::new();
-    let handle = backend.create_session(&config)?;
+    let handle = backend.create_session_with_command_env(&config, |command| {
+        gateway_proxy_env.apply_to_command(command);
+    })?;
 
     // Store child PID in cancel token
     if let Some(ref token) = cancel_token {

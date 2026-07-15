@@ -25,13 +25,8 @@ use crate::services::session_backend::{
     parse_assistant_extra_tool_uses, parse_stream_message_with_state,
 };
 
-fn apply_gateway_proxy_env(
-    command: &mut Command,
-    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
-) {
-    if let Some(gateway_proxy_env) = gateway_proxy_env {
-        gateway_proxy_env.apply_to_command(command);
-    }
+fn apply_gateway_proxy_env(command: &mut Command, gateway_proxy_env: &ClaudeGatewayProxyEnv) {
+    gateway_proxy_env.apply_to_command(command);
 }
 
 /// Phase 1 entry point. The signature matches the subset of
@@ -118,7 +113,7 @@ pub fn execute_streaming(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    apply_gateway_proxy_env(&mut command, gateway_proxy_env.as_ref());
+    apply_gateway_proxy_env(&mut command, &gateway_proxy_env);
 
     let mut child = command
         .spawn()
@@ -379,7 +374,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_e_command_receives_guarded_gateway_env() {
+    fn claude_e_command_receives_authoritative_gateway_env() {
         let gateway_env = crate::services::claude_gateway_proxy::launch_env_for_test(
             true,
             "http://127.0.0.1:10100",
@@ -387,7 +382,7 @@ mod tests {
         );
         let mut command = Command::new("claude-e");
 
-        apply_gateway_proxy_env(&mut command, gateway_env.as_ref());
+        apply_gateway_proxy_env(&mut command, &gateway_env);
 
         let envs = command
             .get_envs()
@@ -405,6 +400,36 @@ mod tests {
         assert_eq!(
             envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&Some("1".to_string()))
+        );
+
+        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
+            false,
+            "http://foreign.example",
+            true,
+        );
+        let mut command = Command::new("claude-e");
+        command
+            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
+            .env(
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "foreign-value",
+            );
+
+        apply_gateway_proxy_env(&mut command, &scrub);
+
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(envs.get("ANTHROPIC_BASE_URL"), Some(&None));
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some(&None)
         );
     }
 }
