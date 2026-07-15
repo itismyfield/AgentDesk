@@ -621,17 +621,13 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     .iter()
     .flat_map(load_inflight_states)
     .any(|state| {
-        if state.rebind_origin || state.channel_id != channel_id {
-            return false;
-        }
-        if inflight::inflight_state_is_stale(
-            &state,
-            now_unix_secs,
-            inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
-        ) {
-            return false;
-        }
-        true
+        !state.rebind_origin
+            && state.channel_id == channel_id
+            && !inflight::inflight_state_is_stale(
+                &state,
+                now_unix_secs,
+                inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
+            )
     })
 }
 

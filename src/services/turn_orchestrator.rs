@@ -16,6 +16,7 @@ mod dispatch_reservation;
 mod overflow;
 mod pending_queue_persistence;
 pub(crate) mod registry_purge;
+mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
     intervention_has_active_source, intervention_sources_all_match_active,
@@ -43,6 +44,7 @@ pub(crate) use pending_queue_persistence::{
     remove_channel_pending_queue_files_all_tokens, save_channel_queue,
     warn_legacy_pending_queue_files,
 };
+pub(crate) use source_generation::SourceMessageQueuedGeneration;
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
@@ -62,25 +64,6 @@ pub(crate) enum InterventionMode {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SourceMessageQueuedGeneration {
-    pub(crate) message_id: MessageId,
-    pub(crate) queued_generation: u64,
-    /// Positive, per-source proof that this queued payload came from a
-    /// genuine user instruction. Unmarked sources retain drop-on-exit.
-    pub(crate) preserve_on_cancel: bool,
-}
-
-impl SourceMessageQueuedGeneration {
-    pub(crate) fn new(message_id: MessageId, queued_generation: u64) -> Self {
-        Self { message_id, queued_generation, preserve_on_cancel: false }
-    }
-
-    pub(crate) fn user_instruction(message_id: MessageId, queued_generation: u64) -> Self {
-        Self { message_id, queued_generation, preserve_on_cancel: true }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct SourceMessageTextSegment {
     pub(crate) message_id: MessageId,
     pub(crate) text: String,
@@ -88,7 +71,10 @@ pub(crate) struct SourceMessageTextSegment {
 
 impl SourceMessageTextSegment {
     pub(crate) fn new(message_id: MessageId, text: impl Into<String>) -> Self {
-        Self { message_id, text: text.into() }
+        Self {
+            message_id,
+            text: text.into(),
+        }
     }
 }
 
@@ -122,7 +108,9 @@ pub(crate) struct Intervention {
 
 impl Intervention {
     pub(crate) fn preserve_on_cancel(&self) -> bool {
-        self.source_message_queued_generations.iter().any(|source| source.preserve_on_cancel)
+        self.source_message_queued_generations
+            .iter()
+            .any(|source| source.preserve_on_cancel)
     }
 
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
@@ -142,7 +130,10 @@ impl Intervention {
         let mut owners = self.source_message_queued_generations.clone();
         for message_id in source_message_ids {
             if !owners.iter().any(|owner| owner.message_id == message_id) {
-                owners.push(SourceMessageQueuedGeneration::new(message_id, self.queued_generation));
+                owners.push(SourceMessageQueuedGeneration::new(
+                    message_id,
+                    self.queued_generation,
+                ));
             }
         }
         owners
