@@ -3579,7 +3579,8 @@ mod queued_dequeue_dispatch_guard_wiring_tests {
         let function_body = &source[function_start..function_end];
         let queued_guard = format!(
             "{}{}",
-            "stale_dispatch_turn_for_queued_", "intervention(shared.pg_pool.as_ref(), &intervention)"
+            "stale_dispatch_turn_for_queued_",
+            "intervention(shared.pg_pool.as_ref(), &intervention)"
         );
         let text_guard = format!(
             "{}{}",

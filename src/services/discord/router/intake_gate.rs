@@ -1286,8 +1286,7 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             author_id: user_id,
                             author_is_bot: new_message.author.bot,
-                            author_is_allowed_automation:
-                                author_excluded_from_cancel_preservation,
+                            author_is_allowed_automation: author_excluded_from_cancel_preservation,
                             message_id: new_message.id,
                             text: text.to_string(),
                             reply_context: reply_context.clone(),
@@ -1339,8 +1338,7 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             author_id: user_id,
                             author_is_bot: new_message.author.bot,
-                            author_is_allowed_automation:
-                                author_excluded_from_cancel_preservation,
+                            author_is_allowed_automation: author_excluded_from_cancel_preservation,
                             message_id: new_message.id,
                             text: text.to_string(),
                             reply_context: reply_context.clone(),

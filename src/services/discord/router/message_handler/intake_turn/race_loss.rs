@@ -163,7 +163,10 @@ pub(super) async fn handle_race_loss_enqueue(
         tracing::info!(
             "  [{ts}] 🔁 RACE: race-lost intervention refused by mailbox before placeholder POST (channel {}, refusal_reason={}); no duplicate queue entry retained",
             channel_id,
-            enqueue_outcome.refusal_reason.map(|r| r.as_str()).unwrap_or("unknown"),
+            enqueue_outcome
+                .refusal_reason
+                .map(|r| r.as_str())
+                .unwrap_or("unknown"),
         );
         return Ok(());
     }
@@ -375,7 +378,9 @@ pub(super) async fn handle_race_loss_enqueue(
     // rechecks ownership after the Discord await so a fast dequeue cannot
     // leave a stale 📬 behind.
     let mut queued_marker_notified = false;
-    if !is_thread_routed && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref()) {
+    if channel_id == original_channel_id
+        && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+    {
         // #1190 follow-up: merged messages get ➕ so the user can tell
         // them apart from standalone queue head entries (📬).
         let emoji = if enqueue_outcome.merged {

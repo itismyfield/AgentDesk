@@ -2606,7 +2606,8 @@ pub(super) async fn handle_text_message(
     // Pre-compute provider-specific compact config
     let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
     let compact_token_limit_for_codex = {
-        provider.compact_cli_config(compact_percent, model_context_window)
+        provider
+            .compact_cli_config(compact_percent, model_context_window)
             .first()
             .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
     };

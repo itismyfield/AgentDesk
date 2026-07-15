@@ -17,8 +17,8 @@ use super::{
     CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, CatchUpTooOldOutboxRequest, ChannelId,
     MessageId, ProviderKind, RuntimeChannelBindingStatus, advance_catch_up_settled_frontier,
     catch_up_source_generation, catch_up_too_old_drop, catch_up_too_old_notice,
-    classify_catch_up_message,
-    classify_catch_up_message_with_utility_resolution, run_catch_up_sweep,
+    classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
+    run_catch_up_sweep,
 };
 use crate::services::discord::health::UtilityBotUserIdResolution;
 use crate::services::turn_orchestrator::{
