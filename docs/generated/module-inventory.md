@@ -858,7 +858,7 @@
 | `services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue` | `src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` | 430 | 430 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery.rs` | 418 | 418 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery/guidance.rs` | 34 | 8 | 26 |  |
-| `services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/prompt_too_long_guidance.rs` | 188 | 10 | 178 |  |
+| `services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/prompt_too_long_guidance.rs` | 187 | 9 | 178 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry` | `src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs` | 103 | 103 | 0 |  |
 | `services::discord::turn_bridge::thinking` | `src/services/discord/turn_bridge/thinking.rs` | 87 | 21 | 66 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1277 | 993 | 284 |  |

@@ -1,10 +1,9 @@
 //! Prompt-too-long terminal guidance adapter and delivery regression coverage.
 
 pub(super) fn render_terminal_guidance(existing_guidance: &str) -> String {
-    let detail = super::super::response_delivery::prompt_too_long_detail_from_guidance(
-        existing_guidance,
-    )
-    .unwrap_or("provider가 프롬프트가 너무 길다고 보고했습니다.");
+    let detail =
+        super::super::response_delivery::prompt_too_long_detail_from_guidance(existing_guidance)
+            .unwrap_or("provider가 프롬프트가 너무 길다고 보고했습니다.");
     super::super::response_delivery::prompt_too_long_guidance(detail)
 }
 
