@@ -75,6 +75,9 @@ node --test policies/__tests__/daily-log-digest.test.js
 echo "=== Weekly regression-churn audit tests (#4265) ==="
 "$PYTHON" -m unittest tests.test_weekly_churn_audit
 
+echo "=== External toolchain draft/approval/smoke tests (#4555) ==="
+"$PYTHON" -m unittest tests.test_toolchain_update
+
 echo "=== await_holding_lock ratchet guard ==="
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
 "$PYTHON" -m unittest tests.test_await_holding_lock_ratchet

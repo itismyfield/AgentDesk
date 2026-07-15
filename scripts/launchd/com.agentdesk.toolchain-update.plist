@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agentdesk.toolchain-update</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>__AGENTDESK_ROOT__/scripts/toolchain_update.py</string>
+    <string>check</string>
+    <string>--output-dir</string>
+    <string>__AGENTDESK_ROOT__/runtime/toolchain-update</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AGENTDESK_ROOT_DIR</key>
+    <string>__AGENTDESK_ROOT__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__AGENTDESK_ROOT__/logs/toolchain-update.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__AGENTDESK_ROOT__/logs/toolchain-update.stderr.log</string>
+</dict>
+</plist>
