@@ -15,7 +15,7 @@
 | `src/server/maintenance.rs` | 1119 | server-runtime | 2026-10-31 | #3909 |
 | `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
-| `src/services/discord/catch_up.rs` | 1746 | discord-relay | 2026-10-31 | #3405 |
+| `src/services/discord/catch_up.rs` | 1792 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2557 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1375 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
@@ -23,8 +23,8 @@
 | `src/services/discord/placeholder_sweeper.rs` | 1020 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine/restore_inflight.rs` | 2313 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1444 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/router/intake_gate.rs` | 1541 | discord-relay | 2026-10-31 | #3838 |
-| `src/services/discord/router/message_handler/intake_turn.rs` | 2834 | discord-relay | 2026-10-31 | #3837 |
+| `src/services/discord/router/intake_gate.rs` | 1584 | discord-relay | 2026-10-31 | #3838 |
+| `src/services/discord/router/message_handler/intake_turn.rs` | 2862 | discord-relay | 2026-10-31 | #3837 |
 | `src/services/discord/session_relay_sink.rs` | 1676 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1624 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 3558 | discord-relay | 2026-10-31 | #3832 |
@@ -90,7 +90,7 @@
 | `src/services/discord/commands/text_commands.rs` | 1482 |
 | `src/services/discord/formatting.rs` | 2566 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4155 |
+| `src/services/discord/mod.rs` | 4168 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1387 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1815 |
@@ -108,5 +108,5 @@
 | `src/services/routines/store.rs` | 3505 |
 | `src/services/settings.rs` | 1059 |
 | `src/services/tui_prompt_dedupe.rs` | 1970 |
-| `src/services/turn_orchestrator.rs` | 3269 |
+| `src/services/turn_orchestrator.rs` | 3262 |
 | `src/voice/receiver.rs` | 1108 |
