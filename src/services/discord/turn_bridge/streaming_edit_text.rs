@@ -255,11 +255,7 @@ pub(in crate::services::discord) fn bridge_tui_transport_error_should_skip_quies
             ProviderKind::Claude,
             Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
         ) => {
-            bridge_pre_submission_tui_prompt_error(
-                provider,
-                full_response,
-                classification,
-            )
+            bridge_pre_submission_tui_prompt_error(provider, full_response, classification)
                 || classification.transport_error_should_skip_quiescence
                 || legacy_error_text.is_some_and(|error_text| {
                     error_text == "Timeout waiting for output file"
@@ -271,11 +267,7 @@ pub(in crate::services::discord) fn bridge_tui_transport_error_should_skip_quies
             ProviderKind::Codex,
             Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
         ) => {
-            bridge_pre_submission_tui_prompt_error(
-                provider,
-                full_response,
-                classification,
-            )
+            bridge_pre_submission_tui_prompt_error(provider, full_response, classification)
                 || classification.transport_error_should_skip_quiescence
                 || legacy_error_text.is_some_and(|error_text| {
                     error_text == "Timeout waiting for output file"

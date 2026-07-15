@@ -790,7 +790,8 @@ src/
 │   │   │   │   └── guarded_save.rs
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms/
-│   │   │   │   │   └── provider_error_presentation.rs
+│   │   │   │   │   ├── provider_error_presentation.rs
+│   │   │   │   │   └── tui_error_classification.rs
 │   │   │   │   ├── content_arms.rs
 │   │   │   │   └── tool_arms.rs
 │   │   │   ├── terminal_outcome_delivery/
