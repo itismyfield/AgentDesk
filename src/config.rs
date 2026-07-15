@@ -1510,6 +1510,13 @@ pub struct RuntimeSettingsConfig {
     pub context_compact_percent_codex: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_claude: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub claude_gateway_proxy_enabled: bool,
+    #[serde(
+        default = "default_claude_gateway_proxy_url",
+        skip_serializing_if = "is_default_claude_gateway_proxy_url"
+    )]
+    pub claude_gateway_proxy_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_poll_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1663,6 +1670,8 @@ impl RuntimeSettingsConfig {
             && self.context_compact_percent.is_none()
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
+            && !self.claude_gateway_proxy_enabled
+            && is_default_claude_gateway_proxy_url(&self.claude_gateway_proxy_url)
             && self.dispatch_poll_sec.is_none()
             && self.agent_sync_sec.is_none()
             && self.github_issue_sync_sec.is_none()
@@ -1696,6 +1705,26 @@ impl RuntimeSettingsConfig {
     }
 }
 
+pub(crate) const DEFAULT_CLAUDE_GATEWAY_PROXY_URL: &str = "http://127.0.0.1:10100";
+
+fn default_claude_gateway_proxy_url() -> String {
+    DEFAULT_CLAUDE_GATEWAY_PROXY_URL.to_string()
+}
+
+fn is_default_claude_gateway_proxy_url(value: &str) -> bool {
+    value.is_empty() || value == DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+}
+
+impl RuntimeSettingsConfig {
+    pub(crate) fn resolved_claude_gateway_proxy_url(&self) -> &str {
+        if self.claude_gateway_proxy_url.is_empty() {
+            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+        } else {
+            &self.claude_gateway_proxy_url
+        }
+    }
+}
+
 #[cfg(test)]
 mod runtime_hook_registry_config_tests {
     use super::*;
@@ -1726,6 +1755,26 @@ mod runtime_hook_registry_config_tests {
             ..RuntimeSettingsConfig::default()
         };
         assert!(!disabled.is_empty());
+    }
+
+    #[test]
+    fn claude_gateway_proxy_defaults_off_with_loopback_url() {
+        let parsed: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!parsed.claude_gateway_proxy_enabled);
+        assert_eq!(
+            parsed.claude_gateway_proxy_url,
+            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+        );
+        assert!(parsed.is_empty());
+
+        let enabled: RuntimeSettingsConfig =
+            serde_yaml::from_str("claude_gateway_proxy_enabled: true\n").unwrap();
+        assert!(enabled.claude_gateway_proxy_enabled);
+        assert_eq!(
+            enabled.resolved_claude_gateway_proxy_url(),
+            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+        );
+        assert!(!enabled.is_empty());
     }
 
     // The keys survive a YAML round-trip with their types intact, and an absent

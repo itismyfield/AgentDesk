@@ -24,7 +24,7 @@
 | `src/services/discord/recovery_engine/restore_inflight.rs` | 2313 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1444 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1584 | discord-relay | 2026-10-31 | #3838 |
-| `src/services/discord/router/message_handler/intake_turn.rs` | 2837 | discord-relay | 2026-10-31 | #3837 |
+| `src/services/discord/router/message_handler/intake_turn.rs` | 2835 | discord-relay | 2026-10-31 | #3837 |
 | `src/services/discord/session_relay_sink.rs` | 1676 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1624 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 3558 | discord-relay | 2026-10-31 | #3832 |
@@ -53,7 +53,7 @@
 | `src/cli/migrate/plan.rs` | 1513 |
 | `src/cli/migrate/source.rs` | 1612 |
 | `src/cli/provider_cli/mod.rs` | 1039 |
-| `src/config.rs` | 2730 |
+| `src/config.rs` | 2759 |
 | `src/db/auto_queue/entries.rs` | 1408 |
 | `src/db/auto_queue/phase_gates.rs` | 1639 |
 | `src/db/dispatched_sessions.rs` | 1734 |
@@ -82,7 +82,7 @@
 | `src/services/auto_queue.rs` | 1545 |
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
-| `src/services/claude.rs` | 2960 |
+| `src/services/claude.rs` | 2965 |
 | `src/services/claude_tui/input.rs` | 1932 |
 | `src/services/codex.rs` | 3131 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
@@ -91,7 +91,7 @@
 | `src/services/discord/formatting.rs` | 2566 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
 | `src/services/discord/mod.rs` | 4168 |
-| `src/services/discord/router/message_handler/headless_turn.rs` | 1387 |
+| `src/services/discord/router/message_handler/headless_turn.rs` | 1385 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1815 |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1496 |
@@ -101,7 +101,7 @@
 | `src/services/onboarding/mod.rs` | 2937 |
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1381 |
-| `src/services/provider.rs` | 1801 |
+| `src/services/provider.rs` | 1781 |
 | `src/services/qwen.rs` | 2198 |
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1593 |

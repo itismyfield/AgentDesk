@@ -168,6 +168,10 @@
   thread channel, belongs to the current runtime owner marker, and exists in the
   local tmux server. Fixed/main-channel sessions are not reap candidates for
   this path.
+- 2026-07-15 audited touch (#4553): config-gated Claude gateway-proxy env is
+  injected only when launching the provider process on its owning node. This is
+  **worker-local** per-session launch state; it adds no leader, lease, durable
+  routing, or cross-node ownership authority.
 - invariants: `heartbeat_capability_registry_routing`,
   `resource_locks_before_exclusive_editor_test`.
 - allowed_changes: `bugfix`, or `new_feature` only when routed through the

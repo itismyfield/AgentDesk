@@ -47,17 +47,14 @@ fn provider_exec_registry_conformance_invariant() {
         );
         match compaction_adapter {
             ProviderCompactionAdapter::ClaudeEnvironment => {
-                assert!(!provider.compact_env_vars(80).is_empty());
                 assert!(provider.compact_cli_config(80, 100_000).is_empty());
             }
             ProviderCompactionAdapter::CodexCli => {
-                assert!(provider.compact_env_vars(80).is_empty());
                 assert!(!provider.compact_cli_config(80, 100_000).is_empty());
             }
             ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled => {
-                assert!(provider.compact_env_vars(80).is_empty());
                 assert!(provider.compact_cli_config(80, 100_000).is_empty());
             }
         }
@@ -115,7 +112,6 @@ fn assert_scoped_dispatches_have_no_wildcard_arms() {
     let provider_exec_source = include_str!("../provider_exec.rs");
 
     for function_name in [
-        "compact_env_vars",
         "compact_cli_config",
         "tmux_capture_indicates_ready_for_input",
     ] {

@@ -2604,8 +2604,7 @@ pub(super) async fn handle_text_message(
     // back to the provider default if the model isn't found.
     let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
 
-    // Pre-compute provider-specific compact config
-    let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
+    // Pre-compute the provider-specific Codex compact config.
     let compact_token_limit_for_codex = {
         provider
             .compact_cli_config(compact_percent, model_context_window)
@@ -2657,7 +2656,6 @@ pub(super) async fn handle_text_message(
                             Some(provider_for_blocking.clone()),
                             model_for_turn.as_deref(),
                             native_fast_mode_override,
-                            compact_percent_for_claude,
                             cache_ttl_minutes,
                             dispatch_type_for_mcp.as_deref(),
                         ),
