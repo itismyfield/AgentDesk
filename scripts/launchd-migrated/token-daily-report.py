@@ -1,281 +1,112 @@
 #!/usr/bin/env python3
-"""Token Manager Daily Report — 에이전트 세션 없이 DB 직접 조회로 리포트 생성."""
+"""Token Manager Daily Report v2 — quota-aware, baseline-relative, evidence-backed.
+
+Redesign vs v1:
+  1. 3 Claude accounts (cswap) via /api/claude-accounts — per-account 5h/7d/Fable.
+  2. Rate-limit RESET detection from snapshot history (metrics/token-history/),
+     classifying 5h (routine ~every 5h) vs 7d/weekly (scheduled vs manual/tibo).
+     Codex-session bootstrap gives a best-effort count until snapshots accumulate.
+  3. CONSUMPTION measured as "new tokens" = input+output+cache_create (Claude) /
+     (input-cached)+output (Codex), EXCLUDING cache-read. This removes the massive
+     cache-read re-count that made every heavy-Codex agent look like an anomaly.
+  4. Baseline-relative anomaly detection: each agent (family-normalized) vs its own
+     last-7-day norm. Ephemeral per-issue workspaces (adk-impl-1234) collapse to a
+     family so they don't perpetually trip "new agent".
+  5. Qualitative drill-down (Claude + Codex) on top consumers: what they DID.
+
+Everything the LLM narrates is pre-computed here with evidence; the LLM is told
+NOT to invent anomalies. That is the fix for "flagged abnormal, re-checked = normal".
+
+Modes:
+  --raw-json   full structured payload (consumed by .sh -> Sonnet narration)
+  --dry-run    Python fallback report to stdout (no LLM, no send)
+  (default)    render fallback report and send to Discord
+"""
 from __future__ import annotations
 
-import json
 import glob
+import json
 import os
 import re
 import sqlite3
 import sys
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 KST = timezone(timedelta(hours=9))
 HOME = Path.home()
+ROOT = Path(os.environ.get("AGENTDESK_ROOT_DIR", str(HOME / ".adk/release")))
+API_PORT = os.environ.get("ADK_API_PORT", "8791")
+API = f"http://127.0.0.1:{API_PORT}/api"
+
 PCD_PROD_DB = HOME / ".local/state/pixel-claw-dashboard/prod/pixel-claw-dashboard.sqlite"
-ADK_DB = HOME / ".adk/release/data/agentdesk.sqlite"
-CLAUDE_CACHE_DIR = HOME / ".cache/claude-dashboard"
 CLAUDE_PROJECTS = HOME / ".claude/projects"
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
+HIST_DIR = ROOT / "metrics" / "token-history"
 TOKEN_MANAGER_CHANNEL = "1481478222439907560"
-ADK_API = "http://127.0.0.1:8791/api/discord/send"
+
+# Claude API-equivalent pricing (USD/MTok). Accounts are subscription/quota, so USD
+# is an ESTIMATE for scale intuition only — quota % is the real constraint.
+PRICE = {"input": 15.0, "output": 75.0, "cache_create": 18.75, "cache_read": 1.50}
+
+BASELINE_DAYS = 7
+ANOM_Z = 2.5
+ANOM_RATIO = 2.0
+ANOM_FLOOR_NEW = 3_000_000        # new-token floor to ignore trivial agents
+NEW_AGENT_FLOOR = 10_000_000      # family with no history flagged only if this big
+RESET_DROP_PT = 15.0
 
 
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
 def _agent_from_path(path: str) -> str:
-    """Extract agent/workspace name from project dir or cwd path."""
     for sep in ("-workspaces-", "/workspaces/"):
         if sep in path:
-            tail = path.split(sep)[-1]
-            return tail.split("/")[0]
+            return path.split(sep)[-1].split("/")[0]
     for sep in ("-worktrees-", "/worktrees/"):
         if sep in path:
-            tail = path.split(sep)[-1]
-            name = tail.split("/")[0]
+            name = path.split(sep)[-1].split("/")[0]
             name = re.sub(r"^(codex|claude)-", "", name)
+            name = re.sub(r"-t?\d{6,}.*$", "", name)
             name = re.sub(r"-\d{8}-\d{6}$", "", name)
             return name
     last = path.rstrip("/").split("/")[-1].lstrip("-")
-    if last.startswith("Users-"):
-        return "(personal)"
+    if last.startswith("Users-") or last.startswith("private-") or last.startswith("tmp"):
+        return "(personal/tmp)"
     return last or "unknown"
 
 
-def query_pcd_db(yesterday_str: str) -> dict:
-    """PCD 프로덕션 DB에서 에이전트별 토큰 현황 조회."""
-    if not PCD_PROD_DB.exists():
-        return {"agents": [], "sessions": [], "daily": []}
-
-    conn = sqlite3.connect(str(PCD_PROD_DB))
-    conn.row_factory = sqlite3.Row
-
-    agents = [
-        dict(r) for r in conn.execute(
-            "SELECT name, stats_tokens, stats_xp FROM agents WHERE stats_tokens > 0 ORDER BY stats_tokens DESC"
-        ).fetchall()
-    ]
-
-    sessions = [
-        dict(r) for r in conn.execute(
-            """SELECT session_key, name, provider, model, tokens, stats_xp, linked_agent_id,
-                      datetime(connected_at/1000, 'unixepoch', 'localtime') as connected,
-                      datetime(last_seen_at/1000, 'unixepoch', 'localtime') as last_seen
-               FROM dispatched_sessions
-               WHERE date(last_seen_at/1000, 'unixepoch', 'localtime') = ?
-               ORDER BY tokens DESC""",
-            (yesterday_str,),
-        ).fetchall()
-    ]
-
-    daily = [
-        dict(r) for r in conn.execute(
-            "SELECT agent_id, tasks_done, xp_earned, skill_calls FROM daily_activity WHERE date = ?",
-            (yesterday_str,),
-        ).fetchall()
-    ]
-
-    conn.close()
-    return {"agents": agents, "sessions": sessions, "daily": daily}
+def family(agent: str) -> str:
+    """Collapse ephemeral per-issue/per-run names to a family for baselining.
+    adk-impl-4305 -> adk-impl-*, adk-review-4308-0fed -> adk-review-*, agent-ab12 -> agent-*."""
+    m = re.match(r"^([a-zA-Z][a-zA-Z-]*?)-(?:\d{2,}|[0-9a-f]{6,})(?:[-.].*)?$", agent)
+    if m:
+        return m.group(1) + "-*"
+    return agent
 
 
-def get_rate_limit() -> dict | None:
-    """ADK API /api/rate-limits에서 실시간 rate limit 조회. Claude/Codex 분리.
-
-    SQLite의 rate_limit_cache 테이블은 2026-04-19 PostgreSQL cutover 이후 미갱신.
-    런타임은 PG에 쓰고 API가 PG를 읽으므로 API를 호출해야 fresh 데이터를 얻는다.
-    """
-    import urllib.request
+def _iso2epoch(s) -> float | None:
+    if not s:
+        return None
     try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:8791/api/rate-limits",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            payload = json.loads(resp.read())
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
     except Exception:
         return None
 
-    result = {}
-    for entry in payload.get("providers", []):
-        provider = entry.get("provider")
-        if provider not in ("claude", "codex"):
-            continue
-        for bucket in entry.get("buckets", []):
-            name = bucket.get("name", "")
-            key = f"{provider}_{name.replace(' ', '_').replace('-', '_').lower()}"
-            result[key] = {
-                "provider": provider,
-                "label": f"{provider.capitalize()} {name}",
-                "utilization": bucket.get("used", 0),
-                "remaining": bucket.get("remaining", 0),
-                "limit": bucket.get("limit", 100),
-                "resets_at": datetime.fromtimestamp(bucket["reset"], tz=timezone.utc).isoformat() if bucket.get("reset") else "",
-            }
-    return result if result else None
+
+def _get(path: str) -> dict:
+    try:
+        req = urllib.request.Request(f"{API}{path}", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read())
+    except Exception as e:  # noqa: BLE001
+        return {"_error": str(e)}
 
 
-def _parse_codex_session(filepath: str) -> dict | None:
-    """Stream-parse a Codex JSONL, extracting only token_count + session_meta."""
-    meta = None
-    last_tc_info = None
-    first_tc_rl = None
-    last_tc_rl = None
-
-    with open(filepath) as f:
-        for line in f:
-            if '"session_meta"' in line:
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") == "session_meta":
-                        meta = obj.get("payload", {})
-                except json.JSONDecodeError:
-                    pass
-            elif '"token_count"' in line:
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") != "event_msg":
-                        continue
-                    p = obj.get("payload", {})
-                    if p.get("type") != "token_count":
-                        continue
-                    if p.get("info"):
-                        last_tc_info = p["info"]
-                    rl = p.get("rate_limits", {})
-                    if rl:
-                        if first_tc_rl is None:
-                            first_tc_rl = rl
-                        last_tc_rl = rl
-                except json.JSONDecodeError:
-                    pass
-
-    if not meta:
-        return None
-
-    cwd = meta.get("cwd", "")
-    usage = last_tc_info.get("total_token_usage", {}) if last_tc_info else {}
-    si = usage.get("input_tokens", 0)
-    so = usage.get("output_tokens", 0)
-    if si == 0 and so == 0:
-        return None
-
-    weekly_delta = None
-    if first_tc_rl and last_tc_rl:
-        w_start = first_tc_rl.get("secondary", {}).get("used_percent", 0)
-        w_end = last_tc_rl.get("secondary", {}).get("used_percent", 0)
-        weekly_delta = w_end - w_start
-
-    return {
-        "provider": "codex",
-        "project": _agent_from_path(cwd),
-        "model": "codex",
-        "input": si,
-        "output": so,
-        "cache_create": 0,
-        "cache_read": usage.get("cached_input_tokens", 0),
-        "total": usage.get("total_tokens", 0) or (si + so),
-        "weekly_pct_delta": weekly_delta,
-    }
-
-
-def analyze_jsonl(yesterday_str: str) -> dict:
-    """로컬 JSONL에서 어제 세션 토큰 분석 (Claude Code + Codex 통합)."""
-    sessions = []
-
-    # --- Claude Code sessions ---
-    for jsonl_path in glob.glob(str(CLAUDE_PROJECTS / "**" / "*.jsonl"), recursive=True):
-        mtime = os.path.getmtime(jsonl_path)
-        mdate = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-        if mdate != yesterday_str:
-            continue
-
-        si = so = scc = scr = 0
-        smodel = ""
-        parts = jsonl_path.replace(str(CLAUDE_PROJECTS) + "/", "").split("/")
-        proj_dir = parts[0] if parts else ""
-        sproj = _agent_from_path(proj_dir)
-
-        try:
-            with open(jsonl_path) as f:
-                for line in f:
-                    try:
-                        d = json.loads(line.strip())
-                        msg = d.get("message", {})
-                        u = msg.get("usage", {})
-                        if u:
-                            si += u.get("input_tokens", 0)
-                            so += u.get("output_tokens", 0)
-                            scc += u.get("cache_creation_input_tokens", 0)
-                            scr += u.get("cache_read_input_tokens", 0)
-                            smodel = msg.get("model", smodel)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        if si > 0 or so > 0:
-            sessions.append({
-                "provider": "claude",
-                "project": sproj, "model": smodel,
-                "input": si, "output": so,
-                "cache_create": scc, "cache_read": scr,
-                "total": si + so,
-            })
-
-    # --- Codex sessions ---
-    yparts = yesterday_str.split("-")
-    if len(yparts) == 3:
-        codex_day_dir = CODEX_SESSIONS / yparts[0] / yparts[1] / yparts[2]
-        if codex_day_dir.exists():
-            for jf in sorted(codex_day_dir.glob("*.jsonl")):
-                try:
-                    result = _parse_codex_session(str(jf))
-                    if result:
-                        sessions.append(result)
-                except Exception:
-                    pass
-
-    # Aggregate by (provider, project)
-    agg = {}
-    for s in sessions:
-        key = (s.get("provider", "unknown"), s["project"])
-        if key not in agg:
-            agg[key] = {
-                "provider": s.get("provider", "unknown"),
-                "project": s["project"],
-                "model": s["model"],
-                "input": 0, "output": 0,
-                "cache_create": 0, "cache_read": 0,
-                "total": 0, "session_count": 0,
-            }
-        a = agg[key]
-        a["input"] += s["input"]
-        a["output"] += s["output"]
-        a["cache_create"] += s.get("cache_create", 0)
-        a["cache_read"] += s.get("cache_read", 0)
-        a["total"] += s["total"]
-        a["session_count"] += 1
-
-    aggregated = sorted(agg.values(), key=lambda x: x["total"], reverse=True)
-
-    # Provider subtotals
-    by_provider = {}
-    for a in aggregated:
-        p = a["provider"]
-        by_provider[p] = by_provider.get(p, 0) + a["total"]
-
-    return {
-        "count": len(sessions),
-        "agent_count": len(aggregated),
-        "total_input": sum(s["input"] for s in sessions),
-        "total_output": sum(s["output"] for s in sessions),
-        "total": sum(s["total"] for s in sessions),
-        "top5": aggregated[:5],
-        "by_provider": by_provider,
-    }
-
-
-def format_tokens(n: int) -> str:
+def fmt_tok(n) -> str:
+    n = int(n or 0)
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1_000:
@@ -283,239 +114,599 @@ def format_tokens(n: int) -> str:
     return str(n)
 
 
-def build_report(yesterday_str: str) -> str:
-    now_kst = datetime.now(KST)
-    pcd = query_pcd_db(yesterday_str)
-    rate = get_rate_limit()
-    jsonl = analyze_jsonl(yesterday_str)
+def usd_equiv(inp, out, cc, cr) -> float:
+    return (inp / 1e6 * PRICE["input"] + out / 1e6 * PRICE["output"]
+            + cc / 1e6 * PRICE["cache_create"] + cr / 1e6 * PRICE["cache_read"])
 
-    lines = [f"**[Token Manager] 일일 리포트 — {yesterday_str}**"]
-    lines.append("")
 
-    # Rate Limit (Claude/Codex 분리)
-    if rate:
-        for provider in ["claude", "codex"]:
-            provider_items = {k: v for k, v in rate.items() if v.get("provider") == provider}
-            if not provider_items:
-                continue
-            lines.append(f"**{provider.capitalize()} Rate Limit**")
-            for k, v in provider_items.items():
-                util = v.get("utilization", "?")
-                label = v.get("label", k)
-                reset = v.get("resets_at", "")
+# --------------------------------------------------------------------------- #
+# account quota + codex rate limit
+# --------------------------------------------------------------------------- #
+def get_accounts() -> list[dict]:
+    data = _get("/claude-accounts")
+    out = []
+    for a in data.get("accounts", []) or []:
+        u = a.get("usage", {}) or {}
+        fh, sd = u.get("fiveHour") or {}, u.get("sevenDay") or {}
+        out.append({
+            "n": a.get("number"), "email": a.get("email"), "org": a.get("organizationName"),
+            "active": a.get("active"),
+            "h5": fh.get("pct"), "h5_countdown": fh.get("countdown"),
+            "d7": sd.get("pct"), "d7_countdown": sd.get("countdown"),
+            "scoped": [{"name": s.get("name"), "pct": s.get("pct"), "countdown": s.get("countdown")}
+                       for s in (u.get("scoped") or [])],
+            "status": a.get("usageStatus"), "age_s": a.get("usageAgeSeconds"),
+        })
+    return out
+
+
+def get_codex_rate() -> dict | None:
+    data = _get("/rate-limits")
+    for p in data.get("providers", []) or []:
+        if p.get("provider") == "codex":
+            now = datetime.now(KST)
+            buckets = {}
+            for b in p.get("buckets", []) or []:
+                reset = b.get("reset")
+                cd = None
                 if reset:
+                    hrs = (datetime.fromtimestamp(reset, KST) - now).total_seconds() / 3600
+                    cd = f"{int(hrs // 24)}d {hrs % 24:.0f}h" if hrs > 24 else f"{hrs:.1f}h"
+                buckets[b.get("name")] = {"used": b.get("used"), "countdown": cd}
+            return {"stale": p.get("stale"), "buckets": buckets}
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# reset detection
+# --------------------------------------------------------------------------- #
+def load_snapshots(days: int = 2) -> list[dict]:
+    snaps, now = [], datetime.now(KST)
+    for dd in range(days + 1):
+        f = HIST_DIR / f"snapshots-{(now - timedelta(days=dd)).strftime('%Y-%m-%d')}.jsonl"
+        if f.exists():
+            with open(f, encoding="utf-8") as fh:
+                for line in fh:
                     try:
-                        reset_dt = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-                        remain_h = (reset_dt - now_kst).total_seconds() / 3600
-                        remain_d = int(remain_h // 24)
-                        remain_hh = remain_h % 24
-                        if remain_d > 0:
-                            lines.append(f"- {label}: **{util}%** ({remain_d}d {remain_hh:.0f}h 후 리셋)")
-                        else:
-                            lines.append(f"- {label}: **{util}%** ({remain_hh:.1f}h 후 리셋)")
+                        snaps.append(json.loads(line))
                     except Exception:
-                        lines.append(f"- {label}: **{util}%**")
-                else:
-                    lines.append(f"- {label}: **{util}%**")
-            lines.append("")
-
-    # JSONL 기반 어제 사용량
-    if jsonl["count"] > 0:
-        agent_count = jsonl.get("agent_count", "?")
-        lines.append(f"**어제 세션 토큰 ({jsonl['count']}개 세션, {agent_count}개 에이전트)**")
-        lines.append(f"- 입력: {format_tokens(jsonl['total_input'])} / 출력: {format_tokens(jsonl['total_output'])} / 총합: **{format_tokens(jsonl['total'])}**")
-        # Provider subtotals
-        by_provider = jsonl.get("by_provider", {})
-        if len(by_provider) > 1:
-            parts_str = " / ".join(f"{p}: {format_tokens(t)}" for p, t in sorted(by_provider.items(), key=lambda x: -x[1]))
-            lines.append(f"- 프로바이더별: {parts_str}")
-        if jsonl["top5"]:
-            lines.append("- Top 5:")
-            for i, s in enumerate(jsonl["top5"]):
-                provider = s.get("provider", "?")
-                model = s["model"] or "?"
-                # shorten model name
-                if provider == "codex":
-                    m = "codex"
-                elif "opus" in model:
-                    m = "opus"
-                elif "sonnet" in model:
-                    m = "sonnet"
-                elif "haiku" in model:
-                    m = "haiku"
-                elif "synthetic" in model:
-                    m = "synthetic"
-                else:
-                    m = model.split("/")[-1][:15]
-                sc = s.get("session_count", 1)
-                sc_str = f", {sc}세션" if sc > 1 else ""
-                lines.append(f"  {i + 1}. {s['project']} ({m}{sc_str}) — {format_tokens(s['total'])}")
-        lines.append("")
-    else:
-        lines.append("**어제 로컬 JSONL 세션**: 없음")
-        lines.append("")
-
-    # PCD 에이전트별 누적 토큰
-    if pcd["agents"]:
-        lines.append("**에이전트 누적 토큰 (리셋 이후)**")
-        total_all = sum(a["stats_tokens"] for a in pcd["agents"])
-        for a in pcd["agents"][:10]:
-            pct = (a["stats_tokens"] / total_all * 100) if total_all > 0 else 0
-            lines.append(f"- {a['name']}: {format_tokens(a['stats_tokens'])} ({pct:.0f}%)")
-        lines.append(f"- **전체**: {format_tokens(total_all)}")
-        lines.append("")
-
-    # PCD 세션 (어제)
-    if pcd["sessions"]:
-        active = [s for s in pcd["sessions"] if s.get("tokens", 0) > 0]
-        if active:
-            lines.append(f"**어제 PCD 세션 (토큰 기록 {len(active)}건)**")
-            for s in active[:5]:
-                lines.append(f"- {s['name']} ({s['provider']}) — {format_tokens(s['tokens'])}")
-            lines.append("")
-
-    # 특이사항 / 효율화 제안
-    anomalies = []
-
-    if rate:
-        for k, v in rate.items():
-            u = v.get("utilization", 0)
-            if u >= 80:
-                label = v.get("label", k)
-                anomalies.append(f"Rate limit {label} {u}% — 조절 필요")
-
-    if pcd["agents"]:
-        total_all = sum(a["stats_tokens"] for a in pcd["agents"])
-        if total_all > 0:
-            top = pcd["agents"][0]
-            top_pct = top["stats_tokens"] / total_all * 100
-            if top_pct > 70:
-                anomalies.append(f"{top['name']}이 전체의 {top_pct:.0f}%를 차지 — 컨텍스트 효율 점검 권고")
-
-    if jsonl["total"] > 10_000_000:
-        anomalies.append(f"일일 토큰 {format_tokens(jsonl['total'])} — 평소 대비 높음")
-
-    if jsonl["count"] > 0:
-        output_ratio = jsonl["total_output"] / max(jsonl["total_input"], 1)
-        if output_ratio > 15:
-            anomalies.append(f"출력/입력 비율 {output_ratio:.0f}x — 불필요한 대량 생성 가능성")
-
-    if anomalies:
-        lines.append("**특이사항**")
-        for a in anomalies:
-            lines.append(f"- {a}")
-    else:
-        lines.append("**특이사항**: 없음 — 정상 범위")
-
-    return "\n".join(lines)
+                        pass
+    snaps.sort(key=lambda s: s.get("epoch", 0))
+    return snaps
 
 
-def send_to_discord(message: str) -> bool:
-    """PCD API로 Discord 채널에 리포트 전송."""
-    # 2000자 제한 처리
-    chunks = []
-    current = ""
-    for para in message.split("\n\n"):
-        candidate = (current + "\n\n" + para).strip() if current else para
-        if len(candidate) <= 1900:
-            current = candidate
-        else:
-            if current:
-                chunks.append(current)
-            current = para[:1900] if len(para) > 1900 else para
-    if current:
-        chunks.append(current)
-
-    import urllib.request
-
-    success = True
-    for chunk in chunks:
-        payload = json.dumps({
-            "target": f"channel:{TOKEN_MANAGER_CHANNEL}",
-            "content": chunk,
-            "source": "token-manager",
-            "bot": "notify",
-        }).encode()
-        req = urllib.request.Request(
-            ADK_API,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            resp = urllib.request.urlopen(req, timeout=10)
-            result = json.loads(resp.read())
-            if not result.get("ok"):
-                print(f"ADK send not ok: {result}", file=sys.stderr)
-                success = False
-        except Exception as e:
-            print(f"Send failed: {e}", file=sys.stderr)
-            success = False
-    return success
+def detect_resets_from_snapshots(snaps: list[dict]) -> list[dict]:
+    resets, series = [], {}
+    for s in snaps:
+        ep = s.get("epoch")
+        for a in s.get("accounts") or []:
+            for bname, field in (("5h", "h5"), ("7d", "d7")):
+                pct = a.get(field)
+                if pct is not None:
+                    series.setdefault((a.get("email"), bname), []).append((ep, pct))
+        for bname, bd in ((s.get("codex") or {}).get("buckets") or {}).items():
+            if bd.get("used") is not None:
+                series.setdefault(("codex", bname), []).append((ep, bd["used"]))
+    for (who, bname), rows in series.items():
+        rows.sort()
+        for i in range(1, len(rows)):
+            if rows[i - 1][1] - rows[i][1] >= RESET_DROP_PT:
+                resets.append({
+                    "who": who, "bucket": bname,
+                    "from_pct": rows[i - 1][1], "to_pct": rows[i][1],
+                    "at": datetime.fromtimestamp(rows[i][0], KST).strftime("%m-%d %H:%M"),
+                    "kind": "weekly" if bname in ("7d",) else "routine5h",
+                    "source": "snapshot",
+                })
+    return resets
 
 
-def collect_raw_data(yesterday_str: str) -> dict:
-    """원시 데이터를 JSON으로 수집 (Claude 분석용)."""
-    now_kst = datetime.now(KST)
-    pcd = query_pcd_db(yesterday_str)
-    rate = get_rate_limit()
-    jsonl = analyze_jsonl(yesterday_str)
-
-    # rate limit에 남은 시간 추가
-    rate_with_remaining = {}
-    if rate:
-        for k, v in rate.items():
-            entry = dict(v)
-            reset = v.get("resets_at", "")
-            if reset:
+def _codex_rl_points(path: str) -> list[tuple]:
+    pts = []
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f):
+                if i > 120:
+                    break
+                if '"rate_limits"' in line:
+                    o = json.loads(line); rl = o.get("payload", {}).get("rate_limits") or {}
+                    up = (rl.get("primary") or {}).get("used_percent"); ep = _iso2epoch(o.get("timestamp"))
+                    if up is not None and ep:
+                        pts.append((ep, up)); break
+        sz = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, sz - 65536)); data = f.read().decode("utf-8", "ignore")
+        for line in reversed(data.splitlines()):
+            if '"rate_limits"' in line:
                 try:
-                    reset_dt = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-                    entry["remaining_hours"] = round((reset_dt - now_kst).total_seconds() / 3600, 1)
+                    o = json.loads(line); rl = o.get("payload", {}).get("rate_limits") or {}
+                    up = (rl.get("primary") or {}).get("used_percent"); ep = _iso2epoch(o.get("timestamp"))
+                    if up is not None and ep:
+                        pts.append((ep, up)); break
                 except Exception:
                     pass
-            rate_with_remaining[k] = entry
-    rate = rate_with_remaining
+    except Exception:
+        pass
+    return pts
+
+
+def codex_reset_count_bootstrap(window_hours: int = 30) -> dict | None:
+    """Count Codex 5h resets from session logs (bootstrap until snapshots exist).
+    5h resets are ROUTINE (~every 5h). Returns a summary, not per-event noise."""
+    now = datetime.now(KST); cutoff = now.timestamp() - window_hours * 3600
+    pts = []
+    for dd in range(0, 2):
+        day = now - timedelta(days=dd)
+        ddir = CODEX_SESSIONS / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+        if not ddir.exists():
+            continue
+        for jf in ddir.glob("*.jsonl"):
+            try:
+                if jf.stat().st_mtime < cutoff:
+                    continue
+            except Exception:
+                continue
+            pts.extend(_codex_rl_points(str(jf)))
+    pts = [(e, p) for e, p in pts if e >= cutoff]
+    if len(pts) < 4:
+        return None
+    buckets = {}
+    for ep, pct in pts:
+        b = int(ep // 900)
+        buckets[b] = max(buckets.get(b, 0), pct)
+    series = sorted(buckets.items())
+    count, last_at, peak = 0, None, 0
+    for i in range(1, len(series)):
+        peak = max(peak, series[i - 1][1])
+        if series[i - 1][1] - series[i][1] >= 30:
+            count += 1
+            last_at = datetime.fromtimestamp(series[i][0] * 900, KST).strftime("%m-%d %H:%M")
+    return {"count": count, "last_at": last_at, "peak": peak, "window_h": window_hours} if count else None
+
+
+# --------------------------------------------------------------------------- #
+# usage scan — "new tokens" excludes cache-read
+# --------------------------------------------------------------------------- #
+def _blank():
+    return {"new": 0, "cache_read": 0, "input": 0, "output": 0, "cc": 0, "sessions": 0}
+
+
+def scan_claude(dates: set, yday: str):
+    history = {d: {} for d in dates}
+    yday_sessions = {}
+    for jf in glob.glob(str(CLAUDE_PROJECTS / "**" / "*.jsonl"), recursive=True):
+        try:
+            mdate = datetime.fromtimestamp(os.path.getmtime(jf)).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+        if mdate not in dates:
+            continue
+        parts = jf.replace(str(CLAUDE_PROJECTS) + "/", "").split("/")
+        agent = _agent_from_path(parts[0] if parts else "")
+        si = so = scc = scr = 0
+        try:
+            with open(jf, encoding="utf-8") as f:
+                for line in f:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        u = json.loads(line).get("message", {}).get("usage", {})
+                    except Exception:
+                        continue
+                    if not u:
+                        continue
+                    si += u.get("input_tokens", 0); so += u.get("output_tokens", 0)
+                    scc += u.get("cache_creation_input_tokens", 0); scr += u.get("cache_read_input_tokens", 0)
+        except Exception:
+            continue
+        new = si + so + scc
+        if new + scr <= 0:
+            continue
+        a = history[mdate].setdefault(agent, _blank())
+        a["new"] += new; a["cache_read"] += scr
+        a["input"] += si; a["output"] += so; a["cc"] += scc; a["sessions"] += 1
+        if mdate == yday:
+            yday_sessions.setdefault(agent, []).append((jf, new))
+    return history, yday_sessions
+
+
+def _codex_summary(path: str):
+    cwd = None
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for i, line in enumerate(f):
+            if i > 40:
+                break
+            if '"session_meta"' in line:
+                try:
+                    o = json.loads(line)
+                    if o.get("type") == "session_meta":
+                        cwd = o.get("payload", {}).get("cwd"); break
+                except Exception:
+                    pass
+    total = None
+    try:
+        sz = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, sz - 65536)); data = f.read().decode("utf-8", "ignore")
+        for line in reversed(data.splitlines()):
+            if '"total_token_usage"' in line:
+                try:
+                    o = json.loads(line); p = o.get("payload", {})
+                    if p.get("type") == "token_count":
+                        total = p.get("info", {}).get("total_token_usage"); break
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return cwd, total
+
+
+def scan_codex(dates: set, yday: str):
+    history = {d: {} for d in dates}
+    yday_sessions = {}
+    for d in dates:
+        yy, mm, dd = d.split("-")
+        ddir = CODEX_SESSIONS / yy / mm / dd
+        if not ddir.exists():
+            continue
+        for jf in ddir.glob("*.jsonl"):
+            cwd, total = _codex_summary(str(jf))
+            if not total:
+                continue
+            agent = _agent_from_path(cwd or "")
+            si = total.get("input_tokens", 0); so = total.get("output_tokens", 0)
+            cached = total.get("cached_input_tokens", 0)
+            new = max(0, si - cached) + so
+            if new + cached <= 0:
+                continue
+            a = history[d].setdefault(agent, _blank())
+            a["new"] += new; a["cache_read"] += cached
+            a["input"] += si; a["output"] += so; a["sessions"] += 1
+            if d == yday:
+                yday_sessions.setdefault(agent, []).append((str(jf), new, cached, cwd))
+    return history, yday_sessions
+
+
+def merge_history(hc, hx, dates):
+    out = {}
+    for d in dates:
+        day = {}
+        for src, prov in ((hc, "claude"), (hx, "codex")):
+            for agent, agg in (src.get(d) or {}).items():
+                e = day.setdefault(agent, {"new": 0, "cache_read": 0, "claude": 0, "codex": 0,
+                                           "input": 0, "output": 0, "cc": 0, "sessions": 0})
+                e["new"] += agg["new"]; e["cache_read"] += agg["cache_read"]
+                e[prov] += agg["new"]
+                e["input"] += agg["input"]; e["output"] += agg["output"]
+                e["cc"] += agg.get("cc", 0); e["sessions"] += agg["sessions"]
+        out[d] = day
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# baseline + anomaly (family-normalized, on new tokens)
+# --------------------------------------------------------------------------- #
+def compute_family_baselines(history, yday, baseline_dates):
+    fams = {}
+    for d in baseline_dates:
+        for ag, agg in (history.get(d) or {}).items():
+            fams.setdefault(family(ag), {})
+            fams[family(ag)].setdefault(d, 0)
+            fams[family(ag)][d] += agg["new"]
+    out = {}
+    for fam, byday in fams.items():
+        vals = [byday.get(d, 0) for d in baseline_dates]
+        nz = [v for v in vals if v > 0]
+        n = len(nz); mean = sum(nz) / n if n else 0
+        std = (sum((v - mean) ** 2 for v in nz) / n) ** 0.5 if n else 0
+        out[fam] = {"mean": mean, "std": std, "n_days": n}
+    return out
+
+
+def detect_anomalies(history, fam_base, yday, drill):
+    out = []
+    for ag, agg in (history.get(yday) or {}).items():
+        y = agg["new"]; base = fam_base.get(family(ag), {})
+        mean, std, n = base.get("mean", 0), base.get("std", 0), base.get("n_days", 0)
+        if n == 0:
+            if y >= NEW_AGENT_FLOOR:
+                out.append({"kind": "new_family_spike", "agent": ag, "family": family(ag),
+                            "yesterday_new": y, "confidence": "low",
+                            "why": f"패밀리 baseline 없음, 어제 새토큰 {fmt_tok(y)}",
+                            "evidence": drill.get(ag, {}).get("evidence", [])})
+            continue
+        if y < ANOM_FLOOR_NEW:
+            continue
+        z = (y - mean) / std if std > 0 else (999 if y > mean * ANOM_RATIO else 0)
+        ratio = y / mean if mean > 0 else 999
+        if z >= ANOM_Z and ratio >= ANOM_RATIO:
+            out.append({"kind": "agent_spike", "agent": ag, "family": family(ag),
+                        "yesterday_new": y, "baseline_mean": mean, "baseline_days": n,
+                        "z": round(z, 1), "ratio": round(ratio, 1),
+                        "confidence": "high" if z >= 3.5 and n >= 4 else "medium",
+                        "why": f"어제 새토큰 {fmt_tok(y)} = 패밀리 평소({fmt_tok(mean)})의 {ratio:.1f}배 (z={z:.1f}, {n}일)",
+                        "evidence": drill.get(ag, {}).get("evidence", [])})
+    out.sort(key=lambda a: a.get("z", 0), reverse=True)
+    return out
+
+
+def account_pressure(accounts, codex):
+    out = []
+    for a in accounts:
+        for bname, field, cdf in (("5h", "h5", "h5_countdown"), ("7d", "d7", "d7_countdown")):
+            pct = a.get(field)
+            if pct is not None and pct >= 80:
+                out.append({"who": a["email"], "bucket": bname, "pct": pct,
+                            "countdown": a.get(cdf), "note": "활성" if a.get("active") else "비활성"})
+    if codex:
+        for bname, bd in (codex.get("buckets") or {}).items():
+            if bd.get("used") is not None and bd["used"] >= 80:
+                out.append({"who": "codex", "bucket": bname, "pct": bd["used"], "countdown": bd.get("countdown"), "note": ""})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# drill-down
+# --------------------------------------------------------------------------- #
+def drilldown_claude(session_files, max_files=12):
+    files = sorted(session_files, key=lambda x: x[1], reverse=True)[:max_files]
+    tool_calls, sizes, turns, cc, cr = {}, [], 0, 0, 0
+    biggest = files[0][1] if files else 0
+    for jf, _n in files:
+        try:
+            with open(jf, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    t, msg = d.get("type"), d.get("message", {})
+                    if t == "assistant":
+                        turns += 1; u = msg.get("usage", {})
+                        cc += u.get("cache_creation_input_tokens", 0); cr += u.get("cache_read_input_tokens", 0)
+                        for it in msg.get("content", []) or []:
+                            if isinstance(it, dict) and it.get("type") == "tool_use":
+                                tool_calls[it.get("name", "?")] = tool_calls.get(it.get("name", "?"), 0) + 1
+                    elif t == "user":
+                        c = msg.get("content")
+                        if isinstance(c, list):
+                            for it in c:
+                                if isinstance(it, dict) and it.get("type") == "tool_result":
+                                    sizes.append(len(str(it.get("content", ""))))
+        except Exception:
+            continue
+    sizes.sort(reverse=True)
+    top_tools = sorted(tool_calls.items(), key=lambda x: -x[1])[:5]
+    big = [s for s in sizes if s > 10_000]
+    ev = [f"{len(files)}세션, {turns}턴, 최대 세션 새토큰 {fmt_tok(biggest)}"]
+    if top_tools:
+        ev.append("주요 도구: " + ", ".join(f"{n}×{c}" for n, c in top_tools))
+    if sizes:
+        ev.append(f"최대 도구출력: {', '.join(f'{s//1000}K자' for s in sizes[:3])} (총 {sum(sizes)//1000}K자)")
+    if big:
+        ev.append(f"10K자↑ 원본 도구출력 {len(big)}건")
+    # cache_read(재사용)는 정상·저비용($1.50/MTok)이므로 문제로 표기하지 않는다.
+    # 비용을 주도하는 것은 cache_create($18.75/MTok)이므로 그쪽을 사실로만 병기.
+    ev.append(f"cache_create {fmt_tok(cc)}(비용주도) · cache_read {fmt_tok(cr)}(재사용, 저비용·정상)")
+    # 실질 비효율 신호: 대량 '원본' 도구출력(캐시가 아니라 새 입력/cache_create를 키움).
+    flags = []
+    if len(big) >= 8:
+        flags.append(f"원본 도구출력 {len(big)}건(10K자↑) — 결과 크기 상한 시 cache_create 절감 여지")
+    return {"evidence": ev, "flags": flags, "turns": turns, "top_tools": top_tools,
+            "cache_read": cr, "cache_create": cc, "big_dumps": len(big)}
+
+
+def drilldown_codex(session_files, max_files=80):
+    files = session_files[:max_files]
+    n_sess = len(files)
+    new_tot = sum(x[1] for x in files)
+    cached_tot = sum(x[2] for x in files)
+    cwds = {}
+    for _p, _n, _c, cwd in files:
+        key = _agent_from_path(cwd or "")
+        cwds[key] = cwds.get(key, 0) + 1
+    top_cwds = sorted(cwds.items(), key=lambda x: -x[1])[:4]
+    biggest = max((x[1] for x in files), default=0)
+    # 캐시재사용(cached)은 장기 세션에서 정상이며 저비용이므로 문제로 표기하지 않는다.
+    ev = [f"{n_sess}개 codex 세션, 새토큰 합 {fmt_tok(new_tot)} (캐시재사용 {fmt_tok(cached_tot)}, 저비용·정상)",
+          f"최대 단일세션 새토큰 {fmt_tok(biggest)}",
+          "작업 경로: " + ", ".join(f"{k}×{c}" for k, c in top_cwds)]
+    # 세션 수는 fan-out 규모를 보는 중립 지표 — '과다'로 단정하지 않고 확인만 권한다.
+    flags = []
+    if n_sess >= 40:
+        flags.append(f"동시 codex 세션 {n_sess}개(fan-out) — 의도된 병렬작업인지 확인")
+    return {"evidence": ev, "flags": flags, "sessions": n_sess, "new": new_tot, "cached": cached_tot}
+
+
+# --------------------------------------------------------------------------- #
+def query_pcd(yday):
+    if not PCD_PROD_DB.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(PCD_PROD_DB)); conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT name, stats_tokens FROM agents WHERE stats_tokens > 0 ORDER BY stats_tokens DESC LIMIT 10").fetchall()]
+        conn.close(); return rows
+    except Exception:
+        return []
+
+
+def collect(yday):
+    now = datetime.now(KST)
+    baseline_dates = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(2, 2 + BASELINE_DAYS)]
+    dates = set(baseline_dates) | {yday}
+
+    hc, yc = scan_claude(dates, yday)
+    hx, yx = scan_codex(dates, yday)
+    history = merge_history(hc, hx, dates)
+
+    yagents = history.get(yday) or {}
+    ranked = sorted(yagents.items(), key=lambda kv: kv[1]["new"], reverse=True)
+
+    drill = {}
+    for ag, _agg in ranked[:3]:
+        d = {}
+        if ag in yc:
+            dc = drilldown_claude(yc[ag])
+            d = dc
+        if ag in yx:
+            dx = drilldown_codex(yx[ag])
+            if d:
+                d = {"evidence": d["evidence"] + dx["evidence"], "flags": d["flags"] + dx["flags"]}
+            else:
+                d = dx
+        if d:
+            drill[ag] = d
+
+    fam_base = compute_family_baselines(history, yday, baseline_dates)
+    accounts = get_accounts()
+    codex = get_codex_rate()
+
+    resets = detect_resets_from_snapshots(load_snapshots(days=2))
+    codex_boot = None if any(r["who"] == "codex" for r in resets) else codex_reset_count_bootstrap()
+
+    anomalies = detect_anomalies(history, fam_base, yday, drill)
+    pressure = account_pressure(accounts, codex)
+
+    rows = []
+    for ag, agg in ranked[:8]:
+        fb = fam_base.get(family(ag), {})
+        rows.append({"agent": ag, "new": agg["new"], "cache_read": agg["cache_read"],
+                     "claude": agg["claude"], "codex": agg["codex"],
+                     "input": agg["input"], "output": agg["output"], "cc": agg["cc"],
+                     "sessions": agg["sessions"],
+                     "usd_equiv": round(usd_equiv(agg["input"], agg["output"], agg["cc"], agg["cache_read"]), 2),
+                     "family_mean": round(fb.get("mean", 0))})
 
     return {
-        "report_date": yesterday_str,
-        "rate_limit": rate,
-        "jsonl_sessions": {
-            "count": jsonl["count"],
-            "total_input": jsonl["total_input"],
-            "total_output": jsonl["total_output"],
-            "total": jsonl["total"],
-            "top5": jsonl["top5"],
+        "report_date": yday, "generated_at": now.isoformat(),
+        "accounts": accounts, "codex_rate": codex,
+        "resets": resets, "codex_reset_bootstrap": codex_boot,
+        "snapshot_history_available": (HIST_DIR / f"snapshots-{yday}.jsonl").exists(),
+        "account_pressure": pressure,
+        "yesterday": {
+            "day_new": sum(a["new"] for a in yagents.values()),
+            "day_cache_read": sum(a["cache_read"] for a in yagents.values()),
+            "agent_count": len(yagents),
+            "by_provider_new": {"claude": sum(a["claude"] for a in yagents.values()),
+                                "codex": sum(a["codex"] for a in yagents.values())},
+            "top_agents": rows,
         },
-        "pcd_agents": pcd["agents"],
-        "pcd_sessions_yesterday": [
-            {k: s[k] for k in ["name", "provider", "model", "tokens", "connected", "last_seen"]}
-            for s in pcd["sessions"] if s.get("tokens", 0) > 0
-        ][:10],
-        "daily_activity": pcd["daily"],
+        "anomalies": anomalies, "drilldown": drill,
+        "baseline_window_days": BASELINE_DAYS, "pcd_cumulative": query_pcd(yday),
     }
 
 
-def main():
-    now_kst = datetime.now(KST)
-    yesterday = (now_kst - timedelta(days=1)).strftime("%Y-%m-%d")
+# --------------------------------------------------------------------------- #
+def render(data):
+    L = [f"**[Token Manager] 일일 리포트 — {data['report_date']}**", ""]
+    L.append("**Claude 계정 (cswap 3개)**")
+    for a in data["accounts"]:
+        star = "🟢활성" if a["active"] else "⚪"
+        sc = ""
+        if a.get("scoped"):
+            sc = " / " + " ".join(f"{s['name']} {s['pct']:.0f}%" for s in a["scoped"] if s.get("pct") is not None)
+        L.append(f"- {star} #{a['n']} {a['email']}: 5h **{a['h5']:.0f}%**({a['h5_countdown']}) · 7d **{a['d7']:.0f}%**({a['d7_countdown']}){sc}")
+    cx = data.get("codex_rate")
+    if cx:
+        parts = [f"{bn} **{bd['used']:.0f}%**" + (f"({bd['countdown']})" if bd.get("countdown") else "")
+                 for bn, bd in (cx.get("buckets") or {}).items() if bd.get("used") is not None]
+        L.append("- 🤖 Codex: " + " · ".join(parts) + (" ⚠️stale" if cx.get("stale") else ""))
+    L.append("")
 
-    if "--raw-json" in sys.argv:
-        data = collect_raw_data(yesterday)
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-        return
+    weekly = [r for r in data["resets"] if r.get("kind") == "weekly"]
+    boot = data.get("codex_reset_bootstrap")
+    if weekly or boot:
+        L.append("**리셋 감지**")
+        for r in weekly:
+            who = "Codex" if r["who"] == "codex" else r["who"]
+            L.append(f"- 🔴 {who} 주간(7d): {r['from_pct']:.0f}%→{r['to_pct']:.0f}% @{r['at']} — 수동/조기 리셋 추정")
+        if boot:
+            la = f", 최근 {boot['last_at']}" if boot.get("last_at") else ""
+            L.append(f"- Codex 5h: 최근 {boot['window_h']}h간 {boot['count']}회 리셋(5h 주기, 정상{la})")
+        L.append("")
+    elif not data.get("snapshot_history_available"):
+        L.append("_주간(7d)·계정별 리셋 감지는 스냅샷 축적 후 활성화됩니다._"); L.append("")
 
-    dry_run = "--dry-run" in sys.argv
+    y = data["yesterday"]; bp = y["by_provider_new"]
+    L.append(f"**어제 새토큰 소비 — {y['agent_count']}개 에이전트, 총 {fmt_tok(y['day_new'])}** _(캐시재사용 {fmt_tok(y['day_cache_read'])} 별도)_")
+    L.append(f"- 프로바이더: claude {fmt_tok(bp['claude'])} / codex {fmt_tok(bp['codex'])}")
+    L.append("- Top 소비 에이전트(새토큰):")
+    for i, r in enumerate(y["top_agents"][:6], 1):
+        base = f", 평소 {fmt_tok(r['family_mean'])}" if r["family_mean"] else ""
+        L.append(f"  {i}. {r['agent']} — {fmt_tok(r['new'])} ({r['sessions']}세션{base})")
+    L.append("")
 
-    report = build_report(yesterday)
+    if data["drilldown"]:
+        L.append("**Top 소비자 심층분석**")
+        for ag, d in data["drilldown"].items():
+            L.append(f"- {ag}:")
+            for e in d["evidence"]:
+                L.append(f"  · {e}")
+            if d.get("flags"):
+                L.append(f"  ⚠️ {', '.join(d['flags'])}")
+        L.append("")
 
-    if dry_run:
-        print(report)
-        return
-
-    if send_to_discord(report):
-        print(f"Token daily report sent for {yesterday}")
+    issues = []
+    for p in data["account_pressure"]:
+        issues.append(f"⚠️ {p['who']} {p['bucket']} {p['pct']:.0f}% — quota 임박({p.get('note','')}, {p.get('countdown','')})")
+    for a in data["anomalies"]:
+        issues.append(f"⚠️ [{a.get('confidence')}] {a['agent']}: {a['why']}")
+        for e in a.get("evidence", [])[:3]:
+            issues.append(f"    · {e}")
+    if issues:
+        L.append("**특이사항 (근거 기반)**")
+        L += [x if x.startswith("    ") else f"- {x}" for x in issues]
     else:
-        print("Failed to send report", file=sys.stderr)
-        sys.exit(1)
+        L.append("**특이사항**: 없음 — baseline 대비 정상, quota 여유")
+    return "\n".join(L)
+
+
+def send_to_discord(message):
+    chunks, cur = [], ""
+    for para in message.split("\n\n"):
+        cand = (cur + "\n\n" + para).strip() if cur else para
+        if len(cand) <= 1900:
+            cur = cand
+        else:
+            if cur:
+                chunks.append(cur)
+            cur = para[:1900]
+    if cur:
+        chunks.append(cur)
+    ok = True
+    for chunk in chunks:
+        payload = json.dumps({"target": f"channel:{TOKEN_MANAGER_CHANNEL}", "content": chunk,
+                              "source": "token-manager", "bot": "notify"}).encode()
+        try:
+            req = urllib.request.Request(f"{API}/discord/send", data=payload,
+                                         headers={"Content-Type": "application/json"})
+            r = json.loads(urllib.request.urlopen(req, timeout=10).read())
+            if not r.get("ok"):
+                ok = False
+        except Exception as e:  # noqa: BLE001
+            print(f"send failed: {e}", file=sys.stderr); ok = False
+    return ok
+
+
+def main():
+    now = datetime.now(KST)
+    yday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    data = collect(yday)
+    if "--raw-json" in sys.argv:
+        print(json.dumps(data, ensure_ascii=False, indent=2)); return
+    report = render(data)
+    if "--emit" in sys.argv:
+        # single collect -> both the deterministic body and the raw JSON, for the
+        # .sh to hand the JSON to a constrained LLM recommendations pass.
+        print("<<<REPORT>>>"); print(report)
+        print("<<<RAWJSON>>>"); print(json.dumps(data, ensure_ascii=False))
+        return
+    if "--dry-run" in sys.argv:
+        print(report); return
+    print(f"sent {yday}" if send_to_discord(report) else "send failed")
 
 
 if __name__ == "__main__":

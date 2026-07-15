@@ -388,11 +388,7 @@ impl VoiceBargeInRuntime {
             .expect("voice test play requests lock")
             .push((channel_id.get(), context));
 
-        let Some(guild_id) = self
-            .voice_guilds
-            .get(&channel_id.get())
-            .map(|entry| *entry.value())
-        else {
+        let Some(guild_id) = self.channels.guild_id(channel_id) else {
             tracing::debug!(
                 channel_id = channel_id.get(),
                 path = %path.display(),
