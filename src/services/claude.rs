@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 #[cfg(unix)]
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, emit_claude_tui_zero_harvest, try_claude_tui_warm_followup,
@@ -205,8 +206,7 @@ fn build_tmux_launch_env_lines(
     exec_path: Option<&str>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
-    gateway_proxy_enabled: bool,
-    gateway_proxy_url: &str,
+    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
 ) -> String {
     let mut env_lines = String::from("unset CLAUDECODE\n");
     if let Some(exec_path) = exec_path {
@@ -237,45 +237,28 @@ fn build_tmux_launch_env_lines(
             provider.as_str()
         ));
     }
-    if gateway_proxy_enabled {
-        env_lines.push_str(&format!(
-            "export ANTHROPIC_BASE_URL='{}'\n",
-            gateway_proxy_url.replace('\'', "'\\''")
-        ));
-        env_lines.push_str("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n");
+    if let Some(gateway_proxy_env) = gateway_proxy_env {
+        gateway_proxy_env.append_shell_exports(&mut env_lines);
     }
 
     env_lines
 }
 
-fn claude_gateway_proxy_config() -> (bool, String) {
-    let Some(config) = crate::config_live_reload::current() else {
-        return (
-            false,
-            crate::config::DEFAULT_CLAUDE_GATEWAY_PROXY_URL.to_string(),
-        );
-    };
-    (
-        config.runtime.claude_gateway_proxy_enabled,
-        config.runtime.resolved_claude_gateway_proxy_url().into(),
-    )
-}
-
 #[cfg(test)]
 mod launch_env_tests {
     use super::build_tmux_launch_env_lines;
+    use crate::services::claude_gateway_proxy::launch_env_for_test;
 
     #[test]
     fn gateway_proxy_env_is_gated_and_dead_envs_are_absent() {
-        let enabled =
-            build_tmux_launch_env_lines(None, None, None, true, "http://proxy.example/it's-ready");
+        let gateway_env = launch_env_for_test(true, "http://proxy.example/it's-ready", true);
+        let enabled = build_tmux_launch_env_lines(None, None, None, gateway_env.as_ref());
         assert!(
             enabled.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
         assert!(enabled.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
 
-        let disabled =
-            build_tmux_launch_env_lines(None, None, None, false, "http://proxy.example/unused");
+        let disabled = build_tmux_launch_env_lines(None, None, None, None);
         assert!(!disabled.contains("ANTHROPIC_BASE_URL"));
         assert!(!disabled.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"));
 
@@ -721,7 +704,7 @@ pub fn execute_command_streaming(
             dispatch_type,
         );
     }
-    let (gateway_proxy_enabled, gateway_proxy_url) = claude_gateway_proxy_config();
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
 
     let default_system_prompt = r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
 
@@ -819,8 +802,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         model_override,
                         effective_prompt,
                         hook_endpoint,
-                        gateway_proxy_enabled,
-                        &gateway_proxy_url,
+                        gateway_proxy_env.as_ref(),
                     );
                 }
                 tracing::warn!(
@@ -865,8 +847,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     tmux_name,
                     report_channel_id,
                     report_provider,
-                    gateway_proxy_enabled,
-                    &gateway_proxy_url,
+                    gateway_proxy_env.as_ref(),
                 );
             } else {
                 let (tmux_missing, pane_liveness) =
@@ -887,8 +868,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         tmux_name,
                         report_channel_id,
                         report_provider,
-                        gateway_proxy_enabled,
-                        &gateway_proxy_url,
+                        gateway_proxy_env.as_ref(),
                     );
                 }
                 // Local without tmux → ProcessBackend (new path)
@@ -900,8 +880,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     sender,
                     cancel_token,
                     tmux_name,
-                    gateway_proxy_enabled,
-                    &gateway_proxy_url,
+                    gateway_proxy_env.as_ref(),
                 );
             }
         }
@@ -917,8 +896,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 sender,
                 cancel_token,
                 tmux_name,
-                gateway_proxy_enabled,
-                &gateway_proxy_url,
+                gateway_proxy_env.as_ref(),
             );
         }
     }
@@ -973,9 +951,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
     }
-    if gateway_proxy_enabled {
-        command.env("ANTHROPIC_BASE_URL", &gateway_proxy_url);
-        command.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+    if let Some(gateway_proxy_env) = gateway_proxy_env.as_ref() {
+        gateway_proxy_env.apply_to_command(&mut command);
     }
 
     let mut child = command.spawn().map_err(|e| {
@@ -1754,8 +1731,7 @@ fn execute_streaming_local_tui_tmux(
     model_override: Option<&str>,
     system_prompt: Option<&str>,
     hook_endpoint: String,
-    gateway_proxy_enabled: bool,
-    gateway_proxy_url: &str,
+    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tui_tmux START: {} ===",
@@ -1842,8 +1818,7 @@ fn execute_streaming_local_tui_tmux(
         model_override,
         hook_endpoint,
         resume,
-        gateway_proxy_enabled,
-        gateway_proxy_url,
+        gateway_proxy_env,
     )?;
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
@@ -2030,8 +2005,7 @@ fn prepare_and_create_claude_tui_session(
     model_override: Option<&str>,
     hook_endpoint: String,
     resume: bool,
-    gateway_proxy_enabled: bool,
-    gateway_proxy_url: &str,
+    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
 ) -> Result<String, String> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
@@ -2059,8 +2033,7 @@ fn prepare_and_create_claude_tui_session(
             system_prompt: system_prompt.map(str::to_string),
             model: model_override.map(str::to_string),
             resume,
-            gateway_proxy_enabled,
-            gateway_proxy_url: gateway_proxy_url.to_string(),
+            gateway_proxy_env: gateway_proxy_env.cloned(),
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
@@ -2582,8 +2555,7 @@ fn execute_streaming_local_tmux(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
-    gateway_proxy_enabled: bool,
-    gateway_proxy_url: &str,
+    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tmux START: {} ===",
@@ -2823,8 +2795,7 @@ fn execute_streaming_local_tmux(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
-        gateway_proxy_enabled,
-        gateway_proxy_url,
+        gateway_proxy_env,
     );
 
     let script_content = format!(
@@ -3024,8 +2995,7 @@ pub(crate) fn execute_streaming_local_process(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
-    gateway_proxy_enabled: bool,
-    gateway_proxy_url: &str,
+    gateway_proxy_env: Option<&ClaudeGatewayProxyEnv>,
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
@@ -3106,15 +3076,8 @@ pub(crate) fn execute_streaming_local_process(
         .clone()
         .map(|path| vec![("PATH".to_string(), path)])
         .unwrap_or_default();
-    if gateway_proxy_enabled {
-        env_vars.push((
-            "ANTHROPIC_BASE_URL".to_string(),
-            gateway_proxy_url.to_string(),
-        ));
-        env_vars.push((
-            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
-            "1".to_string(),
-        ));
+    if let Some(gateway_proxy_env) = gateway_proxy_env {
+        gateway_proxy_env.append_to_env_vars(&mut env_vars);
     }
     let config = SessionConfig {
         session_name: session_name.to_string(),

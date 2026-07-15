@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
 
@@ -278,8 +279,7 @@ pub struct ClaudeTuiLaunchConfig {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub resume: bool,
-    pub gateway_proxy_enabled: bool,
-    pub gateway_proxy_url: String,
+    pub(crate) gateway_proxy_env: Option<ClaudeGatewayProxyEnv>,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -400,14 +400,10 @@ fn write_launch_script(
     // prompt entirely, the placeholder semantics here should be
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
-    let gateway_exports = if config.gateway_proxy_enabled {
-        format!(
-            "export ANTHROPIC_BASE_URL='{}'\nexport CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n",
-            config.gateway_proxy_url.replace('\'', "'\\''")
-        )
-    } else {
-        String::new()
-    };
+    let mut gateway_exports = String::new();
+    if let Some(gateway_proxy_env) = config.gateway_proxy_env.as_ref() {
+        gateway_proxy_env.append_shell_exports(&mut gateway_exports);
+    }
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
@@ -438,8 +434,7 @@ mod tests {
             system_prompt: Some("system prompt".to_string()),
             model: Some("sonnet".to_string()),
             resume: false,
-            gateway_proxy_enabled: false,
-            gateway_proxy_url: "http://127.0.0.1:10100".to_string(),
+            gateway_proxy_env: None,
         }
     }
 
@@ -549,8 +544,11 @@ mod tests {
     fn launch_script_gates_gateway_proxy_exports_and_omits_dead_envs() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
-        config.gateway_proxy_enabled = true;
-        config.gateway_proxy_url = "http://proxy.example/it's-ready".to_string();
+        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
+            true,
+            "http://proxy.example/it's-ready",
+            true,
+        );
         let launch_script_path = dir.path().join("launch.sh");
 
         write_launch_script(
@@ -568,7 +566,7 @@ mod tests {
         assert!(!script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
 
-        config.gateway_proxy_enabled = false;
+        config.gateway_proxy_env = None;
         write_launch_script(
             &launch_script_path,
             &config,
