@@ -275,7 +275,7 @@
 | `PUT` | `/api/settings/escalation` | `escalation::put_escalation_settings` | `src/server/routes/escalation.rs:1313` | `src/server/routes/domains/admin.rs:64` |
 | `GET` | `/api/settings/operator-connectors` | `settings::get_operator_connectors` | `src/server/routes/settings.rs:80` | `src/server/routes/domains/admin.rs:60` |
 | `GET` | `/api/settings/runtime-config` | `settings::get_runtime_config` | `src/server/routes/settings.rs:72` | `src/server/routes/domains/admin.rs:56` |
-| `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:85` | `src/server/routes/domains/admin.rs:56` |
+| `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:87` | `src/server/routes/domains/admin.rs:56` |
 | `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:517` | `src/server/routes/domains/admin.rs:80` |
 | `GET` | `/api/skills/catalog` | `skills_api::catalog` | `src/server/routes/skills_api.rs:351` | `src/server/routes/domains/ops.rs:225` |
 | `POST` | `/api/skills/prune` | `skills_api::prune` | `src/server/routes/skills_api.rs:642` | `src/server/routes/domains/ops.rs:227` |
