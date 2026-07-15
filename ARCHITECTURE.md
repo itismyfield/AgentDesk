@@ -629,6 +629,9 @@ src/
 │   │   │   │   └── stale_turn.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── intake_turn/
+│   │   │   │   │   ├── race_loss/
+│   │   │   │   │   │   ├── mailbox_reaction.rs
+│   │   │   │   │   │   └── mailbox_reaction_tests.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── turn_watchdog.rs
 │   │   │   │   │   └── voice_intake.rs
@@ -863,6 +866,7 @@ src/
 │   │   │   └── watcher_backstop.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── orphan_sweep.rs
+│   │   │   ├── queue_repair.rs
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/

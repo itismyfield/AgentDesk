@@ -1,5 +1,7 @@
 use super::*;
 
+mod mailbox_reaction;
+
 async fn enqueue_race_loss_requeued_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -388,28 +390,15 @@ pub(super) async fn handle_race_loss_enqueue(
         };
         queued_marker_notified =
             emoji == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION;
-        if queued_marker_notified {
-            if let Some(turn_start_attempt) = turn_start_attempt {
-                crate::services::discord::turn_view_reconciler::note_intake_start_rolled_back_to_queued_current(
-                    shared,
-                    channel_id,
-                    user_msg_id,
-                    turn_start_attempt,
-                    "race_loss_message_queued",
-                )
-                .await;
-            }
-        } else {
-            crate::services::discord::queue_marker::note_added_current(
-                shared,
-                http,
-                channel_id,
-                user_msg_id,
-                emoji,
-                "race_loss_message_queued",
-            )
-            .await;
-        }
+        mailbox_reaction::note_queue_pending(
+            shared,
+            http,
+            channel_id,
+            user_msg_id,
+            emoji,
+            turn_start_attempt,
+        )
+        .await;
         // #2036 Surface 3: detect queue→start races where the
         // dispatch path consumed our mapping before this reaction
         // landed and proactively unstick the emoji.
@@ -702,3 +691,6 @@ mod race_loss_requeue_tests {
         assert_eq!(snapshot.intervention_queue.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod mailbox_reaction_tests;

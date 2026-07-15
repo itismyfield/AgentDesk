@@ -121,6 +121,31 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
             .await;
     }
 
+    async fn repair_queued_source_pending_reaction(
+        &mut self,
+        channel_id: serenity::ChannelId,
+        message_id: serenity::MessageId,
+    ) -> Option<char> {
+        let snapshot = mailbox_snapshot(&self.data.shared, channel_id).await;
+        let intervention = snapshot.intervention_queue.iter().find(|intervention| {
+            intervention.message_id == message_id
+                || intervention.source_message_ids.contains(&message_id)
+        })?;
+        let first_source = intervention
+            .source_message_ids
+            .first()
+            .copied()
+            .unwrap_or(intervention.message_id);
+        let emoji = if first_source == message_id {
+            crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
+        } else {
+            crate::services::discord::queue_reactions::QUEUE_MERGED_PENDING_REACTION
+        };
+        add_queue_pending_reaction_self_healing(self.ctx, self.data, channel_id, message_id, emoji)
+            .await;
+        Some(emoji)
+    }
+
     fn advance_checkpoint(
         &mut self,
         channel_id: serenity::ChannelId,
