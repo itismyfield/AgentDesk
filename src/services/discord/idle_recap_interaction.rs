@@ -183,7 +183,7 @@ pub(super) async fn handle_idle_recap_clear_interaction(
         crate::services::discord::commands::SoftClearNotifyMode::Enqueue,
         Some(&clear_target.session_key),
     )
-    .await;
+    .await?;
     delete_previous_card(&ctx.http, channel_id, message_id).await;
 
     Ok(())

@@ -1,6 +1,6 @@
 //! Prompt manifest construction — assembles `PromptManifest` layers and the
-//! `RecoveryContextManifestInput` carrier, plus content hashing/preview helpers
-//! that feed the persistence hand-off.
+//! recovery/channel-context carriers, plus content hashing/preview helpers that
+//! feed the persistence hand-off.
 
 use poise::serenity_prelude::ChannelId;
 use regex::Regex;
@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 use super::DispatchProfile;
+use super::channel_recent_context::ChannelRecentContextManifestInput;
 use super::dispatch_contract::{CurrentTaskContext, render_dispatch_contract};
 use super::memory_guidance::MemoryRecallManifestInput;
 use crate::db::prompt_manifests::{
@@ -26,6 +27,8 @@ pub(super) const CURRENT_TASK_REDACTED_PREVIEW_MAX_BYTES: usize = 2_000;
 pub(super) const RECOVERY_CONTEXT_LAYER_NAME: &str = "recovery_context";
 pub(super) const RECOVERY_CONTEXT_LAYER_SOURCE: &str = "Discord recent N messages";
 pub(super) const RECOVERY_CONTEXT_LAYER_REASON: &str = "provider-native resume failed";
+pub(super) const CHANNEL_RECENT_CONTEXT_LAYER_NAME: &str = "channel_recent_context";
+pub(super) const CHANNEL_RECENT_CONTEXT_LAYER_SOURCE: &str = "session_transcripts.channel_id";
 pub(super) const ROLE_PROMPT_LAYER_NAME: &str = "role_prompt";
 pub(super) const MEMORY_RECALL_LAYER_NAME: &str = "memory_recall";
 pub(super) const MEMORY_RECALL_LAYER_SOURCE: &str = "memento";
@@ -182,6 +185,26 @@ pub(super) fn recovery_context_manifest_layer(
     layer.redacted_preview = Some(redacted_preview);
     layer.full_content = None;
     Ok(layer)
+}
+
+pub(super) fn channel_recent_context_manifest_layer(
+    channel_recent_context: Option<&ChannelRecentContextManifestInput>,
+) -> PromptManifestLayer {
+    let input = channel_recent_context.filter(|input| !input.rendered_context.trim().is_empty());
+    let content = input
+        .map(|input| input.rendered_context.as_str())
+        .unwrap_or("");
+    prompt_manifest_layer(
+        CHANNEL_RECENT_CONTEXT_LAYER_NAME,
+        CHANNEL_RECENT_CONTEXT_LAYER_SOURCE,
+        Some(
+            channel_recent_context
+                .map(|input| input.audit_reason.clone())
+                .unwrap_or_else(|| "not_evaluated;pairs=0".to_string()),
+        ),
+        PromptContentVisibility::UserDerived,
+        content,
+    )
 }
 
 pub(super) fn prompt_manifest_content_stats(content: &str) -> (i64, i64, String) {

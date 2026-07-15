@@ -465,6 +465,16 @@
       "path": "migrations/postgres/0090_task_notification_terminal_delivery_fingerprint.sql",
       "sha256": "2d71a1a62b2b317a6e2286d089bc78e18cb6526de2ad3eaf7f61735409b80fa1",
       "version": 90
+    },
+    {
+      "path": "migrations/postgres/0091_session_transcripts_channel_idx.sql",
+      "sha256": "db6b606aaca960d9b716f2ad4d7c583922470ee51e966be7360e30245b787275",
+      "version": 91
+    },
+    {
+      "path": "migrations/postgres/0092_session_transcript_clear_boundaries.sql",
+      "sha256": "cd8e233b2879beb11d31b6a8e35e44f3927d2ba31658e8a3965d084676ffdc06",
+      "version": 92
     }
   ],
   "version": 1
