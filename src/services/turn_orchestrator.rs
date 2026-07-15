@@ -72,19 +72,11 @@ pub(crate) struct SourceMessageQueuedGeneration {
 
 impl SourceMessageQueuedGeneration {
     pub(crate) fn new(message_id: MessageId, queued_generation: u64) -> Self {
-        Self {
-            message_id,
-            queued_generation,
-            preserve_on_cancel: false,
-        }
+        Self { message_id, queued_generation, preserve_on_cancel: false }
     }
 
     pub(crate) fn user_instruction(message_id: MessageId, queued_generation: u64) -> Self {
-        Self {
-            message_id,
-            queued_generation,
-            preserve_on_cancel: true,
-        }
+        Self { message_id, queued_generation, preserve_on_cancel: true }
     }
 }
 
@@ -96,10 +88,7 @@ pub(crate) struct SourceMessageTextSegment {
 
 impl SourceMessageTextSegment {
     pub(crate) fn new(message_id: MessageId, text: impl Into<String>) -> Self {
-        Self {
-            message_id,
-            text: text.into(),
-        }
+        Self { message_id, text: text.into() }
     }
 }
 
@@ -133,9 +122,7 @@ pub(crate) struct Intervention {
 
 impl Intervention {
     pub(crate) fn preserve_on_cancel(&self) -> bool {
-        self.source_message_queued_generations
-            .iter()
-            .any(|source| source.preserve_on_cancel)
+        self.source_message_queued_generations.iter().any(|source| source.preserve_on_cancel)
     }
 
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
@@ -155,10 +142,7 @@ impl Intervention {
         let mut owners = self.source_message_queued_generations.clone();
         for message_id in source_message_ids {
             if !owners.iter().any(|owner| owner.message_id == message_id) {
-                owners.push(SourceMessageQueuedGeneration::new(
-                    message_id,
-                    self.queued_generation,
-                ));
+                owners.push(SourceMessageQueuedGeneration::new(message_id, self.queued_generation));
             }
         }
         owners

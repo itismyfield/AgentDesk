@@ -3537,11 +3537,9 @@ async fn mailbox_take_next_soft_intervention(
             };
         };
 
-        if let Some(stale) = stale_dispatch_turn_for_queued_intervention(
-            shared.pg_pool.as_ref(),
-            &intervention,
-        )
-        .await
+        if let Some(stale) =
+            stale_dispatch_turn_for_queued_intervention(shared.pg_pool.as_ref(), &intervention)
+                .await
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
