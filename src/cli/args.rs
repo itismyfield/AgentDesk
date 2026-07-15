@@ -884,6 +884,7 @@ pub(crate) enum ConfigAction {
     /// Set runtime config (JSON string)
     Set {
         /// JSON value to set
+        #[arg(id = "config_json")]
         json: String,
     },
     /// Audit config source-of-truth drift across yaml/DB/legacy files
@@ -1342,6 +1343,34 @@ mod tests {
             Commands::SendToAgent { expect_reply, .. } => assert!(!expect_reply),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn config_set_parses_json_value() {
+        let cli = Cli::try_parse_from(["agentdesk", "config", "set", r#"{"a":1}"#])
+            .expect("config set <JSON> parses");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                action: ConfigAction::Set { json },
+            }) if json == r#"{"a":1}"#
+        ));
+        assert!(!cli.json);
+    }
+
+    #[test]
+    fn config_set_parses_json_value_with_global_json() {
+        let cli = Cli::try_parse_from(["agentdesk", "config", "set", r#"{"a":1}"#, "--json"])
+            .expect("config set <JSON> --json parses");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                action: ConfigAction::Set { json },
+            }) if json == r#"{"a":1}"#
+        ));
+        assert!(cli.json);
     }
 
     #[test]
