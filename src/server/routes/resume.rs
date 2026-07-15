@@ -972,7 +972,7 @@ fn cancel_and_clear(state: &AppState, card_id: &str) -> Result<(), String> {
                 crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
                     &mut tx,
                     dispatch_id,
-                    Some("resume"),
+                    Some(crate::dispatch::SUPERSEDE_REASON_RESUME),
                 )
                 .await?;
             }

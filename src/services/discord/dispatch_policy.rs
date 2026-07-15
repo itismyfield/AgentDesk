@@ -84,22 +84,34 @@ fn stale_dispatch_queue_exit_kind(
     let reason = reason.map(str::trim).filter(|value| !value.is_empty());
     if reason.is_some_and(|value| value.starts_with("superseded_by_")) {
         Some(QueueExitKind::Superseded)
-    } else if crate::dispatch::is_user_cancel_reason(reason) {
+    } else if crate::dispatch::is_user_cancel_reason(reason)
+        || crate::dispatch::is_system_cancel_reason(reason)
+    {
         Some(QueueExitKind::Cancelled)
     } else {
         None
     }
 }
 
-const STALE_DISPATCH_REASON_QUERY: &str = "SELECT status, result::jsonb ->> 'reason' AS reason
+const STALE_DISPATCH_REASON_QUERY: &str = "SELECT status, result
        FROM task_dispatches
       WHERE id = $1";
+
+fn structured_cancel_reason(result: Option<&str>) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(result?)
+        .ok()?
+        .as_object()?
+        .get("reason")?
+        .as_str()
+        .map(str::to_string)
+}
 
 fn stale_dispatch_turn_from_row(
     dispatch_id: String,
     row: Option<(String, Option<String>)>,
 ) -> Option<StaleDispatchTurn> {
-    let (status, reason) = row?;
+    let (status, result) = row?;
+    let reason = structured_cancel_reason(result.as_deref());
     stale_dispatch_queue_exit_kind(Some(&status), reason.as_deref()).map(|queue_exit_kind| {
         StaleDispatchTurn {
             dispatch_id,
@@ -110,8 +122,9 @@ fn stale_dispatch_turn_from_row(
 }
 
 /// Returns a queue-exit decision only when the dispatch row contains structured
-/// evidence of an explicit supersede or user cancellation. Terminal status by
-/// itself, an empty status, and a missing row are not exit evidence: the queued
+/// evidence of an explicit supersede, user cancellation, or recognized system
+/// cleanup/close. Terminal status by itself, an empty status, a missing row,
+/// and legacy plaintext result text are not exit evidence: the queued
 /// instruction is allowed to proceed so retention cleanup or an incomplete
 /// terminal write cannot silently discard user input.
 pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
@@ -144,7 +157,7 @@ pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
 mod dispatch_turn_gate_tests {
     use super::{
         QueueExitKind, STALE_DISPATCH_REASON_QUERY, dispatch_status_allows_turn,
-        stale_dispatch_queue_exit_kind, stale_dispatch_turn_from_row,
+        stale_dispatch_queue_exit_kind, stale_dispatch_turn_from_row, structured_cancel_reason,
     };
 
     #[test]
@@ -184,9 +197,28 @@ mod dispatch_turn_gate_tests {
     }
 
     #[test]
-    fn stale_dispatch_query_extracts_only_structured_reason_evidence() {
-        assert!(STALE_DISPATCH_REASON_QUERY.contains("result::jsonb ->> 'reason'"));
-        assert!(!STALE_DISPATCH_REASON_QUERY.contains("result::TEXT"));
+    fn stale_dispatch_result_extracts_structured_evidence_without_database_cast() {
+        assert!(STALE_DISPATCH_REASON_QUERY.contains("SELECT status, result"));
+        assert!(!STALE_DISPATCH_REASON_QUERY.contains("::jsonb"));
+        assert_eq!(
+            structured_cancel_reason(Some("Cancelled: superseded by rereview")),
+            None,
+            "legacy plaintext is ambiguous, not a database error or exit proof"
+        );
+        assert_eq!(
+            structured_cancel_reason(Some(r#"{"reason":"superseded_by_rereview"}"#)),
+            Some("superseded_by_rereview".to_string())
+        );
+        assert!(
+            stale_dispatch_turn_from_row(
+                "legacy-plaintext".to_string(),
+                Some((
+                    "cancelled".to_string(),
+                    Some("Cancelled: superseded by rereview".to_string()),
+                )),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -207,6 +239,120 @@ mod dispatch_turn_gate_tests {
             stale_dispatch_queue_exit_kind(
                 Some("cancelled"),
                 Some(crate::dispatch::SUPERSEDE_REASON_RETRY_CARD),
+            ),
+            Some(QueueExitKind::Superseded)
+        );
+    }
+
+    #[test]
+    fn resume_supersede_drops_the_old_dispatch_before_replacement() {
+        let resume_source = include_str!("../../server/routes/resume.rs");
+        let cancel_and_clear_source = resume_source
+            .split_once("fn cancel_and_clear")
+            .expect("resume cancel_and_clear production path exists")
+            .1
+            .split_once("fn create_and_notify")
+            .expect("resume cancel_and_clear is followed by create_and_notify")
+            .0;
+        assert!(
+            cancel_and_clear_source.contains("Some(crate::dispatch::SUPERSEDE_REASON_RESUME)"),
+            "resume must persist supersede evidence before creating its replacement"
+        );
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(
+                Some("cancelled"),
+                Some(crate::dispatch::SUPERSEDE_REASON_RESUME),
+            ),
+            Some(QueueExitKind::Superseded)
+        );
+    }
+
+    #[test]
+    fn dismissed_review_dispatch_is_dropped_without_resurrection() {
+        let review_decision_source = include_str!("../review_decision.rs");
+        let dismiss_cleanup_source = review_decision_source
+            .split_once("pub async fn dismiss_review_cleanup")
+            .expect("dismiss_review_cleanup production path exists")
+            .1
+            .split_once("// ── Review loopback request DTOs")
+            .expect("dismiss cleanup is followed by review DTOs")
+            .0;
+        assert!(
+            dismiss_cleanup_source
+                .contains("Some(crate::dispatch::USER_CANCEL_REASON_REVIEW_DISMISS)"),
+            "review dismiss must persist explicit user-cancel evidence"
+        );
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(
+                Some("cancelled"),
+                Some(crate::dispatch::USER_CANCEL_REASON_REVIEW_DISMISS),
+            ),
+            Some(QueueExitKind::Cancelled)
+        );
+    }
+
+    #[test]
+    fn system_cleanup_cancelled_dispatches_are_dropped_without_resurrection() {
+        let transition_source = include_str!("../../engine/transition_executor_pg.rs");
+        assert_eq!(
+            transition_source
+                .matches("Some(crate::dispatch::SYSTEM_CANCEL_REASON_TERMINAL_CARD)")
+                .count(),
+            1,
+            "terminal-card transition cleanup must persist recognized system evidence"
+        );
+        assert_eq!(
+            transition_source
+                .matches("Some(crate::dispatch::SYSTEM_CANCEL_REASON_TRANSITION_INTENT)")
+                .count(),
+            1,
+            "transition-intent cleanup must persist recognized system evidence"
+        );
+
+        let terminal_cleanup_source = include_str!("../../kanban/terminal_cleanup.rs");
+        assert!(
+            terminal_cleanup_source
+                .contains("Some(crate::dispatch::SYSTEM_CANCEL_REASON_TERMINAL_CARD)"),
+            "kanban terminal cleanup must persist recognized system evidence"
+        );
+
+        let dispute_source = include_str!("../review_decision/dispute.rs");
+        assert!(
+            dispute_source.contains("crate::dispatch::SYSTEM_CANCEL_REASON_SCOPE_MISMATCH_CLOSED"),
+            "scope-mismatch close must persist recognized system close evidence"
+        );
+
+        for reason in [
+            crate::dispatch::SYSTEM_CANCEL_REASON_TERMINAL_CARD,
+            crate::dispatch::SYSTEM_CANCEL_REASON_TRANSITION_INTENT,
+            crate::dispatch::SYSTEM_CANCEL_REASON_SCOPE_MISMATCH_CLOSED,
+        ] {
+            assert_eq!(
+                stale_dispatch_queue_exit_kind(Some("cancelled"), Some(reason)),
+                Some(QueueExitKind::Cancelled),
+                "recognized system cleanup {reason} must drop its stale queued envelope"
+            );
+        }
+    }
+
+    #[test]
+    fn redispatch_supersede_drops_the_old_dispatch_before_replacement() {
+        let kanban_source = include_str!("../../server/routes/kanban.rs");
+        let redispatch_source = kanban_source
+            .split_once("pub async fn redispatch_card")
+            .expect("redispatch_card production path exists")
+            .1
+            .split_once("pub async fn defer_dod")
+            .expect("redispatch_card is followed by defer_dod")
+            .0;
+        assert!(
+            redispatch_source.contains("Some(crate::dispatch::SUPERSEDE_REASON_REDISPATCH_CARD)"),
+            "redispatch_card must persist supersede evidence before creating its replacement"
+        );
+        assert_eq!(
+            stale_dispatch_queue_exit_kind(
+                Some("cancelled"),
+                Some(crate::dispatch::SUPERSEDE_REASON_REDISPATCH_CARD),
             ),
             Some(QueueExitKind::Superseded)
         );

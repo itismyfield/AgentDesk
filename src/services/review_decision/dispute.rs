@@ -337,7 +337,7 @@ async fn decision_route_dispute_scope_mismatch_close(
         let cancelled_stale = match cancel_stale_review_dispatches_for_scope_mismatch_pg_first(
             state,
             &body.card_id,
-            "scope_mismatch_closed",
+            crate::dispatch::SYSTEM_CANCEL_REASON_SCOPE_MISMATCH_CLOSED,
             &lifecycle_snapshot,
         )
         .await

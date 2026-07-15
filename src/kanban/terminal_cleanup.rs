@@ -3,8 +3,6 @@
 use anyhow::Result;
 use sqlx::Row as SqlxRow;
 
-pub(super) const TERMINAL_DISPATCH_CLEANUP_REASON: &str = "auto_cancelled_on_terminal_card";
-
 const STALE_WORKTREE_KEYS: &[&str] = &[
     "worktree_path",
     "worktree_branch",
@@ -40,7 +38,7 @@ pub(super) async fn sync_terminal_transition_followups_pg(
         cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
             tx,
             &dispatch_id,
-            Some(TERMINAL_DISPATCH_CLEANUP_REASON),
+            Some(crate::dispatch::SYSTEM_CANCEL_REASON_TERMINAL_CARD),
         )
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;

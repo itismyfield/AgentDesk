@@ -129,7 +129,7 @@ pub(crate) async fn execute_pg_transition_intent(
             crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
                 tx,
                 dispatch_id,
-                Some("transition_intent_cancel"),
+                Some(crate::dispatch::SYSTEM_CANCEL_REASON_TRANSITION_INTENT),
             )
             .await
             .map_err(|error| format!("cancel dispatch {dispatch_id}: {error}"))?;
@@ -233,7 +233,7 @@ pub(crate) async fn cancel_live_dispatches_for_terminal_card_pg(
         let changed = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
             tx,
             &dispatch_id,
-            Some("auto_cancelled_on_terminal_card"),
+            Some(crate::dispatch::SYSTEM_CANCEL_REASON_TERMINAL_CARD),
         )
         .await
         .map_err(|error| format!("cancel live dispatch {dispatch_id}: {error}"))?;

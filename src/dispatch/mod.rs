@@ -10,8 +10,10 @@ pub(crate) mod test_support;
 mod types;
 
 pub(crate) use dispatch_cancel::{
-    SUPERSEDE_REASON_REDISPATCH_CARD, SUPERSEDE_REASON_RETRY_CARD, USER_CANCEL_REASON_QUEUE_API,
-    is_user_cancel_reason,
+    SUPERSEDE_REASON_REDISPATCH_CARD, SUPERSEDE_REASON_RESUME, SUPERSEDE_REASON_RETRY_CARD,
+    SYSTEM_CANCEL_REASON_SCOPE_MISMATCH_CLOSED, SYSTEM_CANCEL_REASON_TERMINAL_CARD,
+    SYSTEM_CANCEL_REASON_TRANSITION_INTENT, USER_CANCEL_REASON_QUEUE_API,
+    USER_CANCEL_REASON_REVIEW_DISMISS, is_system_cancel_reason, is_user_cancel_reason,
 };
 pub use dispatch_cancel::{
     cancel_dispatch_and_reset_auto_queue_on_pg, cancel_dispatch_and_reset_auto_queue_on_pg_tx,

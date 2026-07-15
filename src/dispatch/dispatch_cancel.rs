@@ -10,8 +10,19 @@ use sqlx::{PgPool, Row as SqlxRow};
 const USER_CANCEL_REASONS: &[&str] = &["turn_bridge_cancelled"];
 
 pub(crate) const USER_CANCEL_REASON_QUEUE_API: &str = "user_cancelled_by_queue_api";
+pub(crate) const USER_CANCEL_REASON_REVIEW_DISMISS: &str = "user_cancelled_by_review_dismiss";
 pub(crate) const SUPERSEDE_REASON_RETRY_CARD: &str = "superseded_by_retry_card";
 pub(crate) const SUPERSEDE_REASON_REDISPATCH_CARD: &str = "superseded_by_redispatch_card";
+pub(crate) const SUPERSEDE_REASON_RESUME: &str = "superseded_by_resume";
+pub(crate) const SYSTEM_CANCEL_REASON_TERMINAL_CARD: &str = "auto_cancelled_on_terminal_card";
+pub(crate) const SYSTEM_CANCEL_REASON_TRANSITION_INTENT: &str = "transition_intent_cancel";
+pub(crate) const SYSTEM_CANCEL_REASON_SCOPE_MISMATCH_CLOSED: &str = "scope_mismatch_closed";
+
+const SYSTEM_CANCEL_REASONS: &[&str] = &[
+    SYSTEM_CANCEL_REASON_TERMINAL_CARD,
+    SYSTEM_CANCEL_REASON_TRANSITION_INTENT,
+    SYSTEM_CANCEL_REASON_SCOPE_MISMATCH_CLOSED,
+];
 
 /// Returns true when the supplied cancel reason represents a user /
 /// external explicit stop. Matches either an exact reason in
@@ -33,6 +44,20 @@ pub(crate) fn is_user_cancel_reason(reason: Option<&str>) -> bool {
         return true;
     }
     trimmed.starts_with("user_")
+}
+
+/// Returns true when the supplied reason proves that a system transition
+/// intentionally made the queued dispatch ineligible to run. These reasons
+/// are deliberately exact-match: unrelated internal failures remain ambiguous
+/// and their queued instructions must not be discarded.
+pub(crate) fn is_system_cancel_reason(reason: Option<&str>) -> bool {
+    let Some(reason) = reason else {
+        return false;
+    };
+    let trimmed = reason.trim();
+    SYSTEM_CANCEL_REASONS
+        .iter()
+        .any(|candidate| *candidate == trimmed)
 }
 
 pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(

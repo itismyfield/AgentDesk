@@ -237,8 +237,12 @@ pub async fn dismiss_review_cleanup(pool: &PgPool, card_id: &str) -> Result<(), 
     .map_err(|error| format!("load dismiss cleanup dispatches for {card_id}: {error}"))?;
 
     for dispatch_id in &dispatch_ids {
-        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(&mut tx, dispatch_id, None)
-            .await?;
+        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+            &mut tx,
+            dispatch_id,
+            Some(crate::dispatch::USER_CANCEL_REASON_REVIEW_DISMISS),
+        )
+        .await?;
     }
 
     let clear_review_status = crate::engine::transition::TransitionIntent::SetReviewStatus {
