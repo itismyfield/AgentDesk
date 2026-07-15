@@ -3049,9 +3049,7 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
     match kind {
         QueueExitKind::Cancelled => "🚫 **큐에서 제거됨** — 사용자 취소로 처리되지 않습니다.",
         QueueExitKind::Expired => "⌛ **큐에서 제거됨** — 대기 시간 초과로 처리되지 않습니다.",
-        QueueExitKind::Superseded => {
-            "⏏ **큐에서 제거됨** — 후속 메시지로 대체되어 처리되지 않습니다."
-        }
+        QueueExitKind::Superseded => "⏏ **큐에서 제거됨** — 후속 메시지로 대체되어 제외됐습니다.",
         QueueExitKind::Overflow => "⏏ **큐에서 제거됨** — 큐 용량을 초과하여 처리되지 않습니다.",
     }
 }
