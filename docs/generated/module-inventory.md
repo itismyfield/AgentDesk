@@ -986,7 +986,7 @@
 | `services::pipeline_override` | `src/services/pipeline_override.rs` | 1001 | 333 | 668 |  |
 | `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 863 | 672 | 191 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 26 | 26 | 0 |  |
-| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1572 | 1396 | 176 | giant-file |
+| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1545 | 1392 | 153 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 97 | 97 | 0 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 49 | 49 | 0 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 1237 | 926 | 311 |  |
@@ -1005,7 +1005,7 @@
 | `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 248 | 248 | 0 |  |
 | `services::provider_cli::retention` | `src/services/provider_cli/retention.rs` | 91 | 91 | 0 |  |
 | `services::provider_cli::session_guard` | `src/services/provider_cli/session_guard.rs` | 199 | 199 | 0 |  |
-| `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 222 | 173 | 49 |  |
+| `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 213 | 169 | 44 |  |
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 74 | 74 | 0 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 637 | 637 | 0 |  |
 | `services::provider_error_transcript` | `src/services/provider_error_transcript.rs` | 87 | 48 | 39 |  |

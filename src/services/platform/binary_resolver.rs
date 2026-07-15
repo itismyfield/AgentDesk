@@ -785,14 +785,14 @@ where
     output
 }
 
-fn configure_version_probe_command(
-    command: &mut Command,
-    resolution: &BinaryResolution,
-    claude_gateway_env: impl FnOnce() -> crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv,
-) {
+fn configure_version_probe_command(command: &mut Command, resolution: &BinaryResolution) {
     apply_binary_resolution(command, resolution);
     if resolution.requested_binary == "claude" {
-        claude_gateway_env().apply_to_command(command);
+        // `--version` never routes models or spawns subagents, so probes always run
+        // native (Scrub), independent of gateway/config state. Turn launches use
+        // `resolve_for_launch` elsewhere.
+        crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv::Scrub
+            .apply_to_command(command);
     }
 }
 
@@ -801,11 +801,7 @@ pub fn probe_resolved_binary_version(
     resolution: &BinaryResolution,
 ) -> (Option<String>, Option<String>) {
     let mut command = Command::new(binary_path);
-    configure_version_probe_command(
-        &mut command,
-        resolution,
-        crate::services::claude_gateway_proxy::resolve_for_launch,
-    );
+    configure_version_probe_command(&mut command, resolution);
     command.arg("--version");
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -1398,10 +1394,7 @@ fn record_context_launch_artifact(
 mod tests {
     use super::*;
 
-    fn configured_probe_env(
-        provider: &str,
-        gateway_env: crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv,
-    ) -> HashMap<String, Option<String>> {
+    fn configured_probe_env(provider: &str) -> HashMap<String, Option<String>> {
         let resolution = BinaryResolution {
             requested_binary: provider.to_string(),
             resolved_path: Some(format!("/test/bin/{provider}")),
@@ -1418,7 +1411,7 @@ mod tests {
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
                 "inherited-value",
             );
-        configure_version_probe_command(&mut command, &resolution, || gateway_env);
+        configure_version_probe_command(&mut command, &resolution);
         command
             .get_envs()
             .map(|(key, value)| {
@@ -1431,36 +1424,16 @@ mod tests {
     }
 
     #[test]
-    fn version_probe_applies_gateway_env_only_for_claude() {
-        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
-            false,
-            "http://proxy.example:8765",
-            true,
-        );
-        let claude_env = configured_probe_env("claude", scrub.clone());
+    fn version_probe_scrubs_gateway_env_only_for_claude() {
+        let claude_env = configured_probe_env("claude");
         assert_eq!(claude_env.get("ANTHROPIC_BASE_URL"), Some(&None));
         assert_eq!(
             claude_env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&None)
         );
 
-        let inject = crate::services::claude_gateway_proxy::launch_env_for_test(
-            true,
-            "http://proxy.example:8765",
-            true,
-        );
-        let claude_env = configured_probe_env("claude", inject);
-        assert_eq!(
-            claude_env.get("ANTHROPIC_BASE_URL"),
-            Some(&Some("http://proxy.example:8765".to_string()))
-        );
-        assert_eq!(
-            claude_env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-            Some(&Some("1".to_string()))
-        );
-
         for provider in ["codex", "qwen"] {
-            let provider_env = configured_probe_env(provider, scrub.clone());
+            let provider_env = configured_probe_env(provider);
             assert_eq!(
                 provider_env.get("ANTHROPIC_BASE_URL"),
                 Some(&Some("http://inherited.example:9999".to_string()))

@@ -21,11 +21,7 @@ impl<'a> CheckRunner<'a> {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         crate::services::platform::augment_exec_path(&mut command, self.canonical_path);
-        configure_version_probe_command(
-            &mut command,
-            self.provider,
-            crate::services::claude_gateway_proxy::resolve_for_launch,
-        );
+        configure_version_probe_command(&mut command, self.provider);
 
         match run_command_status_with_timeout(command, SMOKE_TIMEOUT) {
             Ok(true) => SmokeCheckStatus::Ok,
@@ -61,13 +57,13 @@ impl<'a> CheckRunner<'a> {
     }
 }
 
-fn configure_version_probe_command(
-    command: &mut Command,
-    provider: &str,
-    claude_gateway_env: impl FnOnce() -> crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv,
-) {
+fn configure_version_probe_command(command: &mut Command, provider: &str) {
     if provider == "claude" {
-        claude_gateway_env().apply_to_command(command);
+        // `--version` never routes models or spawns subagents, so probes always run
+        // native (Scrub), independent of gateway/config state. Turn launches use
+        // `resolve_for_launch` elsewhere.
+        crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv::Scrub
+            .apply_to_command(command);
     }
 }
 
@@ -183,12 +179,7 @@ mod tests {
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
                 "inherited-value",
             );
-        let gateway_env = crate::services::claude_gateway_proxy::launch_env_for_test(
-            false,
-            "http://proxy.example:8765",
-            true,
-        );
-        configure_version_probe_command(&mut command, provider, || gateway_env);
+        configure_version_probe_command(&mut command, provider);
         command
             .get_envs()
             .map(|(key, value)| {
