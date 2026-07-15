@@ -14,7 +14,9 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::INTERVENTION_DEDUP_WINDOW;
+use crate::services::turn_orchestrator::{
+    INTERVENTION_DEDUP_WINDOW, SourceMessageQueuedGeneration,
+};
 
 use super::*;
 
@@ -1254,6 +1256,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 continue;
             }
 
+            let queued_generation =
+                crate::services::discord::runtime_store::load_generation();
+            let source_generation = if msg.author.bot {
+                SourceMessageQueuedGeneration::new(msg.id, queued_generation)
+            } else {
+                SourceMessageQueuedGeneration::user_instruction(msg.id, queued_generation)
+            };
             let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
@@ -1262,9 +1271,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     author_id: msg.author.id,
                     author_is_bot: msg.author.bot,
                     message_id: msg.id,
-                    queued_generation: crate::services::discord::runtime_store::load_generation(),
+                    queued_generation,
                     source_message_ids: vec![msg.id],
-                    source_message_queued_generations: Vec::new(),
+                    source_message_queued_generations: vec![source_generation],
                     source_text_segments: Vec::new(),
                     text: text.clone(),
                     mode: InterventionMode::Soft,
@@ -1615,6 +1624,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 break;
             }
 
+            let queued_generation =
+                crate::services::discord::runtime_store::load_generation();
+            let source_generation = if msg.author.bot {
+                SourceMessageQueuedGeneration::new(msg.id, queued_generation)
+            } else {
+                SourceMessageQueuedGeneration::user_instruction(msg.id, queued_generation)
+            };
             let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
@@ -1623,9 +1639,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     author_id: msg.author.id,
                     author_is_bot: msg.author.bot,
                     message_id: msg.id,
-                    queued_generation: crate::services::discord::runtime_store::load_generation(),
+                    queued_generation,
                     source_message_ids: vec![msg.id],
-                    source_message_queued_generations: Vec::new(),
+                    source_message_queued_generations: vec![source_generation],
                     source_text_segments: Vec::new(),
                     text: text.to_string(),
                     mode: InterventionMode::Soft,

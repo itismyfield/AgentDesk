@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use poise::serenity_prelude as serenity;
 
 use super::super::{Intervention, InterventionMode, MailboxEnqueueOutcome};
+use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 use crate::services::turn_orchestrator::EnqueueRefusalReason;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,13 +111,19 @@ pub(super) struct SoftInterventionSpec {
 
 impl SoftInterventionSpec {
     pub(super) fn into_intervention(self) -> Intervention {
+        let queued_generation = crate::services::discord::runtime_store::load_generation();
+        let source_generation = if self.author_is_bot {
+            SourceMessageQueuedGeneration::new(self.message_id, queued_generation)
+        } else {
+            SourceMessageQueuedGeneration::user_instruction(self.message_id, queued_generation)
+        };
         Intervention {
             author_id: self.author_id,
             author_is_bot: self.author_is_bot,
             message_id: self.message_id,
-            queued_generation: crate::services::discord::runtime_store::load_generation(),
+            queued_generation,
             source_message_ids: vec![self.message_id],
-            source_message_queued_generations: Vec::new(),
+            source_message_queued_generations: vec![source_generation],
             source_text_segments: Vec::new(),
             text: self.text,
             mode: InterventionMode::Soft,
@@ -564,6 +571,16 @@ mod tests {
             stt_mode: Some("file".to_string()),
             stt_latency_ms: Some(120),
         }
+    }
+
+    #[test]
+    fn only_human_intake_sets_cancel_preservation_marker() {
+        let human = request(Default::default()).intervention.into_intervention();
+        assert!(human.preserve_on_cancel());
+
+        let mut bot = request(Default::default()).intervention;
+        bot.author_is_bot = true;
+        assert!(!bot.into_intervention().preserve_on_cancel());
     }
 
     #[tokio::test]

@@ -161,13 +161,19 @@ fn truncate_instruction_for_label(instruction: &str) -> String {
 /// Build the standalone `Soft` intervention for a steer request. Pure; pinned by
 /// unit tests so the never-merged / single-source-id contract can't drift.
 fn build_steer_intervention(request: &SteeringRequest) -> Intervention {
+    let queued_generation = crate::services::discord::runtime_store::load_generation();
     Intervention {
         author_id: request.author_id,
         author_is_bot: false,
         message_id: request.source_id,
-        queued_generation: crate::services::discord::runtime_store::load_generation(),
+        queued_generation,
         source_message_ids: vec![request.source_id],
-        source_message_queued_generations: Vec::new(),
+        source_message_queued_generations: vec![
+            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                request.source_id,
+                queued_generation,
+            ),
+        ],
         source_text_segments: Vec::new(),
         text: request.instruction.clone(),
         mode: InterventionMode::Soft,

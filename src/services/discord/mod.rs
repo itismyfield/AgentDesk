@@ -249,7 +249,8 @@ pub use discord_io::{
 };
 pub(in crate::services::discord) use dispatch_policy::{
     is_allowed_turn_sender, prepend_monitor_auto_turn_origin, resolve_announce_bot_user_id,
-    resolve_notify_bot_user_id, should_phase2_recover_message, stale_dispatch_turn_for_text,
+    resolve_notify_bot_user_id, should_phase2_recover_message,
+    stale_dispatch_turn_for_queued_intervention, stale_dispatch_turn_for_text,
     strip_monitor_auto_turn_origin,
 };
 pub(crate) use inflight::latest_request_owner_user_id_for_channel;
@@ -3536,8 +3537,11 @@ async fn mailbox_take_next_soft_intervention(
             };
         };
 
-        if let Some(stale) =
-            stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), &intervention.text).await
+        if let Some(stale) = stale_dispatch_turn_for_queued_intervention(
+            shared.pg_pool.as_ref(),
+            &intervention,
+        )
+        .await
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(

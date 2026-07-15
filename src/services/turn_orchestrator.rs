@@ -65,6 +65,9 @@ pub(crate) enum InterventionMode {
 pub(crate) struct SourceMessageQueuedGeneration {
     pub(crate) message_id: MessageId,
     pub(crate) queued_generation: u64,
+    /// Positive, per-source proof that this queued payload came from a
+    /// genuine user instruction. Unmarked sources retain drop-on-exit.
+    pub(crate) preserve_on_cancel: bool,
 }
 
 impl SourceMessageQueuedGeneration {
@@ -72,6 +75,15 @@ impl SourceMessageQueuedGeneration {
         Self {
             message_id,
             queued_generation,
+            preserve_on_cancel: false,
+        }
+    }
+
+    pub(crate) fn user_instruction(message_id: MessageId, queued_generation: u64) -> Self {
+        Self {
+            message_id,
+            queued_generation,
+            preserve_on_cancel: true,
         }
     }
 }
@@ -120,6 +132,12 @@ pub(crate) struct Intervention {
 }
 
 impl Intervention {
+    pub(crate) fn preserve_on_cancel(&self) -> bool {
+        self.source_message_queued_generations
+            .iter()
+            .any(|source| source.preserve_on_cancel)
+    }
+
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
         let source_message_ids = if self.source_message_ids.is_empty() {
             vec![self.message_id]
@@ -6617,7 +6635,7 @@ mod persistence_tests {
         intervention.queued_generation = 72;
         intervention.source_message_ids = vec![source_a, source_b];
         intervention.source_message_queued_generations = vec![
-            SourceMessageQueuedGeneration::new(source_a, 71),
+            SourceMessageQueuedGeneration::user_instruction(source_a, 71),
             SourceMessageQueuedGeneration::new(source_b, 72),
         ];
 
@@ -6640,6 +6658,7 @@ mod persistence_tests {
             saved[0].source_message_queued_generations[0].queued_generation,
             71
         );
+        assert!(saved[0].source_message_queued_generations[0].preserve_on_cancel);
         assert_eq!(
             saved[0].source_message_queued_generations[1].message_id,
             source_b.get()
@@ -6654,9 +6673,15 @@ mod persistence_tests {
         assert_eq!(
             loaded_sources
                 .iter()
-                .map(|source| (source.message_id, source.queued_generation))
+                .map(|source| {
+                    (
+                        source.message_id,
+                        source.queued_generation,
+                        source.preserve_on_cancel,
+                    )
+                })
                 .collect::<Vec<_>>(),
-            vec![(source_a, 71), (source_b, 72)]
+            vec![(source_a, 71, true), (source_b, 72, false)]
         );
     }
 
