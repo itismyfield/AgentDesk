@@ -3740,16 +3740,16 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
     // context, attachments, and voice metadata. Legacy rows (pre-v9) default
     // these to None/empty/false, matching the previous behavior exactly.
     // #4247 FIX 2: rebuild the mark from the persisted `followup_preserve_on_cancel`
-    // decision instead of unconditionally leaving the source generations empty
-    // (unmarked). An unmarked reconstruction regresses a genuine-human-marked
-    // instruction to origin/main's drop-on-cancel behavior once it hits the
-    // preservation-aware dispatch-cancel guards downstream.
+    // decision; leaving it unmarked would regress a genuine-human-marked instruction
+    // to origin/main's drop-on-cancel behavior at the downstream preservation guards.
     let queued_generation = shared.restart.current_generation;
     let source_message_queued_generations = if inflight_state.followup_preserve_on_cancel {
-        vec![crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
-            message_id,
-            queued_generation,
-        )]
+        vec![
+            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                message_id,
+                queued_generation,
+            ),
+        ]
     } else {
         Vec::new()
     };
