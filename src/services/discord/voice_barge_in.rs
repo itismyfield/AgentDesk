@@ -45,8 +45,11 @@ use super::voice_id_sequences::VoiceIdSequences;
 use super::voice_sensitivity::SensitivityState;
 use super::{SharedData, http, mailbox_has_active_turn, rate_limit_wait, settings};
 
+#[path = "voice_barge_in/channel_state.rs"]
+mod channel_state;
 #[path = "voice_barge_in/final_result_playback.rs"]
 mod final_result_playback;
+use channel_state::VoiceChannelStateMachines;
 #[path = "voice_barge_in/foreground_decision.rs"]
 mod foreground_decision;
 // S8 (#3038): the foreground decision/parser cluster moved into the
@@ -928,12 +931,10 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     streaming_stt_enabled: AtomicBool,
     tts: RwLock<Option<TtsRuntime>>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
-    monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
-    playbacks: dashmap::DashMap<u64, Arc<LivePlaybackSession>>,
-    spoken_result_playbacks: dashmap::DashMap<u64, SpokenResultPlaybackSession>,
-    voice_guilds: dashmap::DashMap<u64, GuildId>,
-    active_voice_routes: dashmap::DashMap<u64, ActiveVoiceRoute>,
-    deferred_buffers: dashmap::DashMap<u64, Arc<Mutex<DeferredBargeInBuffer>>>,
+    // #4240: all channel-keyed connection/playback/routing/cancel state is
+    // owned by one explicit per-channel state-machine component. Its resource
+    // maps preserve the pre-extraction DashMap operations and lock ordering.
+    channels: VoiceChannelStateMachines,
     // #3038: monotonic ID 발급 관심사를 sub-struct 로 격리. 세 카운터(spoken
     // result / progress playback / internal message)의 seed 값과 memory
     // Ordering 을 그대로 보존한다.
@@ -951,8 +952,6 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // explicit-stop barge-in, supersession by a new utterance, or shutdown
     // can terminate the spawned child mid-flight rather than waiting for
     // natural exit.
-    inflight_foreground_cancels:
-        dashmap::DashMap<u64, Vec<Arc<crate::services::provider::CancelToken>>>,
     #[cfg(test)]
     test_state: Arc<VoiceBargeInTestState>,
 }
@@ -1036,16 +1035,10 @@ impl VoiceBargeInRuntime {
             streaming_stt: StreamingSttSessions::new(),
             tts: RwLock::new(tts),
             progress_tx,
-            monitors: dashmap::DashMap::new(),
-            playbacks: dashmap::DashMap::new(),
-            spoken_result_playbacks: dashmap::DashMap::new(),
-            voice_guilds: dashmap::DashMap::new(),
-            active_voice_routes: dashmap::DashMap::new(),
-            deferred_buffers: dashmap::DashMap::new(),
+            channels: VoiceChannelStateMachines::new(),
             id_sequences: VoiceIdSequences::new(),
             config_cache: ConfigSnapshotCache::new(),
             alias_collision_signature: std::sync::Mutex::new(None),
-            inflight_foreground_cancels: dashmap::DashMap::new(),
             #[cfg(test)]
             test_state: Arc::new(VoiceBargeInTestState::default()),
         }
@@ -1068,16 +1061,10 @@ impl VoiceBargeInRuntime {
             streaming_stt_enabled: AtomicBool::new(false),
             tts: RwLock::new(None),
             progress_tx,
-            monitors: dashmap::DashMap::new(),
-            playbacks: dashmap::DashMap::new(),
-            spoken_result_playbacks: dashmap::DashMap::new(),
-            voice_guilds: dashmap::DashMap::new(),
-            active_voice_routes: dashmap::DashMap::new(),
-            deferred_buffers: dashmap::DashMap::new(),
+            channels: VoiceChannelStateMachines::new(),
             id_sequences: VoiceIdSequences::new(),
             config_cache: ConfigSnapshotCache::new(),
             alias_collision_signature: std::sync::Mutex::new(None),
-            inflight_foreground_cancels: dashmap::DashMap::new(),
             #[cfg(test)]
             test_state: Arc::new(VoiceBargeInTestState::default()),
         }
@@ -1214,7 +1201,8 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         token: Arc<crate::services::provider::CancelToken>,
     ) {
-        self.inflight_foreground_cancels
+        self.channels
+            .inflight_foreground_cancels
             .entry(channel_id.get())
             .or_default()
             .push(token);
@@ -1227,10 +1215,15 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         token: &Arc<crate::services::provider::CancelToken>,
     ) {
-        if let Some(mut entry) = self.inflight_foreground_cancels.get_mut(&channel_id.get()) {
+        if let Some(mut entry) = self
+            .channels
+            .inflight_foreground_cancels
+            .get_mut(&channel_id.get())
+        {
             entry.retain(|existing| !Arc::ptr_eq(existing, token));
         }
-        self.inflight_foreground_cancels
+        self.channels
+            .inflight_foreground_cancels
             .remove_if(&channel_id.get(), |_, value| value.is_empty());
     }
 
@@ -1251,7 +1244,11 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         reason: &'static str,
     ) -> usize {
-        let Some((_, tokens)) = self.inflight_foreground_cancels.remove(&channel_id.get()) else {
+        let Some((_, tokens)) = self
+            .channels
+            .inflight_foreground_cancels
+            .remove(&channel_id.get())
+        else {
             return 0;
         };
         let count = tokens.len();
@@ -1466,43 +1463,22 @@ impl VoiceBargeInRuntime {
         config.wake_words.clone()
     }
 
-    pub(in crate::services::discord) fn register_voice_context(
-        &self,
-        control_channel_id: ChannelId,
-        guild_id: GuildId,
-    ) {
-        if self.enabled {
-            self.voice_guilds.insert(control_channel_id.get(), guild_id);
-        }
-    }
-
     pub(in crate::services::discord) async fn unregister_voice_guild(&self, guild_id: GuildId) {
         // F7 (#2046): voice_guilds 만 지우면 channel_id 키로 적재된 monitors /
         // playbacks / spoken_result_playbacks / active_voice_routes /
         // deferred_buffers 가 남아 join/leave 반복 시 누수. 같은 guild 의 모든
         // control_channel_id 를 먼저 수집해 채널 단위 state 도 함께 정리한다.
-        let stale_channels: Vec<u64> = self
-            .voice_guilds
-            .iter()
-            .filter_map(|entry| {
-                if *entry.value() == guild_id {
-                    Some(*entry.key())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        self.voice_guilds
-            .retain(|_, registered_guild_id| *registered_guild_id != guild_id);
+        let stale_channels = self.channels.remove_guild_contexts(guild_id);
         // #3910: outer handles for the leaving channels, collected so the inner
         // WhisperStream sessions can be discarded after the sync teardown loop.
         let mut stranded_stream_sessions: Vec<SttSessionHandle> = Vec::new();
         for channel_id in stale_channels {
-            self.monitors.remove(&channel_id);
-            if let Some((_, session)) = self.playbacks.remove(&channel_id) {
+            self.channels.disconnected(ChannelId::new(channel_id));
+            self.channels.monitors.remove(&channel_id);
+            if let Some((_, session)) = self.channels.playbacks.remove(&channel_id) {
                 session.cancellation.cancel();
             }
-            if let Some((_, session)) = self.spoken_result_playbacks.remove(&channel_id) {
+            if let Some((_, session)) = self.channels.spoken_result_playbacks.remove(&channel_id) {
                 session.cancellation.cancel();
             }
             // #2250: also abort any in-flight foreground Codex/Claude call so
@@ -1511,14 +1487,15 @@ impl VoiceBargeInRuntime {
                 ChannelId::new(channel_id),
                 "voice_guild_teardown",
             );
-            self.active_voice_routes.remove(&channel_id);
-            self.deferred_buffers.remove(&channel_id);
+            self.channels.active_voice_routes.remove(&channel_id);
+            self.channels.deferred_buffers.remove(&channel_id);
             // #3910: a speaker leaving the channel mid-utterance otherwise leaves
             // its streaming-STT session + feed-task bucket stranded in the maps
             // (they were only reaped at utterance completion). Drop the outer
             // bucket + abort pending feed tasks here, and collect the outer
             // handles so the inner stream session is reaped below too.
             stranded_stream_sessions.extend(self.streaming_stt.remove_channel(channel_id));
+            self.channels.forget(channel_id);
         }
         // #3910: dropping the outer `SttSessionHandle` alone leaves the matching
         // inner `WhisperStream` session (inserted by `start_session`, removed
@@ -1549,16 +1526,7 @@ impl VoiceBargeInRuntime {
         &self,
         guild_id: GuildId,
     ) -> Vec<u64> {
-        self.voice_guilds
-            .iter()
-            .filter_map(|entry| {
-                if *entry.value() == guild_id {
-                    Some(*entry.key())
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.channels.channel_ids_for_guild(guild_id)
     }
 
     pub(in crate::services::discord) fn spawn_sensitivity_ttl_reset(
@@ -1635,6 +1603,7 @@ impl VoiceBargeInRuntime {
         // only active work is a foreground call, otherwise barge-in cannot
         // reach the registered cancel token.
         let has_inflight_foreground = self
+            .channels
             .inflight_foreground_cancels
             .get(&channel_id.get())
             .is_some_and(|entry| !entry.value().is_empty());
@@ -1652,6 +1621,7 @@ impl VoiceBargeInRuntime {
             .verify_processing_barge_in_after_stt(transcript);
         match decision {
             ProcessingBargeInDecision::AbortAgent => {
+                self.channels.barged_in(channel_id);
                 // #2250: also cancel any in-flight foreground/voice Codex
                 // call so its child process is killed mid-flight, not just
                 // the background turn.
@@ -1668,7 +1638,7 @@ impl VoiceBargeInRuntime {
                 // F22 (#2046): 사후 분석 라벨 강화. transcript 글자 수, 현재
                 // sensitivity, 활성 progress playback 보유 여부.
                 let sensitivity = self.current_sensitivity();
-                let playback_active = self.playbacks.contains_key(&channel_id.get());
+                let playback_active = self.channels.playbacks.contains_key(&channel_id.get());
                 tracing::info!(
                     channel_id = channel_id.get(),
                     cancel_channel_id = cancel_channel.get(),
@@ -2041,6 +2011,7 @@ impl VoiceBargeInRuntime {
             crate::voice::prompt::append_voice_background_handoff_marker(&prompt, &correlation_id);
         let generation = default_voice_announce_generation() + 1;
         let agent_id = self
+            .channels
             .active_voice_routes
             .get(&source_channel_id.get())
             .map(|entry| entry.agent_id.clone());
@@ -2535,7 +2506,11 @@ impl VoiceBargeInRuntime {
                 event.foreground_provider = Some(foreground.provider.clone());
                 event.foreground_model = Some(foreground.model.clone());
                 event.foreground_decision = Some("queued_foreground_trigger".to_string());
-                if let Some(route) = self.active_voice_routes.get(&source_channel_id.get()) {
+                if let Some(route) = self
+                    .channels
+                    .active_voice_routes
+                    .get(&source_channel_id.get())
+                {
                     event.agent_id = Some(route.agent_id.clone());
                 }
                 record_voice_flight_event(event);
@@ -2672,6 +2647,7 @@ impl VoiceBargeInRuntime {
         // would bypass `handle_processing_transcript` and never cancel the
         // spawned child.
         let has_inflight_foreground = self
+            .channels
             .inflight_foreground_cancels
             .get(&source_channel_id.get())
             .is_some_and(|entry| !entry.value().is_empty());
@@ -2716,7 +2692,11 @@ impl VoiceBargeInRuntime {
                     event
                 }
             };
-            if let Some(route) = self.active_voice_routes.get(&source_channel_id.get()) {
+            if let Some(route) = self
+                .channels
+                .active_voice_routes
+                .get(&source_channel_id.get())
+            {
                 event.agent_id = Some(route.agent_id.clone());
                 event.background_channel_id = Some(route.channel_id.get());
             }
@@ -2805,6 +2785,7 @@ impl VoiceBargeInRuntime {
 
     async fn take_deferred_prompt(&self, channel_id: ChannelId) -> Option<DeferredBargeInDrain> {
         let buffer = self
+            .channels
             .deferred_buffers
             .get(&channel_id.get())
             .map(|entry| entry.value().clone())?;
@@ -2821,7 +2802,8 @@ impl VoiceBargeInRuntime {
     }
 
     fn buffer_for_channel(&self, channel_id: ChannelId) -> Arc<Mutex<DeferredBargeInBuffer>> {
-        self.deferred_buffers
+        self.channels
+            .deferred_buffers
             .entry(channel_id.get())
             .or_insert_with(|| Arc::new(Mutex::new(DeferredBargeInBuffer::new())))
             .clone()
@@ -3344,7 +3326,7 @@ mod tests {
         source_channel: ChannelId,
         target_channel: ChannelId,
     ) {
-        runtime.active_voice_routes.insert(
+        runtime.channels.active_voice_routes.insert(
             source_channel.get(),
             ActiveVoiceRoute {
                 agent_id: "project-agentdesk".to_string(),
@@ -4012,6 +3994,7 @@ mod tests {
         // Wait until the spawned task has registered the token.
         loop {
             if runtime
+                .channels
                 .inflight_foreground_cancels
                 .contains_key(&channel.get())
             {
@@ -4026,6 +4009,7 @@ mod tests {
 
         assert!(
             !runtime
+                .channels
                 .inflight_foreground_cancels
                 .contains_key(&channel.get()),
             "#3911: aborting the in-flight foreground future must unregister the \
@@ -4036,6 +4020,7 @@ mod tests {
         // (voice_barge_in.rs has_inflight_foreground): it must now be false, so a
         // subsequent fresh utterance is NOT routed down the barge-in/abort path.
         let has_inflight_foreground = runtime
+            .channels
             .inflight_foreground_cancels
             .get(&channel.get())
             .is_some_and(|entry| !entry.value().is_empty());
@@ -4061,6 +4046,7 @@ mod tests {
         let guard = InflightForegroundCancelGuard::register(&runtime, channel, token.clone());
         assert!(
             runtime
+                .channels
                 .inflight_foreground_cancels
                 .contains_key(&channel.get()),
             "constructing the guard must register the token"
@@ -4079,6 +4065,7 @@ mod tests {
         drop(guard);
         assert!(
             !runtime
+                .channels
                 .inflight_foreground_cancels
                 .contains_key(&channel.get()),
             "registry stays drained after a genuine barge-in followed by guard drop"
@@ -4435,7 +4422,7 @@ mod tests {
     #[tokio::test]
     async fn voice_channel_for_background_prefers_active_runtime_route() {
         let runtime = enabled_runtime();
-        runtime.active_voice_routes.insert(
+        runtime.channels.active_voice_routes.insert(
             301,
             ActiveVoiceRoute {
                 agent_id: "project-agentdesk".to_string(),
@@ -4458,7 +4445,7 @@ mod tests {
         let shared = voice_handoff_shared_for_tests();
         let source_channel_id = ChannelId::new(301);
         let target_channel_id = ChannelId::new(201);
-        runtime.active_voice_routes.insert(
+        runtime.channels.active_voice_routes.insert(
             source_channel_id.get(),
             ActiveVoiceRoute {
                 agent_id: "project-agentdesk".to_string(),
@@ -4488,7 +4475,7 @@ mod tests {
         let shared = voice_handoff_shared_for_tests();
         let source_channel_id = ChannelId::new(301);
         let target_channel_id = ChannelId::new(201);
-        runtime.active_voice_routes.insert(
+        runtime.channels.active_voice_routes.insert(
             source_channel_id.get(),
             ActiveVoiceRoute {
                 agent_id: "project-agentdesk".to_string(),
@@ -4668,7 +4655,7 @@ mod tests {
     async fn voice_channel_for_background_fail_closed_on_multi_active_route_without_disambiguator()
     {
         let runtime = enabled_runtime();
-        runtime.active_voice_routes.insert(
+        runtime.channels.active_voice_routes.insert(
             301,
             ActiveVoiceRoute {
                 agent_id: "agent-a".to_string(),
@@ -4676,7 +4663,7 @@ mod tests {
                 updated_at: Instant::now(),
             },
         );
-        runtime.active_voice_routes.insert(
+        runtime.channels.active_voice_routes.insert(
             401,
             ActiveVoiceRoute {
                 agent_id: "agent-b".to_string(),
@@ -4719,7 +4706,7 @@ mod tests {
             Some(BargeInSensitivity::Conservative)
         );
 
-        let monitor = runtime.monitors.get(&42).unwrap().value().clone();
+        let monitor = runtime.channels.monitors.get(&42).unwrap().value().clone();
         assert_eq!(
             lock_monitor(&monitor).sensitivity(),
             BargeInSensitivity::Conservative
@@ -4730,9 +4717,14 @@ mod tests {
     fn live_pcm_observation_stops_registered_player_and_cancels_token() {
         let runtime = enabled_runtime();
         let channel_id = ChannelId::new(42);
+        runtime.voice_connected(channel_id, GuildId::new(7));
         let player = Arc::new(MockPlayer::default());
         let cancellation = CancellationToken::new();
         runtime.reset_after_playback_start(channel_id, player.clone(), cancellation.clone());
+        assert_eq!(
+            runtime.channels.phase(channel_id),
+            channel_state::VoiceChannelPhase::Speaking
+        );
 
         let loud = [16_384, -16_384, 16_384, -16_384];
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
@@ -4743,6 +4735,11 @@ mod tests {
         assert_eq!(owner, None);
         assert_eq!(player.stops.load(Ordering::SeqCst), 1);
         assert!(cancellation.is_cancelled());
+        assert_eq!(
+            runtime.channels.phase(channel_id),
+            channel_state::VoiceChannelPhase::BargedIn,
+            "a detected live cut must drive the production channel state transition"
+        );
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
     }
 
@@ -4794,7 +4791,7 @@ mod tests {
         assert_eq!(player.stops.load(Ordering::SeqCst), 1);
         assert!(playback_cancel.is_cancelled());
         assert!(
-            !runtime.playbacks.contains_key(&channel_id.get()),
+            !runtime.channels.playbacks.contains_key(&channel_id.get()),
             "live cut must remove the stale playback registration"
         );
         assert!(foreground_token.cancelled.load(Ordering::Relaxed));
@@ -4808,6 +4805,7 @@ mod tests {
         );
         assert!(
             !runtime
+                .channels
                 .inflight_foreground_cancels
                 .contains_key(&channel_id.get()),
             "synchronous hook cancel must drain the foreground cancel registry"
@@ -4827,10 +4825,10 @@ mod tests {
         assert!(!second_cancellation.is_cancelled());
 
         runtime.clear_spoken_result_playback_if_current(channel_id, first_id);
-        assert!(runtime.spoken_result_playbacks.contains_key(&42));
+        assert!(runtime.channels.spoken_result_playbacks.contains_key(&42));
 
         runtime.clear_spoken_result_playback_if_current(channel_id, second_id);
-        assert!(!runtime.spoken_result_playbacks.contains_key(&42));
+        assert!(!runtime.channels.spoken_result_playbacks.contains_key(&42));
     }
 
     #[tokio::test]
@@ -4931,7 +4929,7 @@ mod tests {
 
         runtime.clear_playback_if_owner(channel_id, 1);
 
-        assert_eq!(runtime.playbacks.get(&42).unwrap().owner, Some(2));
+        assert_eq!(runtime.channels.playbacks.get(&42).unwrap().owner, Some(2));
     }
 
     // #3908 (bug B): a queued progress/chime flush must NOT steal the barge-in
@@ -4963,7 +4961,12 @@ mod tests {
             "progress must not register while a final-result playback owns the handle"
         );
         assert_eq!(
-            runtime.playbacks.get(&channel_id.get()).unwrap().owner,
+            runtime
+                .channels
+                .playbacks
+                .get(&channel_id.get())
+                .unwrap()
+                .owner,
             Some(final_id),
             "final-result playback must keep owning the barge-in handle so barge-in stops it"
         );
@@ -4987,7 +4990,12 @@ mod tests {
             "progress owns the barge-in handle when no final-result playback is active"
         );
         assert_eq!(
-            runtime.playbacks.get(&channel_id.get()).unwrap().owner,
+            runtime
+                .channels
+                .playbacks
+                .get(&channel_id.get())
+                .unwrap()
+                .owner,
             Some(555)
         );
     }

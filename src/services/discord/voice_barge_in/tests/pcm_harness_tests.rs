@@ -251,10 +251,18 @@ impl VoicePcmHarness {
         self.clear_play_requests();
         self.runtime.clear_playback(self.source_channel);
         self.runtime
+            .channels
             .spoken_result_playbacks
             .remove(&SOURCE_CHANNEL_ID);
-        self.runtime.active_voice_routes.remove(&SOURCE_CHANNEL_ID);
-        self.runtime.deferred_buffers.remove(&SOURCE_CHANNEL_ID);
+        self.runtime.channels.playback_finished(self.source_channel);
+        self.runtime
+            .channels
+            .active_voice_routes
+            .remove(&SOURCE_CHANNEL_ID);
+        self.runtime
+            .channels
+            .deferred_buffers
+            .remove(&SOURCE_CHANNEL_ID);
         self.runtime.cancel_inflight_foreground_calls(
             self.source_channel,
             "voice_pcm_harness_scenario_reset",
