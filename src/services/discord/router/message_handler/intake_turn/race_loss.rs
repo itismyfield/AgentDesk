@@ -131,7 +131,6 @@ pub(super) async fn handle_race_loss_enqueue(
         ),
     )
     .await;
-    let enqueued = enqueue_outcome.enqueued;
 
     // #4078: this is not a fresh enqueue; it is the same message being returned
     // after losing a mailbox-start race to a still-live opponent. Scheduling a
@@ -147,7 +146,7 @@ pub(super) async fn handle_race_loss_enqueue(
     // mapping insert entirely — POSTing a fresh card here would orphan
     // it. `📬` reaction is also skipped (the prior live enqueue already
     // owns the card and emoji). Just clean up `⏳` and return.
-    if !enqueued {
+    if !enqueue_outcome.enqueued {
         crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
             shared,
             http,

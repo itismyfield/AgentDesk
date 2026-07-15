@@ -1809,7 +1809,6 @@ pub(super) async fn handle_text_message(
         }
     });
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
-    let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
     let memory_recall_manifest = super::super::super::prompt_builder::MemoryRecallManifestInput {
         should_recall: memento_recall_gate.should_recall,
         gate_reason: memento_recall_gate.reason,
@@ -1824,7 +1823,7 @@ pub(super) async fn handle_text_message(
             });
     let built_system_prompt = build_system_prompt_with_manifest(
         &discord_context,
-        &channel_participants,
+        &shared.channel_roster(channel_id, request_owner, request_owner_name),
         &current_path,
         channel_id,
         memory_scope_channel_id,
