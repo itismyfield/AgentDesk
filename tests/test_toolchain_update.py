@@ -701,8 +701,46 @@ class SmokeGateTests(unittest.TestCase):
         )
 
     def test_homebrew_loose_versions_cover_tmux_and_postgresql(self) -> None:
-        self.assertEqual(update._loose_version_key("tmux 3.6a"), ((3, 6, 0), "a"))
-        self.assertEqual(update._loose_version_key("psql 17.9"), ((17, 9, 0), ""))
+        self.assertEqual(update._loose_version_key("tmux 3.6a"), ((3, 6, 0), "a", 0))
+        self.assertEqual(update._loose_version_key("psql 17.9"), ((17, 9, 0), "", 0))
+
+    def test_homebrew_revision_nine_to_ten_is_update_available(self) -> None:
+        spec = next(item for item in tool_inventory() if item.key == "gh")
+        decision = update.decide_check(
+            spec,
+            update.ValueProbe(True, "1.1.0_9", "installed"),
+            update.ValueProbe(True, "1.1.0_10", "registry"),
+        )
+
+        self.assertEqual(decision, "update-available")
+
+    def test_homebrew_revision_ten_to_nine_is_installed_newer(self) -> None:
+        spec = next(item for item in tool_inventory() if item.key == "gh")
+        decision = update.decide_check(
+            spec,
+            update.ValueProbe(True, "1.1.0_10", "installed"),
+            update.ValueProbe(True, "1.1.0_9", "registry"),
+        )
+
+        self.assertEqual(decision, "installed-newer-than-registry")
+
+    def test_homebrew_revision_zero_orders_before_one_without_loosening_equality(self) -> None:
+        spec = next(item for item in tool_inventory() if item.key == "gh")
+        decision = update.decide_check(
+            spec,
+            update.ValueProbe(True, "1.1.0", "installed"),
+            update.ValueProbe(True, "1.1.0_1", "registry"),
+        )
+
+        self.assertEqual(decision, "update-available")
+        self.assertFalse(update._same_version("1.1.0", "1.1.0_0"))
+        self.assertFalse(update._same_version("1.1.0_01", "1.1.0_1"))
+
+    def test_malformed_homebrew_revision_suffix_falls_back_without_crashing(self) -> None:
+        self.assertEqual(
+            update._loose_version_key("1.1.0_not-a-revision"),
+            ((1, 1, 0), "_not-a-revision", 0),
+        )
 
     def test_cswap_shape_accepts_fractional_age_and_rejects_drift(self) -> None:
         valid, detail = update.validate_cswap_shape(

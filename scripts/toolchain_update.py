@@ -267,12 +267,29 @@ def _version_tuple(value: str) -> tuple[int, int, int] | None:
     return tuple(map(int, match.groups())) if match else None
 
 
-def _loose_version_key(value: str) -> tuple[tuple[int, ...], str] | None:
+def _loose_version_identity(value: str) -> tuple[tuple[int, ...], str] | None:
     match = re.search(r"(?<!\d)(\d+(?:\.\d+){1,2})([0-9A-Za-z._+-]*)(?!\d)", value)
     if not match:
         return None
     numeric = tuple(int(part) for part in match.group(1).split("."))
     return numeric + (0,) * (3 - len(numeric)), match.group(2)
+
+
+def _loose_version_key(value: str) -> tuple[tuple[int, ...], str, int] | None:
+    identity = _loose_version_identity(value)
+    if identity is None:
+        return None
+    numeric, suffix = identity
+    revision_match = re.fullmatch(r"(.*)_([0-9]+)", suffix)
+    if revision_match is None:
+        # Preserve the prior lexical ordering for non-Homebrew or malformed suffixes.
+        return numeric, suffix, 0
+    try:
+        revision = int(revision_match.group(2))
+    except ValueError:
+        # Extremely long numeric-looking suffixes can exceed Python's conversion limit.
+        return numeric, suffix, 0
+    return numeric, revision_match.group(1), revision
 
 
 def decide_check(spec: ToolSpec, current: ValueProbe, latest: ValueProbe) -> str:
@@ -785,8 +802,8 @@ def _rollback_or_pin_hint(spec: ToolSpec, current: str) -> str:
 
 
 def _same_version(left: str, right: str) -> bool:
-    left_key = _loose_version_key(left)
-    right_key = _loose_version_key(right)
+    left_key = _loose_version_identity(left)
+    right_key = _loose_version_identity(right)
     return left_key == right_key if left_key is not None and right_key is not None else left == right
 
 
