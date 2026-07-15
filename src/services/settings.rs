@@ -10,6 +10,9 @@ use sqlx::Row;
 
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
+mod runtime_config_put;
+use runtime_config_put::with_explicit_runtime_config_keys;
+
 const RETIRED_SETTINGS_JSON_KEYS: &[&str] = &[
     "autoUpdateEnabled",
     "autoUpdateNoticePending",
@@ -916,17 +919,6 @@ pub(crate) fn explicit_runtime_config_keys(values: &Map<String, Value>) -> HashS
         .collect()
 }
 
-fn with_explicit_runtime_config_keys(mut values: Map<String, Value>) -> Map<String, Value> {
-    let explicit_keys = explicit_runtime_config_keys(&values);
-    let mut keys = explicit_keys.into_iter().collect::<Vec<_>>();
-    keys.sort();
-    values.insert(
-        RUNTIME_CONFIG_EXPLICIT_KEYS_META.to_string(),
-        Value::Array(keys.into_iter().map(Value::String).collect()),
-    );
-    values
-}
-
 fn write_runtime_config_pg(
     pg_pool: &sqlx::PgPool,
     values: &Map<String, Value>,
@@ -1045,7 +1037,7 @@ fn seeded_runtime_config_map(
             current.insert(key, value);
         }
     }
-    if !config.runtime.reset_overrides_on_restart && !explicit_keys.is_empty() {
+    if !config.runtime.reset_overrides_on_restart && has_explicit_meta {
         let mut keys = explicit_keys.into_iter().collect::<Vec<_>>();
         keys.sort();
         current.insert(
@@ -1303,6 +1295,24 @@ mod tests {
     }
 
     #[test]
+    fn seeded_runtime_config_preserves_intentional_empty_explicit_metadata() {
+        let mut saved_obj = runtime_config_defaults_map(&crate::config::Config::default());
+        saved_obj.insert("maxEntryRetries".to_string(), json!(8));
+        saved_obj.insert(RUNTIME_CONFIG_EXPLICIT_KEYS_META.to_string(), json!([]));
+        let mut config = crate::config::Config::default();
+        config.runtime.max_entry_retries = Some(4);
+
+        let seeded = seeded_runtime_config_map(Some(saved_obj), &config);
+
+        assert_eq!(seeded.get("maxEntryRetries"), Some(&json!(4)));
+        assert_eq!(
+            seeded.get(RUNTIME_CONFIG_EXPLICIT_KEYS_META),
+            Some(&json!([])),
+            "an empty dashboard list must remain authoritative after startup"
+        );
+    }
+
+    #[test]
     fn explicit_runtime_config_keys_respects_payload_metadata() {
         let mut values = runtime_config_defaults_map(&crate::config::Config::default());
         values.insert(
@@ -1318,14 +1328,17 @@ mod tests {
     }
 
     #[test]
-    fn explicit_runtime_config_keys_without_metadata_is_empty() {
-        let values = runtime_config_defaults_map(&crate::config::Config::default());
+    fn metadata_less_runtime_config_marks_only_known_body_keys_explicit() {
+        let values = json!({"maxEntryRetries": 7, "privateBlobField": true})
+            .as_object()
+            .cloned()
+            .expect("runtime config object");
 
-        let keys = explicit_runtime_config_keys(&values);
+        let marked = with_explicit_runtime_config_keys(values);
 
-        assert!(
-            keys.is_empty(),
-            "full saved runtime-config values are not explicit unless the metadata says so"
+        assert_eq!(
+            marked.get(RUNTIME_CONFIG_EXPLICIT_KEYS_META),
+            Some(&json!(["maxEntryRetries"]))
         );
     }
 
@@ -1384,8 +1397,25 @@ mod tests {
                 "maxEntryRetries": 7,
                 "staleDispatchedRecoverNullDispatch": false,
                 "staleDispatchedTerminalStatuses": ["failed", "expired"],
-                "__runtimeConfigExplicitKeys": []
+                "__runtimeConfigExplicitKeys": [
+                    "maxEntryRetries",
+                    "staleDispatchedRecoverNullDispatch",
+                    "staleDispatchedTerminalStatuses"
+                ]
             }),
+        )
+        .await;
+
+        service
+            .put_runtime_config(json!({
+                "maxEntryRetries": 8,
+                "__runtimeConfigExplicitKeys": []
+            }))
+            .await
+            .expect("clear dashboard runtime override through SettingsService");
+        assert_runtime_blob_and_no_mirrors(
+            &pool,
+            &json!({"maxEntryRetries": 8, "__runtimeConfigExplicitKeys": []}),
         )
         .await;
 
@@ -1414,6 +1444,51 @@ mod tests {
 
         assert_runtime_blob_and_no_mirrors(&pool, &json!({"maxEntryRetries": 99})).await;
 
+        pool.close().await;
+        database.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cli_put_get_set_round_trip_survives_startup_seed() {
+        let database = TestDatabase::create().await;
+        let pool = database.connect().await;
+        let mut config = crate::config::Config::default();
+        config.runtime.max_entry_retries = Some(3);
+        let service = SettingsService::new(Some(pool.clone()), Arc::new(config.clone()));
+        let cli_put = crate::cli::client::runtime_config_payload(json!({
+            "maxEntryRetries": 7
+        }))
+        .expect("normalize CLI PUT body");
+
+        service
+            .put_runtime_config(cli_put)
+            .await
+            .expect("write metadata-less CLI runtime config");
+        let cli_get = serde_json::to_value(
+            service
+                .get_runtime_config()
+                .await
+                .expect("GET runtime config after CLI PUT"),
+        )
+        .expect("serialize runtime config response");
+        let cli_round_trip = crate::cli::client::runtime_config_payload(cli_get)
+            .expect("preserve explicit keys in CLI GET-to-SET payload");
+        service
+            .put_runtime_config(cli_round_trip)
+            .await
+            .expect("write CLI GET-to-SET runtime config");
+        seed_runtime_config_defaults_pg(&pool, &config)
+            .await
+            .expect("run startup runtime-config seed");
+
+        let seeded = service
+            .get_runtime_config()
+            .await
+            .expect("GET runtime config after startup seed");
+        assert_eq!(seeded.current.get("maxEntryRetries"), Some(&json!(7)));
+        assert_eq!(seeded.explicit_keys, vec!["maxEntryRetries"]);
+
+        drop(service);
         pool.close().await;
         database.drop().await;
     }

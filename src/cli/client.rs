@@ -3,6 +3,9 @@
 use crate::config;
 use serde_json::Value;
 
+mod runtime_config;
+pub(crate) use runtime_config::payload as runtime_config_payload;
+
 /// Resolve the API base URL from config or environment.
 pub fn api_base() -> String {
     if let Ok(url) = std::env::var("AGENTDESK_API_URL") {
@@ -316,19 +319,6 @@ fn pad_cell(value: &str, width: usize) -> String {
     let rendered = truncate_cell(value, width);
     let pad = width.saturating_sub(rendered.chars().count());
     format!("{rendered}{}", " ".repeat(pad))
-}
-
-fn runtime_config_payload(value: Value) -> Result<Value, String> {
-    let normalized = match value.get("current") {
-        Some(current) if current.is_object() => current.clone(),
-        Some(_) => return Err("runtime config `current` must be a JSON object".to_string()),
-        None => value,
-    };
-    if normalized.is_object() {
-        Ok(normalized)
-    } else {
-        Err("runtime config must be a JSON object".to_string())
-    }
 }
 
 fn dispatch_context_string_field(dispatch: Option<&Value>, key: &str) -> Option<String> {
@@ -2187,7 +2177,7 @@ fn render_diag_value(value: &Value) -> String {
 /// `agentdesk config get`
 pub fn cmd_config_get() -> Result<(), String> {
     let value = get_json("/api/settings/runtime-config")?;
-    let effective = value.get("current").cloned().unwrap_or(value);
+    let effective = runtime_config_payload(value)?;
     print_json(&effective);
     Ok(())
 }

@@ -38,7 +38,7 @@ We keep per-surface storage, but every settings surface must declare:
 | Surface | Canonical owner | Precedence / baseline | Persistence / restart | Write contract |
 | --- | --- | --- | --- | --- |
 | Company settings JSON | Dashboard general settings UI and any caller that owns the merged JSON document | No YAML baseline. `kv_meta['settings']` is the canonical document. | Persists until explicitly replaced. Restart does not rebuild it from YAML. | `PUT /api/settings` is full replace. Callers must merge hidden keys themselves. |
-| Runtime config | Dashboard live-runtime controls | hardcoded defaults -> `agentdesk.yaml runtime:` -> `kv_meta['runtime-config']` override JSON | Live override applies immediately. On restart, YAML-backed keys are re-applied. Saved keys without YAML baselines persist unless `runtime.reset_overrides_on_restart=true`, in which case the whole surface resets to baseline. | `PUT /api/settings/runtime-config` replaces the override object. `GET` returns `current` + `defaults`. |
+| Runtime config | Dashboard live-runtime controls | hardcoded defaults -> `agentdesk.yaml runtime:` -> `kv_meta['runtime-config']` override JSON | Explicit live overrides apply immediately and survive restart ahead of YAML unless `runtime.reset_overrides_on_restart=true`. Non-explicit saved values rebase onto YAML/defaults. | `PUT /api/settings/runtime-config` fully replaces the object. Supplied `__runtimeConfigExplicitKeys` metadata is authoritative, including an empty list; without it, every known body key is explicit. `GET` returns `current` + `defaults` + `explicit_keys`. |
 | Policy/config keys | Dashboard policy controls and automation helpers | hardcoded defaults -> YAML sections (`review:`, `runtime:`, `automation:`, `kanban:`) -> individual `kv_meta` rows | YAML-backed keys are re-seeded on restart. Hardcoded-only keys keep their DB override unless the reset flag is on. Read-only entries are surfaced as config metadata only. | `PATCH /api/settings/config` writes editable keys only. `GET` returns effective value plus baseline metadata. |
 | Escalation routing | Dashboard escalation panel and Discord `!escalation` command | `escalation:` config baseline plus fallback owner/channel defaults, overridden by `kv_meta['escalation-settings-override']` | Override persists until changed back to defaults. When `runtime.reset_overrides_on_restart=true`, the stored override is cleared on boot. | `PUT /api/settings/escalation` replaces the override. Sending the default body clears the stored override. |
 | Onboarding / secrets | Onboarding wizard | Dedicated onboarding keys and flows, not general settings | Persist until onboarding updates them. | Managed only through `/api/onboarding/*` and onboarding-specific helpers. |
@@ -58,7 +58,8 @@ We keep per-surface storage, but every settings surface must declare:
 - `GET` returns:
   - `defaults`: hardcoded + YAML baseline
   - `current`: defaults with saved override merged on top
-- `PUT` stores the override object and mirrors scalar keys for runtime consumers
+- `PUT` fully replaces the stored override object. When `__runtimeConfigExplicitKeys` is present, the server honors that exact known-key list, including an intentionally empty list from the dashboard. When metadata is absent (for example, CLI or plain REST), every known config key present in the body is recorded as an explicit override; unknown JSON fields never gain override authority.
+- `agentdesk config get` includes the reserved metadata in its current-value object so piping that JSON back to `agentdesk config set` preserves the existing `explicit_keys` list.
 - This is a live-tuning surface, not a durable YAML editor
 
 ### `/api/settings/config`

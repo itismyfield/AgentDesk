@@ -21,6 +21,8 @@ This block is generated from the filesystem and is checked in CI for drift.
 ```text
 src/
 ├── cli/
+│   ├── client/
+│   │   └── runtime_config.rs
 │   ├── doctor/
 │   │   ├── contract.rs
 │   │   ├── health.rs
@@ -569,6 +571,7 @@ src/
 │   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
 │   │   ├── prompt_builder/
+│   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
 │   │   │   ├── dispatch_contract_tests.rs
 │   │   │   ├── layer_rendering.rs
@@ -1099,6 +1102,8 @@ src/
 │   ├── session_backend/
 │   │   ├── stream_line.rs
 │   │   └── terminal_usage.rs
+│   ├── settings/
+│   │   └── runtime_config_put.rs
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── tui_prompt_dedupe/

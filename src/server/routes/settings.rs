@@ -81,7 +81,9 @@ pub async fn get_operator_connectors() -> (StatusCode, Json<Value>) {
     settings_json_response(StatusCode::OK, OptionalConnectorsResponse::current())
 }
 
-/// PUT /api/settings/runtime-config
+/// PUT /api/settings/runtime-config performs a full replacement. A supplied
+/// `__runtimeConfigExplicitKeys` list is authoritative (including empty); without
+/// it, every known config key in the body becomes an explicit restart-stable override.
 pub async fn put_runtime_config(
     State(state): State<AppState>,
     Json(body): Json<Value>,
