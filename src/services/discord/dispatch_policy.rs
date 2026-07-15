@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+use super::Intervention;
 use super::QueueExitKind;
 use super::SharedData;
 use super::parse_dispatch_id;
-use super::Intervention;
 
 const MONITOR_AUTO_TURN_ORIGIN_LITERAL: &str = "[origin=monitor_auto_turn]";
 
@@ -152,8 +152,8 @@ pub(in crate::services::discord) async fn stale_dispatch_turn_for_queued_interve
 #[cfg(test)]
 mod dispatch_turn_gate_tests {
     use super::{
-        QueueExitKind, StaleDispatchTurn, dispatch_status_allows_turn,
-        filter_queued_dispatch_exit, stale_dispatch_queue_exit_kind,
+        QueueExitKind, StaleDispatchTurn, dispatch_status_allows_turn, filter_queued_dispatch_exit,
+        stale_dispatch_queue_exit_kind,
     };
 
     fn stale(status: &str, kind: QueueExitKind) -> Option<StaleDispatchTurn> {

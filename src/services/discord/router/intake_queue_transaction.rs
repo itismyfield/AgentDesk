@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use poise::serenity_prelude as serenity;
 
 use super::super::{Intervention, InterventionMode, MailboxEnqueueOutcome};
-use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 use crate::services::turn_orchestrator::EnqueueRefusalReason;
+use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IntakeQueueCommitSource {

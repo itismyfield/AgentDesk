@@ -1256,8 +1256,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 continue;
             }
 
-            let queued_generation =
-                crate::services::discord::runtime_store::load_generation();
+            let queued_generation = crate::services::discord::runtime_store::load_generation();
             let source_generation = if msg.author.bot {
                 SourceMessageQueuedGeneration::new(msg.id, queued_generation)
             } else {
@@ -1624,8 +1623,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 break;
             }
 
-            let queued_generation =
-                crate::services::discord::runtime_store::load_generation();
+            let queued_generation = crate::services::discord::runtime_store::load_generation();
             let source_generation = if msg.author.bot {
                 SourceMessageQueuedGeneration::new(msg.id, queued_generation)
             } else {
