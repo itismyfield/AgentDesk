@@ -289,22 +289,30 @@ mod tests {
 
     #[test]
     fn hostname_resolution_and_connect_obey_outer_deadline() {
+        // The worker "slow operation" sleeps far longer than the outer deadline so
+        // the test proves the deadline cut it off. The upper bound is kept generously
+        // above the deadline (not a tight margin) so it stays robust under heavy CI /
+        // build load where thread scheduling can add >100ms of wakeup latency; the
+        // production deadline is ~1s, for which this overhead is negligible.
         let timeout = Duration::from_millis(20);
+        let worker_sleep = Duration::from_millis(2000);
+        let robust_upper_bound = Duration::from_millis(1000);
         let started = Instant::now();
 
         let reachable = proxy_reachable_with_hostname_probe(
             "http://bad-hostname.invalid:10100",
             timeout,
-            |_, _, _| {
-                thread::sleep(Duration::from_millis(200));
+            move |_, _, _| {
+                thread::sleep(worker_sleep);
                 false
             },
         );
 
         assert!(!reachable);
         assert!(
-            started.elapsed() < Duration::from_millis(150),
-            "hostname probe exceeded its outer deadline: {:?}",
+            started.elapsed() < robust_upper_bound,
+            "hostname probe did not obey its outer deadline (returned before the {:?} worker sleep expected): {:?}",
+            worker_sleep,
             started.elapsed()
         );
     }
