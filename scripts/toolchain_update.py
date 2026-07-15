@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import urllib.error
@@ -25,11 +26,14 @@ from toolchain_manifest import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 APPROVAL_CONFIRMATION = "approve-exact-toolchain-draft"
 SAFE_WINDOW_CONFIRMATION = "no-active-turns-or-deploys"
-DESTRUCTIVE_METHODS = frozenset({"native", "npm-g"})
+APPROVAL_REQUIRED_METHODS = frozenset({"installer", "native", "npm-g"})
 DEFAULT_TIMEOUT_SECONDS = 20
+DEFAULT_UPDATE_TIMEOUT_SECONDS = 1800
+BUILD_UPDATE_TIMEOUT_SECONDS = 7200
+IDLE_QUEUE_STATUSES = frozenset({"canceled", "cancelled", "completed", "failed", "idle"})
 _SEMVER_RE = re.compile(
     r"(?<![0-9A-Za-z])v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?(?![0-9A-Za-z])"
 )
@@ -314,10 +318,17 @@ def collect_checks(runner: Runner, *, offline: bool = False) -> list[ToolCheck]:
     return checks
 
 
-def draft_basis(checks: Sequence[ToolCheck]) -> dict[str, Any]:
+def draft_basis(
+    checks: Sequence[ToolCheck | Mapping[str, Any]],
+    *,
+    generated_at: str,
+    draft_nonce: str,
+) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
-        "checks": [asdict(check) for check in checks],
+        "generated_at": generated_at,
+        "draft_nonce": draft_nonce,
+        "checks": [dict(check) if isinstance(check, Mapping) else asdict(check) for check in checks],
     }
 
 
@@ -384,7 +395,11 @@ def render_draft(checks: Sequence[ToolCheck], generated_at: str, draft_id: str) 
         lines.append("No hygiene-tier update is currently pending.")
     else:
         for check in hygiene:
-            destructive = " (per-tool approval also required: native/npm mutation)" if check.method in DESTRUCTIVE_METHODS else ""
+            destructive = (
+                " (per-tool approval also required: native/self-updater/npm mutation)"
+                if check.method in APPROVAL_REQUIRED_METHODS
+                else ""
+            )
             lines.append(f"- `{check.display_name}`: `{check.current}` → `{check.latest}`{destructive}")
 
     exceptions = [
@@ -411,7 +426,7 @@ def render_draft(checks: Sequence[ToolCheck], generated_at: str, draft_id: str) 
             "",
             "## Gate contract",
             "",
-            "Applying requires an explicit safe-window confirmation. Approval-tier tools and all native/npm",
+            "Applying requires an explicit safe-window confirmation. Approval-tier tools and all native/self-updater/npm",
             "mutations require a per-tool approval marker bound to this draft ID. Every applied tool runs its",
             "smoke profile immediately; failure stops the batch, emits an alert/rollback-or-pin plan, and exits non-zero.",
             "",
@@ -435,12 +450,12 @@ def write_draft(
 ) -> tuple[Path, Path, str]:
     generated = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     generated_at = generated.isoformat(timespec="seconds").replace("+00:00", "Z")
-    basis = draft_basis(checks)
+    draft_nonce = secrets.token_hex(16)
+    basis = draft_basis(checks, generated_at=generated_at, draft_nonce=draft_nonce)
     draft_id = compute_draft_id(basis)
     payload = {
         **basis,
         "draft_id": draft_id,
-        "generated_at": generated_at,
     }
     json_path = output_dir / "latest.json"
     markdown_path = output_dir / "latest.md"
@@ -459,7 +474,13 @@ def load_draft(path: Path) -> dict[str, Any]:
     checks = payload.get("checks")
     if not isinstance(checks, list):
         raise ToolchainError("toolchain draft checks must be a list")
-    basis = {"schema_version": SCHEMA_VERSION, "checks": checks}
+    generated_at = payload.get("generated_at")
+    draft_nonce = payload.get("draft_nonce")
+    if not isinstance(generated_at, str) or not generated_at:
+        raise ToolchainError("toolchain draft generated_at must be a non-empty string")
+    if not isinstance(draft_nonce, str) or not draft_nonce:
+        raise ToolchainError("toolchain draft nonce must be a non-empty string")
+    basis = draft_basis(checks, generated_at=generated_at, draft_nonce=draft_nonce)
     expected = compute_draft_id(basis)
     if payload.get("draft_id") != expected:
         raise ToolchainError("toolchain draft contents do not match its draft_id")
@@ -484,6 +505,8 @@ def approve_tool(draft_path: Path, tool: str, confirmation: str) -> Path:
     marker = {
         "schema_version": SCHEMA_VERSION,
         "draft_id": payload["draft_id"],
+        "generated_at": payload["generated_at"],
+        "draft_nonce": payload["draft_nonce"],
         "tool": tool,
         "current": check.get("current"),
         "latest": check.get("latest"),
@@ -503,6 +526,8 @@ def _approval_matches(draft_path: Path, draft: Mapping[str, Any], check: Mapping
     return (
         marker.get("schema_version") == SCHEMA_VERSION
         and marker.get("draft_id") == draft.get("draft_id")
+        and marker.get("generated_at") == draft.get("generated_at")
+        and marker.get("draft_nonce") == draft.get("draft_nonce")
         and marker.get("tool") == check.get("key")
         and marker.get("current") == check.get("current")
         and marker.get("latest") == check.get("latest")
@@ -510,7 +535,7 @@ def _approval_matches(draft_path: Path, draft: Mapping[str, Any], check: Mapping
 
 
 def validate_cswap_shape(text: str) -> tuple[bool, str]:
-    """Validate the permissive camelCase shape consumed by services/cswap.rs."""
+    """Validate the required camelCase shape consumed by services/cswap.rs."""
 
     try:
         payload = json.loads(text)
@@ -533,9 +558,9 @@ def validate_cswap_shape(text: str) -> tuple[bool, str]:
         )
     ):
         return False, "activeAccountNumber must be an integer or null"
-    accounts = payload.get("accounts", [])
-    if accounts is None:
-        accounts = []
+    if "accounts" not in payload or payload["accounts"] is None:
+        return False, "accounts must be a present, non-null list"
+    accounts = payload["accounts"]
     if not isinstance(accounts, list):
         return False, "accounts must be a list"
     for index, account in enumerate(accounts):
@@ -595,12 +620,33 @@ def _smoke_node(runner: Runner) -> list[SmokeResult]:
     except (json.JSONDecodeError, ValueError, AttributeError) as error:
         results.append(SmokeResult("node global CLI inventory", False, str(error)))
         return results
-    results.append(SmokeResult("node global CLI inventory", True, f"packages={len(dependencies)}"))
+    npm_global_specs = [spec for spec in tool_inventory() if spec.method == "npm-g"]
+    invalid_specs = [
+        spec.key
+        for spec in npm_global_specs
+        if not isinstance(spec.update_value, str) or isinstance(spec.current_value, str)
+    ]
+    if invalid_specs:
+        results.append(
+            SmokeResult(
+                "node manifest npm global inventory",
+                False,
+                f"missing package/binary argv for {','.join(invalid_specs)}",
+            )
+        )
+        return results
     package_binaries = {
-        "@openai/codex": ("codex", "--version"),
-        "@bitkyc08/opencodex": ("ocx", "--version"),
-        "claude-e": ("claude-e", "--version"),
+        str(spec.update_value): tuple(spec.current_value) for spec in npm_global_specs
     }
+    missing = sorted(package_binaries.keys() - dependencies.keys())
+    results.append(
+        SmokeResult(
+            "node global CLI inventory",
+            not missing,
+            f"expected={len(package_binaries)}, packages={len(dependencies)}, "
+            f"missing={','.join(missing) if missing else 'none'}",
+        )
+    )
     for package, argv in package_binaries.items():
         if package in dependencies:
             results.append(_smoke_version(runner, f"global {package} load", argv))
@@ -621,8 +667,7 @@ def _smoke_postgresql(runner: Runner, *, strict: bool) -> list[SmokeResult]:
         )
         return results
     server = runner.run(
-        ("psql", "-Atqc", "SHOW server_version"),
-        env={"PGDATABASE": database_url},
+        ("psql", "-Atqc", "SHOW server_version", database_url),
     )
     if server.returncode != 0:
         results.append(SmokeResult("psql server major comparison", False, _compact_detail(server.stderr)))
@@ -739,32 +784,32 @@ def _same_version(left: str, right: str) -> bool:
     return left_key == right_key if left_key is not None and right_key is not None else left == right
 
 
-def _version_reached(observed: str, expected: str) -> bool:
-    observed_key = _loose_version_key(observed)
-    expected_key = _loose_version_key(expected)
-    return (
-        observed_key >= expected_key
-        if observed_key is not None and expected_key is not None
-        else observed == expected
-    )
+def _update_timeout(spec: ToolSpec) -> int:
+    if spec.method == "homebrew":
+        return BUILD_UPDATE_TIMEOUT_SECONDS
+    return DEFAULT_UPDATE_TIMEOUT_SECONDS
 
 
-def _write_smoke_alert(
+def _write_apply_alert(
     draft_path: Path,
     draft_id: str,
     spec: ToolSpec,
     check: Mapping[str, Any],
-    smoke: Sequence[SmokeResult],
+    failures: Sequence[SmokeResult],
+    *,
+    stage: str,
 ) -> Path:
     path = draft_path.parent / "alerts" / f"{draft_id[:16]}-{spec.key}.md"
-    failed = [result for result in smoke if not result.ok]
+    failed = [result for result in failures if not result.ok]
     content = "\n".join(
         [
-            f"# Toolchain smoke failure: {spec.display_name}",
+            f"# Toolchain apply failure: {spec.display_name}",
             "",
             f"- Draft ID: `{draft_id}`",
             f"- Attempted: `{check.get('current')}` → `{check.get('latest')}`",
+            f"- Failure stage: {stage}",
             f"- Failed checks: {', '.join(result.check for result in failed)}",
+            f"- Failure details: {'; '.join(result.detail for result in failed)}",
             f"- Rollback/pin plan: `{_rollback_or_pin_hint(spec, str(check.get('current', 'unknown')))}`",
             "",
             "The apply batch stopped. Do not restart dcserver or the ocx proxy until the pin/rollback is completed and the smoke profile passes.",
@@ -790,14 +835,17 @@ def assert_safe_window(runner: Runner) -> None:
         queue = payload["queue"]
         working = int(sessions["working"])
         active_dispatches = int(sessions["with_active_dispatch"])
-        queue_running = queue.get("status") == "running"
+        queue_status = queue.get("status")
+        if queue_status is not None and not isinstance(queue_status, str):
+            raise TypeError("queue.status must be a string or null")
+        queue_busy = queue_status is not None and queue_status not in IDLE_QUEUE_STATUSES
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ToolchainError(f"safe-window status shape is invalid: {error}") from error
-    if working or active_dispatches or queue_running:
+    if working or active_dispatches or queue_busy:
         raise ToolchainError(
             "safe window is busy: "
             f"working_sessions={working}, active_dispatches={active_dispatches}, "
-            f"queue_running={str(queue_running).lower()}"
+            f"queue_status={queue_status or 'idle'}"
         )
     for process in ("cargo", "rustc"):
         running = runner.run(("pgrep", "-x", process), timeout=5)
@@ -836,6 +884,12 @@ def apply_draft(
     unknown = selected - specs.keys()
     if unknown:
         raise ToolchainError(f"unknown tool(s): {', '.join(sorted(unknown))}")
+    stale_manifest = checks.keys() - specs.keys()
+    if stale_manifest:
+        raise ToolchainError(
+            "draft contains tool(s) absent from the current manifest: "
+            f"{', '.join(sorted(stale_manifest))}; generate a fresh draft"
+        )
     if apply_hygiene:
         selected.update(
             key
@@ -852,7 +906,7 @@ def apply_draft(
             raise ToolchainError(f"{spec.key} is not an update-available row in this draft")
         if spec.report_only:
             raise ToolchainError(f"{spec.key} is report-only")
-        needs_approval = spec.tier == "approval" or spec.method in DESTRUCTIVE_METHODS
+        needs_approval = spec.tier == "approval" or spec.method in APPROVAL_REQUIRED_METHODS
         if needs_approval and not _approval_matches(draft_path, draft, check):
             raise ApprovalError(
                 f"{spec.key} requires a per-tool approval marker matching draft {draft['draft_id']}"
@@ -872,22 +926,81 @@ def apply_draft(
     for spec in ordered:
         check = checks[spec.key]
         argv = _update_argv(spec, str(check["latest"]))
-        update = runner.run(argv, timeout=300, env={"HOMEBREW_NO_AUTO_UPDATE": "1"})
-        if update.returncode != 0:
-            raise ToolchainError(
-                f"update command failed for {spec.key}: {_compact_detail(update.stderr or update.stdout)}"
+        assert_safe_window(runner)
+        update_result = runner.run(
+            argv,
+            timeout=_update_timeout(spec),
+            env={"HOMEBREW_NO_AUTO_UPDATE": "1"},
+        )
+        if update_result.returncode != 0:
+            failure = SmokeResult(
+                "update command",
+                False,
+                _compact_detail(
+                    update_result.stderr
+                    or update_result.stdout
+                    or f"exit {update_result.returncode}"
+                ),
             )
-        observed = probe_current(spec, runner)
-        smoke = [
-            SmokeResult(
-                "post-update target version",
-                observed.ok and _version_reached(observed.value, str(check["latest"])),
-                f"expected>={check['latest']}, observed={observed.value}",
-            ),
-            *run_smoke_profile(spec.smoke_profile or spec.key, runner, strict=True),
-        ]
+            alert = _write_apply_alert(
+                draft_path,
+                str(draft["draft_id"]),
+                spec,
+                check,
+                [failure],
+                stage="update command",
+            )
+            return applied, alert
+        try:
+            observed = probe_current(spec, runner)
+        except Exception as error:
+            failure = SmokeResult("post-update version probe", False, _compact_detail(str(error)))
+            alert = _write_apply_alert(
+                draft_path,
+                str(draft["draft_id"]),
+                spec,
+                check,
+                [failure],
+                stage="post-update version probe",
+            )
+            return applied, alert
+        exact_version = SmokeResult(
+            "post-update exact approved version",
+            observed.ok and _same_version(observed.value, str(check["latest"])),
+            f"expected={check['latest']}, observed={observed.value}",
+        )
+        if not exact_version.ok:
+            alert = _write_apply_alert(
+                draft_path,
+                str(draft["draft_id"]),
+                spec,
+                check,
+                [exact_version],
+                stage="post-update exact-version verification (smoke not run)",
+            )
+            return applied, alert
+        try:
+            smoke = run_smoke_profile(spec.smoke_profile or spec.key, runner, strict=True)
+        except Exception as error:
+            failure = SmokeResult("post-update smoke setup", False, _compact_detail(str(error)))
+            alert = _write_apply_alert(
+                draft_path,
+                str(draft["draft_id"]),
+                spec,
+                check,
+                [failure],
+                stage="post-update smoke setup",
+            )
+            return applied, alert
         if any(not result.ok for result in smoke):
-            alert = _write_smoke_alert(draft_path, str(draft["draft_id"]), spec, check, smoke)
+            alert = _write_apply_alert(
+                draft_path,
+                str(draft["draft_id"]),
+                spec,
+                check,
+                smoke,
+                stage="post-update smoke",
+            )
             return applied, alert
         applied.append(spec.key)
     return applied, None
@@ -918,7 +1031,7 @@ def _apply_command(args: argparse.Namespace, runner: Runner) -> int:
         runner=runner,
     )
     if alert is not None:
-        print(f"SMOKE FAILED; apply batch stopped; alert={alert}", file=sys.stderr)
+        print(f"APPLY FAILED; apply batch stopped; alert={alert}", file=sys.stderr)
         return 3
     print(f"applied_and_smoked={','.join(applied)}")
     return 0

@@ -8,6 +8,7 @@ import plistlib
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -24,6 +25,7 @@ from toolchain_manifest import tool_inventory  # noqa: E402
 class FakeRunner(update.Runner):
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.invocations: list[tuple[tuple[str, ...], int, dict[str, str]]] = []
         self.urls: list[str] = []
         self.overrides: dict[tuple[str, ...], update.CommandResult] = {}
         self.sequence_overrides: dict[tuple[str, ...], list[update.CommandResult]] = {}
@@ -35,9 +37,9 @@ class FakeRunner(update.Runner):
         timeout: int = update.DEFAULT_TIMEOUT_SECONDS,
         env: Mapping[str, str] | None = None,
     ) -> update.CommandResult:
-        del timeout, env
         command = tuple(argv)
         self.calls.append(command)
+        self.invocations.append((command, timeout, dict(env or {})))
         if command in self.sequence_overrides and self.sequence_overrides[command]:
             return self.sequence_overrides[command].pop(0)
         if command in self.overrides:
@@ -220,6 +222,11 @@ class InventoryAndDraftTests(unittest.TestCase):
         self.assertNotIn("apply", arguments)
         self.assertNotIn("approve", arguments)
         self.assertIn("StartCalendarInterval", plist)
+        path = plist["EnvironmentVariables"]["PATH"].split(":")
+        self.assertEqual(path[0], "__HOME__/.local/bin")
+        self.assertIn("__HOME__/.cargo/bin", path)
+        self.assertIn("__HOME__/.opencode/bin", path)
+        self.assertIn("__HOME__/bin", path)
 
 
 class ApprovalAndApplyTests(unittest.TestCase):
@@ -238,6 +245,26 @@ class ApprovalAndApplyTests(unittest.TestCase):
                     runner=runner,
                 )
         self.assertNotIn(("npm", "install", "-g", "claude-e@1.1.0"), runner.calls)
+
+    def test_installer_hygiene_requires_per_tool_approval(self) -> None:
+        runner = FakeRunner()
+        with tempfile.TemporaryDirectory() as temp:
+            markdown, draft, _ = update.write_draft(
+                [check_for("opencode", tier="hygiene", method="installer")], Path(temp)
+            )
+            self.assertIn(
+                "per-tool approval also required: native/self-updater/npm mutation",
+                markdown.read_text(encoding="utf-8"),
+            )
+            with self.assertRaises(update.ApprovalError):
+                update.apply_draft(
+                    draft,
+                    requested_tools=[],
+                    apply_hygiene=True,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+        self.assertNotIn(("opencode", "upgrade"), runner.calls)
 
     def test_approval_is_bound_to_exact_draft_and_allows_smoked_apply(self) -> None:
         runner = FakeRunner()
@@ -262,6 +289,31 @@ class ApprovalAndApplyTests(unittest.TestCase):
         self.assertIsNone(alert)
         self.assertIn(("npm", "install", "-g", "@openai/codex@1.1.0"), runner.calls)
 
+    def test_newer_than_approved_native_result_fails_before_smoke_with_alert(self) -> None:
+        runner = FakeRunner()
+        runner.sequence_overrides[("claude", "--version")] = [
+            update.CommandResult(0, "claude 1.0.0\n", ""),
+            update.CommandResult(0, "claude 1.2.0\n", ""),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft(
+                [check_for("claude", tier="approval", method="native")], Path(temp)
+            )
+            update.approve_tool(draft, "claude", update.APPROVAL_CONFIRMATION)
+            applied, alert = update.apply_draft(
+                draft,
+                requested_tools=["claude"],
+                apply_hygiene=False,
+                safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                runner=runner,
+            )
+            self.assertEqual(applied, [])
+            self.assertIsNotNone(alert)
+            alert_text = alert.read_text(encoding="utf-8")
+        self.assertIn("expected=1.1.0, observed=1.2.0", alert_text)
+        self.assertIn("smoke not run", alert_text)
+        self.assertEqual(runner.calls.count(("claude", "--version")), 2)
+
     def test_busy_agentdesk_window_fails_closed_before_mutation(self) -> None:
         runner = FakeRunner()
         runner.overrides[("agentdesk", "status", "--json")] = update.CommandResult(
@@ -282,6 +334,76 @@ class ApprovalAndApplyTests(unittest.TestCase):
                     runner=runner,
                 )
         self.assertNotIn(("brew", "upgrade", "gh"), runner.calls)
+
+    def test_active_queue_fails_closed_before_mutation(self) -> None:
+        runner = FakeRunner()
+        runner.overrides[("agentdesk", "status", "--json")] = update.CommandResult(
+            0,
+            '{"sessions":{"working":0,"with_active_dispatch":0},"queue":{"status":"active"}}',
+            "",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft(
+                [check_for("gh", tier="hygiene", method="homebrew")], Path(temp)
+            )
+            with self.assertRaisesRegex(update.ToolchainError, "queue_status=active"):
+                update.apply_draft(
+                    draft,
+                    requested_tools=["gh"],
+                    apply_hygiene=False,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+        self.assertNotIn(("brew", "upgrade", "gh"), runner.calls)
+
+    def test_completed_queue_history_is_not_treated_as_live(self) -> None:
+        runner = FakeRunner()
+        runner.overrides[("agentdesk", "status", "--json")] = update.CommandResult(
+            0,
+            '{"sessions":{"working":0,"with_active_dispatch":0},"queue":{"status":"completed"}}',
+            "",
+        )
+        update.assert_safe_window(runner)
+
+    def test_safe_window_is_rechecked_before_each_mutation(self) -> None:
+        runner = FakeRunner()
+        idle = update.CommandResult(
+            0,
+            '{"sessions":{"working":0,"with_active_dispatch":0},"queue":{"status":"idle"}}',
+            "",
+        )
+        active = update.CommandResult(
+            0,
+            '{"sessions":{"working":0,"with_active_dispatch":0},"queue":{"status":"active"}}',
+            "",
+        )
+        runner.sequence_overrides[("agentdesk", "status", "--json")] = [idle, idle, active]
+        runner.sequence_overrides[("brew", "list", "--versions", "gh")] = [
+            update.CommandResult(0, "gh 1.0.0\n", ""),
+            update.CommandResult(0, "gh 1.1.0\n", ""),
+        ]
+        runner.sequence_overrides[("brew", "list", "--versions", "jq")] = [
+            update.CommandResult(0, "jq 1.0.0\n", ""),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft(
+                [
+                    check_for("gh", tier="hygiene", method="homebrew"),
+                    check_for("jq", tier="hygiene", method="homebrew"),
+                ],
+                Path(temp),
+            )
+            with self.assertRaisesRegex(update.ToolchainError, "queue_status=active"):
+                update.apply_draft(
+                    draft,
+                    requested_tools=["gh", "jq"],
+                    apply_hygiene=False,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+        self.assertIn(("brew", "upgrade", "gh"), runner.calls)
+        self.assertNotIn(("brew", "upgrade", "jq"), runner.calls)
+        self.assertEqual(runner.calls.count(("agentdesk", "status", "--json")), 3)
 
     def test_running_deploy_fails_closed_before_mutation(self) -> None:
         runner = FakeRunner()
@@ -326,6 +448,63 @@ class ApprovalAndApplyTests(unittest.TestCase):
         self.assertIn("brew pin gh", alert_text)
         self.assertIn("apply batch stopped", alert_text)
 
+    def test_update_timeout_uses_build_window_and_emits_rollback_alert(self) -> None:
+        runner = FakeRunner()
+        runner.overrides[("brew", "upgrade", "gh")] = update.CommandResult(
+            124, "", "timed out during source build"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft(
+                [check_for("gh", tier="hygiene", method="homebrew")], Path(temp)
+            )
+            applied, alert = update.apply_draft(
+                draft,
+                requested_tools=["gh"],
+                apply_hygiene=False,
+                safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                runner=runner,
+            )
+            self.assertEqual(applied, [])
+            self.assertIsNotNone(alert)
+            alert_text = alert.read_text(encoding="utf-8")
+        timeout = next(
+            timeout
+            for command, timeout, _env in runner.invocations
+            if command == ("brew", "upgrade", "gh")
+        )
+        self.assertEqual(timeout, update.BUILD_UPDATE_TIMEOUT_SECONDS)
+        self.assertGreaterEqual(timeout, 3600)
+        self.assertIn("timed out during source build", alert_text)
+        self.assertIn("brew pin gh", alert_text)
+
+    def test_post_mutation_smoke_setup_error_emits_rollback_alert(self) -> None:
+        runner = FakeRunner()
+        runner.sequence_overrides[("brew", "list", "--versions", "gh")] = [
+            update.CommandResult(0, "gh 1.0.0\n", ""),
+            update.CommandResult(0, "gh 1.1.0\n", ""),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft(
+                [check_for("gh", tier="hygiene", method="homebrew")], Path(temp)
+            )
+            with patch.object(
+                update,
+                "run_smoke_profile",
+                side_effect=update.ToolchainError("smoke profile misconfigured"),
+            ):
+                applied, alert = update.apply_draft(
+                    draft,
+                    requested_tools=["gh"],
+                    apply_hygiene=False,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+            self.assertEqual(applied, [])
+            self.assertIsNotNone(alert)
+            alert_text = alert.read_text(encoding="utf-8")
+        self.assertIn("smoke profile misconfigured", alert_text)
+        self.assertIn("brew pin gh", alert_text)
+
     def test_stale_draft_blocks_before_update_command(self) -> None:
         runner = FakeRunner()
         runner.overrides[("brew", "list", "--versions", "gh")] = update.CommandResult(
@@ -344,6 +523,56 @@ class ApprovalAndApplyTests(unittest.TestCase):
                     runner=runner,
                 )
         self.assertNotIn(("brew", "upgrade", "gh"), runner.calls)
+
+    def test_stale_manifest_row_has_operator_friendly_error(self) -> None:
+        runner = FakeRunner()
+        stale = replace(check_for("gh", tier="hygiene", method="homebrew"), key="retired-tool")
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft([stale], Path(temp))
+            with self.assertRaisesRegex(
+                update.ToolchainError,
+                "draft contains tool.*retired-tool.*generate a fresh draft",
+            ):
+                update.apply_draft(
+                    draft,
+                    requested_tools=[],
+                    apply_hygiene=True,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+        self.assertNotIn(("brew", "upgrade", "gh"), runner.calls)
+
+    def test_later_identical_draft_rejects_old_approval_and_reprobe_catches_move(self) -> None:
+        runner = FakeRunner()
+        check = check_for("codex", tier="approval", method="npm-g")
+        same_time = datetime(2026, 7, 15, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            _, draft, draft_a_id = update.write_draft([check], output_dir, now=same_time)
+            update.approve_tool(draft, "codex", update.APPROVAL_CONFIRMATION)
+            _, draft, draft_b_id = update.write_draft([check], output_dir, now=same_time)
+            self.assertNotEqual(draft_a_id, draft_b_id)
+            runner.overrides[("codex", "--version")] = update.CommandResult(
+                0, "codex-cli 1.0.1\n", ""
+            )
+            with self.assertRaises(update.ApprovalError):
+                update.apply_draft(
+                    draft,
+                    requested_tools=["codex"],
+                    apply_hygiene=False,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+            update.approve_tool(draft, "codex", update.APPROVAL_CONFIRMATION)
+            with self.assertRaisesRegex(update.ToolchainError, "stale draft for codex"):
+                update.apply_draft(
+                    draft,
+                    requested_tools=["codex"],
+                    apply_hygiene=False,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+        self.assertNotIn(("npm", "install", "-g", "@openai/codex@1.1.0"), runner.calls)
 
 
 class SmokeGateTests(unittest.TestCase):
@@ -373,6 +602,33 @@ class SmokeGateTests(unittest.TestCase):
         )
         self.assertFalse(bool_schema)
         self.assertIn("schemaVersion must be an integer", bool_detail)
+        for invalid_payload in ("{}", '{"accounts":null}'):
+            valid_accounts, accounts_detail = update.validate_cswap_shape(invalid_payload)
+            self.assertFalse(valid_accounts)
+            self.assertIn("present, non-null list", accounts_detail)
+
+    def test_node_smoke_fails_when_expected_global_inventory_is_empty(self) -> None:
+        runner = FakeRunner()
+        results = update.run_smoke_profile("node", runner, strict=True)
+        inventory = next(result for result in results if result.check == "node global CLI inventory")
+        self.assertFalse(inventory.ok)
+        self.assertIn("expected=3", inventory.detail)
+        self.assertIn("@openai/codex", inventory.detail)
+
+    def test_node_smoke_probes_every_manifest_npm_global_cli(self) -> None:
+        runner = FakeRunner()
+        dependencies = {
+            spec.update_value: {}
+            for spec in tool_inventory()
+            if spec.method == "npm-g" and isinstance(spec.update_value, str)
+        }
+        runner.overrides[("npm", "ls", "-g", "--depth=0", "--json")] = update.CommandResult(
+            0, json.dumps({"dependencies": dependencies}), ""
+        )
+        results = update.run_smoke_profile("node", runner, strict=True)
+        self.assertTrue(all(result.ok for result in results), results)
+        for command in (("codex", "--version"), ("ocx", "--version"), ("claude-e", "--version")):
+            self.assertIn(command, runner.calls)
 
     def test_postgresql_strict_gate_requires_server_comparison(self) -> None:
         runner = FakeRunner()
@@ -387,15 +643,24 @@ class SmokeGateTests(unittest.TestCase):
 
     def test_postgresql_strict_gate_compares_two_part_server_major(self) -> None:
         runner = FakeRunner()
+        database_url = "postgresql://example/agentdesk"
         runner.overrides[("psql", "--version")] = update.CommandResult(
             0, "psql (PostgreSQL) 17.9\n", ""
         )
-        runner.overrides[("psql", "-Atqc", "SHOW server_version")] = update.CommandResult(
+        server_command = ("psql", "-Atqc", "SHOW server_version", database_url)
+        runner.overrides[server_command] = update.CommandResult(
             0, "17.8\n", ""
         )
-        with patch.dict(update.os.environ, {"DATABASE_URL": "postgresql://example"}, clear=False):
+        with patch.dict(
+            update.os.environ,
+            {"DATABASE_URL": database_url, "AGENTDESK_DATABASE_URL": ""},
+            clear=False,
+        ):
             results = update.run_smoke_profile("postgresql-17", runner, strict=True)
         self.assertTrue(all(result.ok for result in results), results)
+        self.assertIn(server_command, runner.calls)
+        server_invocation = next(item for item in runner.invocations if item[0] == server_command)
+        self.assertNotIn("PGDATABASE", server_invocation[2])
 
 
 if __name__ == "__main__":
