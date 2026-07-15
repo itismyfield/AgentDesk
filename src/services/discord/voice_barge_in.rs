@@ -45,10 +45,10 @@ use super::voice_id_sequences::VoiceIdSequences;
 use super::voice_sensitivity::SensitivityState;
 use super::{SharedData, http, mailbox_has_active_turn, rate_limit_wait, settings};
 
-#[path = "voice_barge_in/final_result_playback.rs"]
-mod final_result_playback;
 #[path = "voice_barge_in/channel_state.rs"]
 mod channel_state;
+#[path = "voice_barge_in/final_result_playback.rs"]
+mod final_result_playback;
 use channel_state::VoiceChannelStateMachines;
 #[path = "voice_barge_in/foreground_decision.rs"]
 mod foreground_decision;
@@ -1461,43 +1461,6 @@ impl VoiceBargeInRuntime {
             }
         }
         config.wake_words.clone()
-    }
-
-    pub(in crate::services::discord) fn register_voice_context(
-        &self,
-        control_channel_id: ChannelId,
-        guild_id: GuildId,
-    ) {
-        if self.enabled {
-            self.channels
-                .register_context(control_channel_id, guild_id);
-        }
-    }
-
-    pub(in crate::services::discord) fn voice_join_started(
-        &self,
-        channel_id: ChannelId,
-        guild_id: GuildId,
-    ) {
-        if self.enabled {
-            self.channels.join_started(channel_id, guild_id);
-        }
-    }
-
-    pub(in crate::services::discord) fn voice_connected(
-        &self,
-        channel_id: ChannelId,
-        guild_id: GuildId,
-    ) {
-        if self.enabled {
-            self.channels.connected(channel_id, guild_id);
-        }
-    }
-
-    pub(in crate::services::discord) fn voice_disconnected(&self, channel_id: ChannelId) {
-        if self.enabled {
-            self.channels.disconnected(channel_id);
-        }
     }
 
     pub(in crate::services::discord) async fn unregister_voice_guild(&self, guild_id: GuildId) {
@@ -4966,10 +4929,7 @@ mod tests {
 
         runtime.clear_playback_if_owner(channel_id, 1);
 
-        assert_eq!(
-            runtime.channels.playbacks.get(&42).unwrap().owner,
-            Some(2)
-        );
+        assert_eq!(runtime.channels.playbacks.get(&42).unwrap().owner, Some(2));
     }
 
     // #3908 (bug B): a queued progress/chime flush must NOT steal the barge-in

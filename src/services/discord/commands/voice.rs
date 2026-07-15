@@ -7,6 +7,11 @@ use super::super::{Context, Data, Error, check_auth};
 use crate::voice::barge_in::BargeInSensitivity;
 use crate::voice::commands::{VoiceCommand, parse_voice_command};
 
+mod alert;
+pub(in crate::services::discord) use alert::notify_voice_alert;
+#[cfg(test)]
+use alert::voice_notify_should_send;
+
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
 enum VoiceSensitivityChoice {
     #[name = "normal"]
@@ -291,9 +296,7 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
             )
             .await;
             if let Err(error) = join_result {
-                data.shared
-                    .voice_barge_in
-                    .voice_disconnected(channel_id);
+                data.shared.voice_barge_in.voice_disconnected(channel_id);
                 return Err(error);
             }
             super::super::voice_lifecycle::record_join_success(
@@ -964,51 +967,6 @@ pub(in crate::services::discord) fn voice_occupancy()
     static REGISTRY: std::sync::OnceLock<dashmap::DashMap<(String, u64), u64>> =
         std::sync::OnceLock::new();
     REGISTRY.get_or_init(dashmap::DashMap::new)
-}
-
-/// Track which (voice_channel, kind) auto-join notifications were already sent
-/// so a single process lifetime emits each at most once.
-fn voice_notify_dedup() -> &'static dashmap::DashSet<(u64, &'static str)> {
-    static DEDUP: std::sync::OnceLock<dashmap::DashSet<(u64, &'static str)>> =
-        std::sync::OnceLock::new();
-    DEDUP.get_or_init(dashmap::DashSet::new)
-}
-
-fn voice_notify_should_send(channel_id: ChannelId, kind: &'static str) -> bool {
-    voice_notify_dedup().insert((channel_id.get(), kind))
-}
-
-pub(in crate::services::discord) async fn notify_voice_alert(
-    channel_id: ChannelId,
-    content: String,
-    kind: &'static str,
-) {
-    if !voice_notify_should_send(channel_id, kind) {
-        return;
-    }
-    let Some(token) = crate::credential::read_bot_token("notify") else {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            kind,
-            "voice auto-join alert suppressed: notify bot token not configured"
-        );
-        return;
-    };
-    let client = reqwest::Client::new();
-    let base = crate::services::dispatches::discord_delivery::discord_api_base_url();
-    let target = channel_id.get().to_string();
-    if let Err(error) = crate::services::dispatches::discord_delivery::post_raw_message_once(
-        &client, &token, &base, &target, &content,
-    )
-    .await
-    {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            kind,
-            error = %error,
-            "voice auto-join alert delivery failed via notify bot"
-        );
-    }
 }
 
 #[cfg(test)]

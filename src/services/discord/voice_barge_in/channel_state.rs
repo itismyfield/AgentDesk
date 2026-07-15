@@ -52,15 +52,13 @@ impl VoiceChannelState {
                 Phase::Idle | Phase::Joining | Phase::Connected | Phase::Disconnected,
                 Event::JoinSucceeded,
             ) => Phase::Connected,
-            (
-                Phase::Connected | Phase::Speaking | Phase::BargedIn,
-                Event::PlaybackStarted,
-            ) => Phase::Speaking,
+            (Phase::Connected | Phase::Speaking | Phase::BargedIn, Event::PlaybackStarted) => {
+                Phase::Speaking
+            }
             (Phase::Speaking | Phase::BargedIn, Event::PlaybackFinished) => Phase::Connected,
-            (
-                Phase::Connected | Phase::Speaking | Phase::BargedIn,
-                Event::BargeInDetected,
-            ) => Phase::BargedIn,
+            (Phase::Connected | Phase::Speaking | Phase::BargedIn, Event::BargeInDetected) => {
+                Phase::BargedIn
+            }
             (_, Event::Disconnected) => Phase::Disconnected,
             // Idempotent lifecycle notifications do not create a transition.
             (phase, Event::JoinStarted) if phase == Phase::Joining => phase,
@@ -143,12 +141,22 @@ impl VoiceChannelStateMachines {
     }
 
     pub(super) fn join_started(&self, channel_id: ChannelId, guild_id: GuildId) {
-        self.transition(channel_id, Some(guild_id), VoiceChannelEvent::JoinStarted, true);
+        self.transition(
+            channel_id,
+            Some(guild_id),
+            VoiceChannelEvent::JoinStarted,
+            true,
+        );
     }
 
     pub(super) fn connected(&self, channel_id: ChannelId, guild_id: GuildId) {
         self.register_context(channel_id, guild_id);
-        self.transition(channel_id, Some(guild_id), VoiceChannelEvent::JoinSucceeded, true);
+        self.transition(
+            channel_id,
+            Some(guild_id),
+            VoiceChannelEvent::JoinSucceeded,
+            true,
+        );
     }
 
     pub(super) fn playback_started(&self, channel_id: ChannelId) {
@@ -157,9 +165,7 @@ impl VoiceChannelStateMachines {
 
     pub(super) fn playback_finished(&self, channel_id: ChannelId) {
         if !self.playbacks.contains_key(&channel_id.get())
-            && !self
-                .spoken_result_playbacks
-                .contains_key(&channel_id.get())
+            && !self.spoken_result_playbacks.contains_key(&channel_id.get())
         {
             self.transition(channel_id, None, VoiceChannelEvent::PlaybackFinished, false);
         }
@@ -189,9 +195,7 @@ impl VoiceChannelStateMachines {
     pub(super) fn channel_ids_for_guild(&self, guild_id: GuildId) -> Vec<u64> {
         self.voice_guilds
             .iter()
-            .filter_map(|entry| {
-                (*entry.value() == guild_id).then_some(*entry.key())
-            })
+            .filter_map(|entry| (*entry.value() == guild_id).then_some(*entry.key()))
             .collect()
     }
 
@@ -212,6 +216,44 @@ impl VoiceChannelStateMachines {
             .get(&channel_id.get())
             .map(|state| state.phase)
             .unwrap_or(VoiceChannelPhase::Idle)
+    }
+}
+
+impl VoiceBargeInRuntime {
+    pub(in crate::services::discord) fn register_voice_context(
+        &self,
+        control_channel_id: ChannelId,
+        guild_id: GuildId,
+    ) {
+        if self.enabled {
+            self.channels.register_context(control_channel_id, guild_id);
+        }
+    }
+
+    pub(in crate::services::discord) fn voice_join_started(
+        &self,
+        channel_id: ChannelId,
+        guild_id: GuildId,
+    ) {
+        if self.enabled {
+            self.channels.join_started(channel_id, guild_id);
+        }
+    }
+
+    pub(in crate::services::discord) fn voice_connected(
+        &self,
+        channel_id: ChannelId,
+        guild_id: GuildId,
+    ) {
+        if self.enabled {
+            self.channels.connected(channel_id, guild_id);
+        }
+    }
+
+    pub(in crate::services::discord) fn voice_disconnected(&self, channel_id: ChannelId) {
+        if self.enabled {
+            self.channels.disconnected(channel_id);
+        }
     }
 }
 

@@ -254,9 +254,7 @@ impl VoicePcmHarness {
             .channels
             .spoken_result_playbacks
             .remove(&SOURCE_CHANNEL_ID);
-        self.runtime
-            .channels
-            .playback_finished(self.source_channel);
+        self.runtime.channels.playback_finished(self.source_channel);
         self.runtime
             .channels
             .active_voice_routes
