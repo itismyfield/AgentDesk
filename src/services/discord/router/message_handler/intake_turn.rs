@@ -3157,8 +3157,14 @@ mod live_intake_preserve_wiring_tests {
     #[test]
     fn preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified() {
         let module_src = include_str!("intake_turn.rs");
+        // NB: needle assembled via concat! so the exact fn-call token (name
+        // immediately followed by an open paren) never appears verbatim in this
+        // file's source — otherwise it would trip `intake_dispatch::tests`'s
+        // worker-boundary occurrence-count invariant, which greps this file for
+        // that call token and requires exactly two (the definition + the one
+        // worker call site).
         let signature_pos = module_src
-            .find("pub(super) async fn handle_text_message(")
+            .find(concat!("pub(super) async fn handle_text_message", "("))
             .expect("handle_text_message signature exists");
         let param_pos = module_src[signature_pos..]
             .find("preserve_on_cancel: bool,")
