@@ -28,10 +28,7 @@ pub(super) fn provider_error_presentation(
 
     if prompt_too_long {
         ProviderErrorPresentation::PromptTooLong(
-            crate::services::discord::commands::owner_error_response(
-                "현재 대화가 provider의 컨텍스트 한도를 넘었어요.\n`/compact`로 대화를 압축하거나 요청을 짧게 줄여 다시 보내 주세요.",
-                &format!("__prompt too long__\n{detail}"),
-            ),
+            super::super::super::response_delivery::prompt_too_long_guidance(&detail),
         )
     } else {
         ProviderErrorPresentation::Failure(
