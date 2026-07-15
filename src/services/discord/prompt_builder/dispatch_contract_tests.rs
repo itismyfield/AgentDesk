@@ -1195,6 +1195,111 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
 }
 
 #[test]
+fn shared_prompt_gate_off_preserves_compact_rules_byte_for_byte() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let workspace = "/nonexistent-shared-prompt-gate-off-4560";
+    let binding = test_role_binding("shared-prompt-gate-off-4560");
+
+    let built = build_system_prompt_with_manifest(
+        "ctx",
+        &[],
+        workspace,
+        ChannelId::new(1),
+        ChannelId::new(1),
+        "tok",
+        Some(&binding),
+        false,
+        DispatchProfile::Full,
+        Some("implementation"),
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        None,
+        None,
+        Some("turn-shared-prompt-gate-off-4560"),
+    );
+
+    let expected = shared_agent_rules_lookup(workspace);
+    let manifest = built.manifest.expect("prompt manifest");
+    let layer = manifest
+        .layers
+        .iter()
+        .find(|layer| layer.layer_name == "shared_agent_rules")
+        .expect("shared agent rules layer");
+
+    assert_eq!(layer.source.as_deref(), Some("prompt_builder.shared_agent_rules_lookup"));
+    assert_eq!(layer.reason.as_deref(), Some(format!("workspace={workspace}").as_str()));
+    assert_eq!(layer.full_content.as_deref(), Some(expected.as_str()));
+    assert_eq!(built.system_prompt.matches(expected.as_str()).count(), 1);
+    assert!(!built.system_prompt.contains("[Shared Agent Rules]\n"));
+}
+
+#[test]
+fn shared_prompt_gate_on_injects_full_profile_file_content() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let shared_prompt_path = crate::runtime_layout::shared_prompt_path(runtime_root.path());
+    std::fs::create_dir_all(shared_prompt_path.parent().expect("shared prompt parent"))
+        .expect("create shared prompt parent");
+    let full_padding = "x".repeat(7_000);
+    let raw = format!(
+        "<!-- profile: all -->\nALL PROFILE SENTINEL 4560\n<!-- /profile -->\n\
+         <!-- profile: full -->\n{full_padding}\nFULL PROFILE SENTINEL 4560\n<!-- /profile -->\n\
+         <!-- profile: review-lite -->\nREVIEW PROFILE SENTINEL 4560\n<!-- /profile -->\n\
+         <!-- profile: headless -->\nHEADLESS PROFILE SENTINEL 4560\n<!-- /profile -->\n"
+    );
+    std::fs::write(&shared_prompt_path, raw).expect("write shared prompt");
+    let binding = test_role_binding("shared-prompt-gate-on-4560");
+
+    let built = build_system_prompt_with_manifest(
+        "ctx",
+        &[],
+        "/nonexistent-shared-prompt-workspace-4560",
+        ChannelId::new(1),
+        ChannelId::new(1),
+        "tok",
+        Some(&binding),
+        false,
+        DispatchProfile::Full,
+        Some("implementation"),
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        None,
+        None,
+        Some("turn-shared-prompt-gate-on-4560"),
+    );
+
+    let expected = format!(
+        "\n\n[Shared Agent Rules]\nALL PROFILE SENTINEL 4560\n{full_padding}\nFULL PROFILE SENTINEL 4560"
+    );
+    let manifest = built.manifest.expect("prompt manifest");
+    let layer = manifest
+        .layers
+        .iter()
+        .find(|layer| layer.layer_name == "shared_agent_rules")
+        .expect("shared agent rules layer");
+
+    assert_eq!(layer.source.as_deref(), Some("settings.load_shared_prompt_for_profile"));
+    assert_eq!(layer.reason.as_deref(), Some("profile=full"));
+    assert_eq!(layer.full_content.as_deref(), Some(expected.as_str()));
+    assert_eq!(built.system_prompt.matches(expected.as_str()).count(), 1);
+    assert!(!built.system_prompt.contains("REVIEW PROFILE SENTINEL 4560"));
+    assert!(!built.system_prompt.contains("HEADLESS PROFILE SENTINEL 4560"));
+    assert!(!built.system_prompt.contains("<!-- profile:"));
+    assert!(!built.system_prompt.contains("[Shared Agent Rules Index]"));
+}
+
+#[test]
 fn foreign_workspace_full_prompt_omits_repo_relative_doc_paths() {
     let runtime_root = tempfile::tempdir().expect("runtime root");
     let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());

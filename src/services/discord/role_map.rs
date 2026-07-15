@@ -481,10 +481,6 @@ pub(super) fn resolve_workspace(
         .map(|s| expand_tilde(s))
 }
 
-// #3034: consumed by `settings::content::load_shared_prompt_for_profile`, the
-// profile-aware shared-prompt loader (unwired in prod but a real feature
-// surface). Keep the role_map resolver live.
-#[allow(dead_code)]
 pub(super) fn load_shared_prompt_path() -> Option<String> {
     let json = load_role_map_json()?;
     json.get("sharedPromptFile")

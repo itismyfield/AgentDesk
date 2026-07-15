@@ -1,6 +1,6 @@
 use super::settings::{
     ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance, load_role_prompt,
-    render_peer_agent_guidance,
+    load_shared_prompt_for_profile, render_peer_agent_guidance,
 };
 use super::*;
 use crate::db::prompt_manifests::{PromptContentVisibility, PromptManifest};
@@ -292,6 +292,21 @@ pub(super) fn build_system_prompt_with_manifest(
                 None,
                 PromptContentVisibility::AdkProvided,
                 lite_rules,
+            ));
+        } else if let Some(shared_prompt) = load_shared_prompt_for_profile("full") {
+            let shared_rules = format!("\n\n[Shared Agent Rules]\n{shared_prompt}");
+            tracing::warn!(
+                "  [role-map] Injected full shared agent rules ({} chars) for channel {}",
+                shared_rules.len(),
+                channel_id.get()
+            );
+            system_prompt_owned.push_str(&shared_rules);
+            prompt_manifest_layers.push(prompt_manifest_layer(
+                "shared_agent_rules",
+                "settings.load_shared_prompt_for_profile",
+                Some("profile=full".to_string()),
+                PromptContentVisibility::AdkProvided,
+                &shared_rules,
             ));
         } else {
             // #4314: the shared-rules index now depends on the agent's cwd —
