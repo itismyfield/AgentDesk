@@ -6,7 +6,7 @@ mod tui_error_classification;
 use super::super::streaming_edit_text::TuiErrorClassification;
 use super::super::thinking::{redacted_thinking_transcript_event, thinking_status_line};
 use super::*;
-use provider_error_presentation::{ProviderErrorPresentation, provider_error_presentation};
+use provider_error_presentation::ProviderErrorPresentation;
 use std::sync::Arc;
 use tui_error_classification::resolve_tui_error;
 

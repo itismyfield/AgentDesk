@@ -32,6 +32,15 @@ mod tests {
         claude_tui_followup_requeue_streaming_aware,
     };
 
+    fn assert_wiring_joint(source: &str, expected: &str, joint: &str) {
+        let compact_source = source.split_whitespace().collect::<String>();
+        let compact_expected = expected.split_whitespace().collect::<String>();
+        assert!(
+            compact_source.contains(&compact_expected),
+            "{joint} must preserve the Error-arm TUI classification",
+        );
+    }
+
     #[test]
     fn folded_readiness_timeout_from_error_arm_is_requeued_and_skips_quiescence() {
         let provider = ProviderKind::Claude;
@@ -71,5 +80,47 @@ mod tests {
             &full_response,
             resolution.tui_error_classification,
         ));
+
+        // Mutation guards for the production wiring. The async finalization
+        // contexts require live gateway/shared state, so pin each handoff at
+        // its construction site while the assertions above prove the carried
+        // value drives both lifecycle decisions.
+        assert_wiring_joint(
+            include_str!("../content_arms.rs"),
+            r#"
+                let error_resolution = resolve_tui_error(&provider, &message, &stderr);
+                tui_error_classification = error_resolution.tui_error_classification;
+                transport_error = true;
+            "#,
+            "Error arm -> stream-loop state",
+        );
+        assert_wiring_joint(
+            include_str!("../../mod.rs"),
+            r#"
+                transport_error,
+                tui_error_classification: stream_loop_output.tui_error_classification,
+                recovery_retry,
+            "#,
+            "StreamLoopOutput -> PostLoopFinalizeContext",
+        );
+        assert_wiring_joint(
+            include_str!("../../post_loop_finalize.rs"),
+            r#"
+                claude_tui_followup_pre_submit_requeue_candidate,
+                tui_error_classification,
+                review_dispatch_warning,
+            "#,
+            "post-loop local -> PostLoopFinalizeOutput",
+        );
+        assert_wiring_joint(
+            include_str!("../../terminal_outcome_delivery.rs"),
+            r#"
+                claude_tui_followup_pre_submit_requeue_candidate,
+                tui_error_classification,
+                #[cfg(unix)]
+                bridge_tui_gate_outcome_early,
+            "#,
+            "terminal outcome -> DeliveryEpilogueContext",
+        );
     }
 }
