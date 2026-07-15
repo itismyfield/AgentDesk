@@ -35,6 +35,7 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) recovery_retry: bool,
     pub(super) resume_failure_detected: bool,
     pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
+    pub(super) tui_error_classification: TuiErrorClassification,
     #[cfg(unix)]
     pub(super) bridge_tui_gate_outcome_early:
         Option<super::super::super::tmux::TuiCompletionGateOutcome>,
@@ -84,6 +85,7 @@ pub(super) async fn handle_delivery_epilogue(
     let resume_failure_detected = ctx.resume_failure_detected;
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
+    let tui_error_classification = ctx.tui_error_classification;
     #[cfg(unix)]
     let bridge_tui_gate_outcome_early = ctx.bridge_tui_gate_outcome_early;
     let terminal_delivery_committed = ctx.terminal_delivery_committed;
@@ -296,6 +298,7 @@ pub(super) async fn handle_delivery_epilogue(
                         &provider,
                         inflight_state.runtime_kind,
                         &full_response,
+                        tui_error_classification,
                     ));
             let bridge_gate_outcome = if terminal_delivery_committed
                 && !preserve_inflight_for_cleanup_retry

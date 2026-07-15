@@ -126,6 +126,7 @@ pub(super) enum StreamLoopOutcome {
 
 pub(super) struct StreamLoopOutput {
     pub(super) outcome: StreamLoopOutcome,
+    pub(super) tui_error_classification: TuiErrorClassification,
     pub(super) pending_long_running_open_after_state_save: PendingLongRunningOpenAfterStateSave,
     pub(super) pending_long_running_retarget_after_state_save:
         PendingLongRunningRetargetAfterStateSave,
@@ -185,6 +186,7 @@ pub(super) async fn run_stream_loop(
     let mut active_background_child_session_ids =
         std::mem::take(state.active_background_child_session_ids);
     let mut transport_error = *state.transport_error;
+    let mut tui_error_classification = TuiErrorClassification::default();
     let mut transcript_events = std::mem::take(state.transcript_events);
     let mut resume_failure_detected = *state.resume_failure_detected;
     let mut session_handshake_seen = *state.session_handshake_seen;
@@ -468,6 +470,7 @@ pub(super) async fn run_stream_loop(
                                     done: &mut done,
                                     terminal_control_drain_until: &mut terminal_control_drain_until,
                                     transport_error: &mut transport_error,
+                                    tui_error_classification: &mut tui_error_classification,
                                     resume_failure_detected: &mut resume_failure_detected,
                                     bridge_confirmed_response_sent_offset:
                                         &mut bridge_confirmed_response_sent_offset,
@@ -973,6 +976,7 @@ pub(super) async fn run_stream_loop(
 
     StreamLoopOutput {
         outcome: StreamLoopOutcome::Completed,
+        tui_error_classification,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,
     }

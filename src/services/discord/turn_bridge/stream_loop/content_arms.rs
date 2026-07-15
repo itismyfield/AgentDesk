@@ -7,6 +7,24 @@ use super::*;
 use provider_error_presentation::{ProviderErrorPresentation, provider_error_presentation};
 use std::sync::Arc;
 
+struct ProviderErrorArmResolution {
+    presentation: ProviderErrorPresentation,
+    tui_error_classification: TuiErrorClassification,
+}
+
+fn resolve_provider_error_arm(
+    provider: &ProviderKind,
+    message: &str,
+    stderr: &str,
+) -> ProviderErrorArmResolution {
+    ProviderErrorArmResolution {
+        presentation: provider_error_presentation(message, stderr),
+        // Classify the raw message before presentation folds `Error:` into a
+        // spoiler. Finalization must not infer lifecycle behavior from UI text.
+        tui_error_classification: classify_raw_tui_error(provider, message),
+    }
+}
+
 pub(super) enum StreamContentArmMessage {
     RetryBoundary,
     Init {
@@ -89,6 +107,7 @@ pub(super) struct StreamContentArmState<'a> {
     pub(super) done: &'a mut bool,
     pub(super) terminal_control_drain_until: &'a mut Option<std::time::Instant>,
     pub(super) transport_error: &'a mut bool,
+    pub(super) tui_error_classification: &'a mut TuiErrorClassification,
     pub(super) resume_failure_detected: &'a mut bool,
     pub(super) bridge_confirmed_response_sent_offset: &'a mut usize,
     pub(super) terminal_session_reset_required: &'a mut bool,
@@ -148,6 +167,7 @@ pub(super) async fn handle_stream_content_message(
     let mut done = *state.done;
     let mut terminal_control_drain_until = *state.terminal_control_drain_until;
     let mut transport_error = *state.transport_error;
+    let mut tui_error_classification = *state.tui_error_classification;
     let mut resume_failure_detected = *state.resume_failure_detected;
     let mut bridge_confirmed_response_sent_offset =
         *state.bridge_confirmed_response_sent_offset;
@@ -187,6 +207,7 @@ pub(super) async fn handle_stream_content_message(
             *state.done = done;
             *state.terminal_control_drain_until = terminal_control_drain_until;
             *state.transport_error = transport_error;
+            *state.tui_error_classification = tui_error_classification;
             *state.resume_failure_detected = resume_failure_detected;
             *state.bridge_confirmed_response_sent_offset =
                 bridge_confirmed_response_sent_offset;
@@ -492,8 +513,12 @@ pub(super) async fn handle_stream_content_message(
                                 stream_error_has_stale_resume_error(&message, &stderr);
                             let session_reset_required =
                                 stream_error_requires_terminal_session_reset(&message, &stderr);
+                            let error_resolution =
+                                resolve_provider_error_arm(&provider, &message, &stderr);
+                            tui_error_classification =
+                                error_resolution.tui_error_classification;
                             transport_error = true;
-                            match provider_error_presentation(&message, &stderr) {
+                            match error_resolution.presentation {
                                 ProviderErrorPresentation::PromptTooLong(guidance) => {
                                     // Prompt too long is not a terminal failure — user can retry
                                     // with a shorter message or /compact. Don't mark as transport error.
@@ -617,4 +642,45 @@ pub(super) async fn handle_stream_content_message(
     }
 
     finish!(StreamContentArmOutcome::ContinueDraining);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+
+    #[test]
+    fn folded_readiness_timeout_from_error_arm_is_requeued_and_skips_quiescence() {
+        let provider = ProviderKind::Claude;
+        let resolution = resolve_provider_error_arm(
+            &provider,
+            "timeout waiting for claude tui follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; prompt_marker_detected=false; prompt_draft_detected=false; capture_available=true",
+            "",
+        );
+        let ProviderErrorPresentation::Failure(full_response) = resolution.presentation else {
+            panic!("readiness timeout must remain an ordinary provider failure");
+        };
+
+        // Exercise the actual Error-arm producer output: presentation is folded
+        // and deliberately no longer starts with the legacy lifecycle marker.
+        assert!(full_response.starts_with("⚠️ provider가 응답을 완료하지 못했어요."));
+        assert!(!full_response.trim_start().starts_with("Error:"));
+
+        let requeue_candidate = bridge_claude_tui_followup_requeue_prompt_error(
+            &provider,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            &full_response,
+            resolution.tui_error_classification,
+        );
+        assert!(claude_tui_followup_requeue_streaming_aware(
+            requeue_candidate,
+            false,
+        ));
+        assert!(bridge_tui_transport_error_should_skip_quiescence(
+            &provider,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            &full_response,
+            resolution.tui_error_classification,
+        ));
+    }
 }

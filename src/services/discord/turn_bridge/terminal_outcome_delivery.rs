@@ -60,6 +60,7 @@ pub(super) struct TerminalOutcomeDeliveryContext {
     pub(super) single_message_panel_footer_mode: bool,
     pub(super) is_prompt_too_long: bool,
     pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
+    pub(super) tui_error_classification: TuiErrorClassification,
     pub(super) had_prior_session_id_at_turn_start: bool,
     pub(super) session_handshake_seen: bool,
     pub(super) turn_start: std::time::Instant,
@@ -159,6 +160,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let is_prompt_too_long = ctx.is_prompt_too_long;
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
+    let tui_error_classification = ctx.tui_error_classification;
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
@@ -821,6 +823,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 recovery_retry,
                 resume_failure_detected,
                 claude_tui_followup_pre_submit_requeue_candidate,
+                tui_error_classification,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
                 terminal_delivery_committed,

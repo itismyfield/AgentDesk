@@ -115,9 +115,10 @@ pub(super) use stream_receiver::{
 };
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
-    bridge_streaming_edit_gate_open, bridge_streaming_rollover_should_skip,
+    TuiErrorClassification, bridge_streaming_edit_gate_open, bridge_streaming_rollover_should_skip,
     bridge_tui_transport_error_should_skip_quiescence, build_turn_bridge_streaming_edit_text,
     claude_tui_followup_requeue_streaming_aware, claude_tui_followup_same_input_occupies_pane,
+    classify_raw_tui_error,
 };
 pub(super) use task_notification_lifecycle::{
     close_all_tracked_background_children, close_next_tracked_background_child,
@@ -744,6 +745,7 @@ pub(super) fn spawn_turn_bridge(
             stream_loop_output.pending_long_running_open_after_state_save;
         let pending_long_running_retarget_after_state_save =
             stream_loop_output.pending_long_running_retarget_after_state_save;
+        let tui_error_classification = stream_loop_output.tui_error_classification;
 
         let post_loop_finalize_output = post_loop_finalize::run_post_loop_finalize(
             post_loop_finalize::PostLoopFinalizeContext {
@@ -761,6 +763,7 @@ pub(super) fn spawn_turn_bridge(
                 current_msg_id,
                 cancelled,
                 transport_error,
+                tui_error_classification,
                 recovery_retry,
                 rx_disconnected,
                 tmux_handed_off,
@@ -802,6 +805,7 @@ pub(super) fn spawn_turn_bridge(
         let api_friction_reports = post_loop_finalize_output.api_friction_reports;
         let claude_tui_followup_pre_submit_requeue_candidate =
             post_loop_finalize_output.claude_tui_followup_pre_submit_requeue_candidate;
+        let tui_error_classification = post_loop_finalize_output.tui_error_classification;
         let review_dispatch_warning = post_loop_finalize_output.review_dispatch_warning;
         let is_prompt_too_long = post_loop_finalize_output.is_prompt_too_long;
         let bridge_relay_delegated_to_watcher =
@@ -841,6 +845,7 @@ pub(super) fn spawn_turn_bridge(
                     single_message_panel_footer_mode,
                     is_prompt_too_long,
                     claude_tui_followup_pre_submit_requeue_candidate,
+                    tui_error_classification,
                     had_prior_session_id_at_turn_start,
                     session_handshake_seen,
                     turn_start,
