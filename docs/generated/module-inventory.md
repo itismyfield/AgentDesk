@@ -846,7 +846,7 @@
 | `services::discord::turn_bridge::stream_loop` | `src/services/discord/turn_bridge/stream_loop.rs` | 975 | 975 | 0 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms` | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` | 629 | 629 | 0 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms::provider_error_presentation` | `src/services/discord/turn_bridge/stream_loop/content_arms/provider_error_presentation.rs` | 95 | 42 | 53 |  |
-| `services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification` | `src/services/discord/turn_bridge/stream_loop/content_arms/tui_error_classification.rs` | 75 | 24 | 51 |  |
+| `services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification` | `src/services/discord/turn_bridge/stream_loop/content_arms/tui_error_classification.rs` | 126 | 24 | 102 |  |
 | `services::discord::turn_bridge::stream_loop::tool_arms` | `src/services/discord/turn_bridge/stream_loop/tool_arms.rs` | 684 | 684 | 0 |  |
 | `services::discord::turn_bridge::stream_receiver` | `src/services/discord/turn_bridge/stream_receiver.rs` | 109 | 64 | 45 |  |
 | `services::discord::turn_bridge::stream_tick` | `src/services/discord/turn_bridge/stream_tick.rs` | 908 | 787 | 121 |  |
