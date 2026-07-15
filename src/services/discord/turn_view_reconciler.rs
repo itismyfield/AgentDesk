@@ -16,12 +16,11 @@ use serenity::{ChannelId, MessageId};
 
 use super::{SharedData, queue_reactions};
 
-// #4278: orphan-`⏳` defense sweep (production orchestration + enumeration +
-// persisted-identity removal + pure verdict). A descendant module so it can
-// reach the reconciler's private target store / persistence helpers while
-// keeping this file's core lifecycle unchanged; `placeholder_sweeper`'s
-// periodic loop calls the re-exported production entry.
+// #4278: descendant module owns orphan-`⏳` defense while retaining access to
+// the reconciler's private target store and persistence helpers.
 mod orphan_sweep;
+// #4554: mailbox-truth repair is isolated to keep this giant module net-zero.
+mod queue_repair;
 pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
 
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
@@ -581,7 +580,7 @@ impl TurnViewReconciler {
             .or_else(|| self.load_persisted_target(target, shared, source));
 
         let Some(current) = current else {
-            tracing::debug!(
+            tracing::info!(
                 channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
@@ -595,7 +594,7 @@ impl TurnViewReconciler {
             || current.applied != TurnViewState::Pending
             || current.start_attempt != Some(start_attempt)
         {
-            tracing::debug!(
+            tracing::info!(
                 channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
@@ -845,6 +844,7 @@ impl TurnViewReconciler {
 
         if desired.is_queue_marker()
             && self.recently_finalized_blocks_queued(target, owner.generation)
+            && !queue_repair::allows(shared, target, None, source).await
         {
             tracing::debug!(
                 channel_id = target.channel_id.get(),
@@ -889,6 +889,7 @@ impl TurnViewReconciler {
             if current.owner == owner
                 && desired.is_queue_marker()
                 && current.applied.started_or_terminal()
+                && !queue_repair::allows(shared, target, Some(current.applied), source).await
             {
                 tracing::debug!(
                     channel_id = target.channel_id.get(),

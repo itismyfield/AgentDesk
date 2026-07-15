@@ -28,6 +28,22 @@ pub(in crate::services::discord) async fn note_added_current(
     .await;
 }
 
+pub(in crate::services::discord) async fn note_added_queued_generation(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    emoji: char,
+    generation: u64,
+    source: &'static str,
+) {
+    let generation = effective_queued_generation(shared, generation);
+    turn_view_reconciler::note_intake_queue_marker_added(
+        shared, http, channel_id, message_id, generation, emoji, source,
+    )
+    .await;
+}
+
 pub(in crate::services::discord) async fn note_removed_current(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,

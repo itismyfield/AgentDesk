@@ -121,6 +121,22 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
             .await;
     }
 
+    async fn repair_queued_source_pending_reaction(
+        &mut self,
+        channel_id: serenity::ChannelId,
+        message_id: serenity::MessageId,
+        policy: super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy,
+    ) -> Option<char> {
+        repair_queued_source_pending_reaction_from_mailbox(
+            &self.data.shared,
+            &self.ctx.http,
+            channel_id,
+            message_id,
+            policy,
+        )
+        .await
+    }
+
     fn advance_checkpoint(
         &mut self,
         channel_id: serenity::ChannelId,
@@ -145,6 +161,80 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
     }
 }
 
+async fn repair_queued_source_pending_reaction_from_mailbox(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: serenity::ChannelId,
+    message_id: serenity::MessageId,
+    policy: super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy,
+) -> Option<char> {
+    let snapshot = mailbox_snapshot(shared, channel_id).await;
+    let intervention = snapshot.intervention_queue.iter().find(|intervention| {
+        intervention.message_id == message_id
+            || intervention.source_message_ids.contains(&message_id)
+    })?;
+    let first_source = intervention
+        .source_message_ids
+        .first()
+        .copied()
+        .unwrap_or(intervention.message_id);
+    let queued_generation = intervention
+        .source_message_queued_generations()
+        .into_iter()
+        .find(|source| source.message_id == message_id)?
+        .queued_generation;
+    let emoji = match policy {
+        super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy::QueueState => {
+            if first_source == message_id {
+                crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
+            } else {
+                crate::services::discord::queue_reactions::QUEUE_MERGED_PENDING_REACTION
+            }
+        }
+        super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy::Static(emoji) => {
+            emoji
+        }
+    };
+    crate::services::discord::queue_marker::note_added_queued_generation(
+        shared,
+        http,
+        channel_id,
+        message_id,
+        emoji,
+        queued_generation,
+        "intake_gate_queue_pending",
+    )
+    .await;
+    let still_queued = mailbox_snapshot(shared, channel_id)
+        .await
+        .intervention_queue
+        .iter()
+        .any(|intervention| {
+            intervention.message_id == message_id
+                || intervention.source_message_ids.contains(&message_id)
+        });
+    if !still_queued {
+        crate::services::discord::queue_marker::note_removed_queued_generation(
+            shared,
+            http,
+            channel_id,
+            message_id,
+            emoji,
+            queued_generation,
+            "intake_gate_queue_pending_self_heal",
+        )
+        .await;
+        tracing::info!(
+            channel_id = channel_id.get(),
+            message = message_id.get(),
+            emoji = %emoji,
+            queued_generation,
+            "duplicate queue-pending reaction repaired after dequeue promotion; removed stale reaction"
+        );
+    }
+    Some(emoji)
+}
+
 #[cfg(test)]
 mod schedule_post_enqueue_idle_drain_tests {
     use super::should_schedule_post_enqueue_idle_drain;
@@ -163,6 +253,234 @@ mod schedule_post_enqueue_idle_drain_tests {
     fn skips_when_enqueue_was_refused() {
         assert!(!should_schedule_post_enqueue_idle_drain(false, false));
         assert!(!should_schedule_post_enqueue_idle_drain(false, true));
+    }
+}
+
+#[cfg(test)]
+mod duplicate_repair_interleaving_tests {
+    use std::time::Instant;
+
+    use super::*;
+    use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
+
+    struct ScopedRuntimeRoot {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for ScopedRuntimeRoot {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn scoped_runtime_root() -> ScopedRuntimeRoot {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        ScopedRuntimeRoot {
+            _lock: lock,
+            _temp: temp,
+            previous,
+        }
+    }
+
+    fn queued_intervention(
+        message_id: serenity::MessageId,
+        source_message_ids: Vec<serenity::MessageId>,
+        generation: u64,
+    ) -> Intervention {
+        let source_message_queued_generations = source_message_ids
+            .iter()
+            .copied()
+            .map(|source_id| SourceMessageQueuedGeneration::user_instruction(source_id, generation))
+            .collect();
+        Intervention {
+            author_id: serenity::UserId::new(455_400_000_000_210),
+            author_is_bot: false,
+            message_id,
+            queued_generation: generation,
+            source_message_ids,
+            source_message_queued_generations,
+            source_text_segments: Vec::new(),
+            text: "restart duplicate repair".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    fn reaction_is_present(
+        shared: &SharedData,
+        message_id: serenity::MessageId,
+        emoji: char,
+    ) -> bool {
+        shared
+            .turn_view_reconciler
+            .ops()
+            .into_iter()
+            .filter(|op| op.target.message_id == message_id && op.emoji == emoji)
+            .fold(false, |_, op| op.add)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn generation_restart_duplicate_repair_converges_with_stored_queue_exit_owner() {
+        let _root = scoped_runtime_root();
+        const QUEUED_GENERATION: u64 = 71;
+        const RESTARTED_GENERATION: u64 = 72;
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared)
+            .expect("unshared test state")
+            .restart
+            .current_generation = RESTARTED_GENERATION;
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let provider = ProviderKind::Claude;
+        let channel_id = serenity::ChannelId::new(455_400_000_000_211);
+        let message_id = serenity::MessageId::new(455_400_000_000_212);
+        let merged_head_id = serenity::MessageId::new(455_400_000_000_213);
+        let source_generations = vec![
+            SourceMessageQueuedGeneration::user_instruction(message_id, QUEUED_GENERATION),
+            SourceMessageQueuedGeneration::user_instruction(merged_head_id, QUEUED_GENERATION),
+        ];
+
+        let enqueue =
+            crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+                mailbox_enqueue_intervention(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    queued_intervention(
+                        merged_head_id,
+                        vec![message_id, merged_head_id],
+                        QUEUED_GENERATION,
+                    ),
+                ),
+            )
+            .await;
+        assert!(enqueue.enqueued);
+        let duplicate =
+            crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+                mailbox_enqueue_intervention(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    queued_intervention(message_id, vec![message_id], RESTARTED_GENERATION),
+                ),
+            )
+            .await;
+        assert_eq!(
+            duplicate.refusal_reason,
+            Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued),
+            "the G+1 delivery must take the duplicate-repair path for merged non-head M"
+        );
+        crate::services::discord::turn_view_reconciler::note_intake_queue_marker_added(
+            &shared,
+            &http,
+            channel_id,
+            message_id,
+            QUEUED_GENERATION,
+            crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+            "test_seed_generation_g_queue_marker",
+        )
+        .await;
+
+        let repaired = repair_queued_source_pending_reaction_from_mailbox(
+            &shared,
+            &http,
+            channel_id,
+            message_id,
+            super::super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy::QueueState,
+        )
+        .await;
+        assert_eq!(repaired, Some('📬'));
+
+        crate::services::discord::queue_marker::drain_dispatched_queue_markers(
+            &shared,
+            &http,
+            channel_id,
+            merged_head_id,
+            &source_generations,
+        )
+        .await;
+
+        assert!(
+            !reaction_is_present(&shared, message_id, '📬'),
+            "a G+1 duplicate repair must remain removable by the queue entry's stored generation G"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_gate_duplicate_repair_preserves_static_pending_reaction() {
+        let _root = scoped_runtime_root();
+        const QUEUED_GENERATION: u64 = 81;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let provider = ProviderKind::Claude;
+        let channel_id = serenity::ChannelId::new(455_400_000_000_221);
+        let message_id = serenity::MessageId::new(455_400_000_000_222);
+
+        let enqueue =
+            crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+                mailbox_enqueue_intervention(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    queued_intervention(message_id, vec![message_id], QUEUED_GENERATION),
+                ),
+            )
+            .await;
+        assert!(enqueue.enqueued);
+        crate::services::discord::turn_view_reconciler::note_intake_queue_marker_added(
+            &shared,
+            &http,
+            channel_id,
+            message_id,
+            QUEUED_GENERATION,
+            crate::services::discord::queue_reactions::QUEUE_RECONCILE_PENDING_REACTION,
+            "test_seed_reconcile_gate_pending",
+        )
+        .await;
+        let duplicate =
+            crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+                mailbox_enqueue_intervention(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    queued_intervention(message_id, vec![message_id], QUEUED_GENERATION),
+                ),
+            )
+            .await;
+        assert_eq!(
+            duplicate.refusal_reason,
+            Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued)
+        );
+
+        let repaired = repair_queued_source_pending_reaction_from_mailbox(
+            &shared,
+            &http,
+            channel_id,
+            message_id,
+            super::super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy::Static(
+                crate::services::discord::queue_reactions::QUEUE_RECONCILE_PENDING_REACTION,
+            ),
+        )
+        .await;
+
+        assert_eq!(repaired, Some('🔄'));
+        assert!(reaction_is_present(&shared, message_id, '🔄'));
+        assert!(!reaction_is_present(&shared, message_id, '📬'));
+        assert!(!reaction_is_present(&shared, message_id, '➕'));
     }
 }
 
