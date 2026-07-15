@@ -380,6 +380,10 @@ runtime:
   context_compact_percent: 60
   context_compact_percent_codex: 75
   context_compact_percent_claude: 70
+  # Global Claude gateway-proxy routing toggle. Default: false (off).
+  claude_gateway_proxy_enabled: false
+  # Proxy base URL used only when the toggle is on. Default: http://127.0.0.1:10100
+  claude_gateway_proxy_url: "http://127.0.0.1:10100"
   dispatch_poll_sec: 30
   agent_sync_sec: 300
   github_issue_sync_sec: 900

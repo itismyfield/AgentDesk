@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 #[cfg(unix)]
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, emit_claude_tui_zero_harvest, try_claude_tui_warm_followup,
@@ -206,7 +207,7 @@ fn build_tmux_launch_env_lines(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_percent: Option<u64>,
-    cache_ttl_minutes: Option<u32>,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> String {
     let mut env_lines = String::from("unset CLAUDECODE\n");
     if let Some(exec_path) = exec_path {
@@ -240,27 +241,34 @@ fn build_tmux_launch_env_lines(
     if let Some(pct) = compact_percent.filter(|&p| p > 0) {
         env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
     }
-    // #1088: prompt-cache TTL bucket. Claude CLI honors this env var by
-    // setting cache_control.ttl on the underlying API call.
-    if let Some(ttl_str) = cache_ttl_env_value(cache_ttl_minutes) {
-        env_lines.push_str(&format!(
-            "export CLAUDE_CODE_EXTENDED_CACHE_TTL={}\n",
-            ttl_str
-        ));
-    }
+    gateway_proxy_env.append_shell_env(&mut env_lines);
 
     env_lines
 }
 
-/// Map a normalized cache TTL minutes value (#1088) to the string passed to
-/// the Claude CLI via the `CLAUDE_CODE_EXTENDED_CACHE_TTL` env var, which the
-/// CLI in turn forwards as `cache_control.ttl` on the Anthropic API call.
-/// Returns `None` for the default 5m bucket (no env var emitted).
-pub(crate) fn cache_ttl_env_value(cache_ttl_minutes: Option<u32>) -> Option<&'static str> {
-    match crate::config::normalize_cache_ttl_minutes(cache_ttl_minutes) {
-        Some(60) => Some("1h"),
-        // 5m is the default; no need to set the env var explicitly.
-        _ => None,
+#[cfg(test)]
+mod launch_env_tests {
+    use super::build_tmux_launch_env_lines;
+    use crate::services::claude_gateway_proxy::launch_env_for_test;
+
+    #[test]
+    fn launch_env_restores_compact_override_and_gates_gateway_proxy() {
+        let gateway_env = launch_env_for_test(true, "http://proxy.example/it's-ready", true);
+        let enabled = build_tmux_launch_env_lines(None, None, None, Some(70), &gateway_env);
+        assert!(enabled.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70\n"));
+        assert!(
+            enabled.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
+        );
+        assert!(enabled.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
+
+        let scrub = launch_env_for_test(false, "http://foreign.example", true);
+        let disabled = build_tmux_launch_env_lines(None, None, None, None, &scrub);
+        assert!(disabled.contains("unset ANTHROPIC_BASE_URL\n"));
+        assert!(disabled.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
+
+        assert!(!disabled.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
+        assert!(!enabled.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
+        assert!(!disabled.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
     }
 }
 
@@ -397,19 +405,10 @@ fn execute_command_simple_with_model_and_cancel(
         args.push(model.to_string());
     }
 
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
     let mut command = Command::new(&claude_bin);
-    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    // #2250: put Claude in its own process group so the simple-cancel
-    // watcher can terminate any wrapper / grandchild via
-    // `kill_pid_tree(child_pid)`. Without this, descendants survive cancel.
-    crate::services::process::configure_child_process_group(&mut command);
+    configure_execute_command_simple(&mut command, &resolution, &args, &gateway_proxy_env);
     let mut child = command
-        .args(&args)
-        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
-        .env_remove("CLAUDECODE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start Claude: {}", e))?;
 
@@ -457,6 +456,27 @@ fn execute_command_simple_with_model_and_cancel(
             stderr
         })
     }
+}
+
+fn configure_execute_command_simple(
+    command: &mut Command,
+    resolution: &crate::services::platform::BinaryResolution,
+    args: &[String],
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+) {
+    crate::services::platform::apply_binary_resolution(command, resolution);
+    // #2250: put Claude in its own process group so the simple-cancel
+    // watcher can terminate any wrapper / grandchild via
+    // `kill_pid_tree(child_pid)`. Without this, descendants survive cancel.
+    crate::services::process::configure_child_process_group(command);
+    command
+        .args(args)
+        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    gateway_proxy_env.apply_to_command(command);
 }
 
 // #3034: retained for the #2387 timeout-drain regression test below.
@@ -635,6 +655,54 @@ mod simple_timeout_2387_tests {
     }
 }
 
+#[cfg(test)]
+mod simple_launch_env_tests {
+    use super::configure_execute_command_simple;
+    use std::process::Command;
+
+    #[test]
+    fn disabled_gateway_scrubs_pre_set_proxy_vars_from_simple_command() {
+        let resolution = crate::services::platform::BinaryResolution {
+            requested_binary: "claude".to_string(),
+            resolved_path: Some("claude".to_string()),
+            canonical_path: None,
+            source: Some("test".to_string()),
+            attempts: Vec::new(),
+            failure_kind: None,
+            exec_path: None,
+        };
+        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
+            false,
+            "http://foreign.example:10100",
+            true,
+        );
+        let mut command = Command::new("claude");
+        command
+            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
+            .env(
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "foreign-value",
+            );
+
+        configure_execute_command_simple(&mut command, &resolution, &[], &scrub);
+
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(envs.get("ANTHROPIC_BASE_URL"), Some(&None));
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some(&None)
+        );
+    }
+}
+
 /// Execute a command using Claude CLI with streaming output
 /// If `system_prompt` is None, uses the default file manager system prompt.
 /// If `system_prompt` is Some(""), no system prompt is appended.
@@ -700,7 +768,6 @@ pub fn execute_command_streaming(
             dispatch_type,
         );
     }
-
     let default_system_prompt = r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
 
 SECURITY RULES (MUST FOLLOW):
@@ -843,7 +910,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     report_channel_id,
                     report_provider,
                     compact_percent,
-                    cache_ttl_minutes,
                 );
             } else {
                 let (tmux_missing, pane_liveness) =
@@ -865,7 +931,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         report_channel_id,
                         report_provider,
                         compact_percent,
-                        cache_ttl_minutes,
                     );
                 }
                 // Local without tmux → ProcessBackend (new path)
@@ -951,6 +1016,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if let Some(pct) = compact_percent.filter(|&p| p > 0) {
         command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", pct.to_string());
     }
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    gateway_proxy_env.apply_to_command(&mut command);
 
     let mut child = command.spawn().map_err(|e| {
         debug_log(&format!(
@@ -1812,6 +1879,10 @@ fn execute_streaming_local_tui_tmux(
         cleanup_stale_claude_tui_session(tmux_session_name);
     }
 
+    // Probe only after the warm-followup path has decided a fresh process is
+    // required. If a proxy dies after launch, its env cannot be scrubbed from
+    // the live process; this guard intentionally protects fresh launches only.
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
     let owner_path = prepare_and_create_claude_tui_session(
         tmux_session_name,
         working_dir,
@@ -1822,6 +1893,7 @@ fn execute_streaming_local_tui_tmux(
         hook_endpoint,
         resume,
         compact_percent,
+        &gateway_proxy_env,
     )?;
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
@@ -2009,6 +2081,7 @@ fn prepare_and_create_claude_tui_session(
     hook_endpoint: String,
     resume: bool,
     compact_percent: Option<u64>,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> Result<String, String> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
@@ -2037,6 +2110,7 @@ fn prepare_and_create_claude_tui_session(
             model: model_override.map(str::to_string),
             resume,
             compact_percent,
+            gateway_proxy_env: gateway_proxy_env.clone(),
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
@@ -2559,7 +2633,6 @@ fn execute_streaming_local_tmux(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_percent: Option<u64>,
-    cache_ttl_minutes: Option<u32>,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tmux START: {} ===",
@@ -2795,12 +2868,15 @@ fn execute_streaming_local_tmux(
     let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
+    // A live warm-followup process keeps its original environment. Resolve and
+    // warn only once the startup plan actually requires a fresh process.
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
     let env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
         compact_percent,
-        cache_ttl_minutes,
+        &gateway_proxy_env,
     );
 
     let script_content = format!(
@@ -3087,6 +3163,9 @@ pub(crate) fn execute_streaming_local_process(
             pct.to_string(),
         ));
     }
+    // The follow-up path returned above when the existing process was healthy,
+    // so probing here cannot emit one warning per warm turn.
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),
@@ -3099,7 +3178,9 @@ pub(crate) fn execute_streaming_local_process(
     };
 
     let backend = ProcessBackend::new();
-    let handle = backend.create_session(&config)?;
+    let handle = backend.create_session_with_command_env(&config, |command| {
+        gateway_proxy_env.apply_to_command(command);
+    })?;
 
     // Store child PID in cancel token
     if let Some(ref token) = cancel_token {

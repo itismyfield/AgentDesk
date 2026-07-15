@@ -615,9 +615,11 @@ impl AgentChannel {
         }
     }
 
-    /// Returns the configured prompt-cache TTL in minutes, but only if it is a
-    /// supported bucket (5 or 60). Anything else maps to `None` so the default
-    /// 5-minute TTL is used.
+    /// Returns the configured prompt-cache TTL selector in minutes, but only
+    /// for the retained 5/60 buckets. Subscription Claude automatically
+    /// requests the 1h TTL without an env override, so this value is currently
+    /// inert for native sessions; forwarding it to claude-e remains an
+    /// unimplemented gap documented in `docs/claude-e-rollout/`.
     pub fn cache_ttl_minutes(&self) -> Option<u32> {
         match self {
             Self::Legacy(_) => None,
@@ -635,21 +637,15 @@ pub fn normalize_cache_ttl_minutes(value: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Read the global default prompt-cache TTL from the environment (#2661).
+/// Read the retained global prompt-cache TTL selector from the environment
+/// (#2661).
 ///
 /// `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything
-/// else (including the variable being unset) returns `None`, preserving the
-/// pre-#2661 5-minute default. When this returns `Some(60)`, `resolve_cache_ttl_minutes`
-/// (Discord channel resolver) falls back to it whenever a channel does not
-/// explicitly set `cache_ttl_minutes` on its `AgentChannelConfig`.
-///
-/// Rationale: the developer-role system prompt is ~6KB and is rebuilt every
-/// Discord turn. Anthropic's prompt cache prefix hit-rate falls off after
-/// the 5m default TTL whenever the user goes idle between turns. Most
-/// channels never set the per-channel override, so the operator pays full
-/// prefix cost on every re-engagement. Exposing the 60m bucket as a global
-/// default lets the operator opt-in once at process start and recapture
-/// cache hits across long-form chat sessions.
+/// else (including the variable being unset) returns `None`. The Discord
+/// resolver still carries this value through the existing config chain, but
+/// native subscription Claude already auto-requests the 1h TTL (no env is
+/// needed), and claude-e forwarding is not implemented yet; see
+/// `docs/claude-e-rollout/`.
 pub fn default_cache_ttl_minutes_from_env() -> Option<u32> {
     let raw = std::env::var("AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES").ok()?;
     let parsed = raw.trim().parse::<u32>().ok()?;
@@ -719,11 +715,11 @@ pub struct AgentChannelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub isolate_override: Option<bool>,
-    /// Anthropic prompt-cache TTL bucket (#1088). Only `5` (default) or `60`
-    /// minutes are valid. Any other value is treated as `None` (default 5m).
-    /// When set to `60`, the Claude CLI is invoked with the extended 1h
-    /// cache TTL via the `CLAUDE_CODE_EXTENDED_CACHE_TTL` env var so the
-    /// underlying API call uses `cache_control.ttl = "1h"`.
+    /// Retained Anthropic prompt-cache TTL selector (#1088). Only `5` or `60`
+    /// minutes are valid. Subscription Claude automatically requests the 1h
+    /// TTL without an env override, so this field is currently inert for
+    /// native sessions. Forwarding it to claude-e is an unimplemented gap;
+    /// see `docs/claude-e-rollout/`.
     #[serde(
         default,
         alias = "cacheTtlMinutes",
@@ -1510,6 +1506,13 @@ pub struct RuntimeSettingsConfig {
     pub context_compact_percent_codex: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_claude: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub claude_gateway_proxy_enabled: bool,
+    #[serde(
+        default = "default_claude_gateway_proxy_url",
+        skip_serializing_if = "is_default_claude_gateway_proxy_url"
+    )]
+    pub claude_gateway_proxy_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_poll_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1663,6 +1666,8 @@ impl RuntimeSettingsConfig {
             && self.context_compact_percent.is_none()
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
+            && !self.claude_gateway_proxy_enabled
+            && is_default_claude_gateway_proxy_url(&self.claude_gateway_proxy_url)
             && self.dispatch_poll_sec.is_none()
             && self.agent_sync_sec.is_none()
             && self.github_issue_sync_sec.is_none()
@@ -1696,6 +1701,26 @@ impl RuntimeSettingsConfig {
     }
 }
 
+pub(crate) const DEFAULT_CLAUDE_GATEWAY_PROXY_URL: &str = "http://127.0.0.1:10100";
+
+fn default_claude_gateway_proxy_url() -> String {
+    DEFAULT_CLAUDE_GATEWAY_PROXY_URL.to_string()
+}
+
+fn is_default_claude_gateway_proxy_url(value: &str) -> bool {
+    value.is_empty() || value == DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+}
+
+impl RuntimeSettingsConfig {
+    pub(crate) fn resolved_claude_gateway_proxy_url(&self) -> &str {
+        if self.claude_gateway_proxy_url.is_empty() {
+            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+        } else {
+            &self.claude_gateway_proxy_url
+        }
+    }
+}
+
 #[cfg(test)]
 mod runtime_hook_registry_config_tests {
     use super::*;
@@ -1726,6 +1751,26 @@ mod runtime_hook_registry_config_tests {
             ..RuntimeSettingsConfig::default()
         };
         assert!(!disabled.is_empty());
+    }
+
+    #[test]
+    fn claude_gateway_proxy_defaults_off_with_loopback_url() {
+        let parsed: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!parsed.claude_gateway_proxy_enabled);
+        assert_eq!(
+            parsed.claude_gateway_proxy_url,
+            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+        );
+        assert!(parsed.is_empty());
+
+        let enabled: RuntimeSettingsConfig =
+            serde_yaml::from_str("claude_gateway_proxy_enabled: true\n").unwrap();
+        assert!(enabled.claude_gateway_proxy_enabled);
+        assert_eq!(
+            enabled.resolved_claude_gateway_proxy_url(),
+            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+        );
+        assert!(!enabled.is_empty());
     }
 
     // The keys survive a YAML round-trip with their types intact, and an absent

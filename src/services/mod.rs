@@ -9,6 +9,7 @@ pub mod automation_candidate_materializer;
 pub mod claude;
 pub mod claude_compact_trigger;
 pub mod claude_e;
+pub(crate) mod claude_gateway_proxy;
 pub mod claude_tui;
 pub mod cluster;
 pub mod codex;

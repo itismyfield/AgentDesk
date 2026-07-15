@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
 
@@ -285,6 +286,7 @@ pub struct ClaudeTuiLaunchConfig {
     /// `--resume` TUI spawns honour the configured override. Mirrors the
     /// `p > 0` guard used by the non-TUI tmux/process spawn paths.
     pub compact_percent: Option<u64>,
+    pub(crate) gateway_proxy_env: ClaudeGatewayProxyEnv,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -414,15 +416,21 @@ fn write_launch_script(
         Some(pct) => format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}\n"),
         None => String::new(),
     };
+    let mut gateway_exports = String::new();
+    config
+        .gateway_proxy_env
+        .append_shell_env(&mut gateway_exports);
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
          export CLAUDE_CODE_RESUME_PROMPT=\"_\"\n\
          {compact_export}\
+         {gateway_exports}\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = shell_escape(&config.claude_bin.display().to_string()),
         compact_export = compact_export,
+        gateway_exports = gateway_exports,
         args = args,
     );
     std::fs::write(path, script)
@@ -445,6 +453,11 @@ mod tests {
             model: Some("sonnet".to_string()),
             resume: false,
             compact_percent: None,
+            gateway_proxy_env: crate::services::claude_gateway_proxy::launch_env_for_test(
+                false,
+                "http://127.0.0.1:10100",
+                true,
+            ),
         }
     }
 
@@ -551,13 +564,15 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_exports_compact_override_when_configured() {
-        // #3166: a configured context_compact_percent_claude must reach the TUI
-        // launch script as CLAUDE_AUTOCOMPACT_PCT_OVERRIDE so resume/restore-
-        // spawned TUI sessions honour the user-set auto-compact threshold.
+    fn launch_script_exports_compact_and_gates_gateway_proxy() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.compact_percent = Some(60);
+        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
+            true,
+            "http://proxy.example/it's-ready",
+            true,
+        );
         let launch_script_path = dir.path().join("launch.sh");
 
         write_launch_script(
@@ -568,23 +583,38 @@ mod tests {
         .unwrap();
 
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
         assert!(
-            script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"),
-            "launch script must export the configured compact override, got:\n{script}"
+            script.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
-        // The export must precede the `exec` line so the env is in scope for claude.
+        assert!(script.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
+        assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
         let export_pos = script.find("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").unwrap();
         let exec_pos = script.find("exec ").unwrap();
         assert!(
             export_pos < exec_pos,
             "compact override must be exported before exec"
         );
+
+        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
+            false,
+            "http://foreign.example",
+            true,
+        );
+        write_launch_script(
+            &launch_script_path,
+            &config,
+            Path::new("/tmp/settings.json"),
+        )
+        .unwrap();
+        let disabled_script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(disabled_script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
+        assert!(disabled_script.contains("unset ANTHROPIC_BASE_URL\n"));
+        assert!(disabled_script.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
     }
 
     #[test]
     fn launch_script_resume_exports_compact_override() {
-        // #3166: the resume path is the reported live regression — a --resume
-        // spawn must still carry the override.
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.resume = true;
@@ -604,8 +634,6 @@ mod tests {
 
     #[test]
     fn launch_script_omits_compact_override_when_absent_or_zero() {
-        // Mirror the `p > 0` guard used by the non-TUI spawn paths: None or 0
-        // leaves the var unset so the Claude CLI keeps its built-in default.
         let dir = tempfile::tempdir().unwrap();
         for value in [None, Some(0)] {
             let mut config = sample_config();

@@ -1,10 +1,10 @@
 //! #3262: AgentDesk-side `/compact` injection for the Claude TUI.
 //!
-//! Claude Code IGNORES the `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` env var AgentDesk
-//! exports (services/claude.rs), so a configured `context_compact_percent_claude`
-//! threshold never actually changes when Claude auto-compacts — it only compacts
-//! at its own internal default. Codex, by contrast, honours a real
-//! `model_auto_compact_token_limit` launch knob; Claude's TUI has no equivalent.
+//! Claude Code documents `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, but honors it only
+//! under specific conditions (auto-compact-window, cloud sessions, or specific
+//! models). AgentDesk therefore ALSO injects `/compact` into the TUI pane as its
+//! primary mechanism instead of relying solely on that conditional env knob.
+//! Codex, by contrast, honours a `model_auto_compact_token_limit` launch knob.
 //!
 //! The Claude TUI *does* respond to a user typing `/compact`, and AgentDesk
 //! already delivers `/compact` into the live pane on demand (the manual

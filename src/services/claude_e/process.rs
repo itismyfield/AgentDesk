@@ -15,6 +15,7 @@ use std::sync::mpsc::Sender;
 use serde_json::Value;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::process::kill_child_tree;
 use crate::services::provider::{
     CancelToken, ProviderKind, cancel_requested, register_child_pid, spawn_cancel_watchdog,
@@ -23,6 +24,10 @@ use crate::services::session_backend::{
     StreamLineState, emit_status_events_from_stream_json, observe_stream_context,
     parse_assistant_extra_tool_uses, parse_stream_message_with_state,
 };
+
+fn apply_gateway_proxy_env(command: &mut Command, gateway_proxy_env: &ClaudeGatewayProxyEnv) {
+    gateway_proxy_env.apply_to_command(command);
+}
 
 /// Phase 1 entry point. The signature matches the subset of
 /// `claude::execute_command_streaming` parameters that are meaningful
@@ -91,6 +96,10 @@ pub fn execute_streaming(
         "claude_e.execute_streaming spawning"
     );
 
+    // claude-e is a fresh per-turn process and its real Claude child inherits
+    // these variables, so it uses the same guarded gateway decision as native
+    // fresh launches.
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
     let mut command = Command::new(&claude_e_bin);
     crate::services::process::configure_child_process_group(&mut command);
     command
@@ -104,6 +113,7 @@ pub fn execute_streaming(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_gateway_proxy_env(&mut command, &gateway_proxy_env);
 
     let mut child = command
         .spawn()
@@ -357,4 +367,69 @@ pub fn execute_streaming(
 
     let _ = report_channel_id;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_e_command_receives_authoritative_gateway_env() {
+        let gateway_env = crate::services::claude_gateway_proxy::launch_env_for_test(
+            true,
+            "http://127.0.0.1:10100",
+            true,
+        );
+        let mut command = Command::new("claude-e");
+
+        apply_gateway_proxy_env(&mut command, &gateway_env);
+
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            envs.get("ANTHROPIC_BASE_URL"),
+            Some(&Some("http://127.0.0.1:10100".to_string()))
+        );
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some(&Some("1".to_string()))
+        );
+
+        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
+            false,
+            "http://foreign.example",
+            true,
+        );
+        let mut command = Command::new("claude-e");
+        command
+            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
+            .env(
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "foreign-value",
+            );
+
+        apply_gateway_proxy_env(&mut command, &scrub);
+
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(envs.get("ANTHROPIC_BASE_URL"), Some(&None));
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some(&None)
+        );
+    }
 }
