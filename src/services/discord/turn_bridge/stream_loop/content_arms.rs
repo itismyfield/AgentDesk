@@ -2,6 +2,7 @@
 
 mod provider_error_presentation;
 
+use super::super::streaming_edit_text::{TuiErrorClassification, classify_raw_tui_error};
 use super::super::thinking::{redacted_thinking_transcript_event, thinking_status_line};
 use super::*;
 use provider_error_presentation::{ProviderErrorPresentation, provider_error_presentation};

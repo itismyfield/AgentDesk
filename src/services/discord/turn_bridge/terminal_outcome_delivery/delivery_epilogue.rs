@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use super::super::streaming_edit_text::TuiErrorClassification;
 use super::*;
 
 pub(super) enum DeliveryEpilogueMessage {

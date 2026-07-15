@@ -13,6 +13,7 @@ use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
 };
+use super::streaming_edit_text::TuiErrorClassification;
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
     CancelPromptReplaceState, handle_cancel_prompt_replace,

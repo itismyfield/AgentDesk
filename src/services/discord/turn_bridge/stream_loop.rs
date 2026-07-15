@@ -18,6 +18,7 @@ use super::stream_tick::{
     PendingLongRunningOpenAfterStateSave, PendingLongRunningRetargetAfterStateSave,
     run_bridge_stream_tick,
 };
+use super::streaming_edit_text::TuiErrorClassification;
 use content_arms::{
     StreamContentArmContext, StreamContentArmMessage, StreamContentArmOutcome,
     StreamContentArmState, handle_stream_content_message,

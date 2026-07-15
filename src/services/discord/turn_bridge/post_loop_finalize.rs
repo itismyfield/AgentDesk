@@ -13,6 +13,7 @@ use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
 };
+use super::streaming_edit_text::TuiErrorClassification;
 use super::*;
 
 pub(super) struct PostLoopFinalizeContext {
