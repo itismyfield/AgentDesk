@@ -19,8 +19,9 @@ fn test_agentdesk_root() -> Option<PathBuf> {
         let trimmed = override_root.trim();
         if !trimmed.is_empty() {
             let root = PathBuf::from(trimmed);
-            assert_not_live_release_runtime_root(&root);
-            return Some(root);
+            if !is_live_release_runtime_root(&root) {
+                return Some(root);
+            }
         }
     }
     static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
@@ -32,14 +33,8 @@ fn test_agentdesk_root() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-fn assert_not_live_release_runtime_root(root: &Path) {
-    if let Some(home) = dirs::home_dir() {
-        let live = home.join(".adk").join("release");
-        assert!(
-            root != live,
-            "#3293: test must set AGENTDESK_ROOT_DIR via tempdir before resolving AgentDesk runtime store root"
-        );
-    }
+fn is_live_release_runtime_root(root: &Path) -> bool {
+    dirs::home_dir().is_some_and(|home| root == home.join(".adk").join("release"))
 }
 
 pub(super) fn runtime_root() -> Option<PathBuf> {
@@ -464,6 +459,24 @@ pub(crate) fn best_effort_atomic_write_logged(
             error = %error,
             "best-effort atomic write failed"
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_root_tests {
+    use super::*;
+
+    #[test]
+    fn live_release_override_falls_back_to_isolated_tempdir() {
+        let home = dirs::home_dir().expect("test requires a home directory");
+        let live_release_root = home.join(".adk").join("release");
+        let _env =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", &live_release_root);
+
+        let resolved = test_agentdesk_root().expect("test runtime root");
+
+        assert_ne!(resolved, live_release_root);
+        assert!(resolved.exists(), "fallback tempdir must remain alive");
     }
 }
 

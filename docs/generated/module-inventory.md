@@ -501,7 +501,7 @@
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 264 | 242 | 22 |  |
 | `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1240 | 972 | 268 |  |
-| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2383 | 989 | 1394 |  |
+| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2385 | 989 | 1396 |  |
 | `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1338 | 425 | 913 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1384 | 627 | 757 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 360 | 266 | 94 |  |
@@ -695,7 +695,7 @@
 | `services::discord::runtime_bootstrap::spawns` | `src/services/discord/runtime_bootstrap/spawns.rs` | 268 | 268 | 0 |  |
 | `services::discord::runtime_bootstrap::startup_doctor` | `src/services/discord/runtime_bootstrap/startup_doctor.rs` | 156 | 156 | 0 |  |
 | `services::discord::runtime_bootstrap::voice` | `src/services/discord/runtime_bootstrap/voice.rs` | 271 | 198 | 73 |  |
-| `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 497 | 469 | 28 |  |
+| `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 510 | 465 | 45 |  |
 | `services::discord::semantic_boundaries` | `src/services/discord/semantic_boundaries.rs` | 286 | 286 | 0 |  |
 | `services::discord::session_banner` | `src/services/discord/session_banner.rs` | 495 | 152 | 343 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 214 | 141 | 73 |  |
@@ -786,7 +786,7 @@
 | `services::discord::tmux_watcher::terminal_send` | `src/services/discord/tmux_watcher/terminal_send.rs` | 634 | 580 | 54 |  |
 | `services::discord::tmux_watcher::turn_identity` | `src/services/discord/tmux_watcher/turn_identity.rs` | 511 | 511 | 0 |  |
 | `services::discord::tmux_watcher::turn_stream_collector` | `src/services/discord/tmux_watcher/turn_stream_collector.rs` | 1158 | 1158 | 0 | giant-file |
-| `services::discord::tmux_watcher::two_message_panel` | `src/services/discord/tmux_watcher/two_message_panel.rs` | 694 | 382 | 312 |  |
+| `services::discord::tmux_watcher::two_message_panel` | `src/services/discord/tmux_watcher/two_message_panel.rs` | 695 | 382 | 313 |  |
 | `services::discord::tmux_watcher::utf8_chunk_decoder` | `src/services/discord/tmux_watcher/utf8_chunk_decoder.rs` | 88 | 88 | 0 |  |
 | `services::discord::tui_direct_abort_marker` | `src/services/discord/tui_direct_abort_marker/mod.rs` | 3123 | 838 | 2285 |  |
 | `services::discord::tui_direct_abort_marker::deferred_claim` | `src/services/discord/tui_direct_abort_marker/deferred_claim.rs` | 680 | 273 | 407 |  |
@@ -869,7 +869,7 @@
 | `services::discord::turn_bridge::tmux_runtime::process_backend_cancel` | `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs` | 156 | 156 | 0 |  |
 | `services::discord::turn_bridge::tmux_runtime::process_table` | `src/services/discord/turn_bridge/tmux_runtime/process_table.rs` | 370 | 370 | 0 |  |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 419 | 348 | 71 |  |
-| `services::discord::turn_bridge::two_message_panel` | `src/services/discord/turn_bridge/two_message_panel.rs` | 800 | 270 | 530 |  |
+| `services::discord::turn_bridge::two_message_panel` | `src/services/discord/turn_bridge/two_message_panel.rs` | 801 | 270 | 531 |  |
 | `services::discord::turn_bridge::voice_completion` | `src/services/discord/turn_bridge/voice_completion.rs` | 385 | 385 | 0 |  |
 | `services::discord::turn_bridge::watcher_handoff` | `src/services/discord/turn_bridge/watcher_handoff.rs` | 935 | 532 | 403 |  |
 | `services::discord::turn_bridge::watcher_orphan_cleanup` | `src/services/discord/turn_bridge/watcher_orphan_cleanup.rs` | 475 | 233 | 242 |  |

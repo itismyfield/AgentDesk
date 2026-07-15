@@ -1001,9 +1001,11 @@ mod tests {
     use super::*;
 
     /// The liveness evidence path reaches `latest_runtime_activity_unix_nanos`,
-    /// which trips the #3293 runtime-store guard when `AGENTDESK_ROOT_DIR` points
-    /// at a live release root (the normal dev-machine env). Point it at a throw-
-    /// away temp root so these tests run anywhere, not just under CI's temp root.
+    /// which resolves the runtime-store root. Under a live release
+    /// `AGENTDESK_ROOT_DIR` (the normal dev-machine env) the #3293 guard now
+    /// falls back to a shared throwaway tempdir instead of the live root (#4514).
+    /// Point it at a per-test throwaway root so these tests stay isolated and run
+    /// anywhere, not just under CI's temp root.
     ///
     /// `AGENTDESK_ROOT_DIR` is process-global, so we hold the shared test env lock
     /// (same as the sibling `recovery.rs` tests) for the whole test — otherwise a

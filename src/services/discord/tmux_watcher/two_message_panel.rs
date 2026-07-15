@@ -657,10 +657,11 @@ mod tests {
         );
     }
 
-    /// #3293: `InflightTurnState::new` resolves the AgentDesk runtime store, which
-    /// panics unless the runtime root is a tempdir (never the live `~/.adk/release`).
-    /// Point `AGENTDESK_ROOT_DIR` at a throwaway dir under the shared env lock so
-    /// constructing a test inflight is deterministic; restore on drop.
+    /// #3293: `InflightTurnState::new` resolves the AgentDesk runtime store; the
+    /// guard keeps this off the live `~/.adk/release`, falling back to a shared
+    /// throwaway tempdir (#4514). Point `AGENTDESK_ROOT_DIR` at a per-test
+    /// throwaway dir under the shared env lock so constructing a test inflight is
+    /// deterministic; restore on drop.
     struct RuntimeRootGuard {
         previous: Option<std::ffi::OsString>,
         _root: tempfile::TempDir,
