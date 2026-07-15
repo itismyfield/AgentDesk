@@ -301,6 +301,7 @@ pub(super) trait IntakeQueueCommitEffects {
         &mut self,
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
+        policy: IntakeQueuePendingReactionPolicy,
     ) -> Option<char>;
 
     fn advance_checkpoint(
@@ -401,7 +402,11 @@ where
         IntakeQueueCommitStatus::Refused { reason } => {
             if reason == Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
                 && let Some(emoji) = effects
-                    .repair_queued_source_pending_reaction(channel_id, message_id)
+                    .repair_queued_source_pending_reaction(
+                        channel_id,
+                        message_id,
+                        options.pending_reaction,
+                    )
                     .await
             {
                 outcome.pending_reaction = PendingReactionDecision::Apply(emoji);
@@ -575,8 +580,12 @@ mod tests {
             &mut self,
             channel_id: serenity::ChannelId,
             message_id: serenity::MessageId,
+            policy: IntakeQueuePendingReactionPolicy,
         ) -> Option<char> {
-            let emoji = self.repair_reaction?;
+            let emoji = match policy {
+                IntakeQueuePendingReactionPolicy::QueueState => self.repair_reaction?,
+                IntakeQueuePendingReactionPolicy::Static(emoji) => emoji,
+            };
             self.reactions.push((channel_id, message_id, emoji));
             Some(emoji)
         }
@@ -775,6 +784,42 @@ mod tests {
             outcome.committed_steps,
             vec![IntakeQueueCommittedStep::PendingReactionApplied]
         );
+    }
+
+    #[tokio::test]
+    async fn source_id_duplicate_refusal_preserves_static_reconcile_reaction_policy() {
+        let mut effects = FakeEffects {
+            enqueue_outcome: MailboxEnqueueOutcome {
+                enqueued: false,
+                merged: false,
+                refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+                persistence_error: None,
+            },
+            repair_reaction: Some('📬'),
+            ..FakeEffects::default()
+        };
+        let mut options = IntakeQueueCommitOptions::default();
+        options.pending_reaction = IntakeQueuePendingReactionPolicy::Static(
+            super::super::super::queue_reactions::QUEUE_RECONCILE_PENDING_REACTION,
+        );
+
+        let outcome = commit_soft_intervention_transaction(&mut effects, request(options)).await;
+
+        assert_eq!(
+            outcome.pending_reaction,
+            PendingReactionDecision::Apply('🔄'),
+            "a duplicate reconcile-gate delivery must retain its static pending-reaction policy"
+        );
+        assert_eq!(
+            effects.reactions,
+            vec![(
+                serenity::ChannelId::new(42),
+                serenity::MessageId::new(100),
+                '🔄'
+            )],
+            "duplicate repair must not replace 🔄 with a queue-position-derived marker"
+        );
+        assert!(effects.checkpoints.is_empty());
     }
 
     #[tokio::test]

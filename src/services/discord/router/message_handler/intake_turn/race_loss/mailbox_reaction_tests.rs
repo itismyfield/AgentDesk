@@ -188,3 +188,76 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
             .any(|op| { op.target.message_id == message_id && !op.add && op.emoji == '⏳' })
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn recently_finalized_message_requeued_in_live_mailbox_repairs_mailbox_marker() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let http = Arc::new(serenity::Http::new("Bot test-token"));
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(455_400_000_000_130);
+    let message_id = MessageId::new(455_400_000_000_131);
+    let active_message_id = MessageId::new(455_400_000_000_132);
+
+    crate::services::discord::turn_view_reconciler::note_intake_turn_started_current(
+        &shared,
+        &http,
+        channel_id,
+        message_id,
+        "test_seed_recently_finalized_start",
+    )
+    .await;
+    crate::services::discord::turn_view_reconciler::note_intake_turn_completed(
+        &shared,
+        &http,
+        channel_id,
+        message_id,
+        shared.restart.current_generation,
+        "test_seed_recently_finalized_terminal",
+    )
+    .await;
+    assert!(
+        crate::services::discord::mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            UserId::new(active_message_id.get()),
+            active_message_id,
+        )
+        .await
+    );
+
+    let enqueue = enqueue_race_loss_requeued_intervention(
+        &shared,
+        &provider,
+        channel_id,
+        message_id,
+        user_intervention(message_id.get()),
+    )
+    .await;
+    assert!(
+        enqueue.enqueued,
+        "the duplicate race loser genuinely requeues M"
+    );
+    let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+    assert!(snapshot.intervention_queue.iter().any(|intervention| {
+        intervention.message_id == message_id
+            || intervention.source_message_ids.contains(&message_id)
+    }));
+
+    mailbox_reaction::note_queue_pending(
+        &shared,
+        &http,
+        channel_id,
+        message_id,
+        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        mailbox_add_count(&shared, message_id),
+        1,
+        "recently-finalized suppression must yield to authoritative live mailbox membership"
+    );
+}

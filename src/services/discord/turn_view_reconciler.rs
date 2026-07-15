@@ -844,6 +844,7 @@ impl TurnViewReconciler {
 
         if desired.is_queue_marker()
             && self.recently_finalized_blocks_queued(target, owner.generation)
+            && !queue_repair::allows(shared, target, None, source).await
         {
             tracing::debug!(
                 channel_id = target.channel_id.get(),
@@ -888,7 +889,7 @@ impl TurnViewReconciler {
             if current.owner == owner
                 && desired.is_queue_marker()
                 && current.applied.started_or_terminal()
-                && !queue_repair::allows(shared, target, current.applied, source).await
+                && !queue_repair::allows(shared, target, Some(current.applied), source).await
             {
                 tracing::debug!(
                     channel_id = target.channel_id.get(),

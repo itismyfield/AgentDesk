@@ -3,7 +3,7 @@ use super::*;
 pub(super) async fn allows(
     shared: &SharedData,
     target: TurnViewTarget,
-    current: TurnViewState,
+    current: Option<TurnViewState>,
     source: &'static str,
 ) -> bool {
     if target.kind != TurnViewTargetKind::IntakeUserMessage {
