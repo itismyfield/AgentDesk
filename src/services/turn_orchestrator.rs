@@ -1639,8 +1639,9 @@ impl ChannelMailboxRegistry {
                 handle
             }
         };
-        // Preserve the first runtime's global mirror; this map carries no runtime identity.
-        GLOBAL_CHANNEL_MAILBOXES.entry(channel_id).or_insert(resolved.clone());
+        GLOBAL_CHANNEL_MAILBOXES
+            .entry(channel_id)
+            .or_insert(resolved.clone());
         resolved
     }
 
@@ -2309,40 +2310,6 @@ mod turn_finished_signal_tests {
         tokio::time::timeout(std::time::Duration::from_millis(250), signal.wait())
             .await
             .expect("fresh finish should wake reset waiter");
-    }
-}
-
-#[cfg(test)]
-mod global_mailbox_ownership_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn sibling_registry_handle_does_not_overwrite_global_mailbox_owner() {
-        let owner = ChannelMailboxRegistry::default();
-        let sibling = ChannelMailboxRegistry::default();
-        let channel_id = ChannelId::new(4_535_001);
-        let owner_handle = owner.handle(channel_id);
-        assert!(
-            owner_handle
-                .try_start_turn(
-                    Arc::new(CancelToken::new()),
-                    UserId::new(4_535_002),
-                    MessageId::new(4_535_003),
-                )
-                .await
-        );
-
-        let sibling_handle = sibling.handle(channel_id);
-        assert!(
-            !owner_handle.sender.same_channel(&sibling_handle.sender),
-            "fixture requires distinct per-runtime mailbox actors"
-        );
-        let global = ChannelMailboxRegistry::global_handle(channel_id)
-            .expect("first mailbox owner should remain globally mirrored");
-        assert!(
-            global.sender.same_channel(&owner_handle.sender),
-            "a sibling's empty actor must not replace the owning global mailbox"
-        );
     }
 }
 
@@ -7230,5 +7197,33 @@ mod recovery_done_signal_tests {
         tokio::time::timeout(std::time::Duration::from_millis(50), resolved.wait())
             .await
             .expect("global_recovery_done should resolve to the same Arc");
+    }
+    #[tokio::test]
+    async fn sibling_registry_handle_does_not_overwrite_global_mailbox_owner() {
+        let owner = ChannelMailboxRegistry::default();
+        let sibling = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(4_535_001);
+        let owner_handle = owner.handle(channel_id);
+        assert!(
+            owner_handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(4_535_002),
+                    MessageId::new(4_535_003),
+                )
+                .await
+        );
+
+        let sibling_handle = sibling.handle(channel_id);
+        assert!(
+            !owner_handle.sender.same_channel(&sibling_handle.sender),
+            "fixture requires distinct per-runtime mailbox actors"
+        );
+        let global = ChannelMailboxRegistry::global_handle(channel_id)
+            .expect("first mailbox owner should remain globally mirrored");
+        assert!(
+            global.sender.same_channel(&owner_handle.sender),
+            "a sibling's empty actor must not replace the owning global mailbox"
+        );
     }
 }

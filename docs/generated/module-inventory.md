@@ -428,7 +428,7 @@
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 862 | 354 | 508 |  |
 | `services::codex_tui::warm_followup` | `src/services/codex_tui/warm_followup.rs` | 695 | 512 | 183 |  |
 | `services::cswap` | `src/services/cswap.rs` | 887 | 552 | 335 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 5551 | 4167 | 1384 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 5538 | 4154 | 1384 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 981 | 855 | 126 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1079 | 652 | 427 |  |
@@ -488,7 +488,7 @@
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 113 | 113 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
 | `services::discord::health::rebind_request` | `src/services/discord/health/rebind_request.rs` | 112 | 87 | 25 |  |
-| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5594 | 2561 | 3033 | giant-file |
+| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5729 | 2520 | 3209 | giant-file |
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 515 | 174 | 341 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
@@ -533,7 +533,7 @@
 | `services::discord::inflight_heartbeat_sweeper` | `src/services/discord/inflight_heartbeat_sweeper.rs` | 299 | 264 | 35 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 723 | 723 | 0 |  |
 | `services::discord::jsonl_watcher` | `src/services/discord/jsonl_watcher.rs` | 276 | 210 | 66 |  |
-| `services::discord::mailbox_finish` | `src/services/discord/mailbox_finish.rs` | 88 | 88 | 0 |  |
+| `services::discord::mailbox_finish` | `src/services/discord/mailbox_finish.rs` | 133 | 133 | 0 |  |
 | `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 594 | 483 | 111 |  |
 | `services::discord::meeting_artifact_store` | `src/services/discord/meeting_artifact_store.rs` | 208 | 208 | 0 |  |
 | `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3222 | 3222 | 0 | giant-file |
@@ -626,7 +626,7 @@
 | `services::discord::recovery_engine::terminal_watcher` | `src/services/discord/recovery_engine/terminal_watcher.rs` | 306 | 168 | 138 |  |
 | `services::discord::recovery_paths` | `src/services/discord/recovery_paths/mod.rs` | 36 | 36 | 0 |  |
 | `services::discord::recovery_paths::controller_cutover` | `src/services/discord/recovery_paths/controller_cutover.rs` | 649 | 278 | 371 |  |
-| `services::discord::recovery_paths::restart` | `src/services/discord/recovery_paths/restart.rs` | 1346 | 868 | 478 |  |
+| `services::discord::recovery_paths::restart` | `src/services/discord/recovery_paths/restart.rs` | 1352 | 868 | 484 |  |
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 569 | 253 | 316 |  |
 | `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 305 | 185 | 120 |  |
 | `services::discord::relay_owner_observability` | `src/services/discord/relay_owner_observability.rs` | 458 | 343 | 115 |  |
@@ -1056,12 +1056,12 @@
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 564 | 436 | 128 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7199 | 3290 | 3909 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7229 | 3292 | 3937 | giant-file |
 | `services::turn_orchestrator::active_source_dedup` | `src/services/turn_orchestrator/active_source_dedup.rs` | 129 | 129 | 0 |  |
 | `services::turn_orchestrator::dispatch_reservation` | `src/services/turn_orchestrator/dispatch_reservation.rs` | 743 | 475 | 268 |  |
 | `services::turn_orchestrator::overflow` | `src/services/turn_orchestrator/overflow.rs` | 35 | 35 | 0 |  |
 | `services::turn_orchestrator::pending_queue_persistence` | `src/services/turn_orchestrator/pending_queue_persistence.rs` | 930 | 803 | 127 |  |
-| `services::turn_orchestrator::registry_purge` | `src/services/turn_orchestrator/registry_purge.rs` | 819 | 293 | 526 |  |
+| `services::turn_orchestrator::registry_purge` | `src/services/turn_orchestrator/registry_purge.rs` | 821 | 293 | 528 |  |
 | `services::turn_orchestrator::turn_finished_signal` | `src/services/turn_orchestrator/turn_finished_signal.rs` | 72 | 72 | 0 |  |
 | `supervisor` | `src/supervisor/mod.rs` | 1045 | 916 | 129 |  |
 | `ui` | `src/ui/mod.rs` | 1 | 1 | 0 |  |
