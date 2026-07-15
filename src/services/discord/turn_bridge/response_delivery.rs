@@ -145,7 +145,10 @@ mod tests {
         let detail = "Error: request failed\nstderr: context_length_exceeded: private detail";
         let guidance = prompt_too_long_guidance(detail);
 
-        assert_eq!(prompt_too_long_detail_from_guidance(&guidance), Some(detail));
+        assert_eq!(
+            prompt_too_long_detail_from_guidance(&guidance),
+            Some(detail)
+        );
         assert!(guidance.contains("`/compact`"));
         assert!(guidance.contains("요청을 짧게"));
     }
