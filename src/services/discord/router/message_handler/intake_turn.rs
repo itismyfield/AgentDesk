@@ -1297,6 +1297,7 @@ pub(super) async fn handle_text_message(
     let mut intake_latency = super::latency_spans::IntakeLatencySpans::turn_claimed();
 
     if started
+        && !preserve_on_cancel
         && let Some(stale) =
             super::super::super::stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)
                 .await
