@@ -35,6 +35,7 @@ pub(crate) struct IntakeSubmission {
     pub(crate) provider: ProviderKind,
     pub(crate) request: IntakeRequest,
     pub(crate) origin: IntakeOrigin,
+    pub(crate) preserve_on_cancel: bool,
     pub(crate) has_nonportable_uploads: bool,
     pub(crate) preloaded_uploads: Vec<String>,
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
@@ -179,9 +180,11 @@ pub(crate) async fn finish_admitted_local(
     _permit: LocalAdmissionPermit,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
+    let preserve_on_cancel = submission.preserve_on_cancel;
     message_handler::finish_admitted_local(
         deps,
         submission.request,
+        preserve_on_cancel,
         submission.preloaded_uploads,
         submission.voice_announcement,
     )
@@ -198,6 +201,7 @@ async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmissi
         request.request_owner,
         request.user_msg_id,
         &request.user_text,
+        submission.preserve_on_cancel,
         request.reply_context,
         request.has_reply_boundary,
         request.merge_consecutive,

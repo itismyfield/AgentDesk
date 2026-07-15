@@ -16,7 +16,8 @@ use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CatchUpClassification, CatchUpClassificationDecision,
     CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, CatchUpTooOldOutboxRequest, ChannelId,
     MessageId, ProviderKind, RuntimeChannelBindingStatus, advance_catch_up_settled_frontier,
-    catch_up_too_old_drop, catch_up_too_old_notice, classify_catch_up_message,
+    catch_up_source_generation, catch_up_too_old_drop, catch_up_too_old_notice,
+    classify_catch_up_message,
     classify_catch_up_message_with_utility_resolution, run_catch_up_sweep,
 };
 use crate::services::discord::health::UtilityBotUserIdResolution;
@@ -158,6 +159,64 @@ fn unavailable_utility_id_defers_only_when_sender_semantics_can_change() {
         ),
         CatchUpClassificationDecision::Determinate(CatchUpClassification::NotAllowed),
         "a plain bot message is NotAllowed even if it is notify, so lookup failure is immaterial"
+    );
+}
+
+#[test]
+fn false_flag_non_allowlist_announce_dispatch_is_not_cancel_preserved() {
+    let message = view(
+        ANNOUNCE_BOT_ID,
+        false,
+        60,
+        "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000",
+    );
+    assert_eq!(
+        classify_with_resolutions(
+            &message,
+            UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
+            UtilityBotUserIdResolution::Unconfigured,
+        ),
+        CatchUpClassificationDecision::Determinate(CatchUpClassification::Recover),
+    );
+
+    let source = catch_up_source_generation(
+        MessageId::new(message.message_id),
+        42,
+        message.author_id,
+        message.author_is_bot,
+        &[],
+        UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
+    );
+    assert!(
+        !source.preserve_on_cancel,
+        "resolved announce identity must override a false Discord bot flag without an allowlist fixture"
+    );
+}
+
+#[test]
+fn unavailable_announce_identity_during_recover_is_not_cancel_preserved() {
+    let message = view(HUMAN_ID, false, 60, "계속 진행해");
+    assert_eq!(
+        classify_with_resolutions(
+            &message,
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        ),
+        CatchUpClassificationDecision::Determinate(CatchUpClassification::Recover),
+        "announce ambiguity does not defer when both identity alternatives recover"
+    );
+
+    let source = catch_up_source_generation(
+        MessageId::new(message.message_id),
+        43,
+        message.author_id,
+        message.author_is_bot,
+        &[],
+        UtilityBotUserIdResolution::Unavailable,
+    );
+    assert!(
+        !source.preserve_on_cancel,
+        "an unavailable announce identity is not positive proof of a genuine human"
     );
 }
 

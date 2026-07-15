@@ -17,10 +17,10 @@ pub(in crate::services::discord) use gate::should_process_turn_message;
 pub(super) use queue_effects::queue_pending_reaction_for;
 
 use gate::{
-    bot_author_allowed_for_live_intake, should_merge_consecutive_messages,
-    should_skip_for_missing_required_mention, should_skip_human_slash_message,
-    should_skip_self_authored_turn_message, should_start_attachment_only_turn,
-    strip_leading_bot_mention,
+    bot_author_allowed_for_live_intake, live_sender_excluded_from_human_preservation,
+    should_merge_consecutive_messages, should_skip_for_missing_required_mention,
+    should_skip_human_slash_message, should_skip_self_authored_turn_message,
+    should_start_attachment_only_turn, strip_leading_bot_mention,
 };
 pub(in crate::services::discord::router) use queue_effects::should_schedule_post_enqueue_idle_drain;
 use queue_effects::{IntakeGateQueueEffects, render_visible_queued_ack};
@@ -538,7 +538,19 @@ pub(in crate::services::discord) async fn handle_event(
                 return Ok(());
             }
 
-            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
+            let (announce_resolution, notify_resolution) =
+                if let Some(registry) = data.shared.health_registry() {
+                    (
+                        registry.utility_bot_user_id_resolution("announce").await,
+                        registry.utility_bot_user_id_resolution("notify").await,
+                    )
+                } else {
+                    (
+                        health::UtilityBotUserIdResolution::Unconfigured,
+                        health::UtilityBotUserIdResolution::Unconfigured,
+                    )
+                };
+            let announce_bot_id = announce_resolution.user_id();
 
             // Ignore bot messages, unless they are allowed bot traffic or the
             // announce bot used by agent handoffs. Some utility bot deliveries
@@ -735,6 +747,13 @@ pub(in crate::services::discord) async fn handle_event(
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
             }
+            let author_excluded_from_cancel_preservation =
+                live_sender_excluded_from_human_preservation(
+                    &settings_snapshot.allowed_bot_ids,
+                    user_id.get(),
+                    announce_resolution,
+                    notify_resolution,
+                );
             if let Some(stale) =
                 super::super::stale_dispatch_turn_for_text(data.shared.pg_pool.as_ref(), text).await
             {
@@ -1055,7 +1074,8 @@ pub(in crate::services::discord) async fn handle_event(
                                         channel_id,
                                         author_id: user_id,
                                         author_is_bot: new_message.author.bot,
-                                        author_is_allowed_automation: is_allowed_bot,
+                                        author_is_allowed_automation:
+                                            author_excluded_from_cancel_preservation,
                                         message_id: new_message.id,
                                         text: text.to_string(),
                                         reply_context: None,
@@ -1107,7 +1127,8 @@ pub(in crate::services::discord) async fn handle_event(
                                 channel_id,
                                 author_id: user_id,
                                 author_is_bot: new_message.author.bot,
-                                author_is_allowed_automation: is_allowed_bot,
+                                author_is_allowed_automation:
+                                    author_excluded_from_cancel_preservation,
                                 message_id: new_message.id,
                                 text: text.to_string(),
                                 reply_context: None,
@@ -1162,7 +1183,8 @@ pub(in crate::services::discord) async fn handle_event(
                                 channel_id,
                                 author_id: user_id,
                                 author_is_bot: new_message.author.bot,
-                                author_is_allowed_automation: is_allowed_bot,
+                                author_is_allowed_automation:
+                                    author_excluded_from_cancel_preservation,
                                 message_id: new_message.id,
                                 text: text.to_string(),
                                 reply_context: reply_context.clone(),
@@ -1264,7 +1286,8 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             author_id: user_id,
                             author_is_bot: new_message.author.bot,
-                            author_is_allowed_automation: is_allowed_bot,
+                            author_is_allowed_automation:
+                                author_excluded_from_cancel_preservation,
                             message_id: new_message.id,
                             text: text.to_string(),
                             reply_context: reply_context.clone(),
@@ -1316,7 +1339,8 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             author_id: user_id,
                             author_is_bot: new_message.author.bot,
-                            author_is_allowed_automation: is_allowed_bot,
+                            author_is_allowed_automation:
+                                author_excluded_from_cancel_preservation,
                             message_id: new_message.id,
                             text: text.to_string(),
                             reply_context: reply_context.clone(),
@@ -1394,7 +1418,8 @@ pub(in crate::services::discord) async fn handle_event(
                                     channel_id,
                                     author_id: user_id,
                                     author_is_bot: new_message.author.bot,
-                                    author_is_allowed_automation: is_allowed_bot,
+                                    author_is_allowed_automation:
+                                        author_excluded_from_cancel_preservation,
                                     message_id: new_message.id,
                                     text: text.to_string(),
                                     reply_context: reply_context.clone(),
@@ -1496,7 +1521,7 @@ pub(in crate::services::discord) async fn handle_event(
             // placeholder content is the only visible record of the event;
             // foreground (human) messages keep the legacy delete-on-loss
             // behavior.
-            let notify_bot_id = super::super::resolve_notify_bot_user_id(&data.shared).await;
+            let notify_bot_id = notify_resolution.user_id();
             let turn_kind = super::message_handler::classify_turn_kind_from_author(
                 user_id.get(),
                 notify_bot_id,
@@ -1532,6 +1557,8 @@ pub(in crate::services::discord) async fn handle_event(
                     turn_kind,
                 },
                 origin: super::IntakeOrigin::LiveMessage,
+                preserve_on_cancel: !new_message.author.bot
+                    && !author_excluded_from_cancel_preservation,
                 has_nonportable_uploads: !new_message.attachments.is_empty(),
                 preloaded_uploads,
                 // #3905: carry the gate's already-authorized, non-consuming

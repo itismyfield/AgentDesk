@@ -486,14 +486,12 @@ mod tests {
 
     struct EnvRootGuard {
         previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
     }
 
     impl EnvRootGuard {
         fn set(path: &std::path::Path) -> Self {
-            let lock = crate::config::shared_test_env_lock()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
             let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
             // SAFETY: the crate-wide env lock serializes test environment
             // mutations, and Drop restores the previous value while locked.

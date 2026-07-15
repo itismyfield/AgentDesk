@@ -69,6 +69,7 @@ pub(super) async fn handle_race_loss_enqueue(
     reply_to_user_message: bool,
     dispatch_id_for_thread: &Option<String>,
     turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+    preserve_on_cancel: bool,
 ) -> Result<(), Error> {
     let bot_owner_provider = crate::services::discord::resolve_discord_bot_provider(token);
     let is_thread_routed = channel_id != original_channel_id;
@@ -117,6 +118,7 @@ pub(super) async fn handle_race_loss_enqueue(
             original_request_owner,
             user_msg_id,
             user_text,
+            preserve_on_cancel,
             reply_context.clone(),
             has_reply_boundary,
             merge_consecutive,

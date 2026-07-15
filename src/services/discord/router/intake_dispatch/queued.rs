@@ -47,6 +47,7 @@ pub(crate) async fn admit_queued_intake(
             turn_kind: super::super::TurnKind::Foreground,
         },
         origin: IntakeOrigin::QueuedDrain,
+        preserve_on_cancel: intervention.preserve_on_cancel(),
         has_nonportable_uploads: !intervention.pending_uploads.is_empty(),
         preloaded_uploads: intervention.pending_uploads.clone(),
         voice_announcement: None,

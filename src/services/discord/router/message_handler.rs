@@ -161,6 +161,7 @@ pub(in crate::services::discord) use self::tui_followup::{
 pub(super) async fn finish_admitted_local(
     deps: &IntakeDeps<'_>,
     request: IntakeRequest,
+    preserve_on_cancel: bool,
     preloaded_uploads: Vec<String>,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<(), Error> {
@@ -194,6 +195,7 @@ pub(super) async fn finish_admitted_local(
         has_reply_boundary,
         dm_hint,
         turn_kind,
+        preserve_on_cancel,
         preloaded_uploads,
         voice_announcement,
     )

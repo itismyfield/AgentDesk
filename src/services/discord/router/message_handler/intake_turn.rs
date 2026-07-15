@@ -106,6 +106,9 @@ pub(crate) async fn execute_intake_turn_core(
         request.has_reply_boundary,
         request.dm_hint,
         request.turn_kind,
+        // The durable worker payload has no author/utility classification.
+        // Preserve fail-safe default-drop instead of guessing that it is human.
+        false,
         Vec::new(),
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
         // the durable announcement row for its `user_msg_id` (#3905).
@@ -129,6 +132,7 @@ pub(super) async fn handle_text_message(
     has_reply_boundary: bool,
     dm_hint: Option<bool>,
     turn_kind: TurnKind,
+    preserve_on_cancel: bool,
     preloaded_uploads: Vec<String>,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<(), Error> {
@@ -1474,6 +1478,7 @@ pub(super) async fn handle_text_message(
             reply_to_user_message,
             &dispatch_id_for_thread,
             turn_start_attempt,
+            preserve_on_cancel,
         )
         .await;
     }
@@ -2215,6 +2220,7 @@ pub(super) async fn handle_text_message(
             original_request_owner,
             user_msg_id,
             user_text,
+            preserve_on_cancel,
             reply_context.clone(),
             has_reply_boundary,
             merge_consecutive,
