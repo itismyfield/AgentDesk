@@ -1232,8 +1232,14 @@ fn shared_prompt_gate_off_preserves_compact_rules_byte_for_byte() {
         .find(|layer| layer.layer_name == "shared_agent_rules")
         .expect("shared agent rules layer");
 
-    assert_eq!(layer.source.as_deref(), Some("prompt_builder.shared_agent_rules_lookup"));
-    assert_eq!(layer.reason.as_deref(), Some(format!("workspace={workspace}").as_str()));
+    assert_eq!(
+        layer.source.as_deref(),
+        Some("prompt_builder.shared_agent_rules_lookup")
+    );
+    assert_eq!(
+        layer.reason.as_deref(),
+        Some(format!("workspace={workspace}").as_str())
+    );
     assert_eq!(layer.full_content.as_deref(), Some(expected.as_str()));
     assert_eq!(built.system_prompt.matches(expected.as_str()).count(), 1);
     assert!(!built.system_prompt.contains("[Shared Agent Rules]\n"));
@@ -1289,12 +1295,19 @@ fn shared_prompt_gate_on_injects_full_profile_file_content() {
         .find(|layer| layer.layer_name == "shared_agent_rules")
         .expect("shared agent rules layer");
 
-    assert_eq!(layer.source.as_deref(), Some("settings.load_shared_prompt_for_profile"));
+    assert_eq!(
+        layer.source.as_deref(),
+        Some("settings.load_shared_prompt_for_profile")
+    );
     assert_eq!(layer.reason.as_deref(), Some("profile=full"));
     assert_eq!(layer.full_content.as_deref(), Some(expected.as_str()));
     assert_eq!(built.system_prompt.matches(expected.as_str()).count(), 1);
     assert!(!built.system_prompt.contains("REVIEW PROFILE SENTINEL 4560"));
-    assert!(!built.system_prompt.contains("HEADLESS PROFILE SENTINEL 4560"));
+    assert!(
+        !built
+            .system_prompt
+            .contains("HEADLESS PROFILE SENTINEL 4560")
+    );
     assert!(!built.system_prompt.contains("<!-- profile:"));
     assert!(!built.system_prompt.contains("[Shared Agent Rules Index]"));
 }
