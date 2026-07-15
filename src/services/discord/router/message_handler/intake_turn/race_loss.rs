@@ -378,9 +378,8 @@ pub(super) async fn handle_race_loss_enqueue(
     // rechecks ownership after the Discord await so a fast dequeue cannot
     // leave a stale 📬 behind.
     let mut queued_marker_notified = false;
-    if channel_id == original_channel_id
-        && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
-    {
+    let routed_to_thread = channel_id != original_channel_id;
+    if !routed_to_thread && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref()) {
         // #1190 follow-up: merged messages get ➕ so the user can tell
         // them apart from standalone queue head entries (📬).
         let emoji = if enqueue_outcome.merged {
