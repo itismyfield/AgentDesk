@@ -1220,7 +1220,7 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
         .rev()
         .take(PROMPT_READY_SCAN_LINES)
         .collect();
-    if recent.is_empty() {
+    if recent.is_empty() || recent_has_codex_active_turn(&recent) {
         return false;
     }
     if pane_has_legacy_codex_prompt(&recent) {
@@ -1258,11 +1258,25 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
 fn pane_looks_ready_for_codex_prompt_with_ansi(pane: &str) -> bool {
     // ANSI-preserving tmux capture lets us distinguish Codex's dim placeholder
     // suggestions from real user drafts in the compact prompt.
+    let plain = strip_ansi_escape_sequences(pane);
+    if pane_has_codex_active_turn_in_pane(&plain) {
+        return false;
+    }
     if pane_has_dim_legacy_codex_prompt_in_pane(pane) {
         return true;
     }
-    let plain = strip_ansi_escape_sequences(pane);
     pane_looks_ready_for_codex_prompt(&plain)
+}
+
+fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
+    let recent: Vec<&str> = pane
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(PROMPT_READY_SCAN_LINES)
+        .collect();
+    recent_has_codex_active_turn(&recent)
 }
 
 fn pane_has_dim_legacy_codex_prompt_in_pane(pane: &str) -> bool {
@@ -1344,12 +1358,41 @@ fn line_is_dim_legacy_codex_prompt(line: &str) -> bool {
 const CODEX_COMPACT_PLACEHOLDER_PROMPTS: &[&str] = &[
     "Explain this codebase",
     "Summarize recent commits",
+    "Use /skills to list available skills",
     "Write tests for @filename",
 ];
 
 fn line_is_legacy_codex_status(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.contains("gpt-") && trimmed.contains('·')
+    (trimmed.contains("gpt-") && trimmed.contains('·'))
+        || line_is_codex_fast_context_status(trimmed)
+}
+
+fn line_is_codex_fast_context_status(line: &str) -> bool {
+    let parts: Vec<&str> = line.split('·').map(str::trim).collect();
+    parts.len() == 3
+        && matches!(parts[0], "Fast on" | "Fast off")
+        && !parts[1].is_empty()
+        && parts[2]
+            .strip_prefix("Context ")
+            .and_then(|value| value.strip_suffix("% left"))
+            .is_some_and(|percent| {
+                !percent.is_empty() && percent.chars().all(|ch| ch.is_ascii_digit())
+            })
+}
+
+fn recent_has_codex_active_turn(recent_bottom_up: &[&str]) -> bool {
+    const ACTIVE_TURN_BOTTOM_WINDOW: usize = 6;
+
+    recent_bottom_up
+        .iter()
+        .take(ACTIVE_TURN_BOTTOM_WINDOW)
+        .any(|line| {
+            let trimmed = line.trim_start();
+            (trimmed.starts_with('•') || trimmed.starts_with('◦'))
+                && (trimmed.contains("esc to interrupt")
+                    || trimmed.contains("Esc to interrupt"))
+        })
 }
 
 fn line_is_codex_status_with_ansi(line: &str) -> bool {
@@ -2216,6 +2259,33 @@ The documentation example ends with:
             codex_visible_prompt_draft_backspace_budget(&snapshot),
             Some(19)
         );
+    }
+
+    #[test]
+    fn current_codex_idle_pane_is_ready() {
+        let pane = "\
+╭─────────────────────────────────────────╮\n\
+│ >_ OpenAI Codex (v0.144.4)              │\n\
+╰─────────────────────────────────────────╯\n\
+\n\
+› Use /skills to list available skills\n\
+\n\
+  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left";
+
+        assert!(pane_looks_ready_for_codex_prompt(pane));
+        assert!(!pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn current_codex_busy_pane_is_not_ready() {
+        let pane = "\
+• Working (0s • esc to interrupt)\n\
+\n\
+› Use /skills to list available skills\n\
+\n\
+  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left";
+
+        assert!(!pane_looks_ready_for_codex_prompt(pane));
     }
 
     #[test]
