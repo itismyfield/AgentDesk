@@ -450,6 +450,8 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── voice/
+│   │   │   │   └── alert.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
 │   │   │   ├── control.rs
@@ -856,6 +858,7 @@ src/
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
 │   │   │   │   └── pcm_harness_tests.rs
+│   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
 │   │   │   ├── live_cut_playback.rs
