@@ -662,10 +662,7 @@ enum MailboxOwnership {
     ActiveTurn,
 }
 
-async fn local_mailbox_ownership(
-    shared: &SharedData,
-    channel_id: ChannelId,
-) -> MailboxOwnership {
+async fn local_mailbox_ownership(shared: &SharedData, channel_id: ChannelId) -> MailboxOwnership {
     let Some(handle) = shared.mailbox_peek(channel_id) else {
         return MailboxOwnership::None;
     };

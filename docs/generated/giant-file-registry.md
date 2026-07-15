@@ -16,8 +16,8 @@
 | `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/catch_up.rs` | 1746 | discord-relay | 2026-10-31 | #3405 |
-| `src/services/discord/health/recovery.rs` | 2520 | discord-relay | 2026-10-31 | #3839 |
-| `src/services/discord/idle_recap.rs` | 1374 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/health/recovery.rs` | 2555 | discord-relay | 2026-10-31 | #3839 |
+| `src/services/discord/idle_recap.rs` | 1373 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1180 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1020 | discord-relay | 2026-08-31 | #3405 |
@@ -108,5 +108,5 @@
 | `src/services/routines/store.rs` | 3505 |
 | `src/services/settings.rs` | 1059 |
 | `src/services/tui_prompt_dedupe.rs` | 1970 |
-| `src/services/turn_orchestrator.rs` | 3292 |
+| `src/services/turn_orchestrator.rs` | 3301 |
 | `src/voice/receiver.rs` | 1108 |
