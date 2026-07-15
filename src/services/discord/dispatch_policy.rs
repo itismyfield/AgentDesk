@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+use super::Intervention;
 use super::QueueExitKind;
 use super::SharedData;
 use super::parse_dispatch_id;
@@ -88,6 +89,16 @@ fn stale_dispatch_queue_exit_kind(
     }
 }
 
+fn filter_queued_dispatch_exit(
+    preserve_on_cancel: bool,
+    stale: Option<StaleDispatchTurn>,
+) -> Option<StaleDispatchTurn> {
+    // Fail-safe: only positive enqueue-time provenance suppresses the exit.
+    // Every legacy, system, bot, and follow-up envelope remains unmarked and
+    // therefore follows origin/main's drop behavior unchanged.
+    stale.filter(|_| !preserve_on_cancel)
+}
+
 pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
     pg_pool: Option<&sqlx::PgPool>,
     text: &str,
@@ -130,9 +141,28 @@ pub(in crate::services::discord) async fn stale_dispatch_turn_for_text(
     }
 }
 
+pub(in crate::services::discord) async fn stale_dispatch_turn_for_queued_intervention(
+    pg_pool: Option<&sqlx::PgPool>,
+    intervention: &Intervention,
+) -> Option<StaleDispatchTurn> {
+    let stale = stale_dispatch_turn_for_text(pg_pool, &intervention.text).await;
+    filter_queued_dispatch_exit(intervention.preserve_on_cancel(), stale)
+}
+
 #[cfg(test)]
 mod dispatch_turn_gate_tests {
-    use super::{QueueExitKind, dispatch_status_allows_turn, stale_dispatch_queue_exit_kind};
+    use super::{
+        QueueExitKind, StaleDispatchTurn, dispatch_status_allows_turn, filter_queued_dispatch_exit,
+        stale_dispatch_queue_exit_kind,
+    };
+
+    fn stale(status: &str, kind: QueueExitKind) -> Option<StaleDispatchTurn> {
+        Some(StaleDispatchTurn {
+            dispatch_id: "4247".to_string(),
+            status: status.to_string(),
+            queue_exit_kind: kind,
+        })
+    }
 
     #[test]
     fn dispatch_turn_status_allows_only_live_statuses() {
@@ -168,6 +198,36 @@ mod dispatch_turn_gate_tests {
         assert_eq!(
             stale_dispatch_queue_exit_kind(None, None),
             Some(QueueExitKind::Superseded)
+        );
+    }
+
+    #[test]
+    fn queued_user_instruction_survives_terminal_cancel_classification() {
+        for (status, result) in [
+            (
+                "completed",
+                "ordinary result discussing a superseded prior attempt",
+            ),
+            ("failed", "tmux session died"),
+            ("cancelled", "auto_cancelled_on_terminal_card"),
+        ] {
+            let kind = stale_dispatch_queue_exit_kind(Some(status), Some(result))
+                .expect("terminal status must classify as a queue exit");
+            assert!(
+                filter_queued_dispatch_exit(true, stale(status, kind)).is_none(),
+                "a positively marked user instruction must survive {status} cancellation"
+            );
+            assert_eq!(
+                filter_queued_dispatch_exit(false, stale(status, kind))
+                    .map(|stale| stale.queue_exit_kind),
+                Some(kind),
+                "unmarked {status} work retains origin/main's safe drop behavior"
+            );
+        }
+        assert!(
+            filter_queued_dispatch_exit(true, stale("superseded", QueueExitKind::Superseded))
+                .is_none(),
+            "a genuine user instruction is not stale dispatch work"
         );
     }
 }

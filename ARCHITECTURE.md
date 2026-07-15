@@ -1122,6 +1122,7 @@ src/
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── registry_purge.rs
+│   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs

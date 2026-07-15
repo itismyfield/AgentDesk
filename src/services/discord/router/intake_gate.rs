@@ -17,10 +17,10 @@ pub(in crate::services::discord) use gate::should_process_turn_message;
 pub(super) use queue_effects::queue_pending_reaction_for;
 
 use gate::{
-    bot_author_allowed_for_live_intake, should_merge_consecutive_messages,
-    should_skip_for_missing_required_mention, should_skip_human_slash_message,
-    should_skip_self_authored_turn_message, should_start_attachment_only_turn,
-    strip_leading_bot_mention,
+    bot_author_allowed_for_live_intake, live_sender_excluded_from_human_preservation,
+    should_merge_consecutive_messages, should_skip_for_missing_required_mention,
+    should_skip_human_slash_message, should_skip_self_authored_turn_message,
+    should_start_attachment_only_turn, strip_leading_bot_mention,
 };
 pub(in crate::services::discord::router) use queue_effects::should_schedule_post_enqueue_idle_drain;
 use queue_effects::{IntakeGateQueueEffects, render_visible_queued_ack};
@@ -538,7 +538,19 @@ pub(in crate::services::discord) async fn handle_event(
                 return Ok(());
             }
 
-            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
+            let (announce_resolution, notify_resolution) =
+                if let Some(registry) = data.shared.health_registry() {
+                    (
+                        registry.utility_bot_user_id_resolution("announce").await,
+                        registry.utility_bot_user_id_resolution("notify").await,
+                    )
+                } else {
+                    (
+                        health::UtilityBotUserIdResolution::Unconfigured,
+                        health::UtilityBotUserIdResolution::Unconfigured,
+                    )
+                };
+            let announce_bot_id = announce_resolution.user_id();
 
             // Ignore bot messages, unless they are allowed bot traffic or the
             // announce bot used by agent handoffs. Some utility bot deliveries
@@ -735,6 +747,13 @@ pub(in crate::services::discord) async fn handle_event(
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
             }
+            let author_excluded_from_cancel_preservation =
+                live_sender_excluded_from_human_preservation(
+                    &settings_snapshot.allowed_bot_ids,
+                    user_id.get(),
+                    announce_resolution,
+                    notify_resolution,
+                );
             if let Some(stale) =
                 super::super::stale_dispatch_turn_for_text(data.shared.pg_pool.as_ref(), text).await
             {
@@ -1055,6 +1074,8 @@ pub(in crate::services::discord) async fn handle_event(
                                         channel_id,
                                         author_id: user_id,
                                         author_is_bot: new_message.author.bot,
+                                        author_is_allowed_automation:
+                                            author_excluded_from_cancel_preservation,
                                         message_id: new_message.id,
                                         text: text.to_string(),
                                         reply_context: None,
@@ -1106,6 +1127,8 @@ pub(in crate::services::discord) async fn handle_event(
                                 channel_id,
                                 author_id: user_id,
                                 author_is_bot: new_message.author.bot,
+                                author_is_allowed_automation:
+                                    author_excluded_from_cancel_preservation,
                                 message_id: new_message.id,
                                 text: text.to_string(),
                                 reply_context: None,
@@ -1160,6 +1183,8 @@ pub(in crate::services::discord) async fn handle_event(
                                 channel_id,
                                 author_id: user_id,
                                 author_is_bot: new_message.author.bot,
+                                author_is_allowed_automation:
+                                    author_excluded_from_cancel_preservation,
                                 message_id: new_message.id,
                                 text: text.to_string(),
                                 reply_context: reply_context.clone(),
@@ -1261,6 +1286,7 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             author_id: user_id,
                             author_is_bot: new_message.author.bot,
+                            author_is_allowed_automation: author_excluded_from_cancel_preservation,
                             message_id: new_message.id,
                             text: text.to_string(),
                             reply_context: reply_context.clone(),
@@ -1312,6 +1338,7 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             author_id: user_id,
                             author_is_bot: new_message.author.bot,
+                            author_is_allowed_automation: author_excluded_from_cancel_preservation,
                             message_id: new_message.id,
                             text: text.to_string(),
                             reply_context: reply_context.clone(),
@@ -1389,6 +1416,8 @@ pub(in crate::services::discord) async fn handle_event(
                                     channel_id,
                                     author_id: user_id,
                                     author_is_bot: new_message.author.bot,
+                                    author_is_allowed_automation:
+                                        author_excluded_from_cancel_preservation,
                                     message_id: new_message.id,
                                     text: text.to_string(),
                                     reply_context: reply_context.clone(),
@@ -1490,7 +1519,7 @@ pub(in crate::services::discord) async fn handle_event(
             // placeholder content is the only visible record of the event;
             // foreground (human) messages keep the legacy delete-on-loss
             // behavior.
-            let notify_bot_id = super::super::resolve_notify_bot_user_id(&data.shared).await;
+            let notify_bot_id = notify_resolution.user_id();
             let turn_kind = super::message_handler::classify_turn_kind_from_author(
                 user_id.get(),
                 notify_bot_id,
@@ -1526,6 +1555,8 @@ pub(in crate::services::discord) async fn handle_event(
                     turn_kind,
                 },
                 origin: super::IntakeOrigin::LiveMessage,
+                preserve_on_cancel: !new_message.author.bot
+                    && !author_excluded_from_cancel_preservation,
                 has_nonportable_uploads: !new_message.attachments.is_empty(),
                 preloaded_uploads,
                 // #3905: carry the gate's already-authorized, non-consuming
@@ -1575,5 +1606,48 @@ mod reply_context_tests {
         assert!(should_start_attachment_only_turn("<@123456789>   ", 1));
         assert!(!should_start_attachment_only_turn("please inspect", 1));
         assert!(!should_start_attachment_only_turn("", 0));
+    }
+}
+
+/// #4247 FIX 1/FIX 4: pins the LIVE (non-queued) intake path's
+/// `preserve_on_cancel` computation on `IntakeSubmission` — the SEPARATE
+/// computation from the queued path's `SoftInterventionSpec::into_intervention`
+/// (already pinned by `intake_queue_transaction.rs`'s `human`/`bot`/`automation`
+/// tests). `handle_event`'s Discord/poise `Context`/`Message` dependencies make
+/// a live end-to-end test impractical here (this module is never invoked with
+/// real Discord data from a unit test anywhere in the codebase), so — matching
+/// this file's/module's established source-order-invariant test convention —
+/// this pins the exact computation by source position instead of merely by
+/// existence of the field, so a mutation to a hardcoded `false`/`true` literal
+/// fails the assertion (not a compile error).
+#[cfg(test)]
+mod live_intake_preserve_wiring_tests {
+    #[test]
+    fn live_intake_preserve_on_cancel_is_computed_from_author_identity_not_hardcoded() {
+        let module_src = include_str!("intake_gate.rs");
+        let submission_pos = module_src
+            .find("origin: super::IntakeOrigin::LiveMessage,")
+            .expect("live-message IntakeSubmission construction exists");
+        let preserve_field_pos = module_src[submission_pos..]
+            .find("preserve_on_cancel:")
+            .map(|offset| submission_pos + offset)
+            .expect("live IntakeSubmission sets preserve_on_cancel");
+        let field_end = module_src[preserve_field_pos..]
+            .find(',')
+            .map(|offset| preserve_field_pos + offset)
+            .expect("preserve_on_cancel field has a terminator");
+        let field_src = &module_src[preserve_field_pos..field_end];
+
+        assert!(
+            field_src.contains("!new_message.author.bot"),
+            "live intake must compute preserve_on_cancel from the message \
+             author's bot flag, not a hardcoded literal; got: {field_src:?}"
+        );
+        assert!(
+            field_src.contains("!author_excluded_from_cancel_preservation"),
+            "live intake preserve_on_cancel must also exclude allowed-automation \
+             / announce-excluded authors from preservation, matching the queued \
+             path's SoftInterventionSpec::into_intervention gate; got: {field_src:?}"
+        );
     }
 }

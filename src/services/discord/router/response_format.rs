@@ -324,6 +324,7 @@ pub(super) fn build_race_requeued_intervention(
     request_owner: UserId,
     user_msg_id: MessageId,
     user_text: &str,
+    preserve_on_cancel: bool,
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
@@ -337,13 +338,25 @@ pub(super) fn build_race_requeued_intervention(
     // degrading to plain text.
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Intervention {
+    let queued_generation = crate::services::discord::runtime_store::load_generation();
+    let source_generation = if preserve_on_cancel {
+        crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+            user_msg_id,
+            queued_generation,
+        )
+    } else {
+        crate::services::turn_orchestrator::SourceMessageQueuedGeneration::new(
+            user_msg_id,
+            queued_generation,
+        )
+    };
     Intervention {
         author_id: request_owner,
         author_is_bot: false,
         message_id: user_msg_id,
-        queued_generation: crate::services::discord::runtime_store::load_generation(),
+        queued_generation,
         source_message_ids: vec![user_msg_id],
-        source_message_queued_generations: Vec::new(),
+        source_message_queued_generations: vec![source_generation],
         source_text_segments: Vec::new(),
         text: user_text.to_string(),
         mode: super::super::InterventionMode::Soft,
@@ -378,6 +391,42 @@ mod tests {
             wrap_user_prompt_with_author("Alice", UserId::new(77), "line 1\r\nline 2".to_string());
 
         assert_eq!(prompt, "[User: Alice (ID: 77)]\nline 1\nline 2");
+    }
+
+    #[test]
+    fn race_requeue_carries_the_intake_cancel_preservation_decision() {
+        let runtime_root = tempfile::tempdir().expect("race-requeue runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+        let message_id = MessageId::new(4_247_201);
+
+        let human = build_race_requeued_intervention(
+            UserId::new(77),
+            message_id,
+            "keep this instruction",
+            true,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+        );
+        assert!(human.preserve_on_cancel());
+        assert_eq!(human.source_message_queued_generations.len(), 1);
+        assert!(human.source_message_queued_generations[0].preserve_on_cancel);
+
+        let automation = build_race_requeued_intervention(
+            UserId::new(78),
+            MessageId::new(4_247_202),
+            "DISPATCH:automation",
+            false,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+        );
+        assert!(!automation.preserve_on_cancel());
+        assert!(!automation.source_message_queued_generations[0].preserve_on_cancel);
     }
 
     /// #4307 PR-B (a): a stashed reminder, run through the SAME assembly helpers

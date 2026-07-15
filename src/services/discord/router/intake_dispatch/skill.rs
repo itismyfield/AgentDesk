@@ -35,6 +35,7 @@ pub(crate) async fn dispatch_skill_intake(
                 turn_kind: super::super::TurnKind::Foreground,
             },
             origin,
+            preserve_on_cancel: false,
             has_nonportable_uploads: !preloaded_uploads.is_empty(),
             preloaded_uploads,
             voice_announcement: None,

@@ -249,7 +249,8 @@ pub use discord_io::{
 };
 pub(in crate::services::discord) use dispatch_policy::{
     is_allowed_turn_sender, prepend_monitor_auto_turn_origin, resolve_announce_bot_user_id,
-    resolve_notify_bot_user_id, should_phase2_recover_message, stale_dispatch_turn_for_text,
+    resolve_notify_bot_user_id, should_phase2_recover_message,
+    stale_dispatch_turn_for_queued_intervention, stale_dispatch_turn_for_text,
     strip_monitor_auto_turn_origin,
 };
 pub(crate) use inflight::latest_request_owner_user_id_for_channel;
@@ -620,17 +621,13 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     .iter()
     .flat_map(load_inflight_states)
     .any(|state| {
-        if state.rebind_origin || state.channel_id != channel_id {
-            return false;
-        }
-        if inflight::inflight_state_is_stale(
-            &state,
-            now_unix_secs,
-            inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
-        ) {
-            return false;
-        }
-        true
+        !state.rebind_origin
+            && state.channel_id == channel_id
+            && !inflight::inflight_state_is_stale(
+                &state,
+                now_unix_secs,
+                inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
+            )
     })
 }
 
@@ -3537,7 +3534,8 @@ async fn mailbox_take_next_soft_intervention(
         };
 
         if let Some(stale) =
-            stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), &intervention.text).await
+            stale_dispatch_turn_for_queued_intervention(shared.pg_pool.as_ref(), &intervention)
+                .await
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
@@ -3563,6 +3561,40 @@ async fn mailbox_take_next_soft_intervention(
             has_more: result.has_more,
             persistence_error: None,
         };
+    }
+}
+
+#[cfg(test)]
+mod queued_dequeue_dispatch_guard_wiring_tests {
+    #[test]
+    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
+        let source = include_str!("mod.rs");
+        let function_start = source
+            .find("async fn mailbox_take_next_soft_intervention(")
+            .expect("mailbox dequeue helper exists");
+        let function_end = source[function_start..]
+            .find("\nasync fn idle_queue_take_next_soft_if_ready(")
+            .map(|offset| function_start + offset)
+            .expect("mailbox dequeue helper has a stable following function");
+        let function_body = &source[function_start..function_end];
+        let queued_guard = format!(
+            "{}{}",
+            "stale_dispatch_turn_for_queued_",
+            "intervention(shared.pg_pool.as_ref(), &intervention)"
+        );
+        let text_guard = format!(
+            "{}{}",
+            "stale_dispatch_turn_for_", "text(shared.pg_pool.as_ref(), &intervention.text)"
+        );
+
+        assert!(
+            function_body.contains(&queued_guard),
+            "dequeue must retain the preservation-aware queued dispatch guard"
+        );
+        assert!(
+            !function_body.contains(&text_guard),
+            "dequeue must not bypass queued preservation with the raw text guard"
+        );
     }
 }
 
@@ -3707,13 +3739,27 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
     // PRE-submit busy-timeout requeue preserves the originating turn's reply
     // context, attachments, and voice metadata. Legacy rows (pre-v9) default
     // these to None/empty/false, matching the previous behavior exactly.
+    // #4247 FIX 2: rebuild the mark from the persisted `followup_preserve_on_cancel`
+    // decision; leaving it unmarked would regress a genuine-human-marked instruction
+    // to origin/main's drop-on-cancel behavior at the downstream preservation guards.
+    let queued_generation = shared.restart.current_generation;
+    let source_message_queued_generations = if inflight_state.followup_preserve_on_cancel {
+        vec![
+            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                message_id,
+                queued_generation,
+            ),
+        ]
+    } else {
+        Vec::new()
+    };
     let intervention = Intervention {
         author_id: UserId::new(inflight_state.request_owner_user_id),
         author_is_bot: false,
         message_id,
-        queued_generation: shared.restart.current_generation,
+        queued_generation,
         source_message_ids: vec![message_id],
-        source_message_queued_generations: Vec::new(),
+        source_message_queued_generations,
         source_text_segments: Vec::new(),
         text: inflight_state.user_text.clone(),
         mode: crate::services::turn_orchestrator::InterventionMode::Soft,
@@ -3746,7 +3792,11 @@ mod followup_retry_requeue_tests {
         }
     }
 
-    fn followup_inflight(channel_id: ChannelId, user_msg_id: MessageId) -> InflightTurnState {
+    fn followup_inflight(
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+        preserve_on_cancel: bool,
+    ) -> InflightTurnState {
         let mut state = InflightTurnState::new(
             ProviderKind::Claude,
             channel_id.get(),
@@ -3767,6 +3817,7 @@ mod followup_retry_requeue_tests {
             false,
             vec!["attachment-a".to_string(), "attachment-b".to_string()],
             None,
+            preserve_on_cancel,
         );
         state
     }
@@ -3791,7 +3842,7 @@ mod followup_retry_requeue_tests {
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(3_752_001);
             let user_msg_id = MessageId::new(3_752_101);
-            let state = followup_inflight(channel_id, user_msg_id);
+            let state = followup_inflight(channel_id, user_msg_id, false);
 
             let outcome =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
@@ -3820,6 +3871,54 @@ mod followup_retry_requeue_tests {
         });
     }
 
+    /// #4247 FIX 2 (mutation-provable): a PRE-submit busy-timeout requeue of a
+    /// genuine-human turn whose `followup_preserve_on_cancel` decision was
+    /// stored as `true` must reconstruct a MARKED `Intervention` (non-empty
+    /// `source_message_queued_generations`, `preserve_on_cancel() == true`).
+    /// Mutating `mailbox_requeue_inflight_for_followup_retry` back to the
+    /// unconditional `Vec::new()` this fix replaced makes this assertion fail
+    /// (not a compile error).
+    #[test]
+    fn pre_submit_requeue_of_marked_followup_reconstructs_marked_intervention() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard {
+            previous: std::env::var(AGENTDESK_ROOT_DIR_ENV).ok(),
+        };
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path()) };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let shared = make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(3_752_003);
+            let user_msg_id = MessageId::new(3_752_103);
+            let state = followup_inflight(channel_id, user_msg_id, true);
+
+            let outcome =
+                mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
+                    .await;
+            assert!(outcome.enqueued);
+
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
+            assert_eq!(snapshot.intervention_queue.len(), 1);
+            let intervention = &snapshot.intervention_queue[0];
+            assert!(
+                !intervention.source_message_queued_generations.is_empty(),
+                "a marked followup requeue must not reconstruct an unmarked (empty) intervention"
+            );
+            assert!(
+                intervention.preserve_on_cancel(),
+                "a marked followup requeue must carry preserve_on_cancel() == true"
+            );
+        });
+    }
+
     #[test]
     fn pre_submit_requeue_reports_duplicate_refusal_outcome() {
         let _lock = crate::config::shared_test_env_lock()
@@ -3840,7 +3939,7 @@ mod followup_retry_requeue_tests {
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(3_752_002);
             let user_msg_id = MessageId::new(3_752_102);
-            let state = followup_inflight(channel_id, user_msg_id);
+            let state = followup_inflight(channel_id, user_msg_id, false);
 
             let first =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)

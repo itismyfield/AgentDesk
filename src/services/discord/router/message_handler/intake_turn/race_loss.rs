@@ -69,10 +69,10 @@ pub(super) async fn handle_race_loss_enqueue(
     reply_to_user_message: bool,
     dispatch_id_for_thread: &Option<String>,
     turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+    preserve_on_cancel: bool,
 ) -> Result<(), Error> {
     let bot_owner_provider = crate::services::discord::resolve_discord_bot_provider(token);
-    let is_thread_routed = channel_id != original_channel_id;
-    let want_queued_card = !turn_kind.is_background_trigger() && !is_thread_routed;
+    let want_queued_card = !turn_kind.is_background_trigger() && channel_id == original_channel_id;
 
     // codex review round-9 P2 (#1332): enqueue the intervention BEFORE
     // any Discord HTTP await. The previous order (POST placeholder →
@@ -117,6 +117,7 @@ pub(super) async fn handle_race_loss_enqueue(
             original_request_owner,
             user_msg_id,
             user_text,
+            preserve_on_cancel,
             reply_context.clone(),
             has_reply_boundary,
             merge_consecutive,
@@ -130,7 +131,6 @@ pub(super) async fn handle_race_loss_enqueue(
         ),
     )
     .await;
-    let enqueued = enqueue_outcome.enqueued;
 
     // #4078: this is not a fresh enqueue; it is the same message being returned
     // after losing a mailbox-start race to a still-live opponent. Scheduling a
@@ -146,7 +146,7 @@ pub(super) async fn handle_race_loss_enqueue(
     // mapping insert entirely — POSTing a fresh card here would orphan
     // it. `📬` reaction is also skipped (the prior live enqueue already
     // owns the card and emoji). Just clean up `⏳` and return.
-    if !enqueued {
+    if !enqueue_outcome.enqueued {
         crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
             shared,
             http,
@@ -159,14 +159,13 @@ pub(super) async fn handle_race_loss_enqueue(
         let ts = chrono::Local::now().format("%H:%M:%S");
         // #2728: log which refusal branch fired so race-loss dedup
         // incidents can be classified without re-reading code.
-        let refusal_str = enqueue_outcome
-            .refusal_reason
-            .map(|r| r.as_str())
-            .unwrap_or("unknown");
         tracing::info!(
             "  [{ts}] 🔁 RACE: race-lost intervention refused by mailbox before placeholder POST (channel {}, refusal_reason={}); no duplicate queue entry retained",
             channel_id,
-            refusal_str,
+            enqueue_outcome
+                .refusal_reason
+                .map(|r| r.as_str())
+                .unwrap_or("unknown"),
         );
         return Ok(());
     }
@@ -378,7 +377,8 @@ pub(super) async fn handle_race_loss_enqueue(
     // rechecks ownership after the Discord await so a fast dequeue cannot
     // leave a stale 📬 behind.
     let mut queued_marker_notified = false;
-    if !is_thread_routed && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref()) {
+    let routed_to_thread = channel_id != original_channel_id;
+    if !routed_to_thread && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref()) {
         // #1190 follow-up: merged messages get ➕ so the user can tell
         // them apart from standalone queue head entries (📬).
         let emoji = if enqueue_outcome.merged {

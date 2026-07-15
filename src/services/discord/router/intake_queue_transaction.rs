@@ -5,6 +5,7 @@ use poise::serenity_prelude as serenity;
 
 use super::super::{Intervention, InterventionMode, MailboxEnqueueOutcome};
 use crate::services::turn_orchestrator::EnqueueRefusalReason;
+use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IntakeQueueCommitSource {
@@ -99,6 +100,7 @@ pub(super) struct SoftInterventionSpec {
     pub(super) channel_id: serenity::ChannelId,
     pub(super) author_id: serenity::UserId,
     pub(super) author_is_bot: bool,
+    pub(super) author_is_allowed_automation: bool,
     pub(super) message_id: serenity::MessageId,
     pub(super) text: String,
     pub(super) reply_context: Option<String>,
@@ -110,13 +112,19 @@ pub(super) struct SoftInterventionSpec {
 
 impl SoftInterventionSpec {
     pub(super) fn into_intervention(self) -> Intervention {
+        let queued_generation = crate::services::discord::runtime_store::load_generation();
+        let source_generation = if self.author_is_bot || self.author_is_allowed_automation {
+            SourceMessageQueuedGeneration::new(self.message_id, queued_generation)
+        } else {
+            SourceMessageQueuedGeneration::user_instruction(self.message_id, queued_generation)
+        };
         Intervention {
             author_id: self.author_id,
             author_is_bot: self.author_is_bot,
             message_id: self.message_id,
-            queued_generation: crate::services::discord::runtime_store::load_generation(),
+            queued_generation,
             source_message_ids: vec![self.message_id],
-            source_message_queued_generations: Vec::new(),
+            source_message_queued_generations: vec![source_generation],
             source_text_segments: Vec::new(),
             text: self.text,
             mode: InterventionMode::Soft,
@@ -476,6 +484,35 @@ fn log_commit_outcome(outcome: &IntakeQueueCommitOutcome) {
 mod tests {
     use super::*;
 
+    struct EnvRootGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    }
+
+    impl EnvRootGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            // SAFETY: the crate-wide env lock serializes test environment
+            // mutations, and Drop restores the previous value while locked.
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvRootGuard {
+        fn drop(&mut self) {
+            // SAFETY: this guard still owns the crate-wide env lock.
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
     struct FakeEffects {
         enqueue_outcome: MailboxEnqueueOutcome,
         enqueued_specs: Vec<SoftInterventionSpec>,
@@ -538,6 +575,7 @@ mod tests {
                 channel_id: serenity::ChannelId::new(42),
                 author_id: serenity::UserId::new(7),
                 author_is_bot: false,
+                author_is_allowed_automation: false,
                 message_id: serenity::MessageId::new(100),
                 text: "hello".to_string(),
                 reply_context: None,
@@ -564,6 +602,31 @@ mod tests {
             stt_mode: Some("file".to_string()),
             stt_latency_ms: Some(120),
         }
+    }
+
+    #[test]
+    fn only_human_intake_sets_cancel_preservation_marker() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+
+        let human = request(Default::default()).intervention.into_intervention();
+        assert!(human.preserve_on_cancel());
+
+        let mut bot = request(Default::default()).intervention;
+        bot.author_is_bot = true;
+        assert!(!bot.into_intervention().preserve_on_cancel());
+    }
+
+    #[test]
+    fn false_flag_allowed_automation_dispatch_is_not_cancel_preserved() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+
+        let mut automation = request(Default::default()).intervention;
+        automation.author_is_allowed_automation = true;
+        automation.text = "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000".to_string();
+
+        assert!(!automation.into_intervention().preserve_on_cancel());
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ mod dispatch_reservation;
 mod overflow;
 mod pending_queue_persistence;
 pub(crate) mod registry_purge;
+mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
     intervention_has_active_source, intervention_sources_all_match_active,
@@ -47,6 +48,7 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+pub(crate) use source_generation::SourceMessageQueuedGeneration;
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
 use turn_finished_signal::{
     GLOBAL_TURN_FINISHED_SIGNALS, mark_turn_finished_signal_done, reset_turn_finished_signal,
@@ -59,21 +61,6 @@ pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterventionMode {
     Soft,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SourceMessageQueuedGeneration {
-    pub(crate) message_id: MessageId,
-    pub(crate) queued_generation: u64,
-}
-
-impl SourceMessageQueuedGeneration {
-    pub(crate) fn new(message_id: MessageId, queued_generation: u64) -> Self {
-        Self {
-            message_id,
-            queued_generation,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +107,12 @@ pub(crate) struct Intervention {
 }
 
 impl Intervention {
+    pub(crate) fn preserve_on_cancel(&self) -> bool {
+        self.source_message_queued_generations
+            .iter()
+            .any(|source| source.preserve_on_cancel)
+    }
+
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
         let source_message_ids = if self.source_message_ids.is_empty() {
             vec![self.message_id]
@@ -6596,7 +6589,7 @@ mod persistence_tests {
         intervention.queued_generation = 72;
         intervention.source_message_ids = vec![source_a, source_b];
         intervention.source_message_queued_generations = vec![
-            SourceMessageQueuedGeneration::new(source_a, 71),
+            SourceMessageQueuedGeneration::user_instruction(source_a, 71),
             SourceMessageQueuedGeneration::new(source_b, 72),
         ];
 
@@ -6619,6 +6612,7 @@ mod persistence_tests {
             saved[0].source_message_queued_generations[0].queued_generation,
             71
         );
+        assert!(saved[0].source_message_queued_generations[0].preserve_on_cancel);
         assert_eq!(
             saved[0].source_message_queued_generations[1].message_id,
             source_b.get()
@@ -6633,9 +6627,15 @@ mod persistence_tests {
         assert_eq!(
             loaded_sources
                 .iter()
-                .map(|source| (source.message_id, source.queued_generation))
+                .map(|source| {
+                    (
+                        source.message_id,
+                        source.queued_generation,
+                        source.preserve_on_cancel,
+                    )
+                })
                 .collect::<Vec<_>>(),
-            vec![(source_a, 71), (source_b, 72)]
+            vec![(source_a, 71, true), (source_b, 72, false)]
         );
     }
 

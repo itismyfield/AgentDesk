@@ -84,15 +84,14 @@ pub(crate) async fn execute_intake_turn_core(
     token: &str,
     request: IntakeRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let deps = IntakeDeps {
-        http,
-        cache: None,
-        ctx_for_chained_dispatch: None,
-        shared,
-        token,
-    };
     handle_text_message(
-        &deps,
+        &IntakeDeps {
+            http,
+            cache: None,
+            ctx_for_chained_dispatch: None,
+            shared,
+            token,
+        },
         request.channel_id,
         request.user_msg_id,
         request.request_owner,
@@ -106,6 +105,9 @@ pub(crate) async fn execute_intake_turn_core(
         request.has_reply_boundary,
         request.dm_hint,
         request.turn_kind,
+        // The durable worker payload has no author/utility classification.
+        // Preserve fail-safe default-drop instead of guessing that it is human.
+        false,
         Vec::new(),
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
         // the durable announcement row for its `user_msg_id` (#3905).
@@ -129,6 +131,7 @@ pub(super) async fn handle_text_message(
     has_reply_boundary: bool,
     dm_hint: Option<bool>,
     turn_kind: TurnKind,
+    preserve_on_cancel: bool,
     preloaded_uploads: Vec<String>,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<(), Error> {
@@ -1294,6 +1297,7 @@ pub(super) async fn handle_text_message(
     let mut intake_latency = super::latency_spans::IntakeLatencySpans::turn_claimed();
 
     if started
+        && !preserve_on_cancel
         && let Some(stale) =
             super::super::super::stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)
                 .await
@@ -1474,6 +1478,7 @@ pub(super) async fn handle_text_message(
             reply_to_user_message,
             &dispatch_id_for_thread,
             turn_start_attempt,
+            preserve_on_cancel,
         )
         .await;
     }
@@ -1794,7 +1799,6 @@ pub(super) async fn handle_text_message(
     // Claude keeps SAK in the system prompt for prefix-cache stability.
     // Non-Claude providers receive SAK in the user context instead.
     let sak_for_system = memory_injection_plan.sak_for_system_prompt();
-    let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let current_task_context = active_dispatch_info.as_ref().map(|info| {
         super::super::super::prompt_builder::CurrentTaskContext {
             dispatch_id: active_dispatch_id_for_prompt.as_deref(),
@@ -1806,7 +1810,6 @@ pub(super) async fn handle_text_message(
         }
     });
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
-    let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
     let memory_recall_manifest = super::super::super::prompt_builder::MemoryRecallManifestInput {
         should_recall: memento_recall_gate.should_recall,
         gate_reason: memento_recall_gate.reason,
@@ -1821,7 +1824,7 @@ pub(super) async fn handle_text_message(
             });
     let built_system_prompt = build_system_prompt_with_manifest(
         &discord_context,
-        &channel_participants,
+        &shared.channel_roster(channel_id, request_owner, request_owner_name),
         &current_path,
         channel_id,
         memory_scope_channel_id,
@@ -1832,7 +1835,7 @@ pub(super) async fn handle_text_message(
         dispatch_type_str.as_deref(),
         current_task_context.as_ref(),
         sak_for_system,
-        longterm_catalog_for_prompt,
+        memory_injection_plan.longterm_catalog_for_system_prompt,
         Some(&memory_settings),
         memento_mcp_available,
         matches!(&provider, ProviderKind::Claude),
@@ -1857,7 +1860,6 @@ pub(super) async fn handle_text_message(
     // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
     // `[prompt-prep]` window below (overlaps it; do not sum — see latency_spans.rs).
     intake_latency.mark_prep_done();
-    let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {
         ProviderKind::Claude => "claude",
         ProviderKind::Codex => "codex",
@@ -1866,14 +1868,13 @@ pub(super) async fn handle_text_message(
         ProviderKind::Qwen => "qwen",
         ProviderKind::Unsupported(_) => "unsupported",
     };
-    let dispatch_profile_label = dispatch_profile_label(dispatch_profile);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
         channel_id.get(),
         provider_label,
-        dispatch_profile_label,
-        memory_backend_label,
+        dispatch_profile_label(dispatch_profile),
+        memory_settings.backend.as_str(),
         session_id.is_some(),
         prompt_prep_duration_ms
     );
@@ -2138,13 +2139,12 @@ pub(super) async fn handle_text_message(
                 // to inject the prompt — fall into the busy-notice / cleanup branch
                 // below by surfacing the initial diagnostic. Closes a Codex-flagged
                 // HIGH on the Discord path mirroring the same fix in claude.rs.
-                let cancel_observed_after_wait = cancel_token
-                    .cancelled
-                    .load(std::sync::atomic::Ordering::Relaxed);
                 match (
                     wait_result,
                     post_wait_diagnostic,
-                    cancel_observed_after_wait,
+                    cancel_token
+                        .cancelled
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 ) {
                     (_, _, true) => {
                         tracing::warn!(
@@ -2215,6 +2215,7 @@ pub(super) async fn handle_text_message(
             original_request_owner,
             user_msg_id,
             user_text,
+            preserve_on_cancel,
             reply_context.clone(),
             has_reply_boundary,
             merge_consecutive,
@@ -2510,6 +2511,7 @@ pub(super) async fn handle_text_message(
         merge_consecutive,
         pending_uploads.clone(),
         voice_announcement.clone(),
+        preserve_on_cancel,
     );
     inflight_state.logical_channel_id = Some(logical_channel_id);
     inflight_state.thread_id = thread_id;
@@ -2605,8 +2607,8 @@ pub(super) async fn handle_text_message(
     // Pre-compute provider-specific compact config
     let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
     let compact_token_limit_for_codex = {
-        let cli_config = provider.compact_cli_config(compact_percent, model_context_window);
-        cli_config
+        provider
+            .compact_cli_config(compact_percent, model_context_window)
             .first()
             .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
     };
@@ -3066,5 +3068,99 @@ mod queue_pending_reaction_clear_tests {
                 "intake-gate add emoji {added:?} (merged={merged}) must be in the dequeue clear set"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod turn_start_dispatch_guard_preservation_tests {
+    // #4247 FIX 1: the turn-start DISPATCH-GUARD must gate its raw
+    // `stale_dispatch_turn_for_text` lookup on `!preserve_on_cancel`, mirroring
+    // the dequeue guard's `filter_queued_dispatch_exit(preserve, stale)` — else a
+    // preserved (marked) genuine human instruction that survives the dequeue
+    // guard is dropped anyway on re-entry just because its text carries a stale
+    // `DISPATCH:<id>` prefix, silently defeating the feature end-to-end.
+    #[test]
+    fn turn_start_guard_is_gated_on_preserve_on_cancel() {
+        let module_src = include_str!("intake_turn.rs");
+        let claim_pos = module_src
+            .find("let started = try_start_turn_with_stale_busy_heal(")
+            .expect("turn-start mailbox claim exists");
+        let stale_call_pos = module_src[claim_pos..]
+            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
+            .map(|offset| claim_pos + offset)
+            .expect("turn-start dispatch-guard raw stale-text lookup exists");
+        let gate_between_claim_and_lookup =
+            module_src[claim_pos..stale_call_pos].find("!preserve_on_cancel");
+
+        assert!(
+            gate_between_claim_and_lookup.is_some(),
+            "turn-start DISPATCH-GUARD must gate the raw stale-text lookup on \
+             `!preserve_on_cancel` (#4247 FIX 1) — removing this gate lets a \
+             preserved (marked) genuine human instruction get dropped at turn \
+             start just because it carries a stale DISPATCH: prefix, silently \
+             defeating the fail-safe queue-preservation feature end-to-end"
+        );
+    }
+
+    // Companion: the gated stale lookup must still feed the SAME abort branch
+    // (finish turn, advance checkpoint, exit emoji), i.e. the gate did not get
+    // attached to some other unrelated `stale_dispatch_turn_for_text` use.
+    #[test]
+    fn gated_stale_lookup_feeds_the_turn_abort_branch() {
+        let module_src = include_str!("intake_turn.rs");
+        let claim_pos = module_src
+            .find("let started = try_start_turn_with_stale_busy_heal(")
+            .expect("turn-start mailbox claim exists");
+        let stale_call_pos = module_src[claim_pos..]
+            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
+            .map(|offset| claim_pos + offset)
+            .expect("turn-start dispatch-guard raw stale-text lookup exists");
+        // Anchor on the abort log, then look for the branch's finish + early
+        // return by RELATIVE offset — no fixed byte window (multibyte-safe, and
+        // resilient to added log lines). (Fable review note.)
+        let abort_pos = module_src[stale_call_pos..]
+            .find("DISPATCH-GUARD: aborted terminal dispatch at turn start")
+            .map(|offset| stale_call_pos + offset)
+            .expect("gated stale lookup must still feed the turn-start abort log/branch");
+        let abort_region = &module_src[abort_pos..];
+        let finish = abort_region.find("mailbox_finish_turn");
+        let ret = abort_region.find("return Ok(());");
+        assert!(
+            finish.is_some_and(|f| f < 600),
+            "turn-start abort branch must still finish the mailbox turn"
+        );
+        assert!(
+            ret.is_some_and(|r| r < 1200),
+            "turn-start abort branch must still return early"
+        );
+    }
+
+    // #4247 FIX 1/FIX 4: pin the LIVE (non-queued) intake path threading
+    // `preserve_on_cancel` from the function signature into the turn-start guard
+    // unmodified — distinct from the queued path's `into_intervention`
+    // computation (already pinned by `intake_queue_transaction.rs`).
+    #[test]
+    fn preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified() {
+        let module_src = include_str!("intake_turn.rs");
+        // Needle assembled via concat! so the exact fn-call token never appears
+        // verbatim here (would trip `intake_dispatch::tests`'s occurrence-count
+        // invariant on `intake_turn.rs`).
+        let signature_pos = module_src
+            .find(concat!("pub(super) async fn handle_text_message", "("))
+            .expect("handle_text_message signature exists");
+        let param_pos = module_src[signature_pos..]
+            .find("preserve_on_cancel: bool,")
+            .map(|offset| signature_pos + offset)
+            .expect("handle_text_message receives preserve_on_cancel as a parameter");
+        let guard_pos = module_src[param_pos..]
+            .find("&& !preserve_on_cancel")
+            .map(|offset| param_pos + offset);
+
+        assert!(
+            guard_pos.is_some(),
+            "the live-intake preserve_on_cancel parameter must flow into the \
+             FIX 1 turn-start guard; mutating either the parameter plumbing or \
+             the guard breaks this"
+        );
     }
 }

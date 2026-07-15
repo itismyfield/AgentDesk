@@ -479,7 +479,16 @@
 # `feedback_reminder` for the put-back) of the TUI-busy refusal call-site so the
 # taken reminder is put back on refusal. Same take/inject/put-back path as the
 # session-retry recovery context. 2825 -> 2834.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2834
+# #4247 (reviewable admission): +3 prod LoC for the fail-safe queue-preservation
+# P0 fix, net-zero PROVEN impossible. (1) the turn-start DISPATCH-GUARD gains a
+# `&& !preserve_on_cancel` condition — rustfmt forces each `&&` in the if-let
+# chain onto its own line, so it cannot be folded; (2) `handle_text_message`'s
+# `set_followup_requeue_context` call gains one `preserve_on_cancel` argument
+# (one-arg-per-line under rustfmt); (3) one `#[cfg(test)] mod` framing line for
+# the merged mutation-provable guard/wiring tests (doc moved to inner comments;
+# the two test mods were already merged into one). Dual-CLEAN (codex + Fable).
+# 2834 -> 2837.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2837
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered

@@ -80,6 +80,7 @@ fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnStat
         followup_merge_consecutive: false,
         followup_pending_uploads: Vec::new(),
         followup_voice_announcement: None,
+        followup_preserve_on_cancel: false,
         streaming_rollover_frozen_msg_ids: Vec::new(),
     }
 }
