@@ -865,6 +865,7 @@ mod stall_recovery_tests {
             true,
             vec!["upload://a.png".to_string(), "upload://b.png".to_string()],
             Some(announcement.clone()),
+            true,
         );
 
         save_inflight_state_in_root(temp.path(), &state).expect("save inflight state");
@@ -881,6 +882,7 @@ mod stall_recovery_tests {
             vec!["upload://a.png".to_string(), "upload://b.png".to_string()]
         );
         assert_eq!(loaded[0].followup_voice_announcement, Some(announcement));
+        assert!(loaded[0].followup_preserve_on_cancel);
 
         // A JSON row that omits the new fields entirely (legacy v8 / pre-field
         // shape) must still deserialize, defaulting the follow-up context.
@@ -891,6 +893,7 @@ mod stall_recovery_tests {
         obj.remove("followup_merge_consecutive");
         obj.remove("followup_pending_uploads");
         obj.remove("followup_voice_announcement");
+        obj.remove("followup_preserve_on_cancel");
         let legacy: InflightTurnState =
             serde_json::from_value(value).expect("legacy row must deserialize");
         assert_eq!(legacy.followup_reply_context, None);
@@ -898,6 +901,7 @@ mod stall_recovery_tests {
         assert!(!legacy.followup_merge_consecutive);
         assert!(legacy.followup_pending_uploads.is_empty());
         assert_eq!(legacy.followup_voice_announcement, None);
+        assert!(!legacy.followup_preserve_on_cancel);
     }
 
     // ---- #3558: watcher locked read-modify-write (offset TOCTOU) tests ----

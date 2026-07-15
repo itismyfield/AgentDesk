@@ -449,6 +449,17 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// non-voice turns / legacy rows.
     #[serde(default)]
     pub followup_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    /// #4247 FIX 2: originating `Intervention::preserve_on_cancel()` decision,
+    /// persisted so `mailbox_requeue_inflight_for_followup_retry` can rebuild a
+    /// PRE-submit busy-timeout requeue with the SAME fail-safe preservation
+    /// mark the genuine-human intake computed — instead of unconditionally
+    /// reconstructing an unmarked `Intervention` that regresses to main's
+    /// drop-on-cancel behavior. In-memory/serde-default only (no DB migration,
+    /// no `INFLIGHT_STATE_VERSION` bump per the #2235 compat convention);
+    /// legacy rows deserialize as `false`, matching the previous unmarked
+    /// reconstruction exactly.
+    #[serde(default)]
+    pub followup_preserve_on_cancel: bool,
     /// #3871: Discord message ids of the streamed rollover PREFIXES this turn
     /// froze (a `>DISCORD_MSG_LIMIT` answer that rolled over mid-stream). Persisted
     /// alongside `response_sent_offset` so a terminal full-body fallback that runs
@@ -975,6 +986,7 @@ impl InflightTurnState {
             followup_merge_consecutive: false,
             followup_pending_uploads: Vec::new(),
             followup_voice_announcement: None,
+            followup_preserve_on_cancel: false,
             streaming_rollover_frozen_msg_ids: Vec::new(),
         }
     }
@@ -1163,12 +1175,17 @@ impl InflightTurnState {
         merge_consecutive: bool,
         pending_uploads: Vec<String>,
         voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+        // #4247 FIX 2: the genuine-human intake's preserve decision, carried
+        // forward so a PRE-submit busy-timeout requeue can reconstruct a
+        // correctly marked/unmarked `Intervention` (see field doc above).
+        preserve_on_cancel: bool,
     ) {
         self.followup_reply_context = reply_context;
         self.followup_has_reply_boundary = has_reply_boundary;
         self.followup_merge_consecutive = merge_consecutive;
         self.followup_pending_uploads = pending_uploads;
         self.followup_voice_announcement = voice_announcement;
+        self.followup_preserve_on_cancel = preserve_on_cancel;
     }
 }
 

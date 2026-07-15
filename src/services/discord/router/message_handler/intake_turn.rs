@@ -2511,6 +2511,7 @@ pub(super) async fn handle_text_message(
         merge_consecutive,
         pending_uploads.clone(),
         voice_announcement.clone(),
+        preserve_on_cancel,
     );
     inflight_state.logical_channel_id = Some(logical_channel_id);
     inflight_state.thread_id = thread_id;
