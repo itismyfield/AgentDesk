@@ -1005,7 +1005,7 @@
 | `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 248 | 248 | 0 |  |
 | `services::provider_cli::retention` | `src/services/provider_cli/retention.rs` | 91 | 91 | 0 |  |
 | `services::provider_cli::session_guard` | `src/services/provider_cli/session_guard.rs` | 199 | 199 | 0 |  |
-| `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 155 | 155 | 0 |  |
+| `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 222 | 173 | 49 |  |
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 74 | 74 | 0 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 637 | 637 | 0 |  |
 | `services::provider_error_transcript` | `src/services/provider_error_transcript.rs` | 87 | 48 | 39 |  |
