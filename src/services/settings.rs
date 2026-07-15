@@ -463,9 +463,22 @@ impl SettingsService {
     pub async fn put_runtime_config(&self, body: Value) -> ServiceResult<SettingsOkResponse> {
         let pool = self.pg_pool("put_runtime_config.pg_pool")?;
         if let Some(values) = body.as_object() {
-            let marked = with_explicit_runtime_config_keys(values.clone());
-            let value_str = serde_json::to_string(&Value::Object(marked.clone()))
-                .unwrap_or_else(|_| "{}".to_string());
+            let saved =
+                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                    .bind("runtime-config")
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|error| {
+                        ServiceError::internal(format!("{error}"))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("put_runtime_config.load_pg")
+                    })?
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .and_then(|value| value.as_object().cloned());
+            let marked = with_explicit_runtime_config_keys(values.clone(), saved.as_ref());
+            let value_str =
+                serde_json::to_string(&Value::Object(marked)).unwrap_or_else(|_| "{}".to_string());
             write_runtime_config_pg_async(pool, &value_str).await?;
         } else {
             let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
@@ -1328,17 +1341,54 @@ mod tests {
     }
 
     #[test]
-    fn metadata_less_runtime_config_marks_only_known_body_keys_explicit() {
-        let values = json!({"maxEntryRetries": 7, "privateBlobField": true})
+    fn metadata_less_runtime_config_preserves_omitted_explicit_override() {
+        let saved = json!({
+            "maxEntryRetries": 7,
+            "maxRetries": 5,
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries"]
+        })
+        .as_object()
+        .cloned()
+        .expect("saved runtime config object");
+        let values = json!({"maxRetries": 4, "privateBlobField": true})
             .as_object()
             .cloned()
             .expect("runtime config object");
 
-        let marked = with_explicit_runtime_config_keys(values);
+        let marked = with_explicit_runtime_config_keys(values, Some(&saved));
 
+        assert_eq!(marked.get("maxEntryRetries"), Some(&json!(7)));
+        assert_eq!(marked.get("maxRetries"), Some(&json!(4)));
         assert_eq!(
             marked.get(RUNTIME_CONFIG_EXPLICIT_KEYS_META),
-            Some(&json!(["maxEntryRetries"]))
+            Some(&json!(["maxEntryRetries", "maxRetries"]))
+        );
+    }
+
+    #[test]
+    fn explicit_metadata_still_allows_full_replacement() {
+        let saved = json!({
+            "maxEntryRetries": 7,
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries"]
+        })
+        .as_object()
+        .cloned()
+        .expect("saved runtime config object");
+        let values = json!({
+            "maxRetries": 4,
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxRetries"]
+        })
+        .as_object()
+        .cloned()
+        .expect("explicit full-replacement runtime config object");
+
+        let marked = with_explicit_runtime_config_keys(values, Some(&saved));
+
+        assert_eq!(marked.get("maxEntryRetries"), None);
+        assert_eq!(marked.get("maxRetries"), Some(&json!(4)));
+        assert_eq!(
+            marked.get(RUNTIME_CONFIG_EXPLICIT_KEYS_META),
+            Some(&json!(["maxRetries"]))
         );
     }
 
@@ -1425,6 +1475,58 @@ mod tests {
             .await
             .expect("write non-object runtime-config through SettingsService");
         assert_runtime_blob_and_no_mirrors(&pool, &json!(["non-object", 7, false])).await;
+
+        drop(service);
+        pool.close().await;
+        database.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metadata_less_put_preserves_explicit_overrides_and_metadata_replaces_them() {
+        let database = TestDatabase::create().await;
+        let pool = database.connect().await;
+        let service = SettingsService::new(
+            Some(pool.clone()),
+            Arc::new(crate::config::Config::default()),
+        );
+
+        service
+            .put_runtime_config(json!({
+                "maxEntryRetries": 7,
+                "maxRetries": 5,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries"]
+            }))
+            .await
+            .expect("write initial explicit runtime override");
+        service
+            .put_runtime_config(json!({"maxRetries": 4}))
+            .await
+            .expect("metadata-less update preserves existing explicit override");
+        assert_runtime_blob_and_no_mirrors(
+            &pool,
+            &json!({
+                "maxEntryRetries": 7,
+                "maxRetries": 4,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries", "maxRetries"]
+            }),
+        )
+        .await;
+
+        service
+            .put_runtime_config(json!({
+                "maxRetries": 2,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxRetries"]
+            }))
+            .await
+            .expect("explicit metadata requests a full replacement");
+        assert_runtime_blob_and_no_mirrors(
+            &pool,
+            &json!({
+                "maxRetries": 2,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxRetries"]
+            }),
+        )
+        .await;
 
         drop(service);
         pool.close().await;
