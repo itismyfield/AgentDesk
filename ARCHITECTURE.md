@@ -791,12 +791,18 @@ src/
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   └── guarded_save.rs
 │   │   │   ├── stream_loop/
+│   │   │   │   ├── content_arms/
+│   │   │   │   │   ├── provider_error_presentation.rs
+│   │   │   │   │   └── tui_error_classification.rs
 │   │   │   │   ├── content_arms.rs
 │   │   │   │   └── tool_arms.rs
 │   │   │   ├── terminal_outcome_delivery/
+│   │   │   │   ├── empty_response_recovery/
+│   │   │   │   │   └── guidance.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
+│   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   └── recovery_retry.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── interrupt_policy.rs

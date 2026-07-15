@@ -13,6 +13,7 @@ use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
 };
+use super::streaming_edit_text::TuiErrorClassification;
 use super::*;
 
 pub(super) struct PostLoopFinalizeContext {
@@ -30,6 +31,7 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) current_msg_id: MessageId,
     pub(super) cancelled: bool,
     pub(super) transport_error: bool,
+    pub(super) tui_error_classification: TuiErrorClassification,
     pub(super) recovery_retry: bool,
     pub(super) rx_disconnected: bool,
     pub(super) tmux_handed_off: bool,
@@ -69,6 +71,7 @@ pub(super) struct PostLoopFinalizeOutput {
     pub(super) inflight_state: InflightTurnState,
     pub(super) api_friction_reports: Vec<crate::services::api_friction::ApiFrictionReport>,
     pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
+    pub(super) tui_error_classification: TuiErrorClassification,
     pub(super) review_dispatch_warning: Option<String>,
     pub(super) is_prompt_too_long: bool,
     pub(super) bridge_relay_delegated_to_watcher: bool,
@@ -100,6 +103,7 @@ pub(super) async fn run_post_loop_finalize(
     let current_msg_id = ctx.current_msg_id;
     let cancelled = ctx.cancelled;
     let transport_error = ctx.transport_error;
+    let tui_error_classification = ctx.tui_error_classification;
     let recovery_retry = ctx.recovery_retry;
     let rx_disconnected = ctx.rx_disconnected;
     let tmux_handed_off = ctx.tmux_handed_off;
@@ -241,6 +245,7 @@ pub(super) async fn run_post_loop_finalize(
                 &provider,
                 inflight_state.runtime_kind,
                 &full_response,
+                tui_error_classification,
             );
         // #3885 (reworked): a follow-up pre-submit readiness timeout normally
         // requeues the inflight ("prompt never reached the pane → safe to
@@ -705,6 +710,7 @@ pub(super) async fn run_post_loop_finalize(
         inflight_state,
         api_friction_reports,
         claude_tui_followup_pre_submit_requeue_candidate,
+        tui_error_classification,
         review_dispatch_warning,
         is_prompt_too_long,
         bridge_relay_delegated_to_watcher,

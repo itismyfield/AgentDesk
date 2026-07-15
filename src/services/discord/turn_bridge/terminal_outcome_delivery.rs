@@ -13,6 +13,7 @@ use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
 };
+use super::{streaming_edit_text::TuiErrorClassification, *};
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
     CancelPromptReplaceState, handle_cancel_prompt_replace,
@@ -33,9 +34,9 @@ use recovery_retry::{
 mod cancel_prompt_replace;
 mod delivery_epilogue;
 mod empty_response_recovery;
+mod prompt_too_long_guidance;
 mod recovery_retry;
 
-use super::*;
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
 pub(super) struct TerminalOutcomeDeliveryContext {
@@ -59,6 +60,7 @@ pub(super) struct TerminalOutcomeDeliveryContext {
     pub(super) single_message_panel_footer_mode: bool,
     pub(super) is_prompt_too_long: bool,
     pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
+    pub(super) tui_error_classification: TuiErrorClassification,
     pub(super) had_prior_session_id_at_turn_start: bool,
     pub(super) session_handshake_seen: bool,
     pub(super) turn_start: std::time::Instant,
@@ -136,14 +138,10 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
-    let channel_id = ctx.channel_id;
-    let user_msg_id = ctx.user_msg_id;
-    let current_msg_id = ctx.current_msg_id;
-    let status_panel_msg_id = ctx.status_panel_msg_id;
-    let cancelled = ctx.cancelled;
-    let transport_error = ctx.transport_error;
-    let recovery_retry = ctx.recovery_retry;
-    let rx_disconnected = ctx.rx_disconnected;
+    let (channel_id, user_msg_id) = (ctx.channel_id, ctx.user_msg_id);
+    let (current_msg_id, status_panel_msg_id) = (ctx.current_msg_id, ctx.status_panel_msg_id);
+    let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
+    let (recovery_retry, rx_disconnected) = (ctx.recovery_retry, ctx.rx_disconnected);
     let tmux_last_offset = ctx.tmux_last_offset;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let watcher_handoff_claim_outcome = ctx.watcher_handoff_claim_outcome;
@@ -158,16 +156,15 @@ pub(super) async fn run_terminal_outcome_delivery(
     let is_prompt_too_long = ctx.is_prompt_too_long;
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
+    let tui_error_classification = ctx.tui_error_classification;
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
     #[cfg(unix)]
     let bridge_tui_gate_outcome_early = ctx.bridge_tui_gate_outcome_early;
 
-    let shared_owned = state.shared_owned;
-    let gateway = state.gateway;
-    let provider = state.provider;
-    let cancel_token = state.cancel_token;
+    let (shared_owned, gateway) = (state.shared_owned, state.gateway);
+    let (provider, cancel_token) = (state.provider, state.cancel_token);
     let turn_id = state.turn_id;
     let user_text_owned = state.user_text_owned;
     let adk_session_key = state.adk_session_key;
@@ -820,6 +817,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 recovery_retry,
                 resume_failure_detected,
                 claude_tui_followup_pre_submit_requeue_candidate,
+                tui_error_classification,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
                 terminal_delivery_committed,

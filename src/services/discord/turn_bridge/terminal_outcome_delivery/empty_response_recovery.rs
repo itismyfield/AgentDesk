@@ -1,8 +1,6 @@
 //! Empty-response recovery and silent-turn terminal delivery for terminal outcome delivery.
-
-use std::sync::Arc;
-
-use super::*;
+mod guidance;
+use {super::*, std::sync::Arc};
 
 pub(super) enum EmptyResponseRecoveryMessage {
     ResumeFailureAlreadyHandled,
@@ -264,7 +262,7 @@ pub(super) async fn handle_empty_response_recovery(
                 if !resume_failed {
                     if rx_disconnected {
                         terminal_empty_response_notice =
-                            Some("(No response — 프로세스가 응답 없이 종료됨)".to_string());
+                            Some(guidance::empty_response_guidance(true).to_string());
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             "  [{ts}] ⚠ Empty response: rx disconnected before any text \
@@ -274,7 +272,8 @@ pub(super) async fn handle_empty_response_recovery(
                             inflight_state.last_offset
                         );
                     } else {
-                        terminal_empty_response_notice = Some("(No response)".to_string());
+                        terminal_empty_response_notice =
+                            Some(guidance::empty_response_guidance(false).to_string());
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             "  [{ts}] ⚠ Empty response: done without text (channel {})",

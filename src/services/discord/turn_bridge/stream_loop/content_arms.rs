@@ -1,8 +1,14 @@
 //! Content/status/terminal stream-loop arms for `turn_bridge::spawn_turn_bridge`.
 
+mod provider_error_presentation;
+mod tui_error_classification;
+
+use super::super::streaming_edit_text::TuiErrorClassification;
 use super::super::thinking::{redacted_thinking_transcript_event, thinking_status_line};
 use super::*;
+use provider_error_presentation::ProviderErrorPresentation;
 use std::sync::Arc;
+use tui_error_classification::resolve_tui_error;
 
 pub(super) enum StreamContentArmMessage {
     RetryBoundary,
@@ -86,6 +92,7 @@ pub(super) struct StreamContentArmState<'a> {
     pub(super) done: &'a mut bool,
     pub(super) terminal_control_drain_until: &'a mut Option<std::time::Instant>,
     pub(super) transport_error: &'a mut bool,
+    pub(super) tui_error_classification: &'a mut TuiErrorClassification,
     pub(super) resume_failure_detected: &'a mut bool,
     pub(super) bridge_confirmed_response_sent_offset: &'a mut usize,
     pub(super) terminal_session_reset_required: &'a mut bool,
@@ -145,6 +152,7 @@ pub(super) async fn handle_stream_content_message(
     let mut done = *state.done;
     let mut terminal_control_drain_until = *state.terminal_control_drain_until;
     let mut transport_error = *state.transport_error;
+    let mut tui_error_classification = *state.tui_error_classification;
     let mut resume_failure_detected = *state.resume_failure_detected;
     let mut bridge_confirmed_response_sent_offset =
         *state.bridge_confirmed_response_sent_offset;
@@ -184,6 +192,7 @@ pub(super) async fn handle_stream_content_message(
             *state.done = done;
             *state.terminal_control_drain_until = terminal_control_drain_until;
             *state.transport_error = transport_error;
+            *state.tui_error_classification = tui_error_classification;
             *state.resume_failure_detected = resume_failure_detected;
             *state.bridge_confirmed_response_sent_offset =
                 bridge_confirmed_response_sent_offset;
@@ -489,41 +498,26 @@ pub(super) async fn handle_stream_content_message(
                                 stream_error_has_stale_resume_error(&message, &stderr);
                             let session_reset_required =
                                 stream_error_requires_terminal_session_reset(&message, &stderr);
+                            let error_resolution = resolve_tui_error(&provider, &message, &stderr);
+                            tui_error_classification =
+                                error_resolution.tui_error_classification;
                             transport_error = true;
-                            let combined = format!("{} {}", message, stderr).to_lowercase();
-                            if combined.contains("prompt is too long")
-                                || combined.contains("prompt too long")
-                                || combined.contains("context_length_exceeded")
-                                || combined.contains("max_tokens")
-                                || combined.contains("context window")
-                                || combined.contains("token limit")
-                            {
-                                // Prompt too long is not a terminal failure — user can retry
-                                // with a shorter message or /compact. Don't mark as transport error.
-                                transport_error = false;
-                                full_response = "⚠️ __prompt too long__".to_string();
-                            } else if is_stale_resume {
-                                // Recoverable stale resume: auto-retry with a fresh provider
-                                // session instead of failing the current dispatch/turn.
-                                transport_error = false;
-                                resume_failure_detected = true;
-                                if !stderr.is_empty() {
-                                    full_response = format!(
-                                        "Error: {}\nstderr: {}",
-                                        message,
-                                        truncate_str(&stderr, 500)
-                                    );
-                                } else {
-                                    full_response = format!("Error: {}", message);
+                            match error_resolution.presentation {
+                                ProviderErrorPresentation::PromptTooLong(guidance) => {
+                                    // Prompt too long is not a terminal failure — user can retry
+                                    // with a shorter message or /compact. Don't mark as transport error.
+                                    transport_error = false;
+                                    full_response = guidance;
                                 }
-                            } else if !stderr.is_empty() {
-                                full_response = format!(
-                                    "Error: {}\nstderr: {}",
-                                    message,
-                                    truncate_str(&stderr, 500)
-                                );
-                            } else {
-                                full_response = format!("Error: {}", message);
+                                ProviderErrorPresentation::Failure(guidance) => {
+                                    if is_stale_resume {
+                                        // Recoverable stale resume: auto-retry with a fresh provider
+                                        // session instead of failing the current dispatch/turn.
+                                        transport_error = false;
+                                        resume_failure_detected = true;
+                                    }
+                                    full_response = guidance;
+                                }
                             }
                             sync_terminal_error_delivery_state_for_bridge_owner(
                                 &full_response,
