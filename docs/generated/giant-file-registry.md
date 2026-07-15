@@ -44,7 +44,7 @@
 
 | Path | Prod |
 | --- | ---: |
-| `src/cli/client.rs` | 2474 |
+| `src/cli/client.rs` | 2464 |
 | `src/cli/dcserver.rs` | 1650 |
 | `src/cli/direct.rs` | 1758 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
@@ -106,7 +106,7 @@
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1593 |
 | `src/services/routines/store.rs` | 3505 |
-| `src/services/settings.rs` | 1067 |
+| `src/services/settings.rs` | 1059 |
 | `src/services/tui_prompt_dedupe.rs` | 1970 |
 | `src/services/turn_orchestrator.rs` | 3290 |
 | `src/voice/receiver.rs` | 1108 |

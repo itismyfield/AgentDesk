@@ -483,7 +483,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "dispatchPollSec": 30,
                     "maxRetries": 3,
                     "maxEntryRetries": 3
-                }
+                },
+                "explicit_keys": ["dispatchPollSec", "maxRetries", "maxEntryRetries"]
             }),
         ),
         ep(
@@ -528,7 +529,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "PUT",
             "/api/settings/runtime-config",
             "settings",
-            "Replace the stored runtime-config override object",
+            "Replace runtime-config; known keys are explicit overrides when reserved metadata is omitted",
         )
         .with_example(
             json!({
