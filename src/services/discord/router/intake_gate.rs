@@ -1608,3 +1608,46 @@ mod reply_context_tests {
         assert!(!should_start_attachment_only_turn("", 0));
     }
 }
+
+/// #4247 FIX 1/FIX 4: pins the LIVE (non-queued) intake path's
+/// `preserve_on_cancel` computation on `IntakeSubmission` — the SEPARATE
+/// computation from the queued path's `SoftInterventionSpec::into_intervention`
+/// (already pinned by `intake_queue_transaction.rs`'s `human`/`bot`/`automation`
+/// tests). `handle_event`'s Discord/poise `Context`/`Message` dependencies make
+/// a live end-to-end test impractical here (this module is never invoked with
+/// real Discord data from a unit test anywhere in the codebase), so — matching
+/// this file's/module's established source-order-invariant test convention —
+/// this pins the exact computation by source position instead of merely by
+/// existence of the field, so a mutation to a hardcoded `false`/`true` literal
+/// fails the assertion (not a compile error).
+#[cfg(test)]
+mod live_intake_preserve_wiring_tests {
+    #[test]
+    fn live_intake_preserve_on_cancel_is_computed_from_author_identity_not_hardcoded() {
+        let module_src = include_str!("intake_gate.rs");
+        let submission_pos = module_src
+            .find("origin: super::IntakeOrigin::LiveMessage,")
+            .expect("live-message IntakeSubmission construction exists");
+        let preserve_field_pos = module_src[submission_pos..]
+            .find("preserve_on_cancel:")
+            .map(|offset| submission_pos + offset)
+            .expect("live IntakeSubmission sets preserve_on_cancel");
+        let field_end = module_src[preserve_field_pos..]
+            .find(',')
+            .map(|offset| preserve_field_pos + offset)
+            .expect("preserve_on_cancel field has a terminator");
+        let field_src = &module_src[preserve_field_pos..field_end];
+
+        assert!(
+            field_src.contains("!new_message.author.bot"),
+            "live intake must compute preserve_on_cancel from the message \
+             author's bot flag, not a hardcoded literal; got: {field_src:?}"
+        );
+        assert!(
+            field_src.contains("!author_excluded_from_cancel_preservation"),
+            "live intake preserve_on_cancel must also exclude allowed-automation \
+             / announce-excluded authors from preservation, matching the queued \
+             path's SoftInterventionSpec::into_intervention gate; got: {field_src:?}"
+        );
+    }
+}

@@ -3070,3 +3070,109 @@ mod queue_pending_reaction_clear_tests {
         }
     }
 }
+
+/// #4247 FIX 1 (mutation-provable): the turn-start DISPATCH-GUARD must gate its
+/// raw `stale_dispatch_turn_for_text` lookup on `!preserve_on_cancel`, mirroring
+/// the dequeue guard's `filter_queued_dispatch_exit(preserve, stale)` semantics
+/// — otherwise a preserved (marked, `preserve_on_cancel=true`) genuine human
+/// instruction that survives the dequeue guard is dropped anyway on re-entry
+/// here just because its text carries a stale `DISPATCH:<id>` prefix (see the
+/// `#1332` comment above `try_start_turn_with_stale_busy_heal`, and the "stale
+/// DISPATCH: prefix" comment near the recovery-context take below). This
+/// mirrors the `handle_text_message` source-order tests above
+/// (`recovery_context_take_order_tests`) which pin the same function's control
+/// flow by source position, since the function's Discord/DB dependencies make
+/// a live integration test impractical (confirmed: `handle_text_message` is
+/// never invoked directly from any test in this codebase — see
+/// `router/intake_dispatch/tests.rs`'s boundary invariants).
+#[cfg(test)]
+mod turn_start_dispatch_guard_preservation_tests {
+    #[test]
+    fn turn_start_guard_is_gated_on_preserve_on_cancel() {
+        let module_src = include_str!("intake_turn.rs");
+        let claim_pos = module_src
+            .find("let started = try_start_turn_with_stale_busy_heal(")
+            .expect("turn-start mailbox claim exists");
+        let stale_call_pos = module_src[claim_pos..]
+            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
+            .map(|offset| claim_pos + offset)
+            .expect("turn-start dispatch-guard raw stale-text lookup exists");
+        let gate_between_claim_and_lookup = module_src[claim_pos..stale_call_pos]
+            .find("!preserve_on_cancel");
+
+        assert!(
+            gate_between_claim_and_lookup.is_some(),
+            "turn-start DISPATCH-GUARD must gate the raw stale-text lookup on \
+             `!preserve_on_cancel` (#4247 FIX 1) — removing this gate lets a \
+             preserved (marked) genuine human instruction get dropped at turn \
+             start just because it carries a stale DISPATCH: prefix, silently \
+             defeating the fail-safe queue-preservation feature end-to-end"
+        );
+    }
+
+    /// Companion to the guard-presence check above: confirms the abort branch
+    /// this gate protects is still the SAME branch that finishes the turn,
+    /// advances the checkpoint, and adds the exit-feedback emoji — i.e. the
+    /// gate change did not accidentally get attached to some other unrelated
+    /// `stale_dispatch_turn_for_text` occurrence in the file.
+    #[test]
+    fn gated_stale_lookup_feeds_the_turn_abort_branch() {
+        let module_src = include_str!("intake_turn.rs");
+        let claim_pos = module_src
+            .find("let started = try_start_turn_with_stale_busy_heal(")
+            .expect("turn-start mailbox claim exists");
+        let stale_call_pos = module_src[claim_pos..]
+            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
+            .map(|offset| claim_pos + offset)
+            .expect("turn-start dispatch-guard raw stale-text lookup exists");
+        let abort_region = &module_src[stale_call_pos..stale_call_pos + 1200];
+
+        assert!(
+            abort_region.contains("DISPATCH-GUARD: aborted terminal dispatch at turn start"),
+            "gated stale lookup must still feed the turn-start abort log/branch"
+        );
+        assert!(
+            abort_region.contains("mailbox_finish_turn"),
+            "turn-start abort branch must still finish the mailbox turn"
+        );
+        assert!(
+            abort_region.contains("return Ok(());"),
+            "turn-start abort branch must still return early"
+        );
+    }
+}
+
+/// #4247 FIX 1/FIX 4: pins the LIVE (non-queued) intake path's
+/// `preserve_on_cancel` wiring end-to-end — distinct from the queued path's
+/// `SoftInterventionSpec::into_intervention` computation, which is already
+/// pinned by `intake_queue_transaction.rs`'s `human`/`bot`/`automation` tests.
+/// The live path threads `preserve_on_cancel` from `intake_gate.rs`'s
+/// `IntakeSubmission` construction, through `finish_admitted_local` /
+/// `message_handler::finish_admitted_local`, into this `handle_text_message`
+/// parameter — this test pins the LAST hop (parameter reaches the FIX 1 guard
+/// unmodified) so a future refactor cannot silently drop the wiring between
+/// the function boundary and the guard.
+#[cfg(test)]
+mod live_intake_preserve_wiring_tests {
+    #[test]
+    fn preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified() {
+        let module_src = include_str!("intake_turn.rs");
+        let signature_pos = module_src
+            .find("pub(super) async fn handle_text_message(")
+            .expect("handle_text_message signature exists");
+        let param_pos = module_src[signature_pos..]
+            .find("preserve_on_cancel: bool,")
+            .map(|offset| signature_pos + offset)
+            .expect("handle_text_message receives preserve_on_cancel as a parameter");
+        let guard_pos = module_src[param_pos..]
+            .find("&& !preserve_on_cancel")
+            .map(|offset| param_pos + offset);
+
+        assert!(
+            guard_pos.is_some(),
+            "the live-intake preserve_on_cancel parameter must flow unmodified \
+             (no local shadowing/rebinding) into the FIX 1 turn-start guard; \
+             mutating either the parameter plumbing or the guard breaks this"
+        );
+    }
+}
