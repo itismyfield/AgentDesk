@@ -608,6 +608,9 @@ mod tests {
 
     #[test]
     fn only_human_intake_sets_cancel_preservation_marker() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+
         let human = request(Default::default()).intervention.into_intervention();
         assert!(human.preserve_on_cancel());
 
