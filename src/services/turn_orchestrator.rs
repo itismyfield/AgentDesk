@@ -763,8 +763,11 @@ pub(crate) struct ChannelMailboxHandle {
 impl ChannelMailboxHandle {
     // Called by the actor only after it accepts a turn/queue ownership transition,
     // before the success reply can expose that ownership to concurrent callers.
-    fn publish_global_owner(&self) {
-        GLOBAL_CHANNEL_MAILBOXES.insert(self.channel_id, self.clone());
+    fn publish_if<T>(&self, owns_channel: bool, value: T) -> T {
+        if owns_channel {
+            GLOBAL_CHANNEL_MAILBOXES.insert(self.channel_id, self.clone());
+        }
+        value
     }
 
     async fn request<T>(
@@ -2301,8 +2304,11 @@ mod turn_finished_signal_tests {
 
 fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let handle = ChannelMailboxHandle { channel_id, sender: tx };
-    let actor_handle = handle.clone();
+    let handle = ChannelMailboxHandle {
+        channel_id,
+        sender: tx,
+    };
+    let owner = handle.clone();
     tokio::spawn(async move {
         let mut state = ChannelMailboxState::default();
         while let Some(msg) = rx.recv().await {
@@ -2557,38 +2563,37 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             persistence_error = Some(error);
                         }
                     }
-                    let started = if !can_start || persistence_error.is_some() {
-                        false
-                    } else {
-                        actor_handle.publish_global_owner();
-                        reset_turn_finished_signal(channel_id);
-                        state.cancel_token = Some(cancel_token);
-                        state.active_request_owner = Some(request_owner);
-                        state.active_user_message_id = Some(user_message_id);
-                        // #3167 — record the slot's priority class so the
-                        // dequeue gates can treat a background turn as
-                        // non-blocking.
-                        state.active_turn_kind = turn_kind;
-                        // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
-                        // slot satisfies any reserved dequeue→claim window: clear
-                        // the reservation and reset the valve counter.
-                        if turn_kind == ActiveTurnKind::UserOrAgent {
-                            consume_pending_dispatch_marker_if_matches(
-                                &mut state,
-                                channel_id,
-                                user_message_id,
-                                "try_start_turn",
-                            );
-                            clear_pending_user_dispatch(&mut state);
-                        }
-                        state.recovery_started_at = None;
-                        state.turn_started_at = Some(Utc::now());
-                        state.turn_started_instant = Some(Instant::now());
-                        reset_watchdog_extension_state(&mut state);
-                        true
-                    };
                     let _ = reply.send(TryStartTurnResult {
-                        started,
+                        started: if !can_start || persistence_error.is_some() {
+                            false
+                        } else {
+                            owner.publish_if(true, ());
+                            reset_turn_finished_signal(channel_id);
+                            state.cancel_token = Some(cancel_token);
+                            state.active_request_owner = Some(request_owner);
+                            state.active_user_message_id = Some(user_message_id);
+                            // #3167 — record the slot's priority class so the
+                            // dequeue gates can treat a background turn as
+                            // non-blocking.
+                            state.active_turn_kind = turn_kind;
+                            // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
+                            // slot satisfies any reserved dequeue→claim window: clear
+                            // the reservation and reset the valve counter.
+                            if turn_kind == ActiveTurnKind::UserOrAgent {
+                                consume_pending_dispatch_marker_if_matches(
+                                    &mut state,
+                                    channel_id,
+                                    user_message_id,
+                                    "try_start_turn",
+                                );
+                                clear_pending_user_dispatch(&mut state);
+                            }
+                            state.recovery_started_at = None;
+                            state.turn_started_at = Some(Utc::now());
+                            state.turn_started_instant = Some(Instant::now());
+                            reset_watchdog_extension_state(&mut state);
+                            true
+                        },
                         queue_exit_events,
                         persistence_error,
                     });
@@ -2600,7 +2605,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     turn_kind,
                     reply,
                 } => {
-                    actor_handle.publish_global_owner();
+                    owner.publish_if(true, ());
                     reset_turn_finished_signal(channel_id);
                     let was_idle = state.cancel_token.is_none();
                     state.cancel_token = Some(cancel_token);
@@ -2623,7 +2628,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     reply,
                 } => {
-                    actor_handle.publish_global_owner();
+                    owner.publish_if(true, ());
                     reset_turn_finished_signal(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.cancel_token = Some(cancel_token);
@@ -2710,10 +2715,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             persistence_error: Some(error),
                         };
                     }
-                    if enqueue_result.enqueued || enqueue_result.merged {
-                        actor_handle.publish_global_owner();
-                    }
-                    let _ = reply.send(enqueue_result);
+                    let owns_channel = enqueue_result.enqueued || enqueue_result.merged;
+                    let _ = reply.send(owner.publish_if(owns_channel, enqueue_result));
                 }
                 ChannelMailboxMsg::HasPendingSoftQueue { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
@@ -3178,10 +3181,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         previous_queue,
                         "replace_queue",
                     );
-                    if !state.intervention_queue.is_empty() {
-                        actor_handle.publish_global_owner();
-                    }
-                    let _ = reply.send(());
+                    let _ = reply.send(owner.publish_if(!state.intervention_queue.is_empty(), ()));
                 }
                 ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply } => {
                     // #1683: read the disk queue inside the mailbox actor so
@@ -3193,10 +3193,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         channel_id,
                         &persistence,
                     );
-                    if result.queue_len_after > 0 {
-                        actor_handle.publish_global_owner();
-                    }
-                    let _ = reply.send(result);
+                    let _ = reply.send(owner.publish_if(result.queue_len_after > 0, result));
                 }
                 ChannelMailboxMsg::MergeRestoredQueueItems {
                     items,
@@ -3218,10 +3215,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         persistence,
                         None,
                     );
-                    if result.queue_len_after > 0 {
-                        actor_handle.publish_global_owner();
-                    }
-                    let _ = reply.send(result);
+                    let _ = reply.send(owner.publish_if(result.queue_len_after > 0, result));
                 }
                 ChannelMailboxMsg::MergeRestoredDispatchMarker {
                     mut marker,
@@ -3278,10 +3272,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         restored_override,
                         "merge_restored_dispatch_marker",
                     );
-                    if result.queue_len_after > 0 {
-                        actor_handle.publish_global_owner();
-                    }
-                    let _ = reply.send(result);
+                    let _ = reply.send(owner.publish_if(result.queue_len_after > 0, result));
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
