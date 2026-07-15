@@ -72,8 +72,7 @@ pub(super) async fn handle_race_loss_enqueue(
     preserve_on_cancel: bool,
 ) -> Result<(), Error> {
     let bot_owner_provider = crate::services::discord::resolve_discord_bot_provider(token);
-    let is_thread_routed = channel_id != original_channel_id;
-    let want_queued_card = !turn_kind.is_background_trigger() && !is_thread_routed;
+    let want_queued_card = !turn_kind.is_background_trigger() && channel_id == original_channel_id;
 
     // codex review round-9 P2 (#1332): enqueue the intervention BEFORE
     // any Discord HTTP await. The previous order (POST placeholder →
@@ -161,14 +160,10 @@ pub(super) async fn handle_race_loss_enqueue(
         let ts = chrono::Local::now().format("%H:%M:%S");
         // #2728: log which refusal branch fired so race-loss dedup
         // incidents can be classified without re-reading code.
-        let refusal_str = enqueue_outcome
-            .refusal_reason
-            .map(|r| r.as_str())
-            .unwrap_or("unknown");
         tracing::info!(
             "  [{ts}] 🔁 RACE: race-lost intervention refused by mailbox before placeholder POST (channel {}, refusal_reason={}); no duplicate queue entry retained",
             channel_id,
-            refusal_str,
+            enqueue_outcome.refusal_reason.map(|r| r.as_str()).unwrap_or("unknown"),
         );
         return Ok(());
     }

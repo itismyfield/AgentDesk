@@ -84,15 +84,14 @@ pub(crate) async fn execute_intake_turn_core(
     token: &str,
     request: IntakeRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let deps = IntakeDeps {
-        http,
-        cache: None,
-        ctx_for_chained_dispatch: None,
-        shared,
-        token,
-    };
     handle_text_message(
-        &deps,
+        &IntakeDeps {
+            http,
+            cache: None,
+            ctx_for_chained_dispatch: None,
+            shared,
+            token,
+        },
         request.channel_id,
         request.user_msg_id,
         request.request_owner,
@@ -1799,7 +1798,6 @@ pub(super) async fn handle_text_message(
     // Claude keeps SAK in the system prompt for prefix-cache stability.
     // Non-Claude providers receive SAK in the user context instead.
     let sak_for_system = memory_injection_plan.sak_for_system_prompt();
-    let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let current_task_context = active_dispatch_info.as_ref().map(|info| {
         super::super::super::prompt_builder::CurrentTaskContext {
             dispatch_id: active_dispatch_id_for_prompt.as_deref(),
@@ -1837,7 +1835,7 @@ pub(super) async fn handle_text_message(
         dispatch_type_str.as_deref(),
         current_task_context.as_ref(),
         sak_for_system,
-        longterm_catalog_for_prompt,
+        memory_injection_plan.longterm_catalog_for_system_prompt,
         Some(&memory_settings),
         memento_mcp_available,
         matches!(&provider, ProviderKind::Claude),
@@ -1862,7 +1860,6 @@ pub(super) async fn handle_text_message(
     // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
     // `[prompt-prep]` window below (overlaps it; do not sum — see latency_spans.rs).
     intake_latency.mark_prep_done();
-    let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {
         ProviderKind::Claude => "claude",
         ProviderKind::Codex => "codex",
@@ -1871,14 +1868,13 @@ pub(super) async fn handle_text_message(
         ProviderKind::Qwen => "qwen",
         ProviderKind::Unsupported(_) => "unsupported",
     };
-    let dispatch_profile_label = dispatch_profile_label(dispatch_profile);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
         channel_id.get(),
         provider_label,
-        dispatch_profile_label,
-        memory_backend_label,
+        dispatch_profile_label(dispatch_profile),
+        memory_settings.backend.as_str(),
         session_id.is_some(),
         prompt_prep_duration_ms
     );
@@ -2143,13 +2139,12 @@ pub(super) async fn handle_text_message(
                 // to inject the prompt — fall into the busy-notice / cleanup branch
                 // below by surfacing the initial diagnostic. Closes a Codex-flagged
                 // HIGH on the Discord path mirroring the same fix in claude.rs.
-                let cancel_observed_after_wait = cancel_token
-                    .cancelled
-                    .load(std::sync::atomic::Ordering::Relaxed);
                 match (
                     wait_result,
                     post_wait_diagnostic,
-                    cancel_observed_after_wait,
+                    cancel_token
+                        .cancelled
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 ) {
                     (_, _, true) => {
                         tracing::warn!(
@@ -2611,8 +2606,7 @@ pub(super) async fn handle_text_message(
     // Pre-compute provider-specific compact config
     let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
     let compact_token_limit_for_codex = {
-        let cli_config = provider.compact_cli_config(compact_percent, model_context_window);
-        cli_config
+        provider.compact_cli_config(compact_percent, model_context_window)
             .first()
             .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
     };
