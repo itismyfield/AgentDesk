@@ -405,19 +405,10 @@ fn execute_command_simple_with_model_and_cancel(
         args.push(model.to_string());
     }
 
+    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
     let mut command = Command::new(&claude_bin);
-    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    // #2250: put Claude in its own process group so the simple-cancel
-    // watcher can terminate any wrapper / grandchild via
-    // `kill_pid_tree(child_pid)`. Without this, descendants survive cancel.
-    crate::services::process::configure_child_process_group(&mut command);
+    configure_execute_command_simple(&mut command, &resolution, &args, &gateway_proxy_env);
     let mut child = command
-        .args(&args)
-        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
-        .env_remove("CLAUDECODE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start Claude: {}", e))?;
 
@@ -465,6 +456,27 @@ fn execute_command_simple_with_model_and_cancel(
             stderr
         })
     }
+}
+
+fn configure_execute_command_simple(
+    command: &mut Command,
+    resolution: &crate::services::platform::BinaryResolution,
+    args: &[String],
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+) {
+    crate::services::platform::apply_binary_resolution(command, resolution);
+    // #2250: put Claude in its own process group so the simple-cancel
+    // watcher can terminate any wrapper / grandchild via
+    // `kill_pid_tree(child_pid)`. Without this, descendants survive cancel.
+    crate::services::process::configure_child_process_group(command);
+    command
+        .args(args)
+        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    gateway_proxy_env.apply_to_command(command);
 }
 
 // #3034: retained for the #2387 timeout-drain regression test below.
@@ -640,6 +652,54 @@ mod simple_timeout_2387_tests {
         );
 
         assert_eq!(result.unwrap(), "claude natural completion");
+    }
+}
+
+#[cfg(test)]
+mod simple_launch_env_tests {
+    use super::configure_execute_command_simple;
+    use std::process::Command;
+
+    #[test]
+    fn disabled_gateway_scrubs_pre_set_proxy_vars_from_simple_command() {
+        let resolution = crate::services::platform::BinaryResolution {
+            requested_binary: "claude".to_string(),
+            resolved_path: Some("claude".to_string()),
+            canonical_path: None,
+            source: Some("test".to_string()),
+            attempts: Vec::new(),
+            failure_kind: None,
+            exec_path: None,
+        };
+        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
+            false,
+            "http://foreign.example:10100",
+            true,
+        );
+        let mut command = Command::new("claude");
+        command
+            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
+            .env(
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "foreign-value",
+            );
+
+        configure_execute_command_simple(&mut command, &resolution, &[], &scrub);
+
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(envs.get("ANTHROPIC_BASE_URL"), Some(&None));
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some(&None)
+        );
     }
 }
 

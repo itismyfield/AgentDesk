@@ -163,6 +163,8 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn rendered_env(env: &ClaudeGatewayProxyEnv) -> String {
         let mut rendered = String::new();
@@ -297,23 +299,35 @@ mod tests {
         let timeout = Duration::from_millis(20);
         let worker_sleep = Duration::from_millis(2000);
         let robust_upper_bound = Duration::from_millis(1000);
+        let probe_invoked = Arc::new(AtomicBool::new(false));
+        let probe_invoked_by_worker = Arc::clone(&probe_invoked);
         let started = Instant::now();
 
         let reachable = proxy_reachable_with_hostname_probe(
             "http://bad-hostname.invalid:10100",
             timeout,
             move |_, _, _| {
+                probe_invoked_by_worker.store(true, Ordering::SeqCst);
                 thread::sleep(worker_sleep);
                 false
             },
         );
+        let returned_after = started.elapsed();
 
         assert!(!reachable);
         assert!(
-            started.elapsed() < robust_upper_bound,
+            returned_after < robust_upper_bound,
             "hostname probe did not obey its outer deadline (returned before the {:?} worker sleep expected): {:?}",
             worker_sleep,
-            started.elapsed()
+            returned_after
+        );
+        let invocation_deadline = Instant::now() + robust_upper_bound;
+        while !probe_invoked.load(Ordering::SeqCst) && Instant::now() < invocation_deadline {
+            thread::yield_now();
+        }
+        assert!(
+            probe_invoked.load(Ordering::SeqCst),
+            "domain branch returned without invoking the hostname probe closure"
         );
     }
 }

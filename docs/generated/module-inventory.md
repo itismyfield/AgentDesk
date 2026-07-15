@@ -376,7 +376,7 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4340 | 2956 | 1384 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4400 | 2969 | 1431 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
@@ -384,7 +384,7 @@
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
 | `services::claude_e::process` | `src/services/claude_e/process.rs` | 435 | 371 | 64 |  |
 | `services::claude_e::spawn_queue` | `src/services/claude_e/spawn_queue.rs` | 3 | 3 | 0 |  |
-| `services::claude_gateway_proxy` | `src/services/claude_gateway_proxy.rs` | 311 | 160 | 151 |  |
+| `services::claude_gateway_proxy` | `src/services/claude_gateway_proxy.rs` | 333 | 160 | 173 |  |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 17 | 17 | 0 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1229 | 737 | 492 |  |
 | `services::claude_tui::hook_output_guard` | `src/services/claude_tui/hook_output_guard.rs` | 157 | 157 | 0 |  |
