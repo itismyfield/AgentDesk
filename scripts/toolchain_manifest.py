@@ -190,7 +190,7 @@ def tool_inventory() -> tuple[ToolSpec, ...]:
             "rustup",
             ("rustup", "check"),
             "command",
-            ("rustup", "update", "stable"),
+            ("rustup", "update", "stable", "--no-self-update"),
             "rust",
             "the repository MSRV and pinned toolchain must still compile",
             "https://blog.rust-lang.org/releases/",

@@ -64,7 +64,7 @@ class FakeRunner(update.Runner):
         if command[:3] == ("brew", "info", "--json=v2"):
             return update.CommandResult(
                 0,
-                json.dumps({"formulae": [{"versions": {"stable": "1.1.0"}}]}),
+                json.dumps({"formulae": [{"versions": {"stable": "1.1.0"}, "revision": 0}]}),
                 "",
             )
         if command[:2] == ("npm", "view"):
@@ -221,7 +221,10 @@ class InventoryAndDraftTests(unittest.TestCase):
         self.assertIn("check", arguments)
         self.assertNotIn("apply", arguments)
         self.assertNotIn("approve", arguments)
-        self.assertIn("StartCalendarInterval", plist)
+        self.assertEqual(
+            plist["StartCalendarInterval"],
+            {"Weekday": 0, "Hour": 9, "Minute": 30},
+        )
         path = plist["EnvironmentVariables"]["PATH"].split(":")
         self.assertEqual(path[0], "__HOME__/.local/bin")
         self.assertIn("__HOME__/.cargo/bin", path)
@@ -253,7 +256,7 @@ class ApprovalAndApplyTests(unittest.TestCase):
                 [check_for("opencode", tier="hygiene", method="installer")], Path(temp)
             )
             self.assertIn(
-                "per-tool approval also required: native/self-updater/npm mutation",
+                "per-tool approval also required: native/self-updater/rustup/npm mutation",
                 markdown.read_text(encoding="utf-8"),
             )
             with self.assertRaises(update.ApprovalError):
@@ -265,6 +268,121 @@ class ApprovalAndApplyTests(unittest.TestCase):
                     runner=runner,
                 )
         self.assertNotIn(("opencode", "upgrade"), runner.calls)
+
+    def test_rustup_hygiene_requires_approval_and_disables_self_update(self) -> None:
+        runner = FakeRunner()
+        rustc_version = ("rustup", "run", "stable", "rustc", "--version")
+        runner.sequence_overrides[rustc_version] = [
+            update.CommandResult(0, "rustc 1.0.0\n", ""),
+            update.CommandResult(0, "rustc 1.1.0\n", ""),
+            update.CommandResult(0, "rustc 1.1.0\n", ""),
+        ]
+        update_command = ("rustup", "update", "stable", "--no-self-update")
+        with tempfile.TemporaryDirectory() as temp:
+            markdown, draft, _ = update.write_draft(
+                [check_for("cargo-rustc", tier="hygiene", method="rustup")], Path(temp)
+            )
+            self.assertIn("native/self-updater/rustup/npm", markdown.read_text(encoding="utf-8"))
+            with self.assertRaises(update.ApprovalError):
+                update.apply_draft(
+                    draft,
+                    requested_tools=[],
+                    apply_hygiene=True,
+                    safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                    runner=runner,
+                )
+            self.assertNotIn(update_command, runner.calls)
+
+            update.approve_tool(draft, "cargo-rustc", update.APPROVAL_CONFIRMATION)
+            applied, alert = update.apply_draft(
+                draft,
+                requested_tools=[],
+                apply_hygiene=True,
+                safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                runner=runner,
+            )
+
+        self.assertEqual(applied, ["cargo-rustc"])
+        self.assertIsNone(alert)
+        self.assertIn(update_command, runner.calls)
+        self.assertFalse(any(call == ("rustup", "update", "stable") for call in runner.calls))
+
+    def test_revisioned_homebrew_upgrade_accepts_approved_bottle(self) -> None:
+        runner = FakeRunner()
+        runner.overrides[("brew", "info", "--json=v2", "gh")] = update.CommandResult(
+            0,
+            json.dumps({"formulae": [{"versions": {"stable": "1.1.0"}, "revision": 1}]}),
+            "",
+        )
+        runner.sequence_overrides[("brew", "list", "--versions", "gh")] = [
+            update.CommandResult(0, "gh 1.0.0\n", ""),
+            update.CommandResult(0, "gh 1.1.0_1\n", ""),
+        ]
+        check = replace(
+            check_for("gh", tier="hygiene", method="homebrew"),
+            latest="1.1.0_1",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft([check], Path(temp))
+            applied, alert = update.apply_draft(
+                draft,
+                requested_tools=["gh"],
+                apply_hygiene=False,
+                safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                runner=runner,
+            )
+
+        self.assertEqual(applied, ["gh"])
+        self.assertIsNone(alert)
+        self.assertIn(("gh", "--version"), runner.calls)
+
+    def test_revisioned_homebrew_upgrade_rejects_different_bottle_before_smoke(self) -> None:
+        runner = FakeRunner()
+        runner.overrides[("brew", "info", "--json=v2", "gh")] = update.CommandResult(
+            0,
+            json.dumps({"formulae": [{"versions": {"stable": "1.1.0"}, "revision": 1}]}),
+            "",
+        )
+        runner.sequence_overrides[("brew", "list", "--versions", "gh")] = [
+            update.CommandResult(0, "gh 1.0.0\n", ""),
+            update.CommandResult(0, "gh 1.1.0_2\n", ""),
+        ]
+        check = replace(
+            check_for("gh", tier="hygiene", method="homebrew"),
+            latest="1.1.0_1",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            _, draft, _ = update.write_draft([check], Path(temp))
+            applied, alert = update.apply_draft(
+                draft,
+                requested_tools=["gh"],
+                apply_hygiene=False,
+                safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
+                runner=runner,
+            )
+            self.assertEqual(applied, [])
+            self.assertIsNotNone(alert)
+            alert_text = alert.read_text(encoding="utf-8")
+
+        self.assertIn("expected=1.1.0_1, observed=1.1.0_2", alert_text)
+        self.assertIn("smoke not run", alert_text)
+        self.assertNotIn(("gh", "--version"), runner.calls)
+
+    def test_generated_contract_says_exact_version_can_prevent_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            markdown, _, _ = update.write_draft(
+                [check_for("gh", tier="hygiene", method="homebrew")], Path(temp)
+            )
+            report = markdown.read_text(encoding="utf-8")
+
+        self.assertIn("exact-version verification", report)
+        self.assertIn("may stop the batch before smoke", report)
+        self.assertNotIn("Every applied tool runs its smoke profile", report)
+
+    def test_non_homebrew_default_update_timeout_is_1800_seconds(self) -> None:
+        spec = next(item for item in tool_inventory() if item.key == "cargo-rustc")
+        self.assertEqual(update.DEFAULT_UPDATE_TIMEOUT_SECONDS, 1800)
+        self.assertEqual(update._update_timeout(spec), 1800)
 
     def test_approval_is_bound_to_exact_draft_and_allows_smoked_apply(self) -> None:
         runner = FakeRunner()

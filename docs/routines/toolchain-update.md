@@ -19,7 +19,7 @@ services, and manual-only tools are reported explicitly rather than silently dro
 | native installer | `claude` | approval required; never scheduled for apply |
 | npm global | `codex`, `ocx`, `claude-e` | `codex`/`ocx` approval tier; all npm mutations, including hygiene `claude-e`, require an exact per-tool approval marker |
 | uv tool | `cswap` (`claude-swap`) | approval required because `--list --json` has drifted |
-| rustup | `cargo/rustc` | hygiene candidate; post-update compiler smoke required |
+| rustup | `cargo/rustc` | hygiene candidate; per-tool approval required; rustup binary self-update disabled; post-update compiler smoke required |
 | Homebrew | `tmux`, `gh`, `node`, `python@3.14`, `uv`, `pipx`, `jq`, `ripgrep`, `ffmpeg`, `whisper-cpp`, `postgresql@17` | `tmux`, `node`, and PostgreSQL require approval; the rest are hygiene candidates |
 | pipx | `edge-tts` | hygiene candidate |
 | native installer | `opencode` | hygiene candidate only when already installed; its self-updater still requires exact per-tool approval |
@@ -64,9 +64,10 @@ python3 "$ROOT/scripts/toolchain_update.py" apply \
 ```
 
 `--apply-hygiene` selects every hygiene row whose draft decision is `update-available`.
-Native/self-updater/npm mutations remain approval-gated even when their tier is hygiene, so
-`claude-e` and `opencode` must be approved first. Report-only rows cannot enter the apply path. The
-launchd plist contains neither `approve` nor `apply` and cannot cross either gate.
+Native/self-updater/rustup/npm mutations remain approval-gated even when their tier is hygiene, so
+`claude-e`, `cargo/rustc`, and `opencode` must be approved first. Rustup toolchain updates pass
+`--no-self-update`, so they cannot silently replace the rustup binary. Report-only rows cannot enter
+the apply path. The launchd plist contains neither `approve` nor `apply` and cannot cross either gate.
 
 ## Smoke and failure handling
 

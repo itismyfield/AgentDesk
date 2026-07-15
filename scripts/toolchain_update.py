@@ -29,7 +29,7 @@ from toolchain_manifest import (
 SCHEMA_VERSION = 2
 APPROVAL_CONFIRMATION = "approve-exact-toolchain-draft"
 SAFE_WINDOW_CONFIRMATION = "no-active-turns-or-deploys"
-APPROVAL_REQUIRED_METHODS = frozenset({"installer", "native", "npm-g"})
+APPROVAL_REQUIRED_METHODS = frozenset({"installer", "native", "npm-g", "rustup"})
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_UPDATE_TIMEOUT_SECONDS = 1800
 BUILD_UPDATE_TIMEOUT_SECONDS = 7200
@@ -225,11 +225,16 @@ def _brew_latest(runner: Runner, formula: str) -> ValueProbe:
         return ValueProbe(False, "unavailable", _compact_detail(result.stderr))
     try:
         payload = json.loads(result.stdout)
-        stable = payload["formulae"][0]["versions"]["stable"]
+        formula_payload = payload["formulae"][0]
+        stable = formula_payload["versions"]["stable"]
+        revision = formula_payload.get("revision", 0)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise TypeError("formula revision must be a non-negative integer")
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
         return ValueProbe(False, "invalid-brew-response", str(error))
     stable_text = str(stable).strip()
-    version = stable_text if _BREW_VERSION_RE.fullmatch(stable_text) else None
+    expected_text = f"{stable_text}_{revision}" if revision else stable_text
+    version = expected_text if _BREW_VERSION_RE.fullmatch(expected_text) else None
     return ValueProbe(version is not None, version or "invalid-brew-response", f"brew formula {formula}")
 
 
@@ -396,7 +401,7 @@ def render_draft(checks: Sequence[ToolCheck], generated_at: str, draft_id: str) 
     else:
         for check in hygiene:
             destructive = (
-                " (per-tool approval also required: native/self-updater/npm mutation)"
+                " (per-tool approval also required: native/self-updater/rustup/npm mutation)"
                 if check.method in APPROVAL_REQUIRED_METHODS
                 else ""
             )
@@ -426,9 +431,10 @@ def render_draft(checks: Sequence[ToolCheck], generated_at: str, draft_id: str) 
             "",
             "## Gate contract",
             "",
-            "Applying requires an explicit safe-window confirmation. Approval-tier tools and all native/self-updater/npm",
-            "mutations require a per-tool approval marker bound to this draft ID. Every applied tool runs its",
-            "smoke profile immediately; failure stops the batch, emits an alert/rollback-or-pin plan, and exits non-zero.",
+            "Applying requires an explicit safe-window confirmation. Approval-tier tools and all native/self-updater/rustup/npm",
+            "mutations require a per-tool approval marker bound to this draft ID. After mutation, exact-version verification",
+            "runs first and may stop the batch before smoke. Otherwise the smoke profile runs immediately; failure stops the",
+            "batch, emits an alert/rollback-or-pin plan, and exits non-zero.",
             "",
         ]
     )
