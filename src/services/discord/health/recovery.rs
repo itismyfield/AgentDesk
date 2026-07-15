@@ -1271,6 +1271,14 @@ async fn runtime_turn_cleanup_by_lookup(
                 stop_source,
             );
         }
+        if snapshot.cancel_token.is_some() {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                requested_provider = provider_name.unwrap_or("<unspecified>"),
+                stop_source,
+                "hard-stop declined for observed mailbox turn because runtime ownership was unresolved or the provider did not match"
+            );
+        }
     }
 
     HardStopRuntimeResult::default()
