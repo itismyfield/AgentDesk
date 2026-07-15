@@ -1258,25 +1258,19 @@ async fn runtime_turn_cleanup_by_lookup(
     if let Some(channel_id) = channel_id
         && let Some(handle) = discord::ChannelMailboxRegistry::global_handle(channel_id)
     {
-        let finish = handle.hard_stop().await;
-        if finish.has_pending {
+        // The process-global mirror carries no runtime identity. Reaching this
+        // branch means the instance-local lookup above could not resolve an
+        // owning runtime, so mutating the mirrored actor could finish a
+        // different sibling's mailbox. Observe only; an attributed finish must
+        // go through the ownership-gated runtime path above.
+        let snapshot = handle.snapshot().await;
+        if !snapshot.intervention_queue.is_empty() {
             discord::turn_completion_events::warn_unresolvable_hard_stop_pending_backlog(
                 channel_id,
-                finish.has_pending,
+                true,
                 stop_source,
             );
         }
-        discord::clear_watchdog_deadline_override(channel_id.get()).await;
-        return HardStopRuntimeResult {
-            cleanup_path: if finish.mailbox_online {
-                "mailbox_canonical"
-            } else {
-                "mailbox_fallback"
-            },
-            had_active_turn: finish.removed_token.is_some(),
-            has_pending_queue: finish.has_pending,
-            runtime_session_cleared: false,
-        };
     }
 
     HardStopRuntimeResult::default()
@@ -5008,6 +5002,7 @@ mod hard_stop_completion_event_tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::super::HealthRegistry;
+    use super::HardStopRuntimeResult;
     use crate::config::TestEnvVarGuard;
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
@@ -5523,34 +5518,40 @@ mod hard_stop_completion_event_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn unresolvable_raw_hard_stop_warns_about_potentially_stranded_pending_queue() {
+    async fn unresolved_sibling_global_fallback_does_not_finish_mailbox() {
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Claude;
-        let shared = super::super::super::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        let non_owner = super::super::super::make_shared_data_for_tests();
+        let owner = super::super::super::make_shared_data_for_tests();
         let channel = ChannelId::new(4_048_240);
-        shared
+        let token = Arc::new(CancelToken::new());
+        owner
             .mailbox(channel)
             .replace_queue(
                 vec![intervention(4_048_241, "pending without runtime")],
-                super::super::super::queue_persistence_context(&shared, &provider, channel),
+                super::super::super::queue_persistence_context(&owner, &provider, channel),
             )
             .await;
         assert!(
             super::super::super::mailbox_try_start_turn(
-                &shared,
+                &owner,
                 channel,
-                Arc::new(CancelToken::new()),
+                token.clone(),
                 UserId::new(4_048_242),
                 MessageId::new(4_048_242),
             )
             .await
         );
+        registry
+            .register(provider.as_str().to_string(), non_owner.clone())
+            .await;
 
         let (result, logs) = capture_warns_async(|| async {
             super::stop_runtime_turn_preserving_watcher(
-                None,
-                None,
+                Some(&registry),
+                Some(provider.as_str()),
                 Some(channel.get()),
                 None,
                 "hard_stop_unresolvable_test",
@@ -5559,8 +5560,16 @@ mod hard_stop_completion_event_tests {
         })
         .await;
 
-        assert!(result.had_active_turn);
-        assert!(result.has_pending_queue);
+        assert_eq!(result, HardStopRuntimeResult::default());
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert!(non_owner.mailbox_peek(channel).is_none());
+        let owner_snapshot = owner
+            .mailbox_peek(channel)
+            .expect("owner mailbox must remain registered")
+            .snapshot()
+            .await;
+        assert!(owner_snapshot.cancel_token.is_some());
+        assert_eq!(owner_snapshot.intervention_queue.len(), 1);
         assert!(
             logs.contains("raw hard_stop fallback could not resolve the owning runtime"),
             "strand warning message missing from logs: {logs}"

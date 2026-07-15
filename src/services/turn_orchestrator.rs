@@ -756,20 +756,10 @@ static GLOBAL_CHANNEL_MAILBOXES: LazyLock<dashmap::DashMap<ChannelId, ChannelMai
 
 #[derive(Clone)]
 pub(crate) struct ChannelMailboxHandle {
-    channel_id: ChannelId,
     sender: mpsc::UnboundedSender<ChannelMailboxMsg>,
 }
 
 impl ChannelMailboxHandle {
-    // Called by the actor only after it accepts a turn/queue ownership transition,
-    // before the success reply can expose that ownership to concurrent callers.
-    fn publish_if<T>(&self, owns_channel: bool, value: T) -> T {
-        if owns_channel {
-            GLOBAL_CHANNEL_MAILBOXES.insert(self.channel_id, self.clone());
-        }
-        value
-    }
-
     async fn request<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<T>) -> ChannelMailboxMsg,
@@ -1629,8 +1619,7 @@ impl ChannelMailboxRegistry {
                 handle
             }
         };
-        // Empty actors are runtime-local observations, not channel owners. An actor
-        // publishes itself only after accepting a turn or queue ownership transition.
+        GLOBAL_CHANNEL_MAILBOXES.insert(channel_id, resolved.clone());
         resolved
     }
 
@@ -2304,11 +2293,6 @@ mod turn_finished_signal_tests {
 
 fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let handle = ChannelMailboxHandle {
-        channel_id,
-        sender: tx,
-    };
-    let owner = handle.clone();
     tokio::spawn(async move {
         let mut state = ChannelMailboxState::default();
         while let Some(msg) = rx.recv().await {
@@ -2567,7 +2551,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         started: if !can_start || persistence_error.is_some() {
                             false
                         } else {
-                            owner.publish_if(true, ());
                             reset_turn_finished_signal(channel_id);
                             state.cancel_token = Some(cancel_token);
                             state.active_request_owner = Some(request_owner);
@@ -2605,7 +2588,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     turn_kind,
                     reply,
                 } => {
-                    owner.publish_if(true, ());
                     reset_turn_finished_signal(channel_id);
                     let was_idle = state.cancel_token.is_none();
                     state.cancel_token = Some(cancel_token);
@@ -2628,7 +2610,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     reply,
                 } => {
-                    owner.publish_if(true, ());
                     reset_turn_finished_signal(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.cancel_token = Some(cancel_token);
@@ -2715,8 +2696,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             persistence_error: Some(error),
                         };
                     }
-                    let owns_channel = enqueue_result.enqueued || enqueue_result.merged;
-                    let _ = reply.send(owner.publish_if(owns_channel, enqueue_result));
+                    let _ = reply.send(enqueue_result);
                 }
                 ChannelMailboxMsg::HasPendingSoftQueue { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
@@ -3181,7 +3161,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         previous_queue,
                         "replace_queue",
                     );
-                    let _ = reply.send(owner.publish_if(!state.intervention_queue.is_empty(), ()));
+                    let _ = reply.send(());
                 }
                 ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply } => {
                     // #1683: read the disk queue inside the mailbox actor so
@@ -3193,7 +3173,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         channel_id,
                         &persistence,
                     );
-                    let _ = reply.send(owner.publish_if(result.queue_len_after > 0, result));
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::MergeRestoredQueueItems {
                     items,
@@ -3215,7 +3195,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         persistence,
                         None,
                     );
-                    let _ = reply.send(owner.publish_if(result.queue_len_after > 0, result));
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::MergeRestoredDispatchMarker {
                     mut marker,
@@ -3272,7 +3252,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         restored_override,
                         "merge_restored_dispatch_marker",
                     );
-                    let _ = reply.send(owner.publish_if(result.queue_len_after > 0, result));
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
@@ -3321,7 +3301,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
             }
         }
     });
-    handle
+    ChannelMailboxHandle { sender: tx }
 }
 
 // #3167 BLOCKER-3 — a SINGLE process-wide lock shared by EVERY test in this

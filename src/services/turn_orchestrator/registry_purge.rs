@@ -404,17 +404,7 @@ mod tests {
     async fn remove_idle_entry_unlinks_all_six_maps_when_idle() {
         let registry = ChannelMailboxRegistry::default();
         let channel = ChannelId::new(93_293_004);
-        let handle = registry.handle(channel);
-        assert!(
-            handle
-                .try_start_turn(
-                    Arc::new(CancelToken::new()),
-                    UserId::new(7),
-                    MessageId::new(11),
-                )
-                .await
-        );
-        assert!(handle.hard_stop().await.removed_token.is_some());
+        let _ = registry.handle(channel);
         let _ = registry.recovery_done(channel);
         let _ = registry.turn_finished(channel);
         assert!(GLOBAL_CHANNEL_MAILBOXES.contains_key(&channel));
@@ -435,20 +425,24 @@ mod tests {
     }
 
     /// #3297 finding-5 red-green: the global mirrors are process-wide single
-    /// slots. When one registry owns the mirrored busy actor and another has a
-    /// distinct idle actor for the same channel, purging the idle instance must
-    /// unlink only its instance maps — the global mirror pointing at the busy
-    /// foreign actor must survive (pre-fix code removed it unconditionally on
-    /// the instance-local idle verdict alone).
+    /// slots. When a SECOND registry instance has published a different
+    /// (busy) actor for the same channel, purging the FIRST instance's idle
+    /// entry must unlink only the instance maps — the global mirror pointing
+    /// at the busy foreign actor must survive (pre-fix code removed it
+    /// unconditionally on the instance-local idle verdict alone).
     #[tokio::test]
     async fn remove_idle_entry_skips_global_mirrors_owned_by_another_instance() {
         let registry_a = ChannelMailboxRegistry::default();
         let registry_b = ChannelMailboxRegistry::default();
         let channel = ChannelId::new(93_293_005);
 
-        // B publishes the owning busy actor first. A later creates a distinct
-        // idle sibling actor, but the mailbox mirror preserves B's identity.
+        // A registers first (its actor briefly owns the global slot)...
+        let handle_a = registry_a.handle(channel);
+        let _signal_a = registry_a.recovery_done(channel);
+        // ...then B registers the same channel: B's actor + signal now own
+        // the global mirrors (last-writer-wins), and B's actor is BUSY.
         let handle_b = registry_b.handle(channel);
+        let signal_b = registry_b.recovery_done(channel);
         assert!(
             handle_b
                 .try_start_turn(
@@ -458,12 +452,6 @@ mod tests {
                 )
                 .await
         );
-        let handle_a = registry_a.handle(channel);
-        let _signal_a = registry_a.recovery_done(channel);
-        // Recovery signals retain their existing last-writer-wins behavior;
-        // publish B's after A's so this purge fixture still verifies the
-        // identity guard for that separate global mirror as well.
-        let signal_b = registry_b.recovery_done(channel);
         assert!(
             !handle_a.sender.same_channel(&handle_b.sender),
             "test precondition: two distinct actors for the channel"
@@ -806,38 +794,6 @@ mod tests {
         assert!(fresh_handle.has_active_turn().await);
 
         let _ = fresh_handle.hard_stop().await;
-        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
-    }
-
-    /// #4535 mutation guard: the pre-fix `handle()` published the idle sibling
-    /// with `or_insert`, then the real owner could never replace that actor.
-    #[tokio::test]
-    async fn idle_sibling_cannot_shadow_later_global_mailbox_owner() {
-        let idle_registry = ChannelMailboxRegistry::default();
-        let owner_registry = ChannelMailboxRegistry::default();
-        let channel = ChannelId::new(93_293_106);
-        let idle = idle_registry.handle(channel);
-        assert!(
-            ChannelMailboxRegistry::global_handle(channel).is_none(),
-            "creating an empty local actor must not publish global ownership"
-        );
-
-        let owner = owner_registry.handle(channel);
-        assert!(
-            owner
-                .try_start_turn(
-                    Arc::new(CancelToken::new()),
-                    UserId::new(7),
-                    MessageId::new(11),
-                )
-                .await
-        );
-        assert!(!idle.sender.same_channel(&owner.sender));
-        let global = ChannelMailboxRegistry::global_handle(channel)
-            .expect("accepted turn owner must publish the global mirror");
-        assert!(global.sender.same_channel(&owner.sender));
-
-        let _ = owner.hard_stop().await;
         GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
     }
 
