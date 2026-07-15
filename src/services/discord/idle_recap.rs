@@ -1286,9 +1286,9 @@ pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<String> {
 ///      between the two. The mailbox is the same signal `idle_detector` treats
 ///      as authoritative; `ChannelMailboxRegistry::global_handle` resolves the
 ///      per-channel actor from a process-global registry (the handle is mirrored
-///      into `GLOBAL_CHANNEL_MAILBOXES` by `mailbox()`), so the server route can
-///      consult it without an `Arc<SharedData>`. If no turn has ever touched the
-///      channel the global handle is absent → falls through to the inflight check.
+///      when the actor accepts turn/queue ownership), so the server route can
+///      consult it without an `Arc<SharedData>`. Observation-only empty actors
+///      are not mirrored; absence falls through to the inflight check.
 ///   2. INFLIGHT sidecar (defense-in-depth). A present, NON-stale inflight state
 ///      for `(provider, channel_id)` — the marker the claim path writes LATER via
 ///      `save_inflight_state`. Staleness is applied so a leftover inflight from a
@@ -1308,8 +1308,7 @@ pub(crate) async fn channel_has_active_turn(provider: &ProviderKind, channel_id:
 
 /// Earliest turn-active signal: consult the process-global mailbox actor for
 /// this channel (set by `mailbox_try_start_turn` BEFORE the inflight sidecar is
-/// written). Returns `false` when no mailbox has ever been spawned for the
-/// channel — a genuinely-idle channel that never hosted a turn.
+/// written). Returns `false` when no actor has published channel ownership.
 async fn mailbox_has_active_turn(channel_id: u64) -> bool {
     match crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(
         serenity::ChannelId::new(channel_id),

@@ -655,15 +655,31 @@ struct RuntimeChannelMatch {
     channel_id: ChannelId,
 }
 
-async fn has_local_mailbox_ownership_evidence(shared: &SharedData, channel_id: ChannelId) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MailboxOwnership {
+    None,
+    PendingQueue,
+    ActiveTurn,
+}
+
+async fn local_mailbox_ownership(
+    shared: &SharedData,
+    channel_id: ChannelId,
+) -> MailboxOwnership {
     let Some(handle) = shared.mailbox_peek(channel_id) else {
-        return false;
+        return MailboxOwnership::None;
     };
 
     let snapshot = handle.snapshot().await;
     // Snapshot/observation paths can materialize empty per-runtime mailboxes as
     // a side effect, so bare local-handle existence is not ownership evidence.
-    snapshot.cancel_token.is_some() || !snapshot.intervention_queue.is_empty()
+    if snapshot.cancel_token.is_some() {
+        MailboxOwnership::ActiveTurn
+    } else if !snapshot.intervention_queue.is_empty() {
+        MailboxOwnership::PendingQueue
+    } else {
+        MailboxOwnership::None
+    }
 }
 
 async fn find_runtime_channel_match(
@@ -690,27 +706,49 @@ async fn find_runtime_channel_match(
         })
         .collect();
 
-    for (provider, shared) in providers {
-        if let Some(channel_id) = channel_id {
-            let has_session = {
-                let data = shared.core.lock().await;
-                data.sessions.contains_key(&channel_id)
-            };
-            let has_local_mailbox = has_local_mailbox_ownership_evidence(&shared, channel_id).await;
-            let has_watcher = shared.tmux_watchers.contains_key(&channel_id);
-            // A process-global mailbox is only a raw fallback after runtime
-            // resolution fails. It cannot prove which same-provider runtime
-            // owns the channel: the mirror carries no runtime identity.
-            if has_session || has_local_mailbox || has_watcher {
-                return Some(RuntimeChannelMatch {
-                    provider,
-                    shared,
-                    channel_id,
-                });
+    if let Some(channel_id) = channel_id {
+        let mut queued_owner = None;
+        let mut runtime_evidence = None;
+        for (provider, shared) in providers {
+            match local_mailbox_ownership(&shared, channel_id).await {
+                MailboxOwnership::ActiveTurn => {
+                    return Some(RuntimeChannelMatch {
+                        provider,
+                        shared,
+                        channel_id,
+                    });
+                }
+                MailboxOwnership::PendingQueue if queued_owner.is_none() => {
+                    queued_owner = Some(RuntimeChannelMatch {
+                        provider: provider.clone(),
+                        shared: shared.clone(),
+                        channel_id,
+                    });
+                }
+                _ => {}
             }
-            continue;
+            // Same-provider runtimes are explicitly supported by HealthRegistry::register.
+            // Session/watcher rows may be stale, so retain them only as a fallback after
+            // every sibling has been scanned for a live token or pending queue owner.
+            if runtime_evidence.is_none() {
+                let has_session = {
+                    let data = shared.core.lock().await;
+                    data.sessions.contains_key(&channel_id)
+                };
+                let has_watcher = shared.tmux_watchers.contains_key(&channel_id);
+                if has_session || has_watcher {
+                    runtime_evidence = Some(RuntimeChannelMatch {
+                        provider,
+                        shared,
+                        channel_id,
+                    });
+                }
+            }
         }
+        return queued_owner.or(runtime_evidence);
+    }
 
+    for (provider, shared) in providers {
         let Some(tmux_name) = tmux_name else {
             continue;
         };
@@ -4182,6 +4220,14 @@ mod stall_watchdog_auto_heal_tests {
             .await
         );
         shared.restart.global_active.store(1, Ordering::Relaxed);
+        seed_runtime_session(shared, channel).await;
+        token
+    }
+
+    pub(super) async fn seed_runtime_session(
+        shared: &Arc<crate::services::discord::SharedData>,
+        channel: ChannelId,
+    ) {
         shared.core.lock().await.sessions.insert(
             channel,
             super::super::super::DiscordSession {
@@ -4201,7 +4247,6 @@ mod stall_watchdog_auto_heal_tests {
                 born_generation: crate::services::discord::runtime_store::load_generation(),
             },
         );
-        token
     }
 
     async fn assert_mailbox_and_session_preserved(
@@ -5181,7 +5226,7 @@ mod hard_stop_completion_event_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn provider_known_cancelled_finish_only_finishes_sibling_runtime_that_owns_mailbox() {
+    async fn provider_known_cancelled_finish_prefers_mailbox_owner_over_stale_sibling_session() {
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Claude;
@@ -5211,6 +5256,9 @@ mod hard_stop_completion_event_tests {
         token.cancelled.store(true, Ordering::Relaxed);
         first.restart.global_active.store(1, Ordering::Relaxed);
         second.restart.global_active.store(1, Ordering::Relaxed);
+        // Mutation guard for #4535 review finding 1: the first sibling's stale
+        // session must remain fallback evidence, not beat the later mailbox owner.
+        super::stall_watchdog_auto_heal_tests::seed_runtime_session(&first, channel).await;
         registry
             .register(provider.as_str().to_string(), first.clone())
             .await;

@@ -404,7 +404,17 @@ mod tests {
     async fn remove_idle_entry_unlinks_all_six_maps_when_idle() {
         let registry = ChannelMailboxRegistry::default();
         let channel = ChannelId::new(93_293_004);
-        let _ = registry.handle(channel);
+        let handle = registry.handle(channel);
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    MessageId::new(11),
+                )
+                .await
+        );
+        assert!(handle.hard_stop().await.removed_token.is_some());
         let _ = registry.recovery_done(channel);
         let _ = registry.turn_finished(channel);
         assert!(GLOBAL_CHANNEL_MAILBOXES.contains_key(&channel));
@@ -796,6 +806,38 @@ mod tests {
         assert!(fresh_handle.has_active_turn().await);
 
         let _ = fresh_handle.hard_stop().await;
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+    }
+
+    /// #4535 mutation guard: the pre-fix `handle()` published the idle sibling
+    /// with `or_insert`, then the real owner could never replace that actor.
+    #[tokio::test]
+    async fn idle_sibling_cannot_shadow_later_global_mailbox_owner() {
+        let idle_registry = ChannelMailboxRegistry::default();
+        let owner_registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(93_293_106);
+        let idle = idle_registry.handle(channel);
+        assert!(
+            ChannelMailboxRegistry::global_handle(channel).is_none(),
+            "creating an empty local actor must not publish global ownership"
+        );
+
+        let owner = owner_registry.handle(channel);
+        assert!(
+            owner
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    MessageId::new(11),
+                )
+                .await
+        );
+        assert!(!idle.sender.same_channel(&owner.sender));
+        let global = ChannelMailboxRegistry::global_handle(channel)
+            .expect("accepted turn owner must publish the global mirror");
+        assert!(global.sender.same_channel(&owner.sender));
+
+        let _ = owner.hard_stop().await;
         GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
     }
 
