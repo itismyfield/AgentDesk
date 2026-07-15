@@ -99,8 +99,9 @@ fn snapshot_reactions(
 /// Isolate each reconciler test from the process-global `AGENTDESK_ROOT_DIR`.
 /// S4-a2 gave the reconciler a persisted target store (`persist_target` /
 /// `load_persisted_target`), so every `note_state` transition now resolves the
-/// runtime-store root and panics under the #3293 guard unless a test root is
-/// installed. Acquire the crate-wide env lock (the same
+/// runtime-store root; under the #3293 guard a live/unset `AGENTDESK_ROOT_DIR`
+/// falls back to a shared throwaway tempdir (#4514), so per-test isolation still
+/// requires installing a test root. Acquire the crate-wide env lock (the same
 /// `config::shared_test_env_lock()` every other env-mutating test serializes
 /// on) for the FULL test scope, point the env at a private temp dir, and
 /// restore the prior value on drop. The `MutexGuard` is held across the test's

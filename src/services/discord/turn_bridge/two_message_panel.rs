@@ -276,9 +276,10 @@ mod tests {
     use std::sync::Mutex;
 
     /// #3293: `InflightTurnState::new` resolves the AgentDesk runtime store to
-    /// stamp the born generation, which panics unless the runtime root is a
-    /// tempdir (never the live `~/.adk/release`). Point `AGENTDESK_ROOT_DIR` at a
-    /// throwaway dir under the shared env lock so constructing a test inflight is
+    /// stamp the born generation; the guard keeps this off the live
+    /// `~/.adk/release`, falling back to a shared throwaway tempdir (#4514).
+    /// Point `AGENTDESK_ROOT_DIR` at a per-test throwaway dir under the shared
+    /// env lock so constructing a test inflight is
     /// deterministic regardless of the ambient environment; restore on drop.
     struct RuntimeRootGuard {
         previous: Option<std::ffi::OsString>,
