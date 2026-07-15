@@ -884,7 +884,7 @@ pub(crate) enum ConfigAction {
     /// Set runtime config (JSON string)
     Set {
         /// JSON value to set
-        #[arg(id = "config_json")]
+        #[arg(id = "config_json", value_name = "JSON")]
         json: String,
     },
     /// Audit config source-of-truth drift across yaml/DB/legacy files
@@ -1357,6 +1357,24 @@ mod tests {
             }) if json == r#"{"a":1}"#
         ));
         assert!(!cli.json);
+    }
+
+    #[test]
+    fn config_set_help_preserves_json_value_name() {
+        let mut command = Cli::command();
+        let config = command
+            .find_subcommand_mut("config")
+            .expect("config subcommand exists");
+        let set = config
+            .find_subcommand_mut("set")
+            .expect("config set subcommand exists");
+        let mut rendered = Vec::new();
+        set.write_long_help(&mut rendered)
+            .expect("config set help renders");
+        let rendered = String::from_utf8(rendered).expect("help is UTF-8");
+
+        assert!(rendered.contains("<JSON>"));
+        assert!(!rendered.contains("<CONFIG_JSON>"));
     }
 
     #[test]
