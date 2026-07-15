@@ -1401,6 +1401,17 @@ mod tests {
     }
 
     #[test]
+    fn footer_only_surface_recognizes_fixed_kst_time_line() {
+        let panel = "🟢 진행 중\n\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)";
+        let rendered = super::compose_footer_status_block("⠸", panel);
+
+        assert!(super::streaming_footer_only_surface_was_exposed(
+            &rendered,
+            &ProviderKind::Claude
+        ));
+    }
+
+    #[test]
     fn terminal_footer_replacement_keeps_completion_context_block() {
         let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
         let rendered = format!(

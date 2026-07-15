@@ -11,15 +11,17 @@
 //!   merge (`single_message_panel::merged_footer_header_line`) swaps the leading
 //!   status emoji for the animated spinner, so the marker set there must stay in
 //!   sync with the emojis this label can start with.
-//! - line 2 is the relative TIME line (`마지막 업데이트 : <t:last:R> / 턴 시작 :
-//!   <t:start:R>`). It replaces the pre-#3983 confidence line + `진행 중 —
-//!   provider` header; the freshness class is now absorbed into the line-1 emoji
-//!   (item B), and the provider moved off the footer entirely.
+//! - line 2 is the TIME line (`마지막 업데이트 : MM-DD HH:MM:SS (<t:last:R>) /
+//!   턴 시작 : MM-DD HH:MM:SS (<t:start:R>)`). The fixed KST absolute times keep
+//!   mobile clients readable when they do not refresh Discord's relative token.
+//!   It replaces the pre-#3983 confidence line + `진행 중 — provider` header; the
+//!   freshness class is now absorbed into the line-1 emoji (item B), and the
+//!   provider moved off the footer entirely.
 //!
-//! Both relative ages render with Discord's native `<t:UNIX:R>` token anchored to
-//! STABLE store stamps (never "now"), so the footer text stays byte-identical
-//! across heartbeat ticks — the message is not needlessly re-edited (the #3477
-//! stability invariant) while Discord renders the live localized age client-side.
+//! Both times derive from STABLE store stamps (never "now"), so the footer text
+//! stays byte-identical across heartbeat ticks — the message is not needlessly
+//! re-edited (the #3477 stability invariant) while Discord renders the live
+//! localized age client-side.
 
 use poise::serenity_prelude::ChannelId;
 
@@ -41,14 +43,27 @@ impl super::PlaceholderLiveEvents {
     }
 }
 
-/// #3983: renders the footer's relative time line. `last_activity_unix` is the
-/// store's STABLE per-channel last-live-content arrival stamp; it falls back to the
-/// turn start when no live content has arrived yet. Uses Discord's `<t:UNIX:R>`
-/// token so the text is identical across heartbeat ticks (never re-edited) while
-/// the client shows the live localized age.
+/// #4572: renders a stable Unix stamp as a fixed KST time for the footer.
+fn render_kst_time(unix: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
+        .expect("status-panel timestamps must be valid Unix seconds")
+        .with_timezone(&chrono_tz::Asia::Seoul)
+        .format("%m-%d %H:%M:%S")
+        .to_string()
+}
+
+/// #4572: renders the footer's fixed KST and relative time line.
+/// `last_activity_unix` is the store's STABLE per-channel last-live-content
+/// arrival stamp; it falls back to the turn start when no live content has
+/// arrived yet. The injected stamps keep the text identical across heartbeat
+/// ticks (never re-edited) while Discord can still show the localized relative age.
 pub(super) fn render_time_line(last_activity_unix: Option<i64>, started_at_unix: i64) -> String {
     let last = last_activity_unix.unwrap_or(started_at_unix);
-    format!("마지막 업데이트 : <t:{last}:R> / 턴 시작 : <t:{started_at_unix}:R>")
+    format!(
+        "마지막 업데이트 : {} (<t:{last}:R>) / 턴 시작 : {} (<t:{started_at_unix}:R>)",
+        render_kst_time(last),
+        render_kst_time(started_at_unix),
+    )
 }
 
 /// #3983: the panel's first (activity) line — the derived-status label alone (no
@@ -163,8 +178,16 @@ mod tests {
     fn time_line_anchors_update_to_last_activity_and_start() {
         assert_eq!(
             render_time_line(Some(LAST_ACTIVITY), STARTED_AT),
-            "마지막 업데이트 : <t:1700000300:R> / 턴 시작 : <t:1700000000:R>"
+            "마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)"
         );
+    }
+
+    #[test]
+    fn time_line_includes_fixed_kst_and_discord_relative_tokens() {
+        let line = render_time_line(Some(LAST_ACTIVITY), STARTED_AT);
+
+        assert!(line.contains("마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"));
+        assert!(line.contains("턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)"));
     }
 
     #[test]
@@ -172,7 +195,7 @@ mod tests {
         // No live content yet → the update age anchors to the turn start.
         assert_eq!(
             render_time_line(None, STARTED_AT),
-            "마지막 업데이트 : <t:1700000000:R> / 턴 시작 : <t:1700000000:R>"
+            "마지막 업데이트 : 11-15 07:13:20 (<t:1700000000:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)"
         );
     }
 
