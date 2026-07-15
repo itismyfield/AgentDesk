@@ -1,5 +1,7 @@
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -69,16 +71,38 @@ fn decide_launch_env(
 }
 
 fn proxy_reachable(proxy_url: &str) -> bool {
+    proxy_reachable_with_hostname_probe(
+        proxy_url,
+        PROXY_CONNECT_TIMEOUT,
+        resolve_hostname_and_connect,
+    )
+}
+
+fn proxy_reachable_with_hostname_probe(
+    proxy_url: &str,
+    timeout: Duration,
+    hostname_probe: impl FnOnce(String, u16, Duration) -> bool + Send + 'static,
+) -> bool {
     let Ok(parsed) = url::Url::parse(proxy_url) else {
         return false;
     };
     let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
         return false;
     };
-    let Ok(addresses) = (host, port).to_socket_addrs() else {
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok();
+    }
+
+    let host = host.to_string();
+    run_probe_with_deadline(timeout, move || hostname_probe(host, port, timeout))
+}
+
+fn resolve_hostname_and_connect(host: String, port: u16, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let Ok(addresses) = (host.as_str(), port).to_socket_addrs() else {
         return false;
     };
-    let deadline = Instant::now() + PROXY_CONNECT_TIMEOUT;
     for address in addresses {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return false;
@@ -88,6 +112,23 @@ fn proxy_reachable(proxy_url: &str) -> bool {
         }
     }
     false
+}
+
+fn run_probe_with_deadline(
+    timeout: Duration,
+    probe: impl FnOnce() -> bool + Send + 'static,
+) -> bool {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if thread::Builder::new()
+        .name("claude-gateway-probe".to_string())
+        .spawn(move || {
+            let _ = sender.send(probe());
+        })
+        .is_err()
+    {
+        return false;
+    }
+    receiver.recv_timeout(timeout).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -103,6 +144,7 @@ pub(crate) fn launch_env_for_test(
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::net::TcpListener;
 
     fn rendered_env(env: Option<&ClaudeGatewayProxyEnv>) -> String {
         let mut rendered = String::new();
@@ -165,5 +207,41 @@ mod tests {
             assert!(!probed.get());
             assert!(!warned.get());
         }
+    }
+
+    #[test]
+    fn ip_literal_uses_direct_connect_fast_path() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let reachable = proxy_reachable_with_hostname_probe(
+            &format!("http://{address}"),
+            Duration::from_millis(200),
+            |_, _, _| panic!("IP literals must not invoke hostname resolution"),
+        );
+
+        assert!(reachable);
+    }
+
+    #[test]
+    fn hostname_resolution_and_connect_obey_outer_deadline() {
+        let timeout = Duration::from_millis(20);
+        let started = Instant::now();
+
+        let reachable = proxy_reachable_with_hostname_probe(
+            "http://bad-hostname.invalid:10100",
+            timeout,
+            |_, _, _| {
+                thread::sleep(Duration::from_millis(200));
+                false
+            },
+        );
+
+        assert!(!reachable);
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "hostname probe exceeded its outer deadline: {:?}",
+            started.elapsed()
+        );
     }
 }

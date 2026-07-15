@@ -85,7 +85,7 @@
 | `compat` | `src/compat/mod.rs` | 39 | 39 | 0 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 | 12 | 0 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 27 | 27 | 0 |  |
-| `config` | `src/config.rs` | 3178 | 2759 | 419 | giant-file |
+| `config` | `src/config.rs` | 3174 | 2755 | 419 | giant-file |
 | `config_live_reload` | `src/config_live_reload.rs` | 966 | 525 | 441 |  |
 | `crate` | `src/main.rs` | 7 | 7 | 0 |  |
 | `credential` | `src/credential.rs` | 212 | 59 | 153 |  |
@@ -376,15 +376,15 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4311 | 2928 | 1383 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4344 | 2961 | 1383 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
-| `services::claude_e::process` | `src/services/claude_e/process.rs` | 360 | 360 | 0 |  |
+| `services::claude_e::process` | `src/services/claude_e/process.rs` | 410 | 376 | 34 |  |
 | `services::claude_e::spawn_queue` | `src/services/claude_e/spawn_queue.rs` | 3 | 3 | 0 |  |
-| `services::claude_gateway_proxy` | `src/services/claude_gateway_proxy.rs` | 169 | 101 | 68 |  |
+| `services::claude_gateway_proxy` | `src/services/claude_gateway_proxy.rs` | 247 | 142 | 105 |  |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 17 | 17 | 0 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1229 | 737 | 492 |  |
 | `services::claude_tui::hook_output_guard` | `src/services/claude_tui/hook_output_guard.rs` | 157 | 157 | 0 |  |
@@ -398,7 +398,7 @@
 | `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 750 | 693 | 57 |  |
 | `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3358 | 1932 | 1426 | giant-file |
 | `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 1566 | 863 | 703 |  |
-| `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 763 | 421 | 342 |  |
+| `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 830 | 439 | 391 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 651 | 328 | 323 |  |
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1129 | 587 | 542 |  |
@@ -666,8 +666,8 @@
 | `services::discord::router::message_handler::attachments` | `src/services/discord/router/message_handler/attachments.rs` | 142 | 114 | 28 |  |
 | `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 87 | 87 | 0 |  |
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 313 | 222 | 91 |  |
-| `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1630 | 1385 | 245 | giant-file |
-| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3164 | 2835 | 329 | giant-file |
+| `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1632 | 1387 | 245 | giant-file |
+| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3166 | 2837 | 329 | giant-file |
 | `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 704 | 609 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 256 | 256 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::voice_intake` | `src/services/discord/router/message_handler/intake_turn/voice_intake.rs` | 155 | 155 | 0 |  |
@@ -993,7 +993,7 @@
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1229 | 759 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2395 | 1781 | 614 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2415 | 1801 | 614 | giant-file |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
@@ -1009,7 +1009,7 @@
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 74 | 74 | 0 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 637 | 637 | 0 |  |
 | `services::provider_error_transcript` | `src/services/provider_error_transcript.rs` | 87 | 48 | 39 |  |
-| `services::provider_exec` | `src/services/provider_exec.rs` | 315 | 315 | 0 |  |
+| `services::provider_exec` | `src/services/provider_exec.rs` | 316 | 316 | 0 |  |
 | `services::provider_hosting` | `src/services/provider_hosting.rs` | 1073 | 493 | 580 |  |
 | `services::provider_output_guard` | `src/services/provider_output_guard.rs` | 195 | 195 | 0 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 73 | 73 | 0 |  |

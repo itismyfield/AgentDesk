@@ -588,6 +588,26 @@ impl ProviderKind {
         Self::from_str(raw).unwrap_or_else(|| Self::Unsupported(raw.trim().to_string()))
     }
 
+    /// Returns provider-specific environment variables for auto-compact configuration.
+    /// - Claude: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = percent
+    /// - Codex: uses CLI args instead (see compact_cli_config)
+    #[allow(dead_code)]
+    pub fn compact_env_vars(&self, percent: u64) -> Vec<(String, String)> {
+        let Some(adapter) = self.compaction_adapter() else {
+            return Vec::new();
+        };
+        match adapter {
+            ProviderCompactionAdapter::ClaudeEnvironment => vec![(
+                "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
+                percent.to_string(),
+            )],
+            ProviderCompactionAdapter::CodexCli
+            | ProviderCompactionAdapter::GeminiDisabled
+            | ProviderCompactionAdapter::OpenCodeDisabled
+            | ProviderCompactionAdapter::QwenDisabled => Vec::new(),
+        }
+    }
+
     /// Default context window size in tokens for this provider.
     pub fn default_context_window(&self) -> u64 {
         self.registry_entry()
