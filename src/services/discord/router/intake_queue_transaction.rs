@@ -100,6 +100,7 @@ pub(super) struct SoftInterventionSpec {
     pub(super) channel_id: serenity::ChannelId,
     pub(super) author_id: serenity::UserId,
     pub(super) author_is_bot: bool,
+    pub(super) author_is_allowed_automation: bool,
     pub(super) message_id: serenity::MessageId,
     pub(super) text: String,
     pub(super) reply_context: Option<String>,
@@ -112,7 +113,7 @@ pub(super) struct SoftInterventionSpec {
 impl SoftInterventionSpec {
     pub(super) fn into_intervention(self) -> Intervention {
         let queued_generation = crate::services::discord::runtime_store::load_generation();
-        let source_generation = if self.author_is_bot {
+        let source_generation = if self.author_is_bot || self.author_is_allowed_automation {
             SourceMessageQueuedGeneration::new(self.message_id, queued_generation)
         } else {
             SourceMessageQueuedGeneration::user_instruction(self.message_id, queued_generation)
@@ -545,6 +546,7 @@ mod tests {
                 channel_id: serenity::ChannelId::new(42),
                 author_id: serenity::UserId::new(7),
                 author_is_bot: false,
+                author_is_allowed_automation: false,
                 message_id: serenity::MessageId::new(100),
                 text: "hello".to_string(),
                 reply_context: None,
@@ -581,6 +583,15 @@ mod tests {
         let mut bot = request(Default::default()).intervention;
         bot.author_is_bot = true;
         assert!(!bot.into_intervention().preserve_on_cancel());
+    }
+
+    #[test]
+    fn false_flag_allowed_automation_dispatch_is_not_cancel_preserved() {
+        let mut automation = request(Default::default()).intervention;
+        automation.author_is_allowed_automation = true;
+        automation.text = "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000".to_string();
+
+        assert!(!automation.into_intervention().preserve_on_cancel());
     }
 
     #[tokio::test]

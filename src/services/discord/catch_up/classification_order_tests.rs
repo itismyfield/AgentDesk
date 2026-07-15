@@ -726,6 +726,45 @@ impl CatchUpDiscordApi for TestCatchUpApi {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn phase1_false_flag_allowed_dispatch_is_not_cancel_preserved() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_247_001);
+    let dispatch_message_id = message_id_with_age(1, Duration::from_secs(30));
+    write_checkpoint(
+        root.path(),
+        &provider,
+        channel_id,
+        dispatch_message_id.get() - 1,
+    );
+    shared.settings.write().await.allowed_bot_ids = vec![INFO_BOT_ID];
+
+    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+        channel_id,
+        dispatch_message_id,
+        INFO_BOT_ID,
+        false,
+        "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000",
+    )]);
+    let api = api.with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID));
+
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
+    assert_eq!(mailbox.intervention_queue.len(), 1);
+    assert_eq!(
+        mailbox.intervention_queue[0].message_id,
+        dispatch_message_id
+    );
+    assert!(
+        !mailbox.intervention_queue[0].preserve_on_cancel(),
+        "a bot=false allowed DISPATCH must remain unmarked so cancel drops it like origin/main"
+    );
+    assert!(outbox.lock().expect("outbox capture lock").is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn production_two_scan_retries_unavailable_announce_then_recovers() {
     let root = scoped_runtime_root();
     let shared = super::super::make_shared_data_for_tests();
@@ -794,6 +833,7 @@ async fn production_two_scan_retries_unavailable_announce_then_recovers() {
         vec![announce_message_id],
         "the resolved scan must recover the exact markerless announce trigger"
     );
+    assert!(!mailbox.intervention_queue[0].preserve_on_cancel());
     assert_eq!(
         shared.last_message_ids.get(&channel_id).map(|id| *id),
         Some(announce_message_id.get())
@@ -1015,6 +1055,7 @@ async fn recent_partial_page_failure_preserves_gap_then_recovers_older_human() {
         vec![buried_human_id],
         "the next complete Recent scan must recover the human hidden behind the failed page"
     );
+    assert!(mailbox.intervention_queue[0].preserve_on_cancel());
     assert_eq!(
         shared.last_message_ids.get(&channel_id).map(|id| *id),
         Some(newest_terminal_id.get()),
@@ -1371,6 +1412,10 @@ async fn production_phase2_notify_overlap_is_blocked_before_recovery() {
         recovered_ids,
         vec![allowed_id],
         "phase2 must retain false-flag allowed automation but block notify even when its ID is simultaneously allowed and announce"
+    );
+    assert!(
+        !mailbox.intervention_queue[0].preserve_on_cancel(),
+        "a bot=false allowed DISPATCH remains automation and must retain origin/main cancel-drop behavior"
     );
     assert!(
         !recovered_ids.contains(&notify_id),

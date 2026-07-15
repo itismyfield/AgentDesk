@@ -29,6 +29,32 @@ const CATCH_UP_RETRY_FETCH_FAILURE_LIMIT: u8 = 4;
 // and emit a giving-up WARN at the cap, mirroring the fetch-failure path.
 const CATCH_UP_RETRY_DEFERRED_REARM_LIMIT: u8 = 8;
 
+fn catch_up_source_generation(
+    message_id: MessageId,
+    queued_generation: u64,
+    author_id: u64,
+    author_is_bot: bool,
+    allowed_bot_ids: &[u64],
+    announce_resolution: health::UtilityBotUserIdResolution,
+) -> SourceMessageQueuedGeneration {
+    let announce_identity_excludes_human = match announce_resolution {
+        health::UtilityBotUserIdResolution::Resolved(announce_bot_id) => {
+            announce_bot_id == author_id
+        }
+        health::UtilityBotUserIdResolution::Unconfigured => false,
+        health::UtilityBotUserIdResolution::Unavailable => true,
+    };
+    let is_genuine_human = !author_is_bot
+        && !allowed_bot_ids.contains(&author_id)
+        && !announce_identity_excludes_human;
+
+    if is_genuine_human {
+        SourceMessageQueuedGeneration::user_instruction(message_id, queued_generation)
+    } else {
+        SourceMessageQueuedGeneration::new(message_id, queued_generation)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services) struct CatchUpRetryState {
     checkpoint: u64,
@@ -1257,11 +1283,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
 
             let queued_generation = crate::services::discord::runtime_store::load_generation();
-            let source_generation = if msg.author.bot {
-                SourceMessageQueuedGeneration::new(msg.id, queued_generation)
-            } else {
-                SourceMessageQueuedGeneration::user_instruction(msg.id, queued_generation)
-            };
+            let source_generation = catch_up_source_generation(
+                msg.id,
+                queued_generation,
+                msg.author.id.get(),
+                msg.author.bot,
+                &allowed_bot_ids,
+                announce_resolution,
+            );
             let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
@@ -1624,11 +1653,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
 
             let queued_generation = crate::services::discord::runtime_store::load_generation();
-            let source_generation = if msg.author.bot {
-                SourceMessageQueuedGeneration::new(msg.id, queued_generation)
-            } else {
-                SourceMessageQueuedGeneration::user_instruction(msg.id, queued_generation)
-            };
+            let source_generation = catch_up_source_generation(
+                msg.id,
+                queued_generation,
+                msg.author.id.get(),
+                msg.author.bot,
+                &allowed_bot_ids_phase2,
+                announce_resolution_phase2,
+            );
             let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
