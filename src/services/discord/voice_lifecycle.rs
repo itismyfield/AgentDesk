@@ -475,7 +475,7 @@ pub(in crate::services::discord) fn record_join_success(
     control_channel_id: ChannelId,
 ) {
     barge_in.register_voice_context(control_channel_id, guild_id);
-    barge_in.register_voice_context(channel_id, guild_id);
+    barge_in.voice_connected(channel_id, guild_id);
     super::commands::voice_occupancy().insert(
         (self_provider.to_string(), guild_id.get()),
         channel_id.get(),
@@ -534,6 +534,7 @@ fn handle_rejoin_request(
     let provider_owned = provider.to_string();
     let shutting_down = Arc::clone(shutting_down);
     let _spawned = spawn_rejoin_task(provider, request.guild_id.get(), move |cancel| async move {
+        barge_in.voice_disconnected(request.channel_id);
         run_rejoin_loop(
             &ctx,
             &receiver,
@@ -656,6 +657,7 @@ async fn run_rejoin_loop(
                 return;
             }
             RejoinDecision::AlreadyConnected => {
+                barge_in.voice_connected(channel_id, guild_id);
                 tracing::info!(
                     provider,
                     guild_id = guild_id.get(),
@@ -695,6 +697,7 @@ async fn run_rejoin_loop(
             let _ = manager.remove(guild_id).await;
         }
 
+        barge_in.voice_join_started(channel_id, guild_id);
         match super::commands::join_voice_channel(
             ctx,
             receiver.clone(),
@@ -735,6 +738,7 @@ async fn run_rejoin_loop(
                             canceled,
                             "voice rejoin discarded: /vc leave raced the join (occupancy released)"
                         );
+                        barge_in.voice_disconnected(channel_id);
                         return;
                     }
                     PostJoinDecision::Keep => {}
@@ -750,6 +754,7 @@ async fn run_rejoin_loop(
                 return;
             }
             Err(error) => {
+                barge_in.voice_disconnected(channel_id);
                 // join_voice_channel already embeds the full songbird error_chain
                 // in its context message, so a Display render is sufficient here.
                 tracing::warn!(

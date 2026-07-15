@@ -1009,9 +1009,7 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    // Default-kind restore wrapper; the production restore path lives in the
-    // (currently dormant) `mailbox_restore_active_turn`. Exercised only by
-    // `#[cfg(test)]` tests.
+    // Default-kind wrapper for the dormant restore path and tests.
     #[allow(dead_code)]
     pub(crate) async fn restore_active_turn(
         &self,
@@ -1029,10 +1027,7 @@ impl ChannelMailboxHandle {
         .await;
     }
 
-    /// #3167 — kinded variant of [`Self::restore_active_turn`]. Preserves the
-    /// background classification across a restore so the dequeue gates stay
-    /// background-aware after a re-bind.
-    // Reached only via the dormant restore wrapper / `#[cfg(test)]` tests.
+    /// Kinded restore preserves background-aware dequeue behavior.
     #[allow(dead_code)]
     pub(crate) async fn restore_active_turn_kinded(
         &self,
@@ -1055,13 +1050,8 @@ impl ChannelMailboxHandle {
             .await;
     }
 
-    /// #3167 — current active-turn kind, or `None` when the channel is idle
-    /// (no `cancel_token`). Lets the dequeue path detect a background turn
-    /// holding the slot so it can cancel-then-redispatch instead of starving
-    /// a queued user intervention.
-    // Production gates read `active_turn_kind` off the snapshot
-    // (`snapshot.active_turn_kind`); this async accessor is exercised only by
-    // `#[cfg(test)]` tests.
+    /// Current kind, or `None` when idle. Production gates read the snapshot;
+    /// this accessor is retained for tests.
     #[allow(dead_code)]
     pub(crate) async fn active_turn_kind(&self) -> Option<ActiveTurnKind> {
         self.request(|reply| ChannelMailboxMsg::ActiveTurnKind { reply }, None)
@@ -1376,11 +1366,7 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    // #3864: test-only queue-seeding helper. Production startup restore moved
-    // to `merge_restored_queue_items` (the in-actor merge), so `ReplaceQueue`'s
-    // blind overwrite — the source of the lost-enqueue race — has NO production
-    // caller anymore and is gated to test builds. Test modules still use it to
-    // seed a channel queue directly.
+    // #3864: test-only queue seeding; production uses the race-safe merge.
     #[cfg(test)]
     pub(crate) async fn replace_queue(
         &self,
@@ -1410,13 +1396,7 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    /// #3864: in-actor merge of SIGTERM-restored disk items into the live
-    /// queue. Mirrors `hydrate_pending_queue_from_disk`, but the caller
-    /// supplies the items it already loaded and sender-filtered (the
-    /// sender check is stateless, so it stays out-of-actor); the actor then
-    /// dedups, front-inserts and persists in one serialized step. Replaces
-    /// the out-of-actor snapshot→build→`replace_queue` RMW that silently
-    /// dropped any live `Enqueue` landing between its two round-trips.
+    /// #3864: actor-serialized dedup/merge/persist of restored queue items.
     pub(crate) async fn merge_restored_queue_items(
         &self,
         items: Vec<Intervention>,
@@ -2560,37 +2540,36 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             persistence_error = Some(error);
                         }
                     }
-                    let started = if !can_start || persistence_error.is_some() {
-                        false
-                    } else {
-                        reset_turn_finished_signal(channel_id);
-                        state.cancel_token = Some(cancel_token);
-                        state.active_request_owner = Some(request_owner);
-                        state.active_user_message_id = Some(user_message_id);
-                        // #3167 — record the slot's priority class so the
-                        // dequeue gates can treat a background turn as
-                        // non-blocking.
-                        state.active_turn_kind = turn_kind;
-                        // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
-                        // slot satisfies any reserved dequeue→claim window: clear
-                        // the reservation and reset the valve counter.
-                        if turn_kind == ActiveTurnKind::UserOrAgent {
-                            consume_pending_dispatch_marker_if_matches(
-                                &mut state,
-                                channel_id,
-                                user_message_id,
-                                "try_start_turn",
-                            );
-                            clear_pending_user_dispatch(&mut state);
-                        }
-                        state.recovery_started_at = None;
-                        state.turn_started_at = Some(Utc::now());
-                        state.turn_started_instant = Some(Instant::now());
-                        reset_watchdog_extension_state(&mut state);
-                        true
-                    };
                     let _ = reply.send(TryStartTurnResult {
-                        started,
+                        started: if !can_start || persistence_error.is_some() {
+                            false
+                        } else {
+                            reset_turn_finished_signal(channel_id);
+                            state.cancel_token = Some(cancel_token);
+                            state.active_request_owner = Some(request_owner);
+                            state.active_user_message_id = Some(user_message_id);
+                            // #3167 — record the slot's priority class so the
+                            // dequeue gates can treat a background turn as
+                            // non-blocking.
+                            state.active_turn_kind = turn_kind;
+                            // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
+                            // slot satisfies any reserved dequeue→claim window: clear
+                            // the reservation and reset the valve counter.
+                            if turn_kind == ActiveTurnKind::UserOrAgent {
+                                consume_pending_dispatch_marker_if_matches(
+                                    &mut state,
+                                    channel_id,
+                                    user_message_id,
+                                    "try_start_turn",
+                                );
+                                clear_pending_user_dispatch(&mut state);
+                            }
+                            state.recovery_started_at = None;
+                            state.turn_started_at = Some(Utc::now());
+                            state.turn_started_instant = Some(Instant::now());
+                            reset_watchdog_extension_state(&mut state);
+                            true
+                        },
                         queue_exit_events,
                         persistence_error,
                     });

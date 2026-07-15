@@ -333,12 +333,10 @@ pub(super) async fn handle_cancel_prompt_replace(
         }
         CancelPromptReplaceMessage::PromptTooLong => {
         let mention = gateway.requester_mention().unwrap_or_default();
-        full_response = format!(
-            "{} ⚠️ 프롬프트가 너무 깁니다. 대화 컨텍스트가 모델 한도를 초과했습니다.\n\n\
-             다음 메시지를 보내면 자동으로 새 턴이 시작됩니다.\n\
-             컨텍스트를 줄이려면 `/compact` 또는 `/clear`를 사용해 주세요.",
-            mention
-        );
+        full_response = super::prompt_too_long_guidance::render_terminal_guidance(&full_response);
+        if !mention.is_empty() {
+            full_response = format!("{mention} {full_response}");
+        }
         let display_response = banner.prefix(response_sent_offset == 0, full_response.clone());
         // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
         // routing as site 1 — acquire before replace; B2-skip if held. (codex

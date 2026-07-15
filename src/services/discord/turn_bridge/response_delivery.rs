@@ -5,6 +5,23 @@
 
 use super::*;
 
+const PROMPT_TOO_LONG_DETAIL_MARKER: &str = "__prompt too long__";
+
+pub(super) fn prompt_too_long_guidance(detail: &str) -> String {
+    crate::services::discord::commands::owner_error_response(
+        "현재 대화가 provider의 컨텍스트 한도를 넘었어요.\n`/compact`로 대화를 압축하거나 요청을 짧게 줄여 다시 보내 주세요.",
+        &format!("{PROMPT_TOO_LONG_DETAIL_MARKER}\n{}", detail.trim()),
+    )
+}
+
+pub(super) fn prompt_too_long_detail_from_guidance(guidance: &str) -> Option<&str> {
+    let (_, folded_detail) = guidance.split_once(PROMPT_TOO_LONG_DETAIL_MARKER)?;
+    folded_detail
+        .strip_prefix('\n')
+        .unwrap_or(folded_detail)
+        .strip_suffix("\n```||")
+}
+
 pub(super) fn push_transcript_event(
     events: &mut Vec<SessionTranscriptEvent>,
     event: SessionTranscriptEvent,
@@ -76,7 +93,8 @@ pub(super) fn done_result_requires_full_terminal_replay(
 #[cfg(test)]
 mod tests {
     use super::{
-        done_result_requires_full_terminal_replay, terminal_delivery_response_after_offset,
+        done_result_requires_full_terminal_replay, prompt_too_long_detail_from_guidance,
+        prompt_too_long_guidance, terminal_delivery_response_after_offset,
     };
     use crate::services::discord::DISCORD_MSG_LIMIT;
 
@@ -120,6 +138,19 @@ mod tests {
         assert_eq!(response_sent_offset, 0);
         assert_eq!(delivered, error);
         assert!(!delivered.contains("세션 복구 중"));
+    }
+
+    #[test]
+    fn prompt_too_long_guidance_round_trips_folded_provider_detail() {
+        let detail = "Error: request failed\nstderr: context_length_exceeded: private detail";
+        let guidance = prompt_too_long_guidance(detail);
+
+        assert_eq!(
+            prompt_too_long_detail_from_guidance(&guidance),
+            Some(detail)
+        );
+        assert!(guidance.contains("`/compact`"));
+        assert!(guidance.contains("요청을 짧게"));
     }
 
     #[test]

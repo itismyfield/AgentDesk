@@ -881,7 +881,8 @@ mod tests {
 
     use super::*;
     use crate::services::turn_orchestrator::{
-        ChannelMailboxRegistry, Intervention, InterventionMode, QueuePersistenceContext,
+        ChannelMailboxRegistry, EnqueueRefusalReason, Intervention, InterventionMode,
+        QueuePersistenceContext, save_channel_queue,
     };
 
     struct EnvReset(Option<std::ffi::OsString>);
@@ -951,6 +952,68 @@ mod tests {
 
             assert_eq!(purged, Some(1));
             assert!(handle.snapshot().await.intervention_queue.is_empty());
+        });
+    }
+
+    /// #4535 mutation guard: a restart replay can hydrate durable work and then
+    /// dedup without reporting a fresh enqueue. Handle creation must already
+    /// have published the actor so force purge reaches the live hydrated queue.
+    #[test]
+    fn force_purge_reaches_queue_hydrated_by_dedup_replay() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(9_270_602);
+            let persistence = QueuePersistenceContext::new(&provider, "", None);
+            let durable = make_intervention(11, "hydrated stale prompt");
+            save_channel_queue(
+                &provider,
+                &persistence.token_hash,
+                channel_id,
+                std::slice::from_ref(&durable),
+                None,
+            )
+            .expect("seed durable pending queue");
+
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let replay = handle.enqueue(durable, persistence.clone()).await;
+            assert!(!replay.enqueued);
+            assert!(!replay.merged);
+            assert_eq!(
+                replay.refusal_reason,
+                Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
+            );
+            assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+            assert!(
+                ChannelMailboxRegistry::global_handle(channel_id).is_some(),
+                "hydrated actor must remain reachable through the force-purge registry"
+            );
+
+            let target = TurnLifecycleTarget {
+                provider: Some(provider),
+                channel_id: Some(channel_id),
+                tmux_name: String::new(),
+            };
+            let purged = force_purge_channel_mailbox(None, &target, None).await;
+
+            assert_eq!(purged, Some(1));
+            assert!(handle.snapshot().await.intervention_queue.is_empty());
+            let later_dispatch = handle.take_next_soft(persistence).await;
+            assert!(
+                later_dispatch.intervention.is_none(),
+                "force-purged hydrated message must not dispatch later"
+            );
         });
     }
 }

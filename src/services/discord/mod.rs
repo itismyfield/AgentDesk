@@ -140,8 +140,8 @@ pub(in crate::services::discord) use catch_up::{
     should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
 };
 pub(in crate::services::discord) use mailbox_finish::{
-    mailbox_finish_turn, mailbox_finish_turn_if_matches,
-    mailbox_finish_turn_if_matches_started_before,
+    mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
+    mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_started_before,
 };
 pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
@@ -3981,19 +3981,6 @@ async fn mailbox_cancel_soft_intervention(
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     result.removed
-}
-
-async fn mailbox_finish_cancelled_turn(
-    shared: &SharedData,
-    channel_id: ChannelId,
-) -> FinishTurnResult {
-    let result = shared.mailbox(channel_id).finish_cancelled_turn().await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    if result.removed_token.is_some() {
-        shared.mailboxes.recovery_done(channel_id).mark_done();
-    }
-    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
-    result
 }
 
 async fn mailbox_clear_channel(

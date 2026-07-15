@@ -57,6 +57,56 @@ pub(in crate::services::discord) fn bridge_streaming_edit_gate_open(
     elapsed_ge_interval || (!first_answer_relayed && !current_portion_empty)
 }
 
+/// Presentation-independent classification captured from a raw provider error.
+///
+/// Provider errors are rendered as folded, actionable guidance before terminal
+/// finalization. Keep the lifecycle decisions alongside that presentation so
+/// requeue and quiescence behavior do not depend on the rendered text shape.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::services::discord) struct TuiErrorClassification {
+    pre_submission_prompt_error: bool,
+    claude_followup_requeue_prompt_error: bool,
+    transport_error_should_skip_quiescence: bool,
+}
+
+pub(in crate::services::discord) fn classify_raw_tui_error(
+    provider: &ProviderKind,
+    error_text: &str,
+) -> TuiErrorClassification {
+    let pre_submission_prompt_error = match provider {
+        ProviderKind::Claude => {
+            crate::services::claude_tui::input::is_prompt_ready_timeout_error(error_text)
+        }
+        ProviderKind::Codex => {
+            crate::services::codex_tui::input::is_prompt_ready_timeout_error(error_text)
+        }
+        _ => false,
+    };
+    let claude_followup_requeue_prompt_error = matches!(provider, ProviderKind::Claude)
+        && pre_submission_prompt_error
+        && error_text.contains("follow-up prompt input readiness");
+    let transport_error_should_skip_quiescence = match provider {
+        ProviderKind::Claude => {
+            pre_submission_prompt_error
+                || error_text == "Timeout waiting for output file"
+                || error_text.starts_with("timeout waiting for claude tui transcript file")
+                || error_text.contains("claude tui session died")
+        }
+        ProviderKind::Codex => {
+            pre_submission_prompt_error
+                || error_text == "Timeout waiting for output file"
+                || error_text.contains("codex tui session died")
+        }
+        _ => false,
+    };
+
+    TuiErrorClassification {
+        pre_submission_prompt_error,
+        claude_followup_requeue_prompt_error,
+        transport_error_should_skip_quiescence,
+    }
+}
+
 fn build_provider_streaming_placeholder_text(
     current_portion: &str,
     status_block: &str,
@@ -73,7 +123,11 @@ fn build_provider_streaming_placeholder_text(
 pub(in crate::services::discord) fn bridge_pre_submission_tui_prompt_error(
     provider: &ProviderKind,
     full_response: &str,
+    classification: TuiErrorClassification,
 ) -> bool {
+    if classification.pre_submission_prompt_error {
+        return true;
+    }
     let Some(error_text) = full_response
         .trim_start()
         .strip_prefix("Error:")
@@ -98,6 +152,7 @@ pub(in crate::services::discord) fn bridge_claude_tui_followup_requeue_prompt_er
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
     full_response: &str,
+    classification: TuiErrorClassification,
 ) -> bool {
     if !matches!(provider, ProviderKind::Claude)
         || !matches!(
@@ -106,6 +161,9 @@ pub(in crate::services::discord) fn bridge_claude_tui_followup_requeue_prompt_er
         )
     {
         return false;
+    }
+    if classification.claude_followup_requeue_prompt_error {
+        return true;
     }
     let Some(error_text) = full_response
         .trim_start()
@@ -185,32 +243,36 @@ pub(in crate::services::discord) fn bridge_tui_transport_error_should_skip_quies
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
     full_response: &str,
+    classification: TuiErrorClassification,
 ) -> bool {
-    let Some(error_text) = full_response
+    let legacy_error_text = full_response
         .trim_start()
         .strip_prefix("Error:")
-        .map(str::trim_start)
-    else {
-        return false;
-    };
+        .map(str::trim_start);
 
     match (provider, runtime_kind) {
         (
             ProviderKind::Claude,
             Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
         ) => {
-            bridge_pre_submission_tui_prompt_error(provider, full_response)
-                || error_text == "Timeout waiting for output file"
-                || error_text.starts_with("timeout waiting for claude tui transcript file")
-                || error_text.contains("claude tui session died")
+            bridge_pre_submission_tui_prompt_error(provider, full_response, classification)
+                || classification.transport_error_should_skip_quiescence
+                || legacy_error_text.is_some_and(|error_text| {
+                    error_text == "Timeout waiting for output file"
+                        || error_text.starts_with("timeout waiting for claude tui transcript file")
+                        || error_text.contains("claude tui session died")
+                })
         }
         (
             ProviderKind::Codex,
             Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
         ) => {
-            bridge_pre_submission_tui_prompt_error(provider, full_response)
-                || error_text == "Timeout waiting for output file"
-                || error_text.contains("codex tui session died")
+            bridge_pre_submission_tui_prompt_error(provider, full_response, classification)
+                || classification.transport_error_should_skip_quiescence
+                || legacy_error_text.is_some_and(|error_text| {
+                    error_text == "Timeout waiting for output file"
+                        || error_text.contains("codex tui session died")
+                })
         }
         _ => false,
     }
@@ -367,18 +429,22 @@ mod pre_submission_tui_prompt_error_tests {
         assert!(bridge_pre_submission_tui_prompt_error(
             &ProviderKind::Claude,
             "Error: timeout waiting for claude tui follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available=true",
+            TuiErrorClassification::default(),
         ));
         assert!(bridge_pre_submission_tui_prompt_error(
             &ProviderKind::Codex,
             "Error: timeout waiting for codex tui follow-up prompt input readiness after 45s; reason=composer_not_detected; previous_tui_turn_still_running=true; capture_available=true",
+            TuiErrorClassification::default(),
         ));
         assert!(!bridge_pre_submission_tui_prompt_error(
             &ProviderKind::Claude,
             "Error: claude tui session died during follow-up output reading",
+            TuiErrorClassification::default(),
         ));
         assert!(!bridge_pre_submission_tui_prompt_error(
             &ProviderKind::Claude,
             "timeout waiting for claude tui follow-up prompt input readiness after 45s",
+            TuiErrorClassification::default(),
         ));
     }
 
@@ -388,7 +454,8 @@ mod pre_submission_tui_prompt_error_tests {
         assert!(bridge_claude_tui_followup_requeue_prompt_error(
             &ProviderKind::Claude,
             Some(RuntimeHandoffKind::ClaudeTui),
-            followup
+            followup,
+            TuiErrorClassification::default(),
         ));
 
         for response in [
@@ -400,7 +467,8 @@ mod pre_submission_tui_prompt_error_tests {
                 !bridge_claude_tui_followup_requeue_prompt_error(
                     &ProviderKind::Claude,
                     Some(RuntimeHandoffKind::ClaudeTui),
-                    response
+                    response,
+                    TuiErrorClassification::default(),
                 ),
                 "{response} must not enter the Claude follow-up requeue path"
             );
@@ -409,12 +477,14 @@ mod pre_submission_tui_prompt_error_tests {
         assert!(!bridge_claude_tui_followup_requeue_prompt_error(
             &ProviderKind::Codex,
             Some(RuntimeHandoffKind::CodexTui),
-            followup
+            followup,
+            TuiErrorClassification::default(),
         ));
         assert!(!bridge_claude_tui_followup_requeue_prompt_error(
             &ProviderKind::Claude,
             None,
-            followup
+            followup,
+            TuiErrorClassification::default(),
         ));
         assert!(CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.contains("재시도 큐"));
     }
@@ -428,7 +498,11 @@ mod pre_submission_tui_prompt_error_tests {
             "Error: Timeout waiting for output file",
         ] {
             assert!(
-                !bridge_pre_submission_tui_prompt_error(&ProviderKind::Claude, response),
+                !bridge_pre_submission_tui_prompt_error(
+                    &ProviderKind::Claude,
+                    response,
+                    TuiErrorClassification::default(),
+                ),
                 "{response} must not be retried as a fresh prompt"
             );
         }
@@ -440,26 +514,31 @@ mod pre_submission_tui_prompt_error_tests {
             &ProviderKind::Claude,
             Some(RuntimeHandoffKind::ClaudeTui),
             "Error: Timeout waiting for output file",
+            TuiErrorClassification::default(),
         ));
         assert!(bridge_tui_transport_error_should_skip_quiescence(
             &ProviderKind::Claude,
             Some(RuntimeHandoffKind::ClaudeTui),
             "Error: timeout waiting for claude tui transcript file after 120s; capture_available=true; prompt_marker_detected=true; prompt_draft_detected=false",
+            TuiErrorClassification::default(),
         ));
         assert!(bridge_tui_transport_error_should_skip_quiescence(
             &ProviderKind::Codex,
             Some(RuntimeHandoffKind::CodexTui),
             "Error: timeout waiting for codex tui follow-up prompt input readiness after 45s; reason=composer_not_detected; previous_tui_turn_still_running=true; capture_available=true",
+            TuiErrorClassification::default(),
         ));
         assert!(!bridge_tui_transport_error_should_skip_quiescence(
             &ProviderKind::Claude,
             Some(RuntimeHandoffKind::LegacyTmuxWrapper),
             "Error: Timeout waiting for output file",
+            TuiErrorClassification::default(),
         ));
         assert!(!bridge_tui_transport_error_should_skip_quiescence(
             &ProviderKind::Claude,
             Some(RuntimeHandoffKind::ClaudeTui),
             "Error: upstream API returned 500",
+            TuiErrorClassification::default(),
         ));
     }
 

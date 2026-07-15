@@ -266,7 +266,6 @@ pub(super) fn spawn_turn_bridge(
         bridge.adk_session_key.as_deref(),
         bridge.inflight_state.turn_start_offset,
     );
-    let bridge_session_key = bridge.adk_session_key.clone();
     // Attach the span via `.instrument(..)` on the async block instead of
     // holding a sync `Span::enter()` guard across `.await`. The sync-guard
     // pattern leaks the span into unrelated tasks scheduled on the same
@@ -277,7 +276,7 @@ pub(super) fn spawn_turn_bridge(
         channel_id = bridge.channel_id.get(),
         provider = bridge.provider.as_str(),
         dispatch_id = tracing::field::debug(bridge.dispatch_id.as_deref()),
-        session_key = tracing::field::debug(bridge_session_key.as_deref()),
+        session_key = tracing::field::debug(bridge.adk_session_key.as_deref()),
         turn_id = %bridge_turn_id,
     );
     super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
@@ -508,9 +507,8 @@ pub(super) fn spawn_turn_bridge(
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
-        let completion_tx = bridge.completion_tx;
         let _completion_guard = CompletionGuard {
-            tx: completion_tx,
+            tx: bridge.completion_tx,
             broadcaster: shared_owned.inflight_signals.clone(),
             channel_id,
         };
@@ -761,6 +759,7 @@ pub(super) fn spawn_turn_bridge(
                 current_msg_id,
                 cancelled,
                 transport_error,
+                tui_error_classification: stream_loop_output.tui_error_classification,
                 recovery_retry,
                 rx_disconnected,
                 tmux_handed_off,
@@ -841,6 +840,7 @@ pub(super) fn spawn_turn_bridge(
                     single_message_panel_footer_mode,
                     is_prompt_too_long,
                     claude_tui_followup_pre_submit_requeue_candidate,
+                    tui_error_classification: post_loop_finalize_output.tui_error_classification,
                     had_prior_session_id_at_turn_start,
                     session_handshake_seen,
                     turn_start,
