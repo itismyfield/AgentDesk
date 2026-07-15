@@ -18,7 +18,7 @@ use super::stream_tick::{
     PendingLongRunningOpenAfterStateSave, PendingLongRunningRetargetAfterStateSave,
     run_bridge_stream_tick,
 };
-use super::streaming_edit_text::TuiErrorClassification;
+use super::{streaming_edit_text::TuiErrorClassification, *};
 use content_arms::{
     StreamContentArmContext, StreamContentArmMessage, StreamContentArmOutcome,
     StreamContentArmState, handle_stream_content_message,
@@ -30,8 +30,6 @@ use tool_arms::{
 
 mod content_arms;
 mod tool_arms;
-
-use super::*;
 
 pub(super) struct StreamLoopContext {
     pub(super) shared_owned: Arc<SharedData>,
@@ -137,20 +135,13 @@ pub(super) async fn run_stream_loop(
     ctx: StreamLoopContext,
     state: StreamLoopState<'_>,
 ) -> StreamLoopOutput {
-    let shared_owned = ctx.shared_owned;
-    let gateway = ctx.gateway;
-    let channel_id = ctx.channel_id;
-    let provider = ctx.provider;
-    let cancel_token = ctx.cancel_token;
-    let user_text_owned = ctx.user_text_owned;
-    let request_owner_name = ctx.request_owner_name;
-    let adk_session_key = ctx.adk_session_key;
-    let adk_session_name = ctx.adk_session_name;
-    let adk_session_info = ctx.adk_session_info;
-    let adk_cwd = ctx.adk_cwd;
-    let dispatch_id = ctx.dispatch_id;
-    let role_binding = ctx.role_binding;
-    let turn_id = ctx.turn_id;
+    let (shared_owned, gateway) = (ctx.shared_owned, ctx.gateway);
+    let (channel_id, provider) = (ctx.channel_id, ctx.provider);
+    let (cancel_token, user_text_owned) = (ctx.cancel_token, ctx.user_text_owned);
+    let (request_owner_name, adk_session_key) = (ctx.request_owner_name, ctx.adk_session_key);
+    let (adk_session_name, adk_session_info) = (ctx.adk_session_name, ctx.adk_session_info);
+    let (adk_cwd, dispatch_id) = (ctx.adk_cwd, ctx.dispatch_id);
+    let (role_binding, turn_id) = (ctx.role_binding, ctx.turn_id);
     let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let footer_owner = ctx.footer_owner;

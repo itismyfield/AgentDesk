@@ -1,7 +1,6 @@
 //! Post-commit terminal delivery epilogue for terminal outcome delivery.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 
 use super::super::streaming_edit_text::TuiErrorClassification;
 use super::*;
@@ -65,22 +64,16 @@ pub(super) async fn handle_delivery_epilogue(
     ctx: DeliveryEpilogueContext<'_>,
     state: DeliveryEpilogueState<'_>,
 ) -> DeliveryEpilogueOutcome {
-    let shared_owned = Arc::clone(ctx.shared_owned);
-    let gateway = Arc::clone(ctx.gateway);
-    let provider = ctx.provider.clone();
-    let channel_id = ctx.channel_id;
-    let user_msg_id = ctx.user_msg_id;
-    let current_msg_id = ctx.current_msg_id;
-    let adk_session_key = ctx.adk_session_key;
-    let adk_cwd = ctx.adk_cwd;
-    let dispatch_id = ctx.dispatch_id;
-    let turn_id = ctx.turn_id;
+    let (shared_owned, gateway) = (Arc::clone(ctx.shared_owned), Arc::clone(ctx.gateway));
+    let (provider, channel_id) = (ctx.provider.clone(), ctx.channel_id);
+    let (user_msg_id, current_msg_id) = (ctx.user_msg_id, ctx.current_msg_id);
+    let (adk_session_key, adk_cwd) = (ctx.adk_session_key, ctx.adk_cwd);
+    let (dispatch_id, turn_id) = (ctx.dispatch_id, ctx.turn_id);
     let user_text_owned = ctx.user_text_owned;
     let full_response = ctx.full_response.clone();
     let delivery_response = ctx.delivery_response.clone();
     let spoken_delivery_response = ctx.spoken_delivery_response.clone();
-    let cancelled = ctx.cancelled;
-    let is_prompt_too_long = ctx.is_prompt_too_long;
+    let (cancelled, is_prompt_too_long) = (ctx.cancelled, ctx.is_prompt_too_long);
     let transport_error = ctx.transport_error;
     let recovery_retry = ctx.recovery_retry;
     let resume_failure_detected = ctx.resume_failure_detected;
