@@ -1059,7 +1059,7 @@
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 564 | 436 | 128 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7210 | 3301 | 3909 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7198 | 3289 | 3909 | giant-file |
 | `services::turn_orchestrator::active_source_dedup` | `src/services/turn_orchestrator/active_source_dedup.rs` | 129 | 129 | 0 |  |
 | `services::turn_orchestrator::dispatch_reservation` | `src/services/turn_orchestrator/dispatch_reservation.rs` | 743 | 475 | 268 |  |
 | `services::turn_orchestrator::overflow` | `src/services/turn_orchestrator/overflow.rs` | 35 | 35 | 0 |  |
