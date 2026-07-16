@@ -586,10 +586,10 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 notification_anchor_message_id,
                 &relay_prompt_decision,
                 lease.generation,
-                &mut current_turn_anchor_id,
             )
             .await;
         let anchor_message_id = synthetic_anchor.message_id;
+        current_turn_anchor_id = Some(anchor_message_id.get());
         // #3174: turn-identity guard on the ⏳ lifecycle. A lease-gated completion
         // firing inside the sub-second notify+⏳-add window left a deferred marker;
         // now that THIS turn's anchor exists, drain it (⏳ → ✅ swap). P1: drain ONLY

@@ -170,7 +170,6 @@ pub(super) async fn establish_tui_direct_synthetic_lifecycle_anchor(
     notification_anchor_message_id: MessageId,
     relay_prompt_decision: &RelayObservedPromptInjectionDecision,
     lease_generation: u64,
-    current_turn_anchor_id: &mut Option<u64>,
 ) -> SyntheticLifecycleAnchor {
     let anchor = resolve_tui_direct_synthetic_lifecycle_anchor(
         shared,
@@ -181,7 +180,6 @@ pub(super) async fn establish_tui_direct_synthetic_lifecycle_anchor(
         relay_prompt_decision,
     )
     .await;
-    *current_turn_anchor_id = Some(anchor.message_id.get());
     started(
         shared,
         channel_id,
