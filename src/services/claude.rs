@@ -2999,7 +2999,7 @@ fn send_followup_to_tmux(
     // Publish the new generation before the prompt becomes reachable. Marking
     // submission still waits for a successful flush so a pre-write stop cannot
     // consume this turn's interrupt claim.
-    let write_result = crate::services::provider::submit_claude_wrapper_followup(
+    let write_result = crate::services::provider::cancel_token_claude_interrupt::submit_claude_wrapper_followup(
         cancel_token.as_deref(),
         tmux_session_name,
         || {
