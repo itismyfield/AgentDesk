@@ -2388,11 +2388,13 @@ mod tests {
     #[test]
     fn readiness_snapshot_derives_marker_draft_and_tail_from_one_capture() {
         let pane = "\
-earlier output
+❯ completed prompt
+⏺ earlier completed output
+✻ Baked for 2s
 ────────────────────────────────────────────────────
 ❯ pending draft
 ────────────────────────────────────────────────────
-  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+  🤖 Opus(H) │ 7% │ MCP: 2";
 
         let snapshot = prompt_readiness_snapshot_from_capture(Some(pane), true);
 
