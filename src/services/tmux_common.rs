@@ -141,6 +141,13 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
     if recent.iter().any(|l| l.contains(CLAUDE_TUI_READY_BANNER)) {
         return true;
     }
+    // `recent` is reverse-ordered for bottom-up prompt lookup below. Restore
+    // screen order inside the active-work helper before evaluating wrapped
+    // spinner head → interrupt-tail adjacency. This predicate is only a prompt-
+    // marker producer; every production readiness acceptance also runs the full
+    // forward capture through `snapshot_allows_prompt_readiness`, whose shared
+    // busy classifier vetoes partial spinner frames this lightweight scan cannot
+    // reconstruct by itself.
     if tmux_recent_lines_show_claude_tui_active_work(&recent) {
         return false;
     }
@@ -266,7 +273,7 @@ pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
     let recent = &non_empty[start..];
     tmux_recent_lines_show_claude_tui_interrupt_chrome(recent)
         || tmux_capture_indicates_claude_tui_structured_spinner(capture)
-        || tmux_recent_lines_show_claude_tui_active_work(recent)
+        || tmux_recent_forward_lines_show_claude_tui_active_work(recent)
 }
 
 /// A conservative live-turn signal for Claude TUI spinner chrome. The status
@@ -642,15 +649,23 @@ fn line_is_mcp_auth_required_warning(line: &str) -> bool {
         && (lower.contains("need") || lower.contains("run /mcp"))
 }
 
-fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
-    let forward = lines.iter().rev().copied().collect::<Vec<_>>();
+fn tmux_recent_lines_show_claude_tui_active_work(lines_reverse_ordered: &[&str]) -> bool {
+    let forward = lines_reverse_ordered
+        .iter()
+        .rev()
+        .copied()
+        .collect::<Vec<_>>();
     tmux_recent_lines_show_claude_tui_interrupt_chrome(&forward)
-        || lines.iter().any(|line| {
-            let line = trim_prompt_line(line);
-            let lower = line.to_ascii_lowercase();
-            line.contains("Actioning")
-                || line.contains("Musing")
-                || lower.contains("current work")
+        || tmux_recent_forward_lines_show_claude_tui_active_work(&forward)
+}
+
+fn tmux_recent_forward_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        let lower = line.to_ascii_lowercase();
+        line.contains("Actioning")
+            || line.contains("Musing")
+            || lower.contains("current work")
             // NOTE: neither the footer context-usage bar (`🤖 Model │ ██░░ │ NN%`)
             // nor the completed-thinking summary line (`✻ Churned for 4m 56s`) is a
             // running signal — both render in IDLE/ready states too. #3051 keyed
@@ -664,7 +679,7 @@ fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
                     || line.contains("Searching for ")
                     || line.contains("Reading ")
                     || line.contains("Editing ")))
-        })
+    })
 }
 
 pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
@@ -2050,6 +2065,9 @@ another line of prior output";
         let capture = "\
 some earlier assistant prose still on screen
 (13s · ↓ 1.2k tokens · esc to interrupt)";
+        // Claude renders this parenthesized footer as a standalone status line
+        // while a turn is active. It is intentionally sufficient busy evidence;
+        // prose with the same text embedded mid-line is rejected below.
         assert!(tmux_capture_indicates_claude_tui_busy(capture));
         assert!(tmux_capture_indicates_claude_tui_actively_streaming(
             capture
