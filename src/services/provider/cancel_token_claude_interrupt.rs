@@ -15,15 +15,17 @@ pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
 
 impl ClaudeInterruptDeliveryGuard<'_> {
     pub(crate) fn commit_success<R, E>(self, outcome: Result<R, E>) -> Result<R, E> {
-        if outcome.is_ok() {
-            let committed = self
+        if outcome.is_ok()
+            && self
                 .token
                 .claude_interrupt_claim
                 .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok();
-            debug_assert!(
-                committed,
-                "successful Claude stop write must commit its claim"
+                .is_err()
+        {
+            tracing::error!(
+                generation = self.token.claude_interrupt_generation,
+                claim_state = self.token.claude_interrupt_claim.load(Ordering::Acquire),
+                "Claude stop write succeeded but claim commit lost ownership"
             );
         }
         outcome
