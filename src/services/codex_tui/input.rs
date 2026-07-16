@@ -425,8 +425,7 @@ fn prompt_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, Stri
     let pane = strip_ansi_escape_sequences(pane_with_escapes);
     let composer_marker_detected = pane_looks_ready_for_codex_prompt_with_ansi(pane_with_escapes);
     let dim_placeholder_detected = pane_has_dim_legacy_codex_prompt_in_pane(pane_with_escapes);
-    let prompt_draft_detected =
-        !dim_placeholder_detected && pane_has_codex_prompt_draft(&pane);
+    let prompt_draft_detected = !dim_placeholder_detected && pane_has_codex_prompt_draft(&pane);
     (
         composer_marker_detected,
         prompt_draft_detected,
@@ -1427,7 +1426,7 @@ fn recent_has_codex_compact_prompt(recent: &[&str]) -> bool {
     recent_has_codex_compact_composer(recent)
         && recent
             .get(1)
-            .is_some_and(line_is_legacy_codex_prompt)
+            .is_some_and(|line| line_is_legacy_codex_prompt(line))
 }
 
 fn recent_has_codex_compact_composer(recent: &[&str]) -> bool {
@@ -2231,7 +2230,9 @@ The documentation example ends with:
         );
 
         assert!(pane_looks_ready_for_codex_prompt_with_ansi(pane));
-        assert!(!pane_has_codex_prompt_draft(&strip_ansi_escape_sequences(pane)));
+        assert!(!pane_has_codex_prompt_draft(&strip_ansi_escape_sequences(
+            pane
+        )));
     }
 
     #[test]
@@ -2245,7 +2246,6 @@ The documentation example ends with:
 
         assert!(!pane_looks_ready_for_codex_prompt(pane));
     }
-
 
     #[test]
     fn compact_codex_dim_placeholder_is_ready_without_plain_allowlist() {
@@ -2359,7 +2359,9 @@ then continued with a response.";
 \n\
 \x1b[0m  \x1b[38;2;246;226;183mgpt-5.5 xhigh\x1b[2m\x1b[39m · \x1b[0m\x1b[38;2;171;223;167m~/.adk/release/workspaces/baby";
         assert!(!pane_looks_ready_for_codex_prompt_with_ansi(pane));
-        assert!(pane_has_codex_prompt_draft(&strip_ansi_escape_sequences(pane)));
+        assert!(pane_has_codex_prompt_draft(&strip_ansi_escape_sequences(
+            pane
+        )));
     }
 
     #[test]
