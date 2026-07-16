@@ -25,7 +25,7 @@ pub(super) async fn note_queue_pending(
     user_msg_id: MessageId,
     emoji: char,
     turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
-) -> bool {
+) {
     if emoji == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
         && let Some(turn_start_attempt) = turn_start_attempt
     {
@@ -42,7 +42,7 @@ pub(super) async fn note_queue_pending(
     // refused after a newer start attempt. The mailbox enqueue is authoritative,
     // so always publish the desired queue marker through the reconciler. When the
     // rollback already installed 📬 this coalesces without a second HTTP add.
-    crate::services::discord::queue_marker::note_added_current(
+    let delivered = crate::services::discord::queue_marker::note_added_current(
         shared,
         http,
         channel_id,
@@ -50,5 +50,16 @@ pub(super) async fn note_queue_pending(
         emoji,
         "race_loss_message_queued",
     )
-    .await
+    .await;
+    if !delivered {
+        crate::services::discord::outbound::reaction_control::send_reaction_control_reply_http(
+            http,
+            channel_id,
+            shared,
+            user_msg_id,
+            crate::services::discord::outbound::reaction_control::ReactionControlReplyReason::QueueReactionFailed,
+            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
+        )
+        .await;
+    }
 }

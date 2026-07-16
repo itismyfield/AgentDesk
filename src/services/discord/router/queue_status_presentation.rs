@@ -40,9 +40,12 @@ mod tests {
                     && super::super::super::queue_status_presentation::queue_status_card_enabled();
             "#,
         )));
-        assert!(race_loss.contains(&compact(
+        let race_loss_reaction = compact(include_str!(
+            "message_handler/intake_turn/race_loss/mailbox_reaction.rs"
+        ));
+        assert!(race_loss_reaction.contains(&compact(
             r#"
-                if !reaction_delivered {
+                if !delivered {
                     crate::services::discord::outbound::reaction_control::send_reaction_control_reply_http(
             "#,
         )));

@@ -52,6 +52,18 @@ fn persisted_record(
     persisted_record_with_version(shared, target, provider, applied, PERSISTED_STATE_VERSION)
 }
 
+fn persisted_queue_record(
+    shared: &SharedData,
+    target: TurnViewTarget,
+    provider: &str,
+    applied: &str,
+    identity_label: &str,
+) -> PersistedTargetState {
+    let mut record = persisted_record(shared, target, provider, applied);
+    record.identity_label = identity_label.to_string();
+    record
+}
+
 fn persisted_record_with_version(
     shared: &SharedData,
     target: TurnViewTarget,
@@ -664,7 +676,7 @@ async fn persisted_v1_queued_state_is_invalidated_for_reapplication() {
     let target = target_with(100_000_000_000_155, 100_000_000_000_156);
     clear_persisted(target);
     let provider = shared.provider.as_str().to_string();
-    let record = persisted_record(&shared, target, &provider, "queued");
+    let record = persisted_queue_record(&shared, target, &provider, "queued", "intake-a");
     write_persisted(&record, target);
 
     let reconciler = TurnViewReconciler::default();
@@ -696,7 +708,7 @@ async fn persisted_v1_queued_promotion_clears_legacy_marker_before_pending() {
     let target = target_with(100_000_000_000_165, 100_000_000_000_166);
     clear_persisted(target);
     let provider = shared.provider.as_str().to_string();
-    let record = persisted_record(&shared, target, &provider, "queued");
+    let record = persisted_queue_record(&shared, target, &provider, "queued", "intake-a");
     write_persisted(&record, target);
 
     let reconciler = TurnViewReconciler::default();
