@@ -361,6 +361,7 @@ struct RelayHealthBuildInput {
     channel_id: u64,
     mailbox_has_cancel_token: bool,
     mailbox_active_user_msg_id: Option<u64>,
+    mailbox_turn_started_at_ms: Option<i64>,
     queue_depth: usize,
     watcher_attached: bool,
     watcher_attached_stale: bool,
@@ -395,6 +396,7 @@ fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnaps
         bridge_current_msg_id: input.bridge_current_msg_id,
         mailbox_has_cancel_token: input.mailbox_has_cancel_token,
         mailbox_active_user_msg_id: input.mailbox_active_user_msg_id,
+        mailbox_turn_started_at_ms: input.mailbox_turn_started_at_ms,
         queue_depth: input.queue_depth,
         pending_discord_callback_msg_id: input
             .bridge_current_msg_id
@@ -576,6 +578,9 @@ async fn watcher_state_snapshot_for_shared(
         channel_id: channel.get(),
         mailbox_has_cancel_token,
         mailbox_active_user_msg_id,
+        mailbox_turn_started_at_ms: mailbox_snapshot
+            .turn_started_at
+            .map(|started_at| started_at.timestamp_millis()),
         queue_depth: mailbox_snapshot.intervention_queue.len(),
         watcher_attached: session.attached,
         watcher_attached_stale: session.watcher_attached_stale,
@@ -754,6 +759,9 @@ async fn build_health_snapshot_with_options(
                     channel_id: channel.get(),
                     mailbox_has_cancel_token,
                     mailbox_active_user_msg_id,
+                    mailbox_turn_started_at_ms: snapshot
+                        .turn_started_at
+                        .map(|started_at| started_at.timestamp_millis()),
                     queue_depth,
                     watcher_attached: session.watcher_attached,
                     watcher_attached_stale: session.watcher_attached_stale,
