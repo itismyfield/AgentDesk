@@ -550,8 +550,8 @@ async fn run_placeholder_sweep_pass(
                                 finalize_abandoned_mailbox(shared, provider, &state, true).await;
                             let same_turn =
                                 inflight_state_still_same_turn(provider, &state, age_secs);
-                            let deleted = same_turn
-                                && cleanup.delete_state_if_allowed(provider, &state);
+                            let deleted =
+                                same_turn && cleanup.delete_state_if_allowed(provider, &state);
                             if should_detach_after_cleanup(same_turn, deleted) {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }
@@ -574,8 +574,8 @@ async fn run_placeholder_sweep_pass(
                                 finalize_abandoned_mailbox(shared, provider, &state, true).await;
                             let same_turn =
                                 inflight_state_still_same_turn(provider, &state, age_secs);
-                            let deleted = same_turn
-                                && cleanup.delete_state_if_allowed(provider, &state);
+                            let deleted =
+                                same_turn && cleanup.delete_state_if_allowed(provider, &state);
                             if should_detach_after_cleanup(same_turn, deleted) {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }

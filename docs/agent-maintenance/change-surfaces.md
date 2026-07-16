@@ -1610,7 +1610,7 @@
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
     lines).
-  - `src/services/discord/placeholder_sweeper.rs` (1004 lines; +7 net from #4573 slice A — abandon-guard inflight delete decision extracted to `placeholder_sweeper/abandon_guard.rs`; #4278 kept the
+  - `src/services/discord/placeholder_sweeper.rs` (1017 lines; +7 net from #4573 slice A — abandon-guard inflight delete decision extracted to `placeholder_sweeper/abandon_guard.rs`; #4278 kept the
     periodic loop at a thin call — the orphan-`⏳` sweep orchestration
     (pass-local marker cache + TOCTOU re-verification probes) lives in
     `turn_view_reconciler/orphan_sweep.rs`; -6 from #4047
