@@ -1149,7 +1149,7 @@ mod migration_tests {
 }
 
 #[cfg(test)]
-mod helper_tests {
+mod postgres_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use serde_json::json;
@@ -1231,7 +1231,7 @@ mod helper_tests {
         human.preserve_on_cancel = true;
         let human_id = insert_pending(&pool, &human, 1, None)
             .await
-            .expect("insert human row");
+            .expect("insert human row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] postgres module
         let automation_id = insert_pending(
             &pool,
             &payload("ch-preserve-automation", "msg-automation"),
@@ -1239,7 +1239,7 @@ mod helper_tests {
             None,
         )
         .await
-        .expect("insert automation row");
+        .expect("insert automation row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] postgres module
         let legacy_id: i64 = sqlx::query_scalar(
             "INSERT INTO intake_outbox (
                 target_instance_id, forwarded_by_instance_id, required_labels,
@@ -1253,7 +1253,7 @@ mod helper_tests {
         )
         .fetch_one(&pool)
         .await
-        .expect("insert legacy row without preserve_on_cancel");
+        .expect("insert legacy row without preserve_on_cancel"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] postgres module
 
         for (id, expected) in [
             (human_id, Some(true)),
@@ -1264,7 +1264,7 @@ mod helper_tests {
                 .bind(id)
                 .fetch_one(&pool)
                 .await
-                .expect("read preservation row");
+                .expect("read preservation row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] postgres module
             assert_eq!(row.preserve_on_cancel, expected);
         }
 
