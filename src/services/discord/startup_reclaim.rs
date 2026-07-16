@@ -12,26 +12,21 @@
 //!   * #3402 slot rehydration restores slots onto NEW panels, never editing the
 //!     old frozen message.
 //!
-//! This one-shot sweep runs once per channel at startup. It finds the prior
-//! generation's frozen panel via two combined sources and applies a single
-//! finalize edit that strips the animated footer and appends a static
-//! `⏹ (재시작으로 중단됨)` marker (body preserved verbatim, fences re-balanced):
-//!   1. Persisted inflight state (`discord_inflight/<provider>/<channel>.json`)
-//!      — the exact anchor / status-panel message ids of turns whose
-//!      `updated_at` predates this process boot (precise targets).
-//!   2. A bounded recent-message read of each such channel (serenity http,
-//!      limit ≤ 50, the same path `agentdesk discord read` uses) to catch any
-//!      self-authored message that still carries a frozen spinner and whose
-//!      Discord create/edit time predates boot.
+//! Two independent one-shot passes run at startup. After 30 seconds, the frozen-
+//! panel pass scans prior-generation inflight channels and applies one finalize
+//! edit that strips the animated footer and appends `⏹ (재시작으로 중단됨)`.
+//! After 301 seconds, the orphan-placeholder pass scans configured provider
+//! channels and deletes at most ten current-bot-authored messages per channel
+//! whose content is exactly `...`, age exceeds five minutes, and id is absent
+//! from freshly reloaded inflight and pending-start state. Each pass reads one
+//! recent-message page of at most 50 messages per channel.
 //!
-//! The current generation's live panels are never touched. Two ownership gates
-//! guard this (codex round-1 High-a): a message is finalized only when its
-//! Discord change-time predates `boot_unix_secs` AND its id is absent from the
-//! live-anchor exclusion set — the `current_msg_id`/`status_message_id` of every
-//! not-yet-committed inflight row, which covers anchors re-adopted by alive-tmux
-//! recovery without a Discord re-touch. The body must also parse as a TAIL-
-//! anchored frozen-spinner footer (codex round-1 High-b), and a per-channel guard
-//! blocks rescans.
+//! Current-generation panels and durable placeholder identities are never
+//! touched. Frozen panels must predate `boot_unix_secs`, be absent from the live-
+//! anchor exclusion set, and parse as a tail-anchored frozen-spinner footer.
+//! Exact-placeholder cleanup is separately guarded by bot authorship, age, and
+//! durable-link exclusion. Independent per-pass guards block rescans without
+//! letting the earlier frozen-panel pass suppress the delayed orphan pass.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -48,20 +43,41 @@ use crate::services::provider::ProviderKind;
 /// catch-up path's `CATCH_UP_FETCH_LIMIT` so the spinner-bearing panel is on
 /// the page even after bursty bot activity. `limit` takes `u8` in serenity.
 const RECLAIM_FETCH_LIMIT: u8 = 50;
+/// Exact synthetic placeholders younger than this remain untouched.
+const ORPHAN_PLACEHOLDER_MIN_AGE_SECS: i64 = 5 * 60;
+const FROZEN_PANEL_RECLAIM_DELAY_SECS: u64 = 30;
+/// Wait one second beyond the strict age boundary before the orphan pass.
+const ORPHAN_PLACEHOLDER_RECLAIM_DELAY_SECS: u64 = ORPHAN_PLACEHOLDER_MIN_AGE_SECS as u64 + 1;
+/// Bound destructive work per channel independently from the bounded read page.
+const ORPHAN_PLACEHOLDER_DELETE_LIMIT: usize = 10;
 
-/// One-shot guard: a `(provider, channel_id)` recorded here has already been
-/// reclaim-scanned this process lifetime and is never rescanned.
-fn reclaimed_channels() -> &'static Mutex<HashSet<(String, u64)>> {
-    static GUARD: OnceLock<Mutex<HashSet<(String, u64)>>> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ReclaimPass {
+    FrozenPanels,
+    OrphanPlaceholders,
+}
+
+impl ReclaimPass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FrozenPanels => "frozen_panels",
+            Self::OrphanPlaceholders => "orphan_placeholders",
+        }
+    }
+}
+
+/// One-shot guard per pass: a `(pass, provider, channel_id)` recorded here has
+/// already been scanned this process lifetime and is never rescanned.
+fn reclaimed_channels() -> &'static Mutex<HashSet<(ReclaimPass, String, u64)>> {
+    static GUARD: OnceLock<Mutex<HashSet<(ReclaimPass, String, u64)>>> = OnceLock::new();
     GUARD.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Record the one-shot guard for `(provider, channel_id)`. Returns `true` if
-/// this is the first claim (caller may proceed), `false` if already scanned.
-fn claim_channel_once(provider: &ProviderKind, channel_id: u64) -> bool {
+/// Record the one-shot guard for one pass and channel.
+fn claim_channel_once(pass: ReclaimPass, provider: &ProviderKind, channel_id: u64) -> bool {
     reclaimed_channels()
         .lock()
-        .map(|mut set| set.insert((provider.as_str().to_string(), channel_id)))
+        .map(|mut set| set.insert((pass, provider.as_str().to_string(), channel_id)))
         .unwrap_or(false)
 }
 
@@ -78,68 +94,82 @@ struct ReclaimReport {
     channels_scanned: usize,
     messages_finalized: usize,
     markers_replaced: usize,
+    orphan_placeholders_deleted: usize,
 }
 
-/// One inflight scan, distilled into the two things the sweep needs:
-///   * `candidate_channels` — channels whose prior generation may have left a
-///     frozen panel (a row whose `updated_at` predates boot);
-///   * `live_anchor_ids` — Discord message ids that the CURRENT generation may
-///     still be relaying to and must never finalize (codex round-1 High-a).
+/// One durable-state scan, distilled into prior-generation frozen-panel
+/// channels, configured orphan-placeholder channels, and the durable Discord
+/// identities that each pass must preserve.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ReclaimScanPlan {
-    candidate_channels: Vec<u64>,
+    frozen_panel_channels: Vec<u64>,
+    orphan_placeholder_channels: Vec<u64>,
     live_anchor_ids: HashSet<u64>,
+    protected_message_ids: HashSet<u64>,
 }
 
-/// Build the scan plan from inflight rows. codex round-1 High-a: the alive-tmux
-/// recovery path (`recovery_engine::reregister_active_turn_from_inflight`) can
-/// re-adopt a PRE-boot row as a live turn and re-attach a watcher to its
-/// `current_msg_id`/`status_message_id` WITHOUT bumping `updated_at` or editing
-/// Discord. A timestamp gate alone would then let the sweep finalize that live
-/// anchor. So, independent of any timing heuristic, every row that is NOT
-/// terminal-delivery-committed (and is a real user-authored turn, not a
-/// rebind-origin placeholder) contributes its anchor ids to an explicit
-/// exclusion set. The sweep skips those ids unconditionally — a live anchor is
-/// protected even though its Discord timestamp predates boot.
-///
-/// Recovery_engine is referenced read-only (#3410 parallel area); the alternative
-/// of bumping the recovered row's `updated_at` would require editing that file,
-/// so the ownership exclusion is resolved entirely on the sweep side.
+/// Build the scan plan from durable rows and configured channels. Every
+/// nonzero Discord message identity referenced by inflight or pending-start
+/// state is protected, regardless of lifecycle age; only fully unlinked exact
+/// placeholders are eligible for crash-window cleanup.
 fn build_reclaim_scan_plan(provider: &ProviderKind, boot_unix_secs: i64) -> ReclaimScanPlan {
-    reclaim_scan_plan_from_rows(load_inflight_states_for_sweep(provider), boot_unix_secs)
+    reclaim_scan_plan_from_rows(
+        load_inflight_states_for_sweep(provider),
+        super::tui_direct_pending_start::load_all(),
+        super::settings::list_registered_channel_bindings(),
+        provider,
+        boot_unix_secs,
+    )
 }
 
-/// Pure core of `build_reclaim_scan_plan`, split out so the High-a live-anchor
-/// exclusion and the prior-generation candidate selection can be unit-tested
-/// without writing inflight JSON to disk.
+/// Pure core of `build_reclaim_scan_plan`, split out so channel filtering and
+/// durable message-identity protection can be unit-tested without filesystem
+/// or Discord access.
 fn reclaim_scan_plan_from_rows(
     rows: Vec<(super::inflight::InflightTurnState, u64)>,
+    pending_starts: Vec<super::tui_direct_pending_start::TuiDirectPendingStart>,
+    configured_bindings: Vec<super::settings::RegisteredChannelBinding>,
+    provider: &ProviderKind,
     boot_unix_secs: i64,
 ) -> ReclaimScanPlan {
-    let mut seen = HashSet::new();
+    let mut frozen_seen = HashSet::new();
+    let mut orphan_seen = HashSet::new();
     let mut plan = ReclaimScanPlan::default();
+    for binding in configured_bindings {
+        if &binding.owner_provider == provider
+            && binding.channel_id != 0
+            && orphan_seen.insert(binding.channel_id)
+        {
+            plan.orphan_placeholder_channels.push(binding.channel_id);
+        }
+    }
     for (state, _age) in rows {
-        // Live-anchor exclusion: any not-yet-committed real turn owns its anchor
-        // ids regardless of when it was last touched. rebind-origin rows carry
-        // placeholder ids that do not identify a real Discord message, so they
-        // are excluded from the exclusion set (they cannot be a live anchor).
+        for id in [
+            state.user_msg_id,
+            state.current_msg_id,
+            state.status_message_id.unwrap_or(0),
+            state.injected_prompt_message_id.unwrap_or(0),
+        ] {
+            if id != 0 {
+                plan.protected_message_ids.insert(id);
+            }
+        }
         if !state.terminal_delivery_completed() && !state.rebind_origin {
-            for id in [state.current_msg_id]
-                .into_iter()
-                .chain(state.status_message_id)
-            {
+            for id in [state.current_msg_id, state.status_message_id.unwrap_or(0)] {
                 if id != 0 {
                     plan.live_anchor_ids.insert(id);
                 }
             }
         }
         let updated = parse_updated_at_unix(&state.updated_at).unwrap_or(i64::MAX);
-        if updated >= boot_unix_secs {
-            // Touched at or after boot → current generation. Leave it alone.
-            continue;
+        if updated < boot_unix_secs && state.channel_id != 0 && frozen_seen.insert(state.channel_id)
+        {
+            plan.frozen_panel_channels.push(state.channel_id);
         }
-        if seen.insert(state.channel_id) && state.channel_id != 0 {
-            plan.candidate_channels.push(state.channel_id);
+    }
+    for pending in pending_starts {
+        if pending.provider == provider.as_str() && pending.anchor_message_id != 0 {
+            plan.protected_message_ids.insert(pending.anchor_message_id);
         }
     }
     plan
@@ -162,10 +192,45 @@ fn change_unix_from_parts(edited_unix: Option<i64>, created_unix: i64) -> i64 {
     edited_unix.unwrap_or(created_unix)
 }
 
-/// Reclaim every self-authored frozen panel on one channel. Reads ONE recent
-/// page, finalizes each message whose body still parses as a frozen footer and
-/// whose Discord change-time predates `boot_unix_secs`.
-async fn reclaim_channel(
+fn is_orphan_placeholder_candidate(
+    author_id: u64,
+    bot_user_id: u64,
+    content: &str,
+    message_id: u64,
+    message_change_unix: i64,
+    now_unix_secs: i64,
+    protected_message_ids: &HashSet<u64>,
+) -> bool {
+    author_id == bot_user_id
+        && content == "..."
+        && message_change_unix < now_unix_secs - ORPHAN_PLACEHOLDER_MIN_AGE_SECS
+        && !protected_message_ids.contains(&message_id)
+}
+
+async fn read_reclaim_messages(
+    http: &Arc<serenity::Http>,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<Vec<serenity::Message>> {
+    match serenity::ChannelId::new(channel_id)
+        .messages(
+            http,
+            serenity::builder::GetMessages::new().limit(RECLAIM_FETCH_LIMIT),
+        )
+        .await
+    {
+        Ok(messages) => Some(messages),
+        Err(error) => {
+            tracing::debug!(
+                "startup-reclaim: read failed for {}/{channel_id}: {error}",
+                provider.as_str()
+            );
+            None
+        }
+    }
+}
+
+async fn reclaim_frozen_panels(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -174,47 +239,23 @@ async fn reclaim_channel(
     boot_unix_secs: i64,
     live_anchor_ids: &HashSet<u64>,
 ) -> (usize, usize) {
-    let channel = serenity::ChannelId::new(channel_id);
-    let fetched = channel
-        .messages(
-            http,
-            serenity::builder::GetMessages::new().limit(RECLAIM_FETCH_LIMIT),
-        )
-        .await;
-    let messages = match fetched {
-        Ok(messages) => messages,
-        Err(error) => {
-            tracing::debug!(
-                "startup-reclaim: read failed for {}/{channel_id}: {error}",
-                provider.as_str()
-            );
-            return (0, 0);
-        }
+    let Some(messages) = read_reclaim_messages(http, provider, channel_id).await else {
+        return (0, 0);
     };
-
+    let channel = serenity::ChannelId::new(channel_id);
     let mut finalized = 0usize;
     let mut markers = 0usize;
     for msg in &messages {
-        // codex round-1 Medium: `bot_user_id` is now a hard precondition (the
-        // caller skips the channel if it could not resolve), so author matching
-        // is fail-closed — only our own messages are ever edited.
-        if msg.author.id.get() != bot_user_id {
-            continue; // Not our own message.
-        }
-        // codex round-1 High-a: never finalize an anchor the current generation
-        // may still be relaying to, even if its Discord timestamp predates boot
-        // (alive-tmux recovery re-adopts pre-boot anchors without re-touching
-        // Discord). This explicit ownership check supersedes the timing gate.
-        if live_anchor_ids.contains(&msg.id.get()) {
+        if msg.author.id.get() != bot_user_id
+            || live_anchor_ids.contains(&msg.id.get())
+            || message_change_unix(msg) >= boot_unix_secs
+        {
             continue;
         }
-        if message_change_unix(msg) >= boot_unix_secs {
-            continue; // Current generation may still own this message.
-        }
         let Some(finalized_text) = reclaim_finalize_text(&msg.content, provider) else {
-            continue; // No frozen footer to reclaim (already done or live).
+            continue;
         };
-        let edited = edit_outbound_message(
+        if edit_outbound_message(
             http.clone(),
             shared.clone(),
             channel,
@@ -222,8 +263,8 @@ async fn reclaim_channel(
             &finalized_text,
         )
         .await
-        .is_ok();
-        if edited {
+        .is_ok()
+        {
             finalized += 1;
             markers += 1;
             tracing::info!(
@@ -237,89 +278,209 @@ async fn reclaim_channel(
     (finalized, markers)
 }
 
-/// Run the one-shot startup reclaim sweep for `provider`. Candidate channels
-/// come from prior-generation inflight rows; each is scanned at most once.
+async fn reclaim_orphan_placeholders(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    bot_user_id: u64,
+    now_unix_secs: i64,
+    protected_message_ids: &HashSet<u64>,
+) -> usize {
+    let Some(messages) = read_reclaim_messages(http, provider, channel_id).await else {
+        return 0;
+    };
+    let channel = serenity::ChannelId::new(channel_id);
+    let mut attempted = 0usize;
+    let mut deleted = 0usize;
+    for msg in &messages {
+        if attempted >= ORPHAN_PLACEHOLDER_DELETE_LIMIT {
+            break;
+        }
+        if !is_orphan_placeholder_candidate(
+            msg.author.id.get(),
+            bot_user_id,
+            &msg.content,
+            msg.id.get(),
+            message_change_unix(msg),
+            now_unix_secs,
+            protected_message_ids,
+        ) {
+            continue;
+        }
+        let operation_kind =
+            super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteNonterminal.as_str();
+        if let Some(protection) = super::placeholder_cleanup::terminal_cleanup_protects_delete(
+            &shared.ui.placeholder_cleanup,
+            provider,
+            channel,
+            msg.id,
+        ) {
+            crate::services::observability::emit_relay_delete(
+                provider.as_str(),
+                channel_id,
+                msg.id.get(),
+                None,
+                None,
+                "startup_reclaim_orphan_synthetic_placeholder",
+                operation_kind,
+                protection.relay_delete_outcome(),
+                None,
+            );
+            continue;
+        }
+        attempted += 1;
+        let result = channel.delete_message(http, msg.id).await;
+        crate::services::observability::emit_relay_delete_result(
+            provider.as_str(),
+            channel_id,
+            msg.id.get(),
+            "startup_reclaim_orphan_synthetic_placeholder",
+            operation_kind,
+            &result,
+        );
+        match result {
+            Ok(()) => {
+                deleted += 1;
+                tracing::info!(
+                    "startup-reclaim: deleted unlinked synthetic placeholder channel_id={channel_id} message_id={} ({})",
+                    msg.id.get(),
+                    provider.as_str()
+                );
+            }
+            Err(error) => tracing::warn!(
+                "startup-reclaim: failed to delete unlinked synthetic placeholder channel_id={channel_id} message_id={} ({}): {error}",
+                msg.id.get(),
+                provider.as_str()
+            ),
+        }
+    }
+    deleted
+}
+
+/// Run one startup reclaim pass for `provider`. Durable state is reloaded at
+/// the beginning of every pass so delayed orphan cleanup protects current rows.
 async fn run_startup_reclaim_sweep(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     boot_unix_secs: i64,
+    pass: ReclaimPass,
 ) -> ReclaimReport {
     let plan = build_reclaim_scan_plan(provider, boot_unix_secs);
-    if plan.candidate_channels.is_empty() {
+    let candidate_channels = match pass {
+        ReclaimPass::FrozenPanels => &plan.frozen_panel_channels,
+        ReclaimPass::OrphanPlaceholders => &plan.orphan_placeholder_channels,
+    };
+    if candidate_channels.is_empty() {
         return ReclaimReport::default();
     }
-    // codex round-1 Medium: FAIL-CLOSED on bot-id resolution. Without our own
-    // user id the author filter cannot distinguish our messages from any other
-    // bot's, so a fail-open (bot_user_id = None) would edit ANY matching message.
-    // Resolve once, before consuming any per-channel guard; on failure WARN and
-    // abort the whole sweep WITHOUT claiming any channel, so the one-shot guards
-    // stay unconsumed and a later sweep opportunity (e.g. re-fed channel) is
-    // preserved. Editing zero messages is the safe outcome.
+    // Fail closed: without the current bot id neither pass can prove authorship.
+    // Resolve before consuming guards so a later pass still gets its opportunity.
     let bot_user_id = match http.get_current_user().await {
         Ok(user) => user.id.get(),
         Err(error) => {
             tracing::warn!(
-                "startup-reclaim ({}): skipping sweep — could not resolve bot user id (fail-closed): {error}",
-                provider.as_str()
+                "startup-reclaim ({}, {}): skipping sweep — could not resolve bot user id (fail-closed): {error}",
+                provider.as_str(),
+                pass.as_str()
             );
             return ReclaimReport::default();
         }
     };
     let mut report = ReclaimReport::default();
-    for channel_id in plan.candidate_channels {
-        if !claim_channel_once(provider, channel_id) {
-            continue; // Already scanned this process lifetime.
+    let now_unix_secs = chrono::Utc::now().timestamp();
+    for &channel_id in candidate_channels {
+        if !claim_channel_once(pass, provider, channel_id) {
+            continue;
         }
         report.channels_scanned += 1;
-        let (finalized, markers) = reclaim_channel(
-            http,
-            shared,
-            provider,
-            channel_id,
-            bot_user_id,
-            boot_unix_secs,
-            &plan.live_anchor_ids,
-        )
-        .await;
-        report.messages_finalized += finalized;
-        report.markers_replaced += markers;
+        match pass {
+            ReclaimPass::FrozenPanels => {
+                let (finalized, markers) = reclaim_frozen_panels(
+                    http,
+                    shared,
+                    provider,
+                    channel_id,
+                    bot_user_id,
+                    boot_unix_secs,
+                    &plan.live_anchor_ids,
+                )
+                .await;
+                report.messages_finalized += finalized;
+                report.markers_replaced += markers;
+            }
+            ReclaimPass::OrphanPlaceholders => {
+                report.orphan_placeholders_deleted += reclaim_orphan_placeholders(
+                    http,
+                    shared,
+                    provider,
+                    channel_id,
+                    bot_user_id,
+                    now_unix_secs,
+                    &plan.protected_message_ids,
+                )
+                .await;
+            }
+        }
     }
     report
 }
 
-/// Spawn the one-shot startup reclaim task for `provider`. Runs once after a
-/// short settle delay so live-turn recovery and #3402 slot rehydration have a
-/// chance to re-register current-generation panels first (those carry a
-/// post-boot timestamp and are skipped regardless, but the delay keeps the
-/// reclaim read off the boot-storm critical path). Never loops — the
-/// per-channel guard makes it idempotent if a channel is somehow re-fed.
+async fn run_delayed_reclaim_pass(
+    http: Arc<serenity::Http>,
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    boot_unix_secs: i64,
+    delay_secs: u64,
+    pass: ReclaimPass,
+) {
+    tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+    let report = run_startup_reclaim_sweep(&http, &shared, &provider, boot_unix_secs, pass).await;
+    if report.messages_finalized > 0 || report.orphan_placeholders_deleted > 0 {
+        tracing::info!(
+            "startup-reclaim ({}, {}): channels_scanned={} messages_finalized={} markers_replaced={} orphan_placeholders_deleted={}",
+            provider.as_str(),
+            pass.as_str(),
+            report.channels_scanned,
+            report.messages_finalized,
+            report.markers_replaced,
+            report.orphan_placeholders_deleted
+        );
+    } else {
+        tracing::debug!(
+            "startup-reclaim ({}, {}): channels_scanned={} messages_finalized=0 orphan_placeholders_deleted=0",
+            provider.as_str(),
+            pass.as_str(),
+            report.channels_scanned
+        );
+    }
+}
+
+/// Spawn independent one-shot passes: frozen panels after the boot settle
+/// window, then exact unlinked placeholders after their minimum-age boundary.
 pub(super) fn spawn_startup_reclaim_sweep(
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,
     provider: ProviderKind,
     boot_unix_secs: i64,
 ) {
-    tokio::spawn(async move {
-        // Settle window: let recovery/rehydration re-register live panels first.
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-        let report = run_startup_reclaim_sweep(&http, &shared, &provider, boot_unix_secs).await;
-        if report.messages_finalized > 0 {
-            tracing::info!(
-                "startup-reclaim ({}): channels_scanned={} messages_finalized={} markers_replaced={}",
-                provider.as_str(),
-                report.channels_scanned,
-                report.messages_finalized,
-                report.markers_replaced
-            );
-        } else {
-            tracing::debug!(
-                "startup-reclaim ({}): channels_scanned={} messages_finalized=0",
-                provider.as_str(),
-                report.channels_scanned
-            );
-        }
-    });
+    tokio::spawn(run_delayed_reclaim_pass(
+        http.clone(),
+        shared.clone(),
+        provider.clone(),
+        boot_unix_secs,
+        FROZEN_PANEL_RECLAIM_DELAY_SECS,
+        ReclaimPass::FrozenPanels,
+    ));
+    tokio::spawn(run_delayed_reclaim_pass(
+        http,
+        shared,
+        provider,
+        boot_unix_secs,
+        ORPHAN_PLACEHOLDER_RECLAIM_DELAY_SECS,
+        ReclaimPass::OrphanPlaceholders,
+    ));
 }
 
 #[cfg(test)]
@@ -409,17 +570,29 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_guard_blocks_rescan() {
-        // ③ the per-channel guard claims once then refuses.
+    fn one_shot_guard_is_independent_per_pass() {
         reset_reclaim_guard_for_test();
         let provider = ProviderKind::Claude;
-        assert!(claim_channel_once(&provider, 4242), "first claim succeeds");
-        assert!(
-            !claim_channel_once(&provider, 4242),
-            "second claim on same channel must be refused"
-        );
-        // A different channel is independent.
-        assert!(claim_channel_once(&provider, 9999));
+        assert!(claim_channel_once(
+            ReclaimPass::FrozenPanels,
+            &provider,
+            4242
+        ));
+        assert!(!claim_channel_once(
+            ReclaimPass::FrozenPanels,
+            &provider,
+            4242
+        ));
+        assert!(claim_channel_once(
+            ReclaimPass::OrphanPlaceholders,
+            &provider,
+            4242
+        ));
+        assert!(claim_channel_once(
+            ReclaimPass::FrozenPanels,
+            &provider,
+            9999
+        ));
         reset_reclaim_guard_for_test();
     }
 
@@ -489,9 +662,10 @@ mod tests {
             false,      // not committed → live
             false,      // real turn
         )];
-        let plan = reclaim_scan_plan_from_rows(rows, boot);
+        let plan =
+            reclaim_scan_plan_from_rows(rows, Vec::new(), Vec::new(), &ProviderKind::Claude, boot);
         assert!(
-            plan.candidate_channels.contains(&555),
+            plan.frozen_panel_channels.contains(&555),
             "pre-boot row's channel is still a reclaim candidate"
         );
         assert!(
@@ -514,7 +688,8 @@ mod tests {
             row_with(101, 8001, Some(8002), boot - 50, true, false), // committed
             row_with(102, 8101, Some(8102), boot - 50, false, true), // rebind-origin
         ];
-        let plan = reclaim_scan_plan_from_rows(rows, boot);
+        let plan =
+            reclaim_scan_plan_from_rows(rows, Vec::new(), Vec::new(), &ProviderKind::Claude, boot);
         for id in [8001, 8002, 8101, 8102] {
             assert!(
                 !plan.live_anchor_ids.contains(&id),
@@ -530,12 +705,140 @@ mod tests {
         // a concurrent sweep of the same channel cannot clobber the live panel.
         let boot = 1_700_000_000i64;
         let rows = vec![row_with(303, 7001, Some(7002), boot + 5, false, false)];
-        let plan = reclaim_scan_plan_from_rows(rows, boot);
+        let plan =
+            reclaim_scan_plan_from_rows(rows, Vec::new(), Vec::new(), &ProviderKind::Claude, boot);
         assert!(
-            !plan.candidate_channels.contains(&303),
+            !plan.frozen_panel_channels.contains(&303),
             "post-boot row is current-gen, not a candidate"
         );
         assert!(plan.live_anchor_ids.contains(&7001));
         assert!(plan.live_anchor_ids.contains(&7002));
+    }
+
+    #[test]
+    fn orphan_placeholder_candidate_is_exact_old_owned_and_unlinked() {
+        let now = 1_700_000_000i64;
+        let protected = HashSet::from([9001]);
+        assert!(is_orphan_placeholder_candidate(
+            7,
+            7,
+            "...",
+            9002,
+            now - ORPHAN_PLACEHOLDER_MIN_AGE_SECS - 1,
+            now,
+            &protected,
+        ));
+        for (author, content, message_id, changed) in [
+            (8, "...", 9002, now - ORPHAN_PLACEHOLDER_MIN_AGE_SECS - 1),
+            (7, " ... ", 9002, now - ORPHAN_PLACEHOLDER_MIN_AGE_SECS - 1),
+            (7, "...", 9001, now - ORPHAN_PLACEHOLDER_MIN_AGE_SECS - 1),
+            (7, "...", 9002, now - ORPHAN_PLACEHOLDER_MIN_AGE_SECS),
+        ] {
+            assert!(!is_orphan_placeholder_candidate(
+                author, 7, content, message_id, changed, now, &protected,
+            ));
+        }
+    }
+
+    #[test]
+    fn orphan_placeholder_delete_is_terminal_cleanup_guarded() {
+        let module_src = include_str!("startup_reclaim.rs");
+        let guard_needle = ["terminal_cleanup_", "protects_delete("].concat();
+        let attempt_needle = ["attempted ", "+= 1;"].concat();
+        let delete_needle = [".delete_", "message(http, msg.id)"].concat();
+        let result_needle = ["emit_relay_delete_", "result("].concat();
+        let guard = module_src
+            .find(&guard_needle)
+            .expect("orphan reclaim must consult terminal cleanup protection");
+        let attempt = module_src
+            .find(&attempt_needle)
+            .expect("orphan reclaim must count destructive attempts");
+        let delete = module_src
+            .find(&delete_needle)
+            .expect("orphan reclaim must retain its bounded delete");
+        let result = module_src
+            .find(&result_needle)
+            .expect("orphan reclaim delete result must be durably observed");
+
+        assert!(
+            guard < attempt && attempt < delete && delete < result,
+            "committed and retry-pending terminal placeholders must be skipped before a delete attempt"
+        );
+    }
+
+    #[test]
+    fn configured_candidates_are_provider_scoped_and_deduplicated() {
+        let bindings = vec![
+            super::super::settings::RegisteredChannelBinding {
+                channel_id: 42,
+                owner_provider: ProviderKind::Claude,
+                fallback_name: None,
+            },
+            super::super::settings::RegisteredChannelBinding {
+                channel_id: 42,
+                owner_provider: ProviderKind::Claude,
+                fallback_name: None,
+            },
+            super::super::settings::RegisteredChannelBinding {
+                channel_id: 43,
+                owner_provider: ProviderKind::Codex,
+                fallback_name: None,
+            },
+        ];
+        let plan = reclaim_scan_plan_from_rows(
+            Vec::new(),
+            Vec::new(),
+            bindings,
+            &ProviderKind::Claude,
+            1_700_000_000,
+        );
+        assert_eq!(plan.orphan_placeholder_channels, vec![42]);
+        assert!(plan.frozen_panel_channels.is_empty());
+    }
+
+    #[test]
+    fn every_inflight_discord_identity_is_protected_from_placeholder_cleanup() {
+        let boot = 1_700_000_000i64;
+        let mut row = row_with(303, 7001, Some(7002), boot - 5, true, false);
+        row.0.user_msg_id = 7003;
+        row.0.injected_prompt_message_id = Some(7004);
+        let plan = reclaim_scan_plan_from_rows(
+            vec![row],
+            Vec::new(),
+            Vec::new(),
+            &ProviderKind::Claude,
+            boot,
+        );
+        for id in [7001, 7002, 7003, 7004] {
+            assert!(plan.protected_message_ids.contains(&id));
+        }
+    }
+
+    #[test]
+    fn matching_pending_start_anchor_is_protected_from_placeholder_cleanup() {
+        let pending = super::super::tui_direct_pending_start::TuiDirectPendingStart {
+            provider: "claude".to_string(),
+            channel_id: 303,
+            tmux_session_name: "tmux-test".to_string(),
+            prompt_text: "continue".to_string(),
+            anchor_message_id: 8001,
+            lease_relay_owner: "bridge_adapter".to_string(),
+            lease_runtime_kind: Some("claude_tui".to_string()),
+            lease_turn_id: None,
+            lease_session_key: None,
+            generation: 0,
+            created_at_ms: 0,
+            observed_at_ms: 0,
+            state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
+            attempt_count: 0,
+        };
+        let plan = reclaim_scan_plan_from_rows(
+            Vec::new(),
+            vec![pending],
+            Vec::new(),
+            &ProviderKind::Claude,
+            1_700_000_000,
+        );
+        assert!(plan.protected_message_ids.contains(&8001));
     }
 }

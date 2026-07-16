@@ -61,6 +61,7 @@ const STARTUP_DIALOG_DISMISS_SETTLE: Duration = Duration::from_millis(500);
 pub enum PromptReadinessKind {
     FreshTurn,
     Followup,
+    ProvenWarmFollowup,
 }
 
 /// Resolve the Follow-up readiness budget from the live config snapshot,
@@ -134,22 +135,30 @@ impl PromptReadinessKind {
     fn timeout(self) -> Duration {
         match self {
             Self::FreshTurn => FRESH_PROMPT_READY_TIMEOUT,
-            Self::Followup => followup_prompt_ready_timeout(),
+            Self::Followup | Self::ProvenWarmFollowup => followup_prompt_ready_timeout(),
         }
     }
 
     fn event_budget(self) -> Duration {
         match self {
             Self::FreshTurn => FRESH_PROMPT_READY_EVENT_BUDGET,
-            Self::Followup => FOLLOWUP_PROMPT_READY_EVENT_BUDGET,
+            Self::Followup | Self::ProvenWarmFollowup => FOLLOWUP_PROMPT_READY_EVENT_BUDGET,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::FreshTurn => "fresh",
-            Self::Followup => "follow-up",
+            Self::Followup | Self::ProvenWarmFollowup => "follow-up",
         }
+    }
+
+    fn is_followup(self) -> bool {
+        matches!(self, Self::Followup | Self::ProvenWarmFollowup)
+    }
+
+    fn allows_stale_mcp_auth_warning(self) -> bool {
+        matches!(self, Self::ProvenWarmFollowup)
     }
 }
 
@@ -361,20 +370,26 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
         session_name,
         PROMPT_READY_CAPTURE_SCROLLBACK,
     );
-    let prompt_marker_detected = pane.as_deref().is_some_and(pane_looks_ready_for_prompt);
+    prompt_readiness_snapshot_from_capture(
+        pane.as_deref(),
+        crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name),
+    )
+}
+
+fn prompt_readiness_snapshot_from_capture(
+    pane: Option<&str>,
+    tmux_pane_alive: bool,
+) -> PromptReadinessSnapshot {
+    let prompt_marker_detected = pane.is_some_and(pane_looks_ready_for_prompt);
     let prompt_draft_detected = pane
-        .as_deref()
         .is_some_and(crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft);
     let pane_tail = pane
-        .as_deref()
         .map(prompt_ready_debug_tail)
         .unwrap_or_else(|| "<capture unavailable>".to_string());
     PromptReadinessSnapshot {
         prompt_marker_detected,
         prompt_draft_detected,
-        tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
-            session_name,
-        ),
+        tmux_pane_alive,
         capture_available: pane.is_some(),
         pane_tail,
     }
@@ -939,7 +954,7 @@ pub fn send_followup_prompt_or_idle_transcript(
     let actions = plan_prompt_submit(prompt)?;
     wait_for_prompt_ready_or_idle_transcript(
         session_name,
-        PromptReadinessKind::Followup,
+        PromptReadinessKind::ProvenWarmFollowup,
         cancel_token,
         transcript_path,
     )?;
@@ -971,16 +986,14 @@ fn wait_for_prompt_ready_inner(
     let timeout = readiness.timeout();
     let start = Instant::now();
 
-    // #3889: a fresh cold-boot can land on the MCP-authentication-required
+    // #3889/#4528: a cold pane can land on the MCP-authentication-required
     // welcome screen, which paints composer chrome (so it reads READY) yet
     // silently drops every prompt submission until the operator runs `/mcp`.
-    // Detect it up front and fail fast with an actionable, non-timeout reason
-    // instead of blind-waiting the full readiness timeout and then rebooting
-    // into the same blocked screen. Scoped to FreshTurn (the cold-boot case);
-    // the kind-agnostic polling-loop check below is the safety net for both
-    // kinds. The check only re-captures when the banner is actually present, so
-    // a healthy fresh boot pays just one extra capture.
-    if matches!(readiness, PromptReadinessKind::FreshTurn) {
+    // Detect it up front and fail fast with an actionable, non-timeout reason.
+    // Only the hosted existing-session path supplies ProvenWarmFollowup after a
+    // recorded turn; a plain Followup intent is not proof that this warning is
+    // stale. The check only re-captures when the banner is actually present.
+    if !readiness.allows_stale_mcp_auth_warning() {
         let snapshot = prompt_readiness_snapshot(session_name);
         if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)? {
             log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
@@ -1008,7 +1021,7 @@ fn wait_for_prompt_ready_inner(
     if claude_registry_stop_already_buffered(session_name) {
         check_prompt_cancel(cancel_token)?;
         let snapshot = prompt_readiness_snapshot(session_name);
-        if prompt_marker_confirms_prompt_ready(&snapshot) {
+        if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             tracing::debug!(
                 tmux_session_name = session_name,
                 readiness = readiness.label(),
@@ -1026,11 +1039,11 @@ fn wait_for_prompt_ready_inner(
         );
     }
 
-    // #3889: even an idle transcript must not confirm ready while the live pane
-    // is stranded on the MCP-auth welcome screen (short-circuit keeps the pane
-    // capture off the non-idle hot path).
+    // #3889/#4528: an idle transcript must not bypass an auth block without
+    // recorded-turn warm provenance. Even proven warm reuse must still reject
+    // live busy chrome in the confirming pane capture.
     if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path)
-        && pane_not_mcp_auth_blocked(session_name)
+        && pane_allows_prompt_readiness(session_name, readiness)
     {
         tracing::info!(
             tmux_session_name = session_name,
@@ -1065,8 +1078,12 @@ fn wait_for_prompt_ready_inner(
     // guaranteed to wake this specific permit, even if the wait has not yet
     // been polled. See issue #2445.
     let notify = crate::services::claude_tui::hook_server::prompt_ready_notify();
-    let (fast_path, post_event_snapshot) =
-        run_prompt_ready_fast_path(notify, session_name.to_string(), readiness.event_budget());
+    let (fast_path, post_event_snapshot) = run_prompt_ready_fast_path(
+        notify,
+        session_name.to_string(),
+        readiness,
+        readiness.event_budget(),
+    );
 
     match fast_path {
         HookFastPathOutcome::PreSnapshotReady => {
@@ -1088,7 +1105,7 @@ fn wait_for_prompt_ready_inner(
 
     check_prompt_cancel(cancel_token)?;
     if let Some(snapshot) = post_event_snapshot {
-        if prompt_marker_confirms_prompt_ready(&snapshot) {
+        if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             check_prompt_cancel(cancel_token)?;
             // The live broadcast woke this waiter. Drain the parallel registry
             // copy as consumed too, otherwise the same Stop can be replayed into
@@ -1104,9 +1121,9 @@ fn wait_for_prompt_ready_inner(
             );
             return Ok(());
         }
-        // #3889: gate the idle-transcript fallback on the MCP-auth check too —
-        // we already hold the post-event snapshot, so this is free.
-        if !snapshot_indicates_mcp_auth_block(&snapshot)
+        // #3889/#4528: only proven warm reuse may treat this banner as stale.
+        // Every path still honors the live draft and busy state below.
+        if snapshot_allows_prompt_readiness(readiness, &snapshot)
             && transcript_idle_confirms_prompt_ready(&snapshot, transcript_path)
         {
             check_prompt_cancel(cancel_token)?;
@@ -1185,6 +1202,7 @@ fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFas
 fn run_prompt_ready_fast_path(
     notify: Arc<Notify>,
     session_name: String,
+    readiness: PromptReadinessKind,
     budget: Duration,
 ) -> (HookFastPathOutcome, Option<PromptReadinessSnapshot>) {
     let fut = async move {
@@ -1198,7 +1216,7 @@ fn run_prompt_ready_fast_path(
         notified.as_mut().enable();
 
         let pre_snapshot = prompt_readiness_snapshot(&session_name);
-        if prompt_marker_confirms_prompt_ready(&pre_snapshot) {
+        if prompt_marker_confirms_prompt_ready(readiness, &pre_snapshot) {
             return (HookFastPathOutcome::PreSnapshotReady, None);
         }
         if !pre_snapshot.tmux_pane_alive {
@@ -1321,12 +1339,11 @@ fn wait_for_prompt_ready_polling(
     let mut active_turn_extension_logged = false;
     loop {
         check_prompt_cancel(cancel_token)?;
-        // #3889: idle transcript alone must not confirm ready while the pane is
-        // stranded on the MCP-auth welcome screen (short-circuit keeps the pane
-        // capture off the non-idle poll cadence). When it IS blocked this falls
-        // through to the snapshot + auth fail-fast just below.
+        // #3889/#4528: preserve the auth gate unless the caller supplied
+        // recorded-turn warm provenance. Short-circuit ordering keeps the pane
+        // capture off the non-idle poll cadence.
         if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path)
-            && pane_not_mcp_auth_blocked(session_name)
+            && pane_allows_prompt_readiness(session_name, readiness)
         {
             tracing::info!(
                 tmux_session_name = session_name,
@@ -1338,17 +1355,16 @@ fn wait_for_prompt_ready_polling(
         }
         let snapshot = prompt_readiness_snapshot(session_name);
         check_prompt_cancel(cancel_token)?;
-        // #3889: bail out of the wait the moment the pane is confirmed stranded
-        // on the MCP-authentication-required cold-boot welcome screen. This must
-        // precede the ready check because that screen's composer chrome would
-        // otherwise read as ready (`prompt_marker_confirms_prompt_ready` already
-        // refuses it, but failing fast here surfaces the actionable reason and
-        // avoids burning the rest of the timeout).
-        if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)? {
-            log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
-            return Err(mcp_auth_required_error_message(session_name));
+        // #3889/#4528: plain Followup callers may point at a genuine cold pane,
+        // so only recorded-turn warm provenance can bypass the stable auth block.
+        if !readiness.allows_stale_mcp_auth_warning() {
+            if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)?
+            {
+                log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
+                return Err(mcp_auth_required_error_message(session_name));
+            }
         }
-        if prompt_marker_confirms_prompt_ready(&snapshot) {
+        if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             return Ok(());
         }
         // Startup dialogs (resume-from-summary picker, workspace trust) park
@@ -1394,10 +1410,9 @@ fn wait_for_prompt_ready_polling(
                 }
             }
         }
-        // #3889: gate the idle-transcript fallback on the MCP-auth check (the
-        // snapshot is already in hand). The auth fail-fast above normally returns
-        // first, so this is belt-and-suspenders for any future reordering.
-        if !snapshot_indicates_mcp_auth_block(&snapshot)
+        // #3889/#4528: apply the same provenance-aware auth policy to the
+        // transcript-idle fallback; draft and busy state still veto every kind.
+        if snapshot_allows_prompt_readiness(readiness, &snapshot)
             && transcript_idle_confirms_prompt_ready(&snapshot, transcript_path)
         {
             tracing::info!(
@@ -1540,14 +1555,33 @@ fn pane_looks_ready_for_prompt(pane: &str) -> bool {
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
 }
 
-fn prompt_marker_confirms_prompt_ready(snapshot: &PromptReadinessSnapshot) -> bool {
+fn prompt_marker_confirms_prompt_ready(
+    readiness: PromptReadinessKind,
+    snapshot: &PromptReadinessSnapshot,
+) -> bool {
     snapshot.prompt_marker_detected
         && !snapshot.prompt_draft_detected
-        // #3889: the MCP-authentication-required cold-boot welcome screen paints
-        // composer chrome that otherwise reads as ready, but Claude Code drops
-        // submissions into it. Never confirm ready while that banner is up — in
-        // any path (fast-path pre/post snapshot, buffered-Stop, or polling).
-        && !snapshot_indicates_mcp_auth_block(snapshot)
+        && snapshot_allows_prompt_readiness(readiness, snapshot)
+}
+
+/// #3889/#4528: an MCP-auth warning blocks readiness unless the caller proves
+/// this is hosted reuse after a recorded turn. A plain Followup intent can also
+/// target a genuine cold/auth-blocked pane, so it receives no exemption. Draft
+/// and live busy evidence veto every readiness kind, including proven warm reuse
+/// and transcript-idle fallback paths that do not require a prompt marker.
+fn snapshot_allows_prompt_readiness(
+    readiness: PromptReadinessKind,
+    snapshot: &PromptReadinessSnapshot,
+) -> bool {
+    if snapshot.prompt_draft_detected {
+        return false;
+    }
+    if snapshot.capture_available
+        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&snapshot.pane_tail)
+    {
+        return false;
+    }
+    readiness.allows_stale_mcp_auth_warning() || !snapshot_indicates_mcp_auth_block(snapshot)
 }
 
 /// Whether the snapshot's captured pane shows the MCP-authentication-required
@@ -1562,19 +1596,14 @@ fn snapshot_indicates_mcp_auth_block(snapshot: &PromptReadinessSnapshot) -> bool
         )
 }
 
-/// #3889 (Codex review #3931 [2]): a ready-return path that relies on transcript
-/// idleness — NOT a live pane marker — must still refuse to confirm ready when
-/// the pane is stranded on the MCP-authentication-required cold-boot welcome
-/// screen. Otherwise a stale idle transcript from a prior run (reachable via the
-/// #3880 A2 recorded-turn fast path) lets the prompt submit into a dead screen,
-/// bypassing the marker-path gate entirely.
-///
-/// Captures the pane to verify. Callers MUST gate this behind the transcript-idle
-/// check via short-circuit `&&` so the steady-state polling cadence pays no extra
-/// capture — the snapshot is taken only at the confirm boundary. A blind capture
-/// cannot assert a block, so it reports "not blocked".
-fn pane_not_mcp_auth_blocked(session_name: &str) -> bool {
-    !snapshot_indicates_mcp_auth_block(&prompt_readiness_snapshot(session_name))
+/// #3889/#4528: apply the same provenance-aware auth policy to the transcript-
+/// idle path, which has no live snapshot of its own. Callers MUST gate this
+/// behind the transcript-idle check via short-circuit `&&` so the pane is
+/// captured only at the confirm boundary. Only ProvenWarmFollowup ignores the
+/// auth warning; draft or busy evidence still blocks it. A blind capture cannot
+/// assert a draft, busy frame, or auth block.
+fn pane_allows_prompt_readiness(session_name: &str, readiness: PromptReadinessKind) -> bool {
+    snapshot_allows_prompt_readiness(readiness, &prompt_readiness_snapshot(session_name))
 }
 
 /// Actionable, NON-timeout error for a cold-boot stranded on the
@@ -1651,7 +1680,7 @@ fn prompt_ready_timeout_should_clear_followup_draft(
     snapshot: &PromptReadinessSnapshot,
     requeue_enabled: bool,
 ) -> bool {
-    matches!(readiness, PromptReadinessKind::Followup)
+    readiness.is_followup()
         && requeue_enabled
         && snapshot.tmux_pane_alive
         && snapshot.capture_available
@@ -1980,6 +2009,10 @@ mod tests {
             FOLLOWUP_PROMPT_READY_TIMEOUT
         );
         assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+        assert_eq!(
+            PromptReadinessKind::ProvenWarmFollowup.timeout().as_secs(),
+            45
+        );
         assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
     }
 
@@ -2352,6 +2385,26 @@ mod tests {
     }
 
     #[test]
+    fn readiness_snapshot_derives_marker_draft_and_tail_from_one_capture() {
+        let pane = "\
+❯ completed prompt
+⏺ earlier completed output
+✻ Baked for 2s
+────────────────────────────────────────────────────
+❯ pending draft
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2";
+
+        let snapshot = prompt_readiness_snapshot_from_capture(Some(pane), true);
+
+        assert!(snapshot.prompt_marker_detected);
+        assert!(snapshot.prompt_draft_detected);
+        assert!(snapshot.capture_available);
+        assert!(snapshot.tmux_pane_alive);
+        assert_eq!(snapshot.pane_tail, pane);
+    }
+
+    #[test]
     fn prompt_marker_does_not_confirm_readiness_when_draft_is_present() {
         let snapshot = PromptReadinessSnapshot {
             prompt_marker_detected: true,
@@ -2361,7 +2414,10 @@ mod tests {
             pane_tail: "\u{276f} stale draft".to_string(),
         };
 
-        assert!(!prompt_marker_confirms_prompt_ready(&snapshot));
+        assert!(!prompt_marker_confirms_prompt_ready(
+            PromptReadinessKind::Followup,
+            &snapshot,
+        ));
     }
 
     // #3889: the MCP-authentication-required cold-boot welcome screen paints
@@ -2397,7 +2453,7 @@ mod tests {
         };
         assert!(snapshot_indicates_mcp_auth_block(&blocked));
         assert!(
-            !prompt_marker_confirms_prompt_ready(&blocked),
+            !prompt_marker_confirms_prompt_ready(PromptReadinessKind::FreshTurn, &blocked),
             "MCP-auth cold-boot welcome screen must not be classified ready-to-submit"
         );
 
@@ -2416,7 +2472,7 @@ mod tests {
         };
         assert!(!snapshot_indicates_mcp_auth_block(&ready));
         assert!(
-            prompt_marker_confirms_prompt_ready(&ready),
+            prompt_marker_confirms_prompt_ready(PromptReadinessKind::FreshTurn, &ready),
             "a normal empty composer must still confirm ready"
         );
 
@@ -2428,6 +2484,117 @@ mod tests {
             ..blocked.clone()
         };
         assert!(!snapshot_indicates_mcp_auth_block(&blind));
+    }
+
+    // #4528: Claude Code v2.1.209 can keep the MCP-auth warning visible after a
+    // successful turn. Only a caller with recorded-turn warm provenance may
+    // accept the idle composer; plain Followup remains a cold/auth-blocked pane.
+    // Positive busy chrome vetoes every kind.
+    #[test]
+    fn mcp_auth_warning_requires_warm_provenance_and_idle_pane() {
+        let idle_pane = "\
+╭─── Claude Code v2.1.209 ───────────────────────────╮
+│            Welcome back 오부장!                    │
+╰────────────────────────────────────────────────────
+
+ ⚠ 1 MCP server needs authentication · run /mcp
+
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        let idle = PromptReadinessSnapshot {
+            prompt_marker_detected: pane_looks_ready_for_prompt(idle_pane),
+            prompt_draft_detected:
+                crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(
+                    idle_pane,
+                ),
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: idle_pane.to_string(),
+        };
+
+        assert!(snapshot_indicates_mcp_auth_block(&idle));
+        assert!(
+            !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &idle),
+            "Followup intent alone must not bypass a genuine cold auth block"
+        );
+        assert!(
+            prompt_marker_confirms_prompt_ready(PromptReadinessKind::ProvenWarmFollowup, &idle,),
+            "recorded-turn warm provenance may ignore a persistent warning"
+        );
+        assert!(
+            !prompt_marker_confirms_prompt_ready(PromptReadinessKind::FreshTurn, &idle),
+            "the same warning must keep the #3889 cold-boot FreshTurn guard"
+        );
+
+        let busy_pane = "\
+ ⚠ 1 MCP server needs authentication · run /mcp
+ ⏺ Running 1 shell command…
+ · Actioning… (4m 7s · esc to interrupt)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        let busy = PromptReadinessSnapshot {
+            // Exercise the readiness boundary directly with the stale marker
+            // bit observed in the #4528 trace; the pane body must still veto it.
+            prompt_marker_detected: true,
+            prompt_draft_detected:
+                crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(
+                    busy_pane,
+                ),
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: busy_pane.to_string(),
+        };
+
+        assert!(snapshot_indicates_mcp_auth_block(&busy));
+        assert!(crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(busy_pane));
+        for readiness in [
+            PromptReadinessKind::FreshTurn,
+            PromptReadinessKind::Followup,
+            PromptReadinessKind::ProvenWarmFollowup,
+        ] {
+            assert!(
+                !prompt_marker_confirms_prompt_ready(readiness, &busy),
+                "positive generating chrome must veto readiness for {readiness:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_auth_warning_unknown_duration_spinner_keeps_warm_followup_not_ready() {
+        // Claude Code 2.1.209 ships spinner phrases beyond the legacy verb
+        // allowlist. The shared structural classifier must veto the stale prompt
+        // marker even when warm provenance permits the auth warning itself.
+        let pane = "\
+ ⚠ 1 MCP server needs authentication · run /mcp
+ ✳ Architecting… (12s)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: pane.to_string(),
+        };
+
+        assert!(snapshot_indicates_mcp_auth_block(&snapshot));
+        assert!(
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane),
+            "shared live-turn classification must include unknown structured spinner phrases"
+        );
+        assert!(
+            !prompt_marker_confirms_prompt_ready(
+                PromptReadinessKind::ProvenWarmFollowup,
+                &snapshot,
+            ),
+            "a duration-only unknown-phrase spinner must veto proven warm readiness"
+        );
     }
 
     // #3889: the MCP-auth fail-fast error must be a DISTINCT, non-timeout error
@@ -2738,13 +2905,11 @@ line 13";
         ));
     }
 
-    // Codex review #3931 [2] (under-block): the transcript-idle fallback paths
-    // must also honour the MCP-auth gate. A recorded-turn (idle) transcript +
-    // an MCP-auth welcome pane must NOT confirm ready, even though the
-    // transcript-idle predicate ALONE accepts the composer-chrome pane — a
-    // normal recorded-turn idle pane (no welcome banner) still does.
+    // #3889/#4528: transcript-idle fallback applies the same provenance-aware
+    // policy as marker readiness. Plain Followup rejects an auth welcome pane;
+    // only ProvenWarmFollowup may ignore that warning, and drafts still veto it.
     #[test]
-    fn idle_transcript_fallback_is_gated_on_mcp_auth_block() {
+    fn idle_transcript_fallback_applies_kind_aware_mcp_auth_gate() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             file.path(),
@@ -2767,16 +2932,33 @@ line 13";
         };
         // Precondition: the transcript-idle predicate alone accepts the
         // composer-chrome welcome pane (this is exactly why the gate is needed).
-        assert!(transcript_idle_confirms_prompt_ready(
-            &blocked,
-            Some(file.path())
-        ));
+        let transcript_idle = transcript_idle_confirms_prompt_ready(&blocked, Some(file.path()));
+        assert!(transcript_idle);
         assert!(snapshot_indicates_mcp_auth_block(&blocked));
-        // The gate the fallback paths apply (`!block && idle`) refuses it.
         assert!(
-            !(!snapshot_indicates_mcp_auth_block(&blocked)
-                && transcript_idle_confirms_prompt_ready(&blocked, Some(file.path()))),
-            "MCP-auth welcome pane must not confirm ready via the idle-transcript fallback"
+            !(snapshot_allows_prompt_readiness(PromptReadinessKind::FreshTurn, &blocked)
+                && transcript_idle),
+            "MCP-auth welcome pane must not confirm FreshTurn via idle transcript"
+        );
+        assert!(
+            !(snapshot_allows_prompt_readiness(PromptReadinessKind::ProvenWarmFollowup, &blocked)
+                && transcript_idle),
+            "an unsent draft must block proven warm reuse despite an idle transcript"
+        );
+
+        let warm_idle = PromptReadinessSnapshot {
+            prompt_draft_detected: false,
+            ..blocked.clone()
+        };
+        assert!(
+            !(snapshot_allows_prompt_readiness(PromptReadinessKind::Followup, &warm_idle)
+                && transcript_idle),
+            "Followup intent alone must not bypass a genuine cold auth block"
+        );
+        assert!(
+            snapshot_allows_prompt_readiness(PromptReadinessKind::ProvenWarmFollowup, &warm_idle,)
+                && transcript_idle,
+            "recorded-turn warm provenance may ignore a stale warning only when idle"
         );
 
         // No regression: a normal recorded-turn idle pane (no welcome banner)
@@ -2790,7 +2972,7 @@ line 13";
         };
         assert!(!snapshot_indicates_mcp_auth_block(&ready));
         assert!(
-            !snapshot_indicates_mcp_auth_block(&ready)
+            snapshot_allows_prompt_readiness(PromptReadinessKind::FreshTurn, &ready)
                 && transcript_idle_confirms_prompt_ready(&ready, Some(file.path())),
             "a normal recorded-turn idle pane must still confirm ready (no regression)"
         );
@@ -2822,6 +3004,10 @@ line 13";
     fn prompt_ready_timeouts_are_split_for_fresh_and_followup_turns() {
         assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
         assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+        assert_eq!(
+            PromptReadinessKind::ProvenWarmFollowup.timeout().as_secs(),
+            45
+        );
     }
 
     #[test]
@@ -2831,6 +3017,7 @@ line 13";
         for kind in [
             PromptReadinessKind::FreshTurn,
             PromptReadinessKind::Followup,
+            PromptReadinessKind::ProvenWarmFollowup,
         ] {
             assert!(
                 kind.event_budget() < kind.timeout(),
@@ -3156,6 +3343,11 @@ line 13";
         // budget should be cleared (only when requeue is enabled).
         assert!(prompt_ready_timeout_should_clear_followup_draft(
             PromptReadinessKind::Followup,
+            &draft,
+            true
+        ));
+        assert!(prompt_ready_timeout_should_clear_followup_draft(
+            PromptReadinessKind::ProvenWarmFollowup,
             &draft,
             true
         ));

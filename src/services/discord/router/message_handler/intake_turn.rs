@@ -1831,7 +1831,7 @@ pub(super) async fn handle_text_message(
         token,
         role_binding.as_ref(),
         reply_to_user_message,
-        dispatch_profile,
+        PromptProfiles::foreground(dispatch_profile),
         dispatch_type_str.as_deref(),
         current_task_context.as_ref(),
         sak_for_system,
@@ -2838,6 +2838,31 @@ mod recovery_context_take_order_tests {
             "let session_retry_context = ",
             "take_session_retry_context(shared, channel_id, Some(&turn_id));"
         )
+    }
+
+    #[test]
+    fn discord_user_turn_keeps_user_and_streaming_placeholder_ids_separate() {
+        let module_src = include_str!("intake_turn.rs");
+        let bridge_context_pos = module_src
+            .find("TurnBridgeContext {")
+            .expect("Discord intake builds a turn-bridge context");
+        let bridge_context = &module_src[bridge_context_pos..];
+        let user_message_field = format!("{}{}", "user_msg_id: Some(", "user_msg_id),");
+        let placeholder_field = format!("{}{}", "current_msg_id: Some(", "placeholder_msg_id),");
+        let synthetic_flag = format!("{}{}", "is_external_input_tui_", "direct: false");
+
+        assert!(
+            bridge_context.contains(&user_message_field),
+            "Discord-origin user turns must retain the real user message as their request identity"
+        );
+        assert!(
+            bridge_context.contains(&placeholder_field),
+            "Discord-origin user turns must keep the posted intake placeholder as their streaming edit target"
+        );
+        assert!(
+            bridge_context.contains(&synthetic_flag),
+            "Discord-origin user turns must remain outside the synthetic TUI-direct path"
+        );
     }
 
     #[test]

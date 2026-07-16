@@ -320,8 +320,7 @@ pub(super) async fn run_post_loop_finalize(
         && !terminal_error_path;
     let response_unsent = response_portion_after_offset(&full_response, response_sent_offset);
     let response_pending_trimmed_empty = response_unsent.trim().is_empty();
-    // #3268: `mut` so the post-gate self-healing handoff (below) can promote it.
-    let mut bridge_relay_delegated_to_watcher = recovered_watcher_owns_output
+    let bridge_relay_delegated_to_watcher = recovered_watcher_owns_output
         || should_delegate_bridge_relay_to_watcher(
             watcher_owns_assistant_relay,
             watcher_relay_available_for_turn,
@@ -331,9 +330,7 @@ pub(super) async fn run_post_loop_finalize(
             transport_error,
             recovery_retry,
         );
-    // #3268: `mut` so the post-gate self-healing handoff can promote it to
-    // `WatcherRelay` once the gate confirms the pane is still busy.
-    let mut bridge_output_owner = classify_bridge_output_owner(
+    let bridge_output_owner = classify_bridge_output_owner(
         standby_relay_owns_output
             && !cancelled
             && !is_prompt_too_long
@@ -372,9 +369,7 @@ pub(super) async fn run_post_loop_finalize(
     // dispatch followups / auto-queue slot release race ahead of the final
     // message edit, so an archived/deleted thread could strand the turn
     // while the queue already advanced.
-    // #3268: `mut` so the post-gate self-healing handoff can clear it — a
-    // handed-off turn is NOT done on the bridge side.
-    let mut should_complete_work_dispatch_after_delivery =
+    let should_complete_work_dispatch_after_delivery =
         !cancelled && !is_prompt_too_long && !transport_error && bridge_output_owner.is_none();
     let should_fail_dispatch_after_delivery = transport_error && !cancelled;
 
@@ -433,54 +428,19 @@ pub(super) async fn run_post_loop_finalize(
     // pre-submit guard below is the correctness barrier that prevents
     // follow-up input from being injected into a still-busy pane.
     // #3038: the early TUI completion gate (eligibility filter + bounded
-    // quiescence probe + timed-out warning) is extracted verbatim to
-    // `early_tui_completion.rs`. The two outputs are consumed later, so the
-    // `#[cfg]` `let` declarations stay here (preserving the exact unix /
-    // non-unix split) and the helper returns the computed values; behavior
-    // is byte-identical (see the module doc for the seam-fix note).
+    // quiescence probe) is extracted to `early_tui_completion.rs`. The outcome
+    // is reused by the late gate, so its exact Unix-only binding stays here.
     #[cfg(unix)]
-    let bridge_early_gate_timed_out;
-    #[cfg(not(unix))]
-    let bridge_early_gate_timed_out = false;
-    #[cfg(unix)]
-    let bridge_tui_gate_outcome_early: Option<super::super::tmux::TuiCompletionGateOutcome>;
-    #[cfg(unix)]
-    {
-        let (outcome_early, gate_timed_out) = early_tui_completion::run_early_tui_completion_gate(
-            cancelled,
-            is_prompt_too_long,
-            transport_error,
-            recovery_retry,
-            &inflight_state,
-            &provider,
-            channel_id,
-        )
-        .await;
-        bridge_tui_gate_outcome_early = outcome_early;
-        bridge_early_gate_timed_out = gate_timed_out;
-    }
-    // #3268 (Defect B): on (gate timeout + non-terminal + genuinely-live
-    // watcher) hand the busy turn back to the watcher — see `watcher_handoff`.
-    #[cfg(unix)]
-    watcher_handoff::maybe_hand_off_busy_turn_to_watcher(
-        &shared_owned,
-        bridge_early_gate_timed_out,
-        terminal_error_path,
-        watcher_owner_channel_id,
-        channel_id,
+    let bridge_tui_gate_outcome_early = early_tui_completion::run_early_tui_completion_gate(
+        cancelled,
+        is_prompt_too_long,
+        transport_error,
+        recovery_retry,
+        &inflight_state,
         &provider,
-        dispatch_id.as_deref(),
-        adk_session_key.as_deref(),
-        turn_id.as_str(),
-        current_msg_id.get(),
-        can_chain_locally,
-        tmux_last_offset,
-        response_unsent,
-        &mut inflight_state,
-        &mut bridge_relay_delegated_to_watcher,
-        &mut bridge_output_owner,
-        &mut should_complete_work_dispatch_after_delivery,
-    );
+        channel_id,
+    )
+    .await;
     let has_queued_turns = if bridge_relay_delegated_to_watcher {
         // #1452 (Codex P1): the actual `mailbox_finalize_owed.store(true,
         // Release)` happens EARLIER, at the watcher-unpause site in the
@@ -532,7 +492,6 @@ pub(super) async fn run_post_loop_finalize(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),
                 watcher_owner_channel = watcher_owner_channel_id.get(),
-                tui_gate_timed_out = bridge_early_gate_timed_out,
                 "  [{ts}] ⚠ bridge watcher handoff missing finalizer; bridge is releasing mailbox to avoid stranded queued turns"
             );
             // #3016 phase 2: route through the single-authority finalizer.
@@ -624,14 +583,6 @@ pub(super) async fn run_post_loop_finalize(
         // gone. The ledger's exactly-once gate already guards the
         // cross-turn hazard the CAS protected against — a watcher surviving
         // into the NEXT turn no longer has a flag to swap.
-        if bridge_early_gate_timed_out {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                "  [{ts}] ⚠ #2293/#2780: bridge releasing mailbox despite TUI quiescence timeout; follow-up pre-submit gate will requeue if pane is still busy"
-            );
-        }
         let outcome = shared_owned
             .turn_finalizer
             .submit_terminal(

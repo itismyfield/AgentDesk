@@ -10,14 +10,13 @@ use crate::services::discord::health::{
     start_reserved_headless_agent_turn_with_owner_channel,
 };
 
+use super::fresh_context_guaranteed;
 use super::runtime::RoutineRunOutcome;
 use super::session_control::RoutineSessionController;
 use super::store::{
     ClaimedRoutineRun, NextDueAtUpdate, RecoveredRoutineRun, RoutineStore, RunningAgentRoutineRun,
     terminal_failure_should_pause,
 };
-
-const FRESH_CONTEXT_GUARANTEED: bool = false;
 
 #[derive(Clone)]
 pub struct RoutineAgentExecutor {
@@ -128,7 +127,7 @@ impl RoutineAgentExecutor {
                 status: "running".to_string(),
                 result_json: Some(started.result_json),
                 error: None,
-                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                fresh_context_guaranteed: started.fresh_context_guaranteed,
             }),
             Ok(started) => {
                 // Prefer the dispatch label the routine script returned (e.g.
@@ -163,7 +162,7 @@ impl RoutineAgentExecutor {
                     status: "succeeded".to_string(),
                     result_json: Some(started.result_json),
                     error: None,
-                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    fresh_context_guaranteed: started.fresh_context_guaranteed,
                 })
             }
             Err(error) => {
@@ -202,6 +201,7 @@ impl RoutineAgentExecutor {
         action: String,
         pause_on_terminal_failure: bool,
     ) -> Result<RoutineRunOutcome> {
+        let fresh_context_guaranteed = fresh_context_guaranteed(&claimed.execution_strategy, false);
         match claimed_failure_recovery_plan(&claimed, failed_agent_id, attempt_kind) {
             AgentFailureRecoveryPlan::Retry {
                 retry_count_after_increment,
@@ -242,7 +242,7 @@ impl RoutineAgentExecutor {
                     status: "running".to_string(),
                     result_json,
                     error: Some(message.to_string()),
-                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    fresh_context_guaranteed,
                 });
             }
             AgentFailureRecoveryPlan::Fallback {
@@ -271,7 +271,7 @@ impl RoutineAgentExecutor {
                             status: "running".to_string(),
                             result_json: Some(started.result_json),
                             error: Some(message.to_string()),
-                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                            fresh_context_guaranteed: started.fresh_context_guaranteed,
                         });
                     }
                     Ok(started) => {
@@ -308,7 +308,7 @@ impl RoutineAgentExecutor {
                             status: "succeeded".to_string(),
                             result_json: Some(started.result_json),
                             error: Some(message.to_string()),
-                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                            fresh_context_guaranteed: started.fresh_context_guaranteed,
                         });
                     }
                     Err(fallback_error) => {
@@ -353,6 +353,8 @@ impl RoutineAgentExecutor {
         let pending = store.list_running_agent_runs(limit).await?;
         let mut outcomes = Vec::new();
         for run in pending {
+            let fresh_context_guaranteed =
+                fresh_context_guaranteed_from_result(run.result_json.as_ref());
             if run.turn_id.is_none() {
                 if let Some(outcome) = self
                     .restart_due_retry(store, run, pause_on_terminal_failure)
@@ -399,7 +401,7 @@ impl RoutineAgentExecutor {
                     status: "succeeded".to_string(),
                     result_json,
                     error: None,
-                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    fresh_context_guaranteed,
                 });
                 continue;
             }
@@ -454,7 +456,11 @@ impl RoutineAgentExecutor {
             Some(prompt) => prompt.to_string(),
             None => {
                 let message = "routine retry cannot restart because prompt is missing";
-                let result_json = Some(merge_pending_result(&run, "failed", Some(message), None));
+                let result_json = Some(pending_result_without_fresh_context_guarantee(
+                    &run,
+                    "failed",
+                    Some(message),
+                ));
                 let closed = store
                     .fail_agent_run(&run.run_id, message, result_json.clone(), None)
                     .await?;
@@ -466,7 +472,7 @@ impl RoutineAgentExecutor {
                     status: "failed".to_string(),
                     result_json,
                     error: Some(message.to_string()),
-                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    fresh_context_guaranteed: false,
                 }));
             }
         };
@@ -477,7 +483,11 @@ impl RoutineAgentExecutor {
             .map(str::to_string)
         else {
             let message = "routine retry cannot restart because routine.agent_id is missing";
-            let result_json = Some(merge_pending_result(&run, "failed", Some(message), None));
+            let result_json = Some(pending_result_without_fresh_context_guarantee(
+                &run,
+                "failed",
+                Some(message),
+            ));
             let closed = store
                 .fail_agent_run(&run.run_id, message, result_json.clone(), None)
                 .await?;
@@ -489,7 +499,7 @@ impl RoutineAgentExecutor {
                 status: "failed".to_string(),
                 result_json,
                 error: Some(message.to_string()),
-                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                fresh_context_guaranteed: false,
             }));
         };
         let checkpoint = pending_checkpoint(run.result_json.as_ref());
@@ -517,7 +527,7 @@ impl RoutineAgentExecutor {
                 status: "running".to_string(),
                 result_json: Some(started.result_json),
                 error: None,
-                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                fresh_context_guaranteed: started.fresh_context_guaranteed,
             })),
             Ok(started) => {
                 let last_result = "retry headless command consumed without starting an agent turn";
@@ -541,16 +551,15 @@ impl RoutineAgentExecutor {
                     status: "succeeded".to_string(),
                     result_json: Some(started.result_json),
                     error: None,
-                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    fresh_context_guaranteed: started.fresh_context_guaranteed,
                 }))
             }
             Err(error) => {
                 let message = error.to_string();
-                let result_json = Some(merge_pending_result(
+                let result_json = Some(pending_result_without_fresh_context_guarantee(
                     &run,
                     "failed_to_start",
                     Some(&message),
-                    None,
                 ));
                 self.handle_running_agent_failure(
                     store,
@@ -576,30 +585,19 @@ impl RoutineAgentExecutor {
         attempt_kind: &str,
         pause_on_terminal_failure: bool,
     ) -> Result<Option<RoutineRunOutcome>> {
+        let fresh_context_guaranteed = fresh_context_guaranteed_from_result(result_json.as_ref());
         match running_failure_recovery_plan(&run, failed_agent_id, attempt_kind) {
             AgentFailureRecoveryPlan::Retry {
                 retry_count_after_increment: retry_count,
                 next_retry_at,
             } => {
-                let mut retry_result = result_json.unwrap_or_else(|| {
-                    merge_pending_result(&run, "retry_scheduled", Some(message), None)
-                });
-                if let Some(object) = retry_result.as_object_mut() {
-                    object.insert(
-                        "status".to_string(),
-                        Value::String("retry_scheduled".to_string()),
-                    );
-                    object.insert(
-                        "retry_count".to_string(),
-                        Value::Number(serde_json::Number::from(retry_count)),
-                    );
-                    object.insert(
-                        "next_retry_at".to_string(),
-                        Value::String(next_retry_at.to_rfc3339()),
-                    );
-                }
-                preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
-                let result_json = Some(retry_result);
+                let result_json = Some(retry_scheduled_result(
+                    &run,
+                    result_json,
+                    message,
+                    retry_count,
+                    next_retry_at,
+                ));
                 let scheduled = store
                     .schedule_agent_retry(
                         &run.run_id,
@@ -618,7 +616,7 @@ impl RoutineAgentExecutor {
                     status: "running".to_string(),
                     result_json,
                     error: Some(message.to_string()),
-                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                    fresh_context_guaranteed: false,
                 }));
             }
             AgentFailureRecoveryPlan::Fallback {
@@ -626,6 +624,11 @@ impl RoutineAgentExecutor {
             } => {
                 let Some(prompt) = pending_prompt(run.result_json.as_ref()).map(str::to_string)
                 else {
+                    let result_json = Some(pending_result_without_fresh_context_guarantee(
+                        &run,
+                        "failed",
+                        Some(message),
+                    ));
                     let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
                         store
                             .fail_run_and_pause_routine(&run.run_id, message, result_json.clone())
@@ -643,7 +646,7 @@ impl RoutineAgentExecutor {
                         status: "failed".to_string(),
                         result_json,
                         error: Some(message.to_string()),
-                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                        fresh_context_guaranteed: false,
                     }));
                 };
                 let checkpoint = pending_checkpoint(run.result_json.as_ref());
@@ -672,7 +675,7 @@ impl RoutineAgentExecutor {
                             status: "running".to_string(),
                             result_json: Some(started.result_json),
                             error: Some(message.to_string()),
-                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                            fresh_context_guaranteed: started.fresh_context_guaranteed,
                         }));
                     }
                     Ok(started) => {
@@ -698,15 +701,18 @@ impl RoutineAgentExecutor {
                             status: "succeeded".to_string(),
                             result_json: Some(started.result_json),
                             error: Some(message.to_string()),
-                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                            fresh_context_guaranteed: started.fresh_context_guaranteed,
                         }));
                     }
                     Err(fallback_error) => {
                         let combined = format!(
                             "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
                         );
-                        let result_json =
-                            Some(merge_pending_result(&run, "failed", Some(&combined), None));
+                        let result_json = Some(pending_result_without_fresh_context_guarantee(
+                            &run,
+                            "failed",
+                            Some(&combined),
+                        ));
                         let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
                             store
                                 .fail_run_and_pause_routine(
@@ -728,7 +734,7 @@ impl RoutineAgentExecutor {
                             status: "failed".to_string(),
                             result_json,
                             error: Some(combined),
-                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                            fresh_context_guaranteed: false,
                         }));
                     }
                 }
@@ -755,7 +761,7 @@ impl RoutineAgentExecutor {
             status: "failed".to_string(),
             result_json,
             error: Some(message.to_string()),
-            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+            fresh_context_guaranteed,
         }))
     }
 
@@ -1032,7 +1038,8 @@ impl RoutineAgentExecutor {
             "attempt_kind": attempt_kind,
             "prompt": prompt,
             "completion_evidence": "session_transcripts",
-            "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+            "fresh_context_guaranteed":
+                fresh_context_guaranteed(&claimed.execution_strategy, false),
             "checkpoint": checkpoint,
             "next_due_at": next_due_at.map(|value| value.to_rfc3339()),
         });
@@ -1059,7 +1066,8 @@ impl RoutineAgentExecutor {
             "routine_run_id": claimed.run_id,
             "script_ref": claimed.script_ref,
             "execution_strategy": claimed.execution_strategy,
-            "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+            "fresh_context_guaranteed":
+                fresh_context_guaranteed(&claimed.execution_strategy, false),
             "turn_id": turn_id.clone(),
             "parent_channel_id": channel_id_num.to_string(),
             "discord_thread_id": discord_thread_id,
@@ -1110,9 +1118,9 @@ impl RoutineAgentExecutor {
                 outcome.turn_id
             ));
         }
-        if outcome.status.as_str() != "started"
-            && let Some(object) = result_json.as_object_mut()
-        {
+        let started = outcome.status.as_str() == "started";
+        let provider_fresh_context = fresh_context_guaranteed(&claimed.execution_strategy, started);
+        if !started && let Some(object) = result_json.as_object_mut() {
             object.insert(
                 "status".to_string(),
                 Value::String(outcome.status.as_str().to_string()),
@@ -1122,20 +1130,59 @@ impl RoutineAgentExecutor {
                 Value::String("headless_start_outcome".to_string()),
             );
         }
+        let durable_confirmation_persisted = if provider_fresh_context {
+            let confirmed_result = result_with_fresh_context_guarantee(result_json.clone(), true);
+            match store
+                .confirm_agent_turn_started(&claimed.run_id, &turn_id)
+                .await
+            {
+                Ok(true) => {
+                    result_json = confirmed_result;
+                    true
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        routine_id = %claimed.routine_id,
+                        run_id = %claimed.run_id,
+                        turn_id = %turn_id,
+                        "fresh provider start confirmation found no matching routine agent turn"
+                    );
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        routine_id = %claimed.routine_id,
+                        run_id = %claimed.run_id,
+                        turn_id = %turn_id,
+                        error = %error,
+                        "failed to persist fresh provider start confirmation"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        let fresh_context_guaranteed = confirmed_fresh_context_guarantee(
+            provider_fresh_context,
+            durable_confirmation_persisted,
+        );
+        result_json = result_with_fresh_context_guarantee(result_json, fresh_context_guaranteed);
 
         // #3022: persist run -> fresh-session ownership now that the session is
         // up, so boot recovery can reap this exact session if a dcserver restart
         // orphans it. Best-effort: a failure here only loses the boot-recovery
         // backstop (the in-line completion path still tears the session down),
         // so it must never fail the started turn.
-        if outcome.status.as_str() == "started" {
+        if started {
             self.record_owned_fresh_session(store, claimed, &result_json)
                 .await;
         }
 
         Ok(StartedAgentTurn {
             result_json,
-            started: outcome.status.as_str() == "started",
+            started,
+            fresh_context_guaranteed,
         })
     }
 
@@ -1408,6 +1455,7 @@ impl RoutineAgentExecutor {
 struct StartedAgentTurn {
     result_json: Value,
     started: bool,
+    fresh_context_guaranteed: bool,
 }
 
 struct RoutineThreadTarget {
@@ -1573,8 +1621,9 @@ async fn fail_claimed_agent_run(
         "routine_id": claimed.routine_id,
         "run_id": claimed.run_id,
         "script_ref": claimed.script_ref,
-        "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+        "fresh_context_guaranteed": fresh_context_guaranteed(&claimed.execution_strategy, false),
     }));
+    let fresh_context_guaranteed = fresh_context_guaranteed(&claimed.execution_strategy, false);
     let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
         store
             .fail_run_and_pause_routine(&claimed.run_id, &message, result_json.clone())
@@ -1598,7 +1647,7 @@ async fn fail_claimed_agent_run(
         status: "failed".to_string(),
         result_json,
         error: Some(message),
-        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+        fresh_context_guaranteed,
     })
 }
 
@@ -1632,7 +1681,7 @@ fn retry_scheduled_result_for_claimed(
         "routine_id": claimed.routine_id,
         "run_id": claimed.run_id,
         "script_ref": claimed.script_ref,
-        "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+        "fresh_context_guaranteed": fresh_context_guaranteed(&claimed.execution_strategy, false),
         "checkpoint": checkpoint,
         "next_due_at": next_due_at.map(|value| value.to_rfc3339()),
     })
@@ -1658,7 +1707,7 @@ fn completed_result(
             .unwrap_or(0),
         "duration_ms": completion.duration_ms,
         "completion_created_at": completion.created_at,
-        "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+        "fresh_context_guaranteed": fresh_context_guaranteed_from_result(run.result_json.as_ref()),
     });
     if let Some(object) = result.as_object_mut() {
         if completion.evidence.is_transcript() {
@@ -1677,6 +1726,41 @@ fn completed_result(
     with_started_run_routing_metadata(result, run.result_json.as_ref())
 }
 
+fn pending_result_without_fresh_context_guarantee(
+    run: &RunningAgentRoutineRun,
+    status: &str,
+    error: Option<&str>,
+) -> Value {
+    result_with_fresh_context_guarantee(merge_pending_result(run, status, error, None), false)
+}
+
+fn retry_scheduled_result(
+    run: &RunningAgentRoutineRun,
+    result_json: Option<Value>,
+    message: &str,
+    retry_count: i32,
+    next_retry_at: DateTime<Utc>,
+) -> Value {
+    let mut retry_result = result_json
+        .unwrap_or_else(|| merge_pending_result(run, "retry_scheduled", Some(message), None));
+    if let Some(object) = retry_result.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            Value::String("retry_scheduled".to_string()),
+        );
+        object.insert(
+            "retry_count".to_string(),
+            Value::Number(serde_json::Number::from(retry_count)),
+        );
+        object.insert(
+            "next_retry_at".to_string(),
+            Value::String(next_retry_at.to_rfc3339()),
+        );
+    }
+    preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
+    result_with_fresh_context_guarantee(retry_result, false)
+}
+
 fn merge_pending_result(
     run: &RunningAgentRoutineRun,
     status: &str,
@@ -1685,14 +1769,15 @@ fn merge_pending_result(
 ) -> Value {
     with_started_run_routing_metadata(
         json!({
-        "status": status,
-        "turn_id": run.turn_id,
-        "routine_id": run.routine_id,
-        "run_id": run.run_id,
-        "script_ref": run.script_ref,
-        "error": error,
-        "duration_ms": completion.and_then(|value| value.duration_ms),
-        "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+            "status": status,
+            "turn_id": run.turn_id,
+            "routine_id": run.routine_id,
+            "run_id": run.run_id,
+            "script_ref": run.script_ref,
+            "error": error,
+            "duration_ms": completion.and_then(|value| value.duration_ms),
+            "fresh_context_guaranteed":
+                fresh_context_guaranteed_from_result(run.result_json.as_ref()),
         }),
         run.result_json.as_ref(),
     )
@@ -1761,6 +1846,30 @@ fn pending_checkpoint_for_completion(
     } else {
         Some(checkpoint)
     }
+}
+
+fn confirmed_fresh_context_guarantee(
+    provider_fresh_context: bool,
+    durable_confirmation_persisted: bool,
+) -> bool {
+    provider_fresh_context && durable_confirmation_persisted
+}
+
+fn result_with_fresh_context_guarantee(mut result_json: Value, guaranteed: bool) -> Value {
+    if let Some(object) = result_json.as_object_mut() {
+        object.insert(
+            "fresh_context_guaranteed".to_string(),
+            Value::Bool(guaranteed),
+        );
+    }
+    result_json
+}
+
+fn fresh_context_guaranteed_from_result(result_json: Option<&Value>) -> bool {
+    result_json
+        .and_then(|value| value.get("fresh_context_guaranteed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn pending_checkpoint(result_json: Option<&Value>) -> Option<Value> {
@@ -2285,7 +2394,7 @@ mod tests {
                 "script_ref": "family-profile-probe-obujang.js",
                 "execution_strategy": "fresh",
                 "completion_evidence": "session_transcripts",
-                "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
+                "fresh_context_guaranteed": true,
                 "checkpoint": {
                     "plan": {"date": "2026-05-30", "hour": 12, "minute": 0},
                     "pendingDelivery": {
@@ -2361,6 +2470,85 @@ mod tests {
         assert_eq!(timeout_secs_for_run(&running_run(None), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(0)), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(-5)), 1800), 1800);
+    }
+
+    #[test]
+    fn fresh_context_guarantee_requires_provider_and_durable_confirmation() {
+        assert!(!confirmed_fresh_context_guarantee(false, false));
+        assert!(!confirmed_fresh_context_guarantee(true, false));
+        assert!(!confirmed_fresh_context_guarantee(false, true));
+        assert!(confirmed_fresh_context_guarantee(true, true));
+    }
+
+    #[test]
+    fn fresh_context_guarantee_is_read_only_from_verified_durable_result() {
+        assert!(fresh_context_guaranteed_from_result(Some(&json!({
+            "fresh_context_guaranteed": true
+        }))));
+        assert!(!fresh_context_guaranteed_from_result(Some(&json!({
+            "fresh_context_guaranteed": false
+        }))));
+        assert!(!fresh_context_guaranteed_from_result(Some(&json!({}))));
+        assert!(!fresh_context_guaranteed_from_result(Some(&json!({
+            "fresh_context_guaranteed": "true"
+        }))));
+        assert!(!fresh_context_guaranteed_from_result(None));
+    }
+
+    #[test]
+    fn failed_start_clears_stale_fresh_context_guarantee() {
+        let run = running_run_with_result(json!({
+            "fresh_context_guaranteed": true
+        }));
+        let result = pending_result_without_fresh_context_guarantee(
+            &run,
+            "failed_to_start",
+            Some("start failed"),
+        );
+
+        assert_eq!(result.get("fresh_context_guaranteed"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn retry_scheduled_clears_prior_attempt_fresh_context_guarantee() {
+        let run = RunningAgentRoutineRun {
+            max_retries: 1,
+            result_json: Some(json!({
+                "prompt": "retry me",
+                "fresh_context_guaranteed": true
+            })),
+            ..running_run(None)
+        };
+
+        let result = retry_scheduled_result(
+            &run,
+            Some(json!({"fresh_context_guaranteed": true})),
+            "attempt failed",
+            1,
+            Utc::now(),
+        );
+
+        assert_eq!(result.get("status"), Some(&json!("retry_scheduled")));
+        assert_eq!(result.get("fresh_context_guaranteed"), Some(&json!(false)));
+        assert_eq!(result.get("prompt"), Some(&json!("retry me")));
+    }
+
+    #[test]
+    fn completion_preserves_verified_fresh_context_guarantee() {
+        let run = running_run_with_result(json!({
+            "fresh_context_guaranteed": true
+        }));
+        let completion = completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
+
+        assert_eq!(
+            completed_result(&run, &completion, "done").get("fresh_context_guaranteed"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            merge_pending_result(&run, "timeout", Some("timed out"), None)
+                .get("fresh_context_guaranteed"),
+            Some(&json!(true))
+        );
     }
 
     #[test]

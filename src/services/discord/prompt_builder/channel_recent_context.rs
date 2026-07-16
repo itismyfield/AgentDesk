@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn intentionally_severed_session_never_reinjects_recent_context() {
+    fn fresh_routine_severance_blocks_seed_without_changing_normal_new_session() {
         assert!(
             should_inject(
                 None,
@@ -290,7 +290,7 @@ mod tests {
                 None,
                 Option::<&()>::None,
             ),
-            "a normal fresh session must still inject recent context"
+            "a normal new provider session must still inject recent context"
         );
         assert!(
             !should_inject(
@@ -314,7 +314,7 @@ mod tests {
                 None,
                 Option::<&()>::None,
             ),
-            "/goal fresh and fresh DM routines must seal the channel transcript continuity path"
+            "/goal fresh and fresh routines must seal the channel transcript continuity path"
         );
     }
 

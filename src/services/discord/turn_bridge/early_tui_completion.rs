@@ -1,28 +1,22 @@
 //! #3038 (giant-file decompose, registry deadline 2026-08-31): the early TUI
 //! completion gate — the #2293/#2780 pre-mailbox-release observation that
-//! computes `bridge_tui_gate_outcome_early` + `bridge_early_gate_timed_out` —
-//! moved verbatim out of the middle of `spawn_turn_bridge`'s async body.
+//! computes `bridge_tui_gate_outcome_early` — moved verbatim out of the middle
+//! of `spawn_turn_bridge`'s async body.
 //!
 //! Unlike the tail-block epilogue (`finalize_epilogue.rs`), this block sits
-//! mid-body and its two outputs are consumed later (the legacy timed-out flag by
-//! watcher-handoff + mailbox-release sites, the outcome by the late-gate reuse
-//! at the `bridge_gate_outcome` site), so the context it reads is threaded in by
-//! SHARED REFERENCE (`inflight_state`, `provider` — both still live afterwards)
-//! and by `Copy` value (`channel_id`, the four eligibility flags), and the two
-//! computed values are RETURNED — the `#[cfg]` `let` declarations stay at the
-//! call site so their exact `#[cfg(unix)]` / `#[cfg(not(unix))]` split is
-//! preserved. S2-b keeps the flag shape for caller compatibility, but it is
-//! always `false` because completion quiescence no longer suppresses finalize.
+//! mid-body and its outcome is consumed later by the late-gate reuse at the
+//! `bridge_gate_outcome` site. The context it reads is threaded in by SHARED
+//! REFERENCE (`inflight_state`, `provider` — both still live afterwards) and by
+//! `Copy` value (`channel_id`, the four eligibility flags); the exact
+//! `#[cfg(unix)]` / `#[cfg(not(unix))]` split remains at the call site.
 
 use super::*;
 
 /// Run the #2293/#2780 early TUI quiescence gate BEFORE the visible
 /// completion/status cleanup (and BEFORE the channel-mailbox release), applying
-/// the same eligibility filter the late gate uses. Returns
-/// `(bridge_tui_gate_outcome_early, bridge_early_gate_timed_out)` computed
-/// exactly as the inline block did. Do NOT treat this as a mailbox correctness
-/// primitive — see the call-site comment; the hosted-TUI pre-submit guard is the
-/// correctness barrier.
+/// the same eligibility filter the late gate uses. Do NOT treat this as a
+/// mailbox correctness primitive — see the call-site comment; the hosted-TUI
+/// pre-submit guard is the correctness barrier.
 pub(super) async fn run_early_tui_completion_gate(
     cancelled: bool,
     is_prompt_too_long: bool,
@@ -31,12 +25,9 @@ pub(super) async fn run_early_tui_completion_gate(
     inflight_state: &InflightTurnState,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> (Option<super::super::tmux::TuiCompletionGateOutcome>, bool) {
-    let bridge_early_gate_timed_out = false;
-    #[allow(unused_assignments, unused_mut)]
-    let mut bridge_tui_gate_outcome_early: Option<
-        super::super::tmux::TuiCompletionGateOutcome,
-    > = None;
+) -> Option<super::super::tmux::TuiCompletionGateOutcome> {
+    let mut bridge_tui_gate_outcome_early: Option<super::super::tmux::TuiCompletionGateOutcome> =
+        None;
     // Reproduce the same eligibility filter the late gate already
     // applies, but BEFORE the channel-mailbox release.
     let eligible_for_early_gate =
@@ -55,7 +46,7 @@ pub(super) async fn run_early_tui_completion_gate(
             );
             bridge_tui_gate_outcome_early =
                 Some(super::super::tmux::TuiCompletionGateOutcome::NotGated);
-            return (bridge_tui_gate_outcome_early, bridge_early_gate_timed_out);
+            return bridge_tui_gate_outcome_early;
         }
         bridge_tui_gate_outcome_early = Some(
             super::super::tmux::run_tui_completion_gate(
@@ -67,5 +58,5 @@ pub(super) async fn run_early_tui_completion_gate(
             .await,
         );
     }
-    (bridge_tui_gate_outcome_early, bridge_early_gate_timed_out)
+    bridge_tui_gate_outcome_early
 }

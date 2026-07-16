@@ -463,10 +463,48 @@ impl SettingsService {
     pub async fn put_runtime_config(&self, body: Value) -> ServiceResult<SettingsOkResponse> {
         let pool = self.pg_pool("put_runtime_config.pg_pool")?;
         if let Some(values) = body.as_object() {
-            let marked = with_explicit_runtime_config_keys(values.clone());
-            let value_str = serde_json::to_string(&Value::Object(marked.clone()))
-                .unwrap_or_else(|_| "{}".to_string());
-            write_runtime_config_pg_async(pool, &value_str).await?;
+            let mut tx = pool.begin().await.map_err(|error| {
+                ServiceError::internal(format!("begin runtime-config tx: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("put_runtime_config.begin_pg_tx")
+            })?;
+            let saved = if values.contains_key(RUNTIME_CONFIG_EXPLICIT_KEYS_META) {
+                None
+            } else {
+                // Also serialize initial writes when no runtime-config row exists to lock.
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                    .bind("runtime-config")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        ServiceError::internal(format!("{error}"))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("put_runtime_config.lock_pg")
+                    })?;
+                sqlx::query_scalar::<_, String>(
+                    "SELECT value FROM kv_meta WHERE key = $1 LIMIT 1 FOR UPDATE",
+                )
+                .bind("runtime-config")
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| {
+                    ServiceError::internal(format!("{error}"))
+                        .with_code(ErrorCode::Database)
+                        .with_operation("put_runtime_config.load_pg")
+                })?
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|value| value.as_object().cloned())
+            };
+            let marked = with_explicit_runtime_config_keys(values.clone(), saved.as_ref());
+            let value_str =
+                serde_json::to_string(&Value::Object(marked)).unwrap_or_else(|_| "{}".to_string());
+            write_runtime_config_in_tx(&mut tx, &value_str).await?;
+            tx.commit().await.map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("put_runtime_config.commit_pg_tx")
+            })?;
         } else {
             let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
             write_runtime_config_pg_async(pool, &value_str).await?;
@@ -704,7 +742,19 @@ async fn write_runtime_config_pg_async(pool: &sqlx::PgPool, value_str: &str) -> 
             .with_code(ErrorCode::Database)
             .with_operation("put_runtime_config.begin_pg_tx")
     })?;
+    write_runtime_config_in_tx(&mut tx, value_str).await?;
+    tx.commit().await.map_err(|error| {
+        ServiceError::internal(format!("{error}"))
+            .with_code(ErrorCode::Database)
+            .with_operation("put_runtime_config.commit_pg_tx")
+    })?;
+    Ok(())
+}
 
+async fn write_runtime_config_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    value_str: &str,
+) -> ServiceResult<()> {
     for write in runtime_config_write_plan(value_str.to_string()) {
         match write {
             RuntimeConfigKvWrite::UpsertBlob(value) => {
@@ -717,7 +767,7 @@ async fn write_runtime_config_pg_async(pool: &sqlx::PgPool, value_str: &str) -> 
                 )
                 .bind("runtime-config")
                 .bind(value)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await
                 .map_err(|error| {
                     ServiceError::internal(format!("{error}"))
@@ -728,7 +778,7 @@ async fn write_runtime_config_pg_async(pool: &sqlx::PgPool, value_str: &str) -> 
             RuntimeConfigKvWrite::DeleteScalar(key) => {
                 sqlx::query("DELETE FROM kv_meta WHERE key = $1")
                     .bind(key)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await
                     .map_err(|error| {
                         ServiceError::internal(format!("{error}"))
@@ -739,13 +789,6 @@ async fn write_runtime_config_pg_async(pool: &sqlx::PgPool, value_str: &str) -> 
             }
         }
     }
-
-    tx.commit().await.map_err(|error| {
-        ServiceError::internal(format!("{error}"))
-            .with_code(ErrorCode::Database)
-            .with_operation("put_runtime_config.commit_pg_tx")
-    })?;
-
     Ok(())
 }
 
@@ -1069,6 +1112,13 @@ mod tests {
     }
 
     impl TestDatabase {
+        async fn create_if_configured() -> Option<Self> {
+            std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())?;
+            Some(Self::create().await)
+        }
+
         async fn create() -> Self {
             let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
             let database_name = format!("agentdesk_settings_{}", uuid::Uuid::new_v4().simple());
@@ -1328,17 +1378,77 @@ mod tests {
     }
 
     #[test]
-    fn metadata_less_runtime_config_marks_only_known_body_keys_explicit() {
-        let values = json!({"maxEntryRetries": 7, "privateBlobField": true})
+    fn metadata_less_runtime_config_preserves_omitted_explicit_override() {
+        let saved = json!({
+            "maxEntryRetries": 7,
+            "maxRetries": 5,
+            "rateLimitStaleSec": 600,
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries"]
+        })
+        .as_object()
+        .cloned()
+        .expect("saved runtime config object");
+        let values = json!({"maxRetries": 4, "privateBlobField": true})
             .as_object()
             .cloned()
             .expect("runtime config object");
 
-        let marked = with_explicit_runtime_config_keys(values);
+        let marked = with_explicit_runtime_config_keys(values, Some(&saved));
 
+        assert_eq!(marked.get("maxEntryRetries"), Some(&json!(7)));
+        assert_eq!(marked.get("maxRetries"), Some(&json!(4)));
+        assert_eq!(marked.get("rateLimitStaleSec"), None);
+        assert_eq!(
+            marked.get(RUNTIME_CONFIG_EXPLICIT_KEYS_META),
+            Some(&json!(["maxEntryRetries", "maxRetries"]))
+        );
+    }
+
+    #[test]
+    fn metadata_less_empty_runtime_config_omits_saved_non_explicit_keys() {
+        let saved = json!({
+            "maxEntryRetries": 7,
+            "rateLimitStaleSec": 600,
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries"]
+        })
+        .as_object()
+        .cloned()
+        .expect("saved runtime config object");
+
+        let marked = with_explicit_runtime_config_keys(Map::new(), Some(&saved));
+
+        assert_eq!(marked.get("maxEntryRetries"), Some(&json!(7)));
+        assert_eq!(marked.get("rateLimitStaleSec"), None);
         assert_eq!(
             marked.get(RUNTIME_CONFIG_EXPLICIT_KEYS_META),
             Some(&json!(["maxEntryRetries"]))
+        );
+    }
+
+    #[test]
+    fn explicit_metadata_still_allows_full_replacement() {
+        let saved = json!({
+            "maxEntryRetries": 7,
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries"]
+        })
+        .as_object()
+        .cloned()
+        .expect("saved runtime config object");
+        let values = json!({
+            "maxRetries": 4,
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxRetries"]
+        })
+        .as_object()
+        .cloned()
+        .expect("explicit full-replacement runtime config object");
+
+        let marked = with_explicit_runtime_config_keys(values, Some(&saved));
+
+        assert_eq!(marked.get("maxEntryRetries"), None);
+        assert_eq!(marked.get("maxRetries"), Some(&json!(4)));
+        assert_eq!(
+            marked.get(RUNTIME_CONFIG_EXPLICIT_KEYS_META),
+            Some(&json!(["maxRetries"]))
         );
     }
 
@@ -1373,7 +1483,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_runtime_config_object_and_non_object_keep_only_blob_authority() {
+    async fn put_pg_runtime_config_object_and_non_object_keep_only_blob_authority() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         upsert_test_kv(&pool, "runtime-config", r#"{"old":true}"#).await;
@@ -1432,7 +1542,66 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn startup_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion() {
+    async fn metadata_less_put_pg_runtime_config_preserves_explicit_overrides_and_metadata_replaces_them()
+     {
+        let Some(database) = TestDatabase::create_if_configured().await else {
+            eprintln!(
+                "skipping metadata_less_put_pg_runtime_config_preserves_explicit_overrides_and_metadata_replaces_them: postgres unavailable"
+            );
+            return;
+        };
+        let pool = database.connect().await;
+        let service = SettingsService::new(
+            Some(pool.clone()),
+            Arc::new(crate::config::Config::default()),
+        );
+
+        service
+            .put_runtime_config(json!({
+                "maxEntryRetries": 7,
+                "maxRetries": 5,
+                "rateLimitStaleSec": 600,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries"]
+            }))
+            .await
+            .expect("write initial explicit runtime override");
+        service
+            .put_runtime_config(json!({"maxRetries": 4}))
+            .await
+            .expect("metadata-less update preserves existing explicit override");
+        assert_runtime_blob_and_no_mirrors(
+            &pool,
+            &json!({
+                "maxEntryRetries": 7,
+                "maxRetries": 4,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxEntryRetries", "maxRetries"]
+            }),
+        )
+        .await;
+
+        service
+            .put_runtime_config(json!({
+                "maxRetries": 2,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxRetries"]
+            }))
+            .await
+            .expect("explicit metadata requests a full replacement");
+        assert_runtime_blob_and_no_mirrors(
+            &pool,
+            &json!({
+                "maxRetries": 2,
+                RUNTIME_CONFIG_EXPLICIT_KEYS_META: ["maxRetries"]
+            }),
+        )
+        .await;
+
+        drop(service);
+        pool.close().await;
+        database.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_pg_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         upsert_test_kv(&pool, "runtime-config", r#"{"maxEntryRetries":99}"#).await;
@@ -1449,7 +1618,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cli_put_get_set_round_trip_survives_startup_seed() {
+    async fn cli_pg_put_get_set_round_trip_survives_startup_seed() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         let mut config = crate::config::Config::default();
@@ -1494,7 +1663,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn runtime_config_delete_failure_rolls_back_blob_and_every_mirror() {
+    async fn runtime_config_pg_delete_failure_rolls_back_blob_and_every_mirror() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         let old_blob = r#"{"maxEntryRetries":4,"marker":"old"}"#;

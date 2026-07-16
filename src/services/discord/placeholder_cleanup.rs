@@ -370,6 +370,35 @@ pub(in crate::services::discord) fn committed_terminal_anchor_protects_delete(
     registry.is_committed_terminal_anchor(provider, channel_id, message_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum TerminalCleanupDeleteProtection {
+    CommittedTerminal,
+    RetryPending,
+}
+
+impl TerminalCleanupDeleteProtection {
+    pub(in crate::services::discord) fn relay_delete_outcome(self) -> &'static str {
+        match self {
+            Self::CommittedTerminal => "skipped_committed_terminal",
+            Self::RetryPending => "skipped_terminal_retry_pending",
+        }
+    }
+}
+
+pub(in crate::services::discord) fn terminal_cleanup_protects_delete(
+    registry: &PlaceholderCleanupRegistry,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> Option<TerminalCleanupDeleteProtection> {
+    if committed_terminal_anchor_protects_delete(registry, provider, channel_id, message_id, None) {
+        return Some(TerminalCleanupDeleteProtection::CommittedTerminal);
+    }
+    registry
+        .terminal_cleanup_retry_pending(provider, channel_id, message_id)
+        .then_some(TerminalCleanupDeleteProtection::RetryPending)
+}
+
 /// #3607 panel-sweep terminal-anchor guard wrapper. Returns true (and emits the
 /// `skipped_committed_terminal` delete event + a log) when the orphan
 /// status-panel sweeper is about to delete a committed terminal anchor — so the
@@ -559,6 +588,54 @@ mod terminal_anchor_guard_tests {
             anchor(),
             None,
         ));
+    }
+
+    #[test]
+    fn terminal_cleanup_delete_protection_distinguishes_commit_and_retry() {
+        let committed = PlaceholderCleanupRegistry::default();
+        record(
+            &committed,
+            anchor(),
+            PlaceholderCleanupOperation::EditTerminal,
+            PlaceholderCleanupOutcome::Succeeded,
+        );
+        let committed_protection =
+            terminal_cleanup_protects_delete(&committed, &PROVIDER, channel(), anchor());
+        assert_eq!(
+            committed_protection,
+            Some(TerminalCleanupDeleteProtection::CommittedTerminal),
+        );
+        assert_eq!(
+            committed_protection.map(TerminalCleanupDeleteProtection::relay_delete_outcome),
+            Some("skipped_committed_terminal"),
+        );
+
+        let retry_pending = PlaceholderCleanupRegistry::default();
+        record(
+            &retry_pending,
+            anchor(),
+            PlaceholderCleanupOperation::EditTerminal,
+            PlaceholderCleanupOutcome::failed("transient terminal edit failure"),
+        );
+        let retry_protection =
+            terminal_cleanup_protects_delete(&retry_pending, &PROVIDER, channel(), anchor());
+        assert_eq!(
+            retry_protection,
+            Some(TerminalCleanupDeleteProtection::RetryPending),
+        );
+        assert_eq!(
+            retry_protection.map(TerminalCleanupDeleteProtection::relay_delete_outcome),
+            Some("skipped_terminal_retry_pending"),
+        );
+        assert_eq!(
+            terminal_cleanup_protects_delete(
+                &PlaceholderCleanupRegistry::default(),
+                &PROVIDER,
+                channel(),
+                anchor(),
+            ),
+            None,
+        );
     }
 
     #[test]

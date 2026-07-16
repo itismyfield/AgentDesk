@@ -12,9 +12,25 @@ set -euo pipefail
 #   PG_TUNNEL_SSH_TARGET=mac-mini
 # PG_TUNNEL_HOST is accepted as a backwards-friendly alias.  No config file is
 # shipped in the repository; deploy-release.sh only arms launchd when the local
-# file exists and passes --check-config.
+# file exists, passes --check-config, and proves the remote Unix-socket path with
+# a dedicated SQL probe.  --check-config validates local configuration only.
 
-TAKEOVER_PATTERN='^([^[:space:]]*/)?ssh[[:space:]].*-L[[:space:]]+127[.]0[.]0[.]1:15432:'
+# A migration deploy must take over both the new socket target and the old TCP
+# target on the exact loopback listener. Other bind addresses and ports remain
+# outside this ownership boundary. The endpoint boundary is load-bearing: a
+# superstring such as port 54321 or socket .5432.bak must never be signaled.
+TAKEOVER_PATTERN='^([^[:space:]]*/)?ssh[[:space:]].*-L[[:space:]]+127[.]0[.]0[.]1:15432:(/tmp/[.]s[.]PGSQL[.]5432|127[.]0[.]0[.]1:5432)([[:space:]]|$)'
+UNIX_FORWARD_PATTERN='^([^[:space:]]*/)?ssh[[:space:]].*-L[[:space:]]+127[.]0[.]0[.]1:15432:/tmp/[.]s[.]PGSQL[.]5432([[:space:]]|$)'
+TCP_FORWARD_PATTERN='^([^[:space:]]*/)?ssh[[:space:]].*-L[[:space:]]+127[.]0[.]0[.]1:15432:127[.]0[.]0[.]1:5432([[:space:]]|$)'
+SSH_BASE_ARGS=(
+    -N
+    -T
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=3
+    -o ExitOnForwardFailure=yes
+)
 EXPECTED_SSH_ARGS=(
     -N
     -T
@@ -23,7 +39,7 @@ EXPECTED_SSH_ARGS=(
     -o ServerAliveInterval=15
     -o ServerAliveCountMax=3
     -o ExitOnForwardFailure=yes
-    -L 127.0.0.1:15432:127.0.0.1:5432
+    -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432
 )
 
 die() {
@@ -99,11 +115,74 @@ validate_ssh_args() {
     done
 }
 
-if [ "${1:-}" = "--check-config" ]; then
-    [ "$#" -eq 2 ] || die "usage: $0 --check-config CONFIG"
-    load_config "$2"
-    exit 0
-fi
+validate_probe_port() {
+    local port=$1
+    case "$port" in
+        ""|*[!0-9]*) die "probe port must be a decimal integer" ;;
+    esac
+    [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] ||
+        die "probe port must be between 1024 and 65535"
+    [ "$port" -ne 15432 ] || die "probe port must not be the canonical port"
+}
+
+canonical_forward_kind() {
+    local pids pid command kind=""
+    pids=$(/usr/bin/pgrep -f "$TAKEOVER_PATTERN" 2>/dev/null || true)
+    # pgrep returns one numeric pid per line; intentional whitespace splitting.
+    # shellcheck disable=SC2086
+    for pid in $pids; do
+        case "$pid" in *[!0-9]*|"") continue ;; esac
+        command=$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)
+        if printf '%s\n' "$command" | /usr/bin/grep -Eq "$UNIX_FORWARD_PATTERN"; then
+            [ -z "$kind" ] || [ "$kind" = "unix" ] || die "ambiguous canonical tunnel state"
+            kind="unix"
+        elif printf '%s\n' "$command" | /usr/bin/grep -Eq "$TCP_FORWARD_PATTERN"; then
+            [ -z "$kind" ] || [ "$kind" = "tcp" ] || die "ambiguous canonical tunnel state"
+            kind="tcp"
+        fi
+    done
+    printf '%s\n' "${kind:-none}"
+}
+
+restore_canonical_forward() {
+    local kind=$1 endpoint
+    case "$kind" in
+        unix) endpoint="127.0.0.1:15432:/tmp/.s.PGSQL.5432" ;;
+        tcp) endpoint="127.0.0.1:15432:127.0.0.1:5432" ;;
+        *) die "restore kind must be 'unix' or 'tcp'" ;;
+    esac
+    exec /usr/bin/ssh -f "${SSH_BASE_ARGS[@]}" -L "$endpoint" "$PG_TUNNEL_SSH_TARGET"
+}
+
+case "${1:-}" in
+    --check-config)
+        [ "$#" -eq 2 ] || die "usage: $0 --check-config CONFIG"
+        load_config "$2"
+        exit 0
+        ;;
+    --probe-remote)
+        [ "$#" -eq 3 ] || die "usage: $0 --probe-remote CONFIG PORT"
+        load_config "$2"
+        validate_probe_port "$3"
+        exec /usr/bin/ssh "${SSH_BASE_ARGS[@]}" \
+            -L "127.0.0.1:$3:/tmp/.s.PGSQL.5432" "$PG_TUNNEL_SSH_TARGET"
+        ;;
+    --canonical-kind)
+        [ "$#" -eq 1 ] || die "usage: $0 --canonical-kind"
+        canonical_forward_kind
+        exit 0
+        ;;
+    --take-over-canonical)
+        [ "$#" -eq 1 ] || die "usage: $0 --take-over-canonical"
+        take_over_manual_tunnel
+        exit 0
+        ;;
+    --restore-canonical)
+        [ "$#" -eq 3 ] || die "usage: $0 --restore-canonical CONFIG KIND"
+        load_config "$2"
+        restore_canonical_forward "$3"
+        ;;
+esac
 
 [ "$#" -ge 1 ] || die "usage: $0 CONFIG SSH_ARGS..."
 CONFIG_PATH=$1

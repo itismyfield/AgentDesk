@@ -1,6 +1,6 @@
 use super::settings::{
     ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance, load_role_prompt,
-    render_peer_agent_guidance,
+    load_shared_prompt_for_profile, render_peer_agent_guidance,
 };
 use super::*;
 use crate::db::prompt_manifests::{PromptContentVisibility, PromptManifest};
@@ -96,6 +96,50 @@ impl DispatchProfile {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SharedPromptProfile {
+    Full,
+    ReviewLite,
+    Headless,
+}
+
+impl SharedPromptProfile {
+    const fn for_dispatch(profile: DispatchProfile) -> Self {
+        match profile {
+            DispatchProfile::ReviewLite => Self::ReviewLite,
+            DispatchProfile::Full | DispatchProfile::Lite => Self::Full,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::ReviewLite => "review-lite",
+            Self::Headless => "headless",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PromptProfiles {
+    dispatch: DispatchProfile,
+    shared: SharedPromptProfile,
+}
+
+impl PromptProfiles {
+    const fn new(dispatch: DispatchProfile, shared: SharedPromptProfile) -> Self {
+        Self { dispatch, shared }
+    }
+
+    pub(super) const fn foreground(dispatch: DispatchProfile) -> Self {
+        Self::new(dispatch, SharedPromptProfile::for_dispatch(dispatch))
+    }
+
+    pub(super) const fn headless(dispatch: DispatchProfile) -> Self {
+        Self::new(dispatch, SharedPromptProfile::Headless)
+    }
+}
+
 // #3034: system-prompt assembly exercised by the dispatch-contract tests;
 // the prod path builds the prompt through other entry points. Test contract.
 #[allow(dead_code)]
@@ -125,7 +169,7 @@ pub(super) fn build_system_prompt(
         token,
         role_binding,
         queued_turn,
-        profile,
+        PromptProfiles::foreground(profile),
         dispatch_type,
         current_task,
         shared_knowledge,
@@ -150,7 +194,7 @@ pub(super) fn build_system_prompt_with_manifest(
     token: &str,
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
-    profile: DispatchProfile,
+    profiles: PromptProfiles,
     dispatch_type: Option<&str>,
     current_task: Option<&CurrentTaskContext<'_>>,
     shared_knowledge: Option<&str>,
@@ -163,6 +207,10 @@ pub(super) fn build_system_prompt_with_manifest(
     memory_recall_manifest: Option<&MemoryRecallManifestInput<'_>>,
     turn_id: Option<&str>,
 ) -> BuiltSystemPrompt {
+    let PromptProfiles {
+        dispatch: profile,
+        shared: shared_prompt_profile,
+    } = profiles;
     let mut prompt_manifest_layers = Vec::new();
     // Issue #2659: track per-build appendages so identical large content
     // (SAK / longterm_catalog / future skill listings) is never pushed
@@ -293,25 +341,48 @@ pub(super) fn build_system_prompt_with_manifest(
                 PromptContentVisibility::AdkProvided,
                 lite_rules,
             ));
-        } else {
-            // #4314: the shared-rules index now depends on the agent's cwd —
-            // repo-relative `docs/*` references are injected only when the
-            // workspace actually is an AgentDesk checkout. Compute once and
-            // reuse for both the log and the append.
-            let shared_rules = shared_agent_rules_lookup(current_path);
-            tracing::warn!(
-                "  [role-map] Injected compact shared rule index ({} chars) for channel {}",
-                shared_rules.len(),
-                channel_id.get()
-            );
-            system_prompt_owned.push_str(&shared_rules);
-            prompt_manifest_layers.push(prompt_manifest_layer(
-                "shared_agent_rules",
-                "prompt_builder.shared_agent_rules_lookup",
-                Some(format!("workspace={current_path}")),
-                PromptContentVisibility::AdkProvided,
-                &shared_rules,
-            ));
+        }
+
+        if profile != DispatchProfile::Lite {
+            let shared_profile = shared_prompt_profile.as_str();
+            if let Some(shared_prompt) = load_shared_prompt_for_profile(shared_profile) {
+                let shared_rules = format!("\n\n[Shared Agent Rules]\n{shared_prompt}");
+                if dedupe_tracker.record("shared_agent_rules", &shared_rules) {
+                    tracing::warn!(
+                        "  [role-map] Injected {} shared agent rules ({} chars) for channel {}",
+                        shared_profile,
+                        shared_rules.len(),
+                        channel_id.get()
+                    );
+                    system_prompt_owned.push_str(&shared_rules);
+                    prompt_manifest_layers.push(prompt_manifest_layer(
+                        "shared_agent_rules",
+                        "settings.load_shared_prompt_for_profile",
+                        Some(format!("profile={shared_profile}")),
+                        PromptContentVisibility::AdkProvided,
+                        &shared_rules,
+                    ));
+                }
+            } else {
+                // #4314: the shared-rules index now depends on the agent's cwd —
+                // repo-relative `docs/*` references are injected only when the
+                // workspace actually is an AgentDesk checkout. Compute once and
+                // reuse for both the log and the append.
+                let shared_rules = shared_agent_rules_lookup(current_path);
+                tracing::warn!(
+                    "  [role-map] Injected compact shared rule index ({} chars) for channel {}",
+                    shared_rules.len(),
+                    channel_id.get()
+                );
+                system_prompt_owned.push_str(&shared_rules);
+                prompt_manifest_layers.push(prompt_manifest_layer(
+                    "shared_agent_rules",
+                    "prompt_builder.shared_agent_rules_lookup",
+                    Some(format!("workspace={current_path}")),
+                    PromptContentVisibility::AdkProvided,
+                    &shared_rules,
+                ));
+            }
         }
 
         if profile != DispatchProfile::Lite {
@@ -365,8 +436,9 @@ pub(super) fn build_system_prompt_with_manifest(
         // `dedupe_tracker.record(...)` so the same SHA-256-identical block
         // is never appended twice in one build. Behavior is preserved on
         // the happy path (first-time appendage always records); duplicate
-        // attempts only trip a WARN log and skip the push.
-        if profile != DispatchProfile::Lite {
+        // attempts only trip a WARN log and skip the push. SAK remains Full-only:
+        // ReviewLite retains its review contract without the broad operational context.
+        if profile == DispatchProfile::Full {
             if let Some(sak) = shared_knowledge
                 && dedupe_tracker.record("shared_knowledge", sak)
             {
@@ -382,7 +454,7 @@ pub(super) fn build_system_prompt_with_manifest(
             }
         }
 
-        // ReviewLite/Lite: skip long-term memory and peer agents to save tokens
+        // ReviewLite/Lite: skip shared operational context, long-term memory, and peer agents.
         if profile == DispatchProfile::Full {
             if let Some(catalog) = longterm_catalog
                 && dedupe_tracker.record("longterm_catalog", catalog)
@@ -423,11 +495,11 @@ pub(super) fn build_system_prompt_with_manifest(
                 }
             }
         }
-    } else if profile != DispatchProfile::Lite {
+    } else if profile == DispatchProfile::Full {
         if let Some(sak) = shared_knowledge
             && dedupe_tracker.record("shared_knowledge", sak)
         {
-            // No role binding — still inject SAK (no LTM/peer agents to worry about)
+            // No role binding — Full still injects SAK (no LTM/peer agents to worry about)
             system_prompt_owned.push_str("\n\n");
             system_prompt_owned.push_str(sak);
             prompt_manifest_layers.push(prompt_manifest_layer(

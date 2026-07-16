@@ -391,8 +391,10 @@ fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
         "running activity: {live:?}"
     );
     assert!(
-        live.contains("마지막 업데이트 : <t:") && live.contains("턴 시작 : <t:"),
-        "time line must render: {live:?}"
+        live.contains("마지막 업데이트 : ")
+            && live.contains("턴 시작 : ")
+            && live.contains(" (<t:"),
+        "time line must include fixed KST and relative timestamps: {live:?}"
     );
     assert!(
         !live.contains("신뢰도"),
@@ -8863,7 +8865,7 @@ fn status_panel_free_renderer_leads_with_activity_and_time_lines() {
     let out = super::status_panel::render_status_panel(
         StatusPanelState::default(),
         &ProviderKind::Claude,
-        "마지막 업데이트 : <t:1700000000:R> / 턴 시작 : <t:1700000000:R>".to_string(),
+        "마지막 업데이트 : 11-15 07:13:20 (<t:1700000000:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)".to_string(),
         Some("턴 트리거: https://discord.com/channels/1/2/3".to_string()),
     );
     let mut sections = out.split("\n\n");
@@ -8874,7 +8876,9 @@ fn status_panel_free_renderer_leads_with_activity_and_time_lines() {
     );
     assert_eq!(
         sections.next(),
-        Some("마지막 업데이트 : <t:1700000000:R> / 턴 시작 : <t:1700000000:R>"),
+        Some(
+            "마지막 업데이트 : 11-15 07:13:20 (<t:1700000000:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)"
+        ),
         "line 2 = time line: {out:?}"
     );
     assert!(

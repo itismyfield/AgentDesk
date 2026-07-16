@@ -86,7 +86,7 @@ fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) ->
     let busy = lines.iter().any(|line| {
         let trimmed = trim_prompt_line(line);
         let lower = trimmed.to_ascii_lowercase();
-        lower.contains("esc to interrupt")
+        line_has_claude_tui_interrupt_chrome(trimmed)
             || lower.contains("processing")
             || lower.contains("thinking")
             || lower.contains("running")
@@ -141,6 +141,13 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
     if recent.iter().any(|l| l.contains(CLAUDE_TUI_READY_BANNER)) {
         return true;
     }
+    // `recent` is reverse-ordered for bottom-up prompt lookup below. Restore
+    // screen order inside the active-work helper before evaluating wrapped
+    // spinner head → interrupt-tail adjacency. This predicate is only a prompt-
+    // marker producer; every production readiness acceptance also runs the full
+    // forward capture through `snapshot_allows_prompt_readiness`, whose shared
+    // busy classifier vetoes partial spinner frames this lightweight scan cannot
+    // reconstruct by itself.
     if tmux_recent_lines_show_claude_tui_active_work(&recent) {
         return false;
     }
@@ -243,14 +250,15 @@ pub(crate) fn tmux_capture_indicates_claude_tui_actively_streaming(capture: &str
 /// The reliable in-progress markers the Claude TUI actually RENDERS are:
 ///   1. the `esc to interrupt` footer — the strongest, unambiguous signal; it
 ///      only renders while a turn is in flight; and
-///   2. the spinner progress line — a leading spinner glyph (`· ✢ ✻ ✽ ✶ ✳ ✦`)
-///      immediately followed by a work verb (`Actioning…`, `Musing…`,
-///      `Thinking…`, `Processing…`, `Running…`, …). This is the footer the TUI
-///      draws while streaming, NOT free-text in the response body.
+///   2. structured spinner chrome — a leading spinner glyph, a compact status
+///      phrase, and an ellipsis, optionally followed by duration/token/interrupt
+///      chrome. This admits multi-word and earliest truncated frames without a
+///      fixed verb allowlist while excluding ordinary prose and balanced fenced
+///      examples.
 /// Plus the explicit `⏺ Running command / Searching for / Reading / Editing …`
 /// active-work markers via `tmux_recent_lines_show_claude_tui_active_work`.
 ///
-/// Bare `processing`/`thinking`/`running` NOT anchored to the spinner glyph or
+/// Bare `processing`/`thinking`/`running` NOT anchored to spinner structure or
 /// the `esc to interrupt` footer are DROPPED. Anything that is not a
 /// recognizable Claude-TUI in-progress frame biases to FALSE.
 pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
@@ -263,18 +271,36 @@ pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
     }
     let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
     let recent = &non_empty[start..];
-    recent.iter().any(|line| {
-        let trimmed = trim_prompt_line(line);
-        // (1) the `esc to interrupt` footer — strongest in-flight marker.
-        if trimmed.to_ascii_lowercase().contains("esc to interrupt") {
-            return true;
-        }
-        // (2) the spinner progress line: a leading spinner glyph adjacent to a
-        // work verb, as the Claude TUI renders the streaming footer. The
-        // verb-word match is ANCHORED to the spinner glyph so the same word in
-        // assistant body text does NOT trip it.
-        tmux_line_is_claude_tui_spinner_progress(trimmed)
-    }) || tmux_recent_lines_show_claude_tui_active_work(recent)
+    tmux_recent_lines_show_claude_tui_interrupt_chrome(recent)
+        || tmux_capture_indicates_claude_tui_structured_spinner(capture)
+        || tmux_recent_forward_lines_show_claude_tui_active_work(recent)
+}
+
+/// A conservative live-turn signal for Claude TUI spinner chrome. The status
+/// line must have a spinner glyph, a compact status phrase, and an ellipsis.
+/// Parenthesized duration/interrupt chrome is a strong positive signal, while an
+/// early suffix-free frame must use a known work-status shape or phrase.
+/// Only candidates inside a fence pair that is balanced in this capture are
+/// excluded. An unmatched fence can be a closing fence whose opener scrolled
+/// away, so it must not hide later live status chrome.
+pub(crate) fn tmux_capture_indicates_claude_tui_structured_spinner(capture: &str) -> bool {
+    let lines = capture.lines().collect::<Vec<_>>();
+    let recent_start = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .rev()
+        .nth(CLAUDE_TUI_ACTIVE_SCAN_LINES.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let balanced_fences = claude_tui_balanced_markdown_fence_ranges(&lines);
+    lines.iter().enumerate().any(|(index, line)| {
+        index >= recent_start
+            && !balanced_fences
+                .iter()
+                .any(|(open, close)| index > *open && index < *close)
+            && tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line))
+    })
 }
 
 /// #3521: `true` when the Claude TUI pane shows a BACKGROUND AGENT still pending — the
@@ -318,13 +344,12 @@ pub(crate) fn sniff_background_agent_pending(tmux_session_name: &str) -> bool {
 /// verb. Anchoring the verb to the spinner glyph is what distinguishes the TUI
 /// chrome from the same verb appearing in assistant body text.
 fn tmux_line_is_claude_tui_spinner_progress(line: &str) -> bool {
-    const SPINNER_GLYPHS: [char; 8] = ['·', '✢', '✳', '✶', '✻', '✽', '✦', '∗'];
     let line = line.trim_start();
     let mut chars = line.chars();
     let Some(first) = chars.next() else {
         return false;
     };
-    if !SPINNER_GLYPHS.contains(&first) {
+    if !is_claude_tui_spinner_glyph(first) {
         return false;
     }
     // The remainder after the glyph (and its following space) must lead with a
@@ -358,10 +383,180 @@ fn tmux_line_is_claude_tui_spinner_progress(line: &str) -> bool {
     //   - the literal `esc to interrupt`, OR
     //   - a parenthesized TUI status group containing a duration (`<N>s` /
     //     `<N>m`), a `tokens` count, and/or the `·` separator the TUI uses.
-    if lower.contains("esc to interrupt") {
+    if line_has_claude_tui_interrupt_chrome(line) {
         return true;
     }
     line_has_claude_tui_spinner_status_group(line)
+}
+
+fn is_claude_tui_spinner_glyph(glyph: char) -> bool {
+    const SPINNER_GLYPHS: [char; 8] = ['·', '✢', '✳', '✶', '✻', '✽', '✦', '∗'];
+    SPINNER_GLYPHS.contains(&glyph)
+}
+
+fn line_has_claude_tui_interrupt_chrome(line: &str) -> bool {
+    let line = trim_prompt_line(line);
+    let lower = line.to_ascii_lowercase();
+    let Some(interrupt_start) = lower.find("esc to interrupt") else {
+        return false;
+    };
+    let after_interrupt = &line[interrupt_start + "esc to interrupt".len()..];
+    // Complete footer chrome ends at its closing parenthesis. Any trailing
+    // non-whitespace turns the line into assistant prose quoting the footer.
+    if after_interrupt.trim() != ")" {
+        return false;
+    }
+    let before_interrupt = &line[..interrupt_start];
+    let has_status_group = before_interrupt.starts_with('(')
+        && !before_interrupt[1..].contains(')')
+        && before_interrupt[1..].contains('·');
+    let spinner_prefix = line.chars().next().is_some_and(is_claude_tui_spinner_glyph);
+    has_status_group || (spinner_prefix && lower[..interrupt_start].contains('…'))
+}
+
+fn lines_reconstruct_claude_tui_interrupt_chrome(first: &str, second: &str) -> bool {
+    let mut combined = String::with_capacity(first.len() + second.len());
+    combined.push_str(trim_prompt_line(first));
+    combined.push_str(trim_prompt_line(second));
+    line_has_claude_tui_interrupt_chrome(&combined)
+}
+
+fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
+    lines.iter().enumerate().any(|(index, line)| {
+        line_has_claude_tui_interrupt_chrome(line)
+            || index.checked_sub(1).is_some_and(|previous_index| {
+                lines_reconstruct_claude_tui_interrupt_chrome(lines[previous_index], line)
+            })
+    })
+}
+
+fn claude_tui_markdown_fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = trim_prompt_line(line).trim_start_matches(|character: char| {
+        matches!(character, '│' | '┃' | '┆' | '┊' | '▏' | '▕')
+    });
+    let trimmed = trimmed.trim_start();
+    let marker = trimmed.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let length = trimmed
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
+    (length >= 3).then_some((marker, length))
+}
+
+fn claude_tui_balanced_markdown_fence_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut open_fence = None;
+    for (index, line) in lines.iter().enumerate() {
+        let Some(marker) = claude_tui_markdown_fence_marker(line) else {
+            continue;
+        };
+        match open_fence {
+            Some((open_index, open_char, open_len))
+                if marker.0 == open_char && marker.1 >= open_len =>
+            {
+                ranges.push((open_index, index));
+                open_fence = None;
+            }
+            None => open_fence = Some((index, marker.0, marker.1)),
+            _ => {}
+        }
+    }
+    ranges
+}
+
+fn tmux_line_is_claude_tui_structured_spinner(line: &str) -> bool {
+    let line = line.trim_start();
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !is_claude_tui_spinner_glyph(first) {
+        return false;
+    }
+
+    let rest = chars.as_str().trim_start();
+    let (status, suffix) = if let Some(status_end) = rest.find('…') {
+        (&rest[..status_end], &rest[status_end + '…'.len_utf8()..])
+    } else if let Some(status_end) = rest.find("...") {
+        (&rest[..status_end], &rest[status_end + 3..])
+    } else {
+        return false;
+    };
+    let status = status.trim();
+    if !claude_tui_spinner_status_phrase_is_compact(status) {
+        return false;
+    }
+    if !claude_tui_spinner_status_is_known(status) {
+        return false;
+    }
+    let suffix = suffix.trim_start();
+    if suffix.is_empty() {
+        return true;
+    }
+    if !suffix.starts_with('(') {
+        return false;
+    }
+    line_has_claude_tui_spinner_status_fragment(suffix)
+}
+
+fn claude_tui_spinner_status_phrase_is_compact(status: &str) -> bool {
+    !status.is_empty()
+        && status.chars().count() <= 48
+        && status.split_whitespace().count() <= 5
+        && status.chars().all(|character| {
+            character.is_alphanumeric()
+                || matches!(character, ' ' | '-' | '_' | '/' | ':' | '\'' | '’')
+        })
+}
+
+fn claude_tui_spinner_status_is_known(status: &str) -> bool {
+    const SPECIAL_STATUSES: [&str; 3] = [
+        "Beboppin'",
+        "Compacting conversation",
+        "Mapping distant galaxies",
+    ];
+    if SPECIAL_STATUSES
+        .iter()
+        .any(|candidate| status.eq_ignore_ascii_case(candidate))
+    {
+        return true;
+    }
+    !status.chars().any(char::is_whitespace) && status.to_ascii_lowercase().ends_with("ing")
+}
+
+fn line_has_claude_tui_spinner_status_fragment(line: &str) -> bool {
+    let Some(open) = line.find('(') else {
+        return false;
+    };
+    let after_open = &line[open + 1..];
+    let (group, closed) = if let Some(close) = after_open.find(')') {
+        if !after_open[close + 1..].trim().is_empty() {
+            return false;
+        }
+        (&after_open[..close], true)
+    } else {
+        (after_open, false)
+    };
+    let lower = group.to_ascii_lowercase();
+    let has_status = lower.contains("esc to interrupt")
+        || lower.contains("tokens")
+        || group.contains('·')
+        || group
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(is_claude_tui_duration_token);
+    has_status && (closed || !group.trim().is_empty())
+}
+
+fn is_claude_tui_duration_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() >= 2
+        && matches!(bytes[bytes.len() - 1], b's' | b'm')
+        && bytes[..bytes.len() - 1]
+            .iter()
+            .all(|byte| byte.is_ascii_digit())
 }
 
 /// `true` when `line` contains the parenthesized status group the Claude TUI
@@ -378,6 +573,9 @@ fn line_has_claude_tui_spinner_status_group(line: &str) -> bool {
     let Some(close_rel) = after_open.find(')') else {
         return false;
     };
+    if !after_open[close_rel + 1..].trim().is_empty() {
+        return false;
+    }
     let group = &after_open[..close_rel];
     let lower = group.to_ascii_lowercase();
     if lower.contains("esc to interrupt") || lower.contains("tokens") || group.contains('·') {
@@ -386,12 +584,7 @@ fn line_has_claude_tui_spinner_status_group(line: &str) -> bool {
     // A standalone duration token such as `12s` / `4m` inside the group.
     group
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|tok| {
-            let bytes = tok.as_bytes();
-            bytes.len() >= 2
-                && matches!(bytes[bytes.len() - 1], b's' | b'm')
-                && bytes[..bytes.len() - 1].iter().all(|b| b.is_ascii_digit())
-        })
+        .any(is_claude_tui_duration_token)
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
@@ -469,14 +662,33 @@ fn line_is_mcp_auth_required_warning(line: &str) -> bool {
         && (lower.contains("need") || lower.contains("run /mcp"))
 }
 
-fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
+fn tmux_recent_lines_show_claude_tui_active_work(lines_reverse_ordered: &[&str]) -> bool {
+    let forward = lines_reverse_ordered
+        .iter()
+        .rev()
+        .copied()
+        .collect::<Vec<_>>();
+    // Prompt-marker detection intentionally consumes only decisive in-flight
+    // chrome. A suffix-free early spinner can coexist briefly with an already
+    // painted empty composer, so it remains marker-ready here; the final
+    // readiness boundary independently applies the full structured-spinner busy
+    // veto to the same capture.
+    tmux_recent_lines_show_claude_tui_interrupt_chrome(&forward)
+        || tmux_recent_forward_lines_show_claude_tui_active_work_without_spinner(&forward)
+}
+
+fn tmux_recent_forward_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
+    lines
+        .iter()
+        .any(|line| tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line)))
+        || tmux_recent_forward_lines_show_claude_tui_active_work_without_spinner(lines)
+}
+
+fn tmux_recent_forward_lines_show_claude_tui_active_work_without_spinner(lines: &[&str]) -> bool {
     lines.iter().any(|line| {
         let line = trim_prompt_line(line);
         let lower = line.to_ascii_lowercase();
-        line.contains("Actioning")
-            || line.contains("Musing")
-            || lower.contains("esc to interrupt")
-            || lower.contains("current work")
+        lower.contains("current work")
             // NOTE: neither the footer context-usage bar (`🤖 Model │ ██░░ │ NN%`)
             // nor the completed-thinking summary line (`✻ Churned for 4m 56s`) is a
             // running signal — both render in IDLE/ready states too. #3051 keyed
@@ -484,7 +696,7 @@ fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
             // context usage to not-ready; the running vs. idle distinction is
             // instead carried by the footer (`Tools: 0 done` = freshly-started, no
             // tools yet) handled in `..._show_idle_suggestion_chrome`, plus the
-            // explicit `esc to interrupt`/spinner-verb keywords above.
+            // explicit interrupt/status chrome above.
             || (line.starts_with('⏺')
                 && ((line.contains("Running ") && line.contains("command"))
                     || line.contains("Searching for ")
@@ -1876,10 +2088,49 @@ another line of prior output";
         let capture = "\
 some earlier assistant prose still on screen
 (13s · ↓ 1.2k tokens · esc to interrupt)";
+        // Claude renders this parenthesized footer as a standalone status line
+        // while a turn is active. It is intentionally sufficient busy evidence;
+        // prose with the same text embedded mid-line is rejected below.
         assert!(tmux_capture_indicates_claude_tui_busy(capture));
         assert!(tmux_capture_indicates_claude_tui_actively_streaming(
             capture
         ));
+    }
+
+    #[test]
+    fn busy_rejects_assistant_interrupt_prose_above_idle_composer() {
+        let capture = "\
+⏺ Press Esc to interrupt the current Claude Code turn.
+✻ Baked for 2s
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done";
+
+        assert!(!tmux_capture_indicates_claude_tui_busy(capture));
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
+
+        for parenthesized_prose in [
+            "\
+⏺ The footer shows (12s · esc to interrupt) while the turn is running.
+✻ Baked for 2s
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done",
+            "\
+(12s · esc to interrupt) is the footer example
+✻ Baked for 2s
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done",
+        ] {
+            assert!(!tmux_capture_indicates_claude_tui_busy(parenthesized_prose));
+            assert!(tmux_capture_indicates_claude_tui_ready_for_input(
+                parenthesized_prose
+            ));
+        }
     }
 
     // #3107 codex re-review (F2 PARTIAL close): a spinner-progress line keyed on
@@ -1924,6 +2175,160 @@ another line of prior output";
         // (no `esc to interrupt`, no `tokens`) still qualifies.
         let line = "✻ Thinking… (12s)";
         assert!(tmux_line_is_claude_tui_spinner_progress(line));
+    }
+
+    #[test]
+    fn structured_spinner_accepts_unknown_and_early_status_frames() {
+        let capture = "\
+earlier assistant prose
+✳ Architecting…
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        assert!(!tmux_line_is_claude_tui_spinner_progress("✳ Architecting…"));
+        assert!(tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting…"
+        ));
+        assert!(tmux_capture_indicates_claude_tui_busy(capture));
+        for line in [
+            "· Thinking…",
+            "✳ Beboppin'…",
+            "✳ Beboppin'… (12s)",
+            "✳ Dilly-dallying…",
+            "✦ Mapping distant galaxies…",
+            "✦ Mapping distant galaxies… (12s",
+            "· Compacting conversation… (30s)",
+        ] {
+            assert!(
+                tmux_line_is_claude_tui_structured_spinner(line),
+                "live early or duration spinner must be recognized: {line}"
+            );
+        }
+        let live_early_spinner_with_stale_prompt = "\
+· Thinking…
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2";
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(
+            live_early_spinner_with_stale_prompt
+        ));
+        assert!(tmux_capture_indicates_claude_tui_busy(
+            live_early_spinner_with_stale_prompt
+        ));
+    }
+
+    #[test]
+    fn wrapped_interrupt_tail_requires_adjacent_open_spinner_head() {
+        for live_wrapped_spinner in [
+            "\
+✳ Beboppin'… (12s · ↓ 1.2k tokens ·
+esc to interrupt)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2",
+            "\
+(13s · ↓ 1.2k tokens · esc to interrupt
+)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2",
+            "\
+(13s · ↓ 1.2k tokens · esc to interru
+pt)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2",
+        ] {
+            assert!(!tmux_capture_indicates_claude_tui_ready_for_input(
+                live_wrapped_spinner
+            ));
+            assert!(tmux_capture_indicates_claude_tui_busy(live_wrapped_spinner));
+        }
+
+        let stale_isolated_wrapped_tail = "\
+⏺ completed response
+✻ Baked for 2s
+esc to interrupt)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done";
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(
+            stale_isolated_wrapped_tail
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_busy(
+            stale_isolated_wrapped_tail
+        ));
+    }
+
+    #[test]
+    fn structured_spinner_rejects_prose_and_non_status_parentheticals() {
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting the response (12s)"
+        ));
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting… (a fresh idea)"
+        ));
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting… (12s) is displayed here"
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_busy(
+            "✳ Architecting… (12s) is displayed here\n────────────────────────\n❯"
+        ));
+        for verb in ["Actioning", "Musing"] {
+            let prose = format!(
+                "· {verb}… (12s) is displayed here\n✻ Baked for 2s\n────────────────────────\n❯\n────────────────────────\n  Tools: 1 done"
+            );
+            assert!(!tmux_capture_indicates_claude_tui_busy(&prose));
+            assert!(tmux_capture_indicates_claude_tui_ready_for_input(&prose));
+        }
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "Architecting… (12s)"
+        ));
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "· Thinking through the problem…"
+        ));
+        for line in ["✳ Done…", "✳ Done… (12s)", "· Nothin'…"] {
+            assert!(!tmux_line_is_claude_tui_structured_spinner(line));
+        }
+        assert!(!tmux_capture_indicates_claude_tui_busy(
+            "✳ Done… (12s)\n────────────────────────────────────────\n❯"
+        ));
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "✳ This ordinary prose has far too many words to be compact status chrome…"
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_structured_spinner(
+            "\
+Here is the exact status-line format:
+```text
+✳ Architecting… (12s)
+```
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on"
+        ));
+    }
+
+    #[test]
+    fn unmatched_fence_does_not_hide_later_spinner_chrome() {
+        // The first fence is a closing-only tail after its opener scrolled away;
+        // the second fixture leaves a dangling opener. Neither incomplete capture
+        // context may suppress later live status chrome.
+        for capture in [
+            "```\nprior prose after a scrolled-away opener\n✦ Mapping distant galaxies… (12s)",
+            "```text\n✳ Architecting…",
+        ] {
+            assert!(
+                tmux_capture_indicates_claude_tui_structured_spinner(capture),
+                "an unmatched tail fence must fail safe for later spinner chrome"
+            );
+        }
     }
 
     #[test]
