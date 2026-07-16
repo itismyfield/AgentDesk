@@ -3341,6 +3341,43 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
+mod guarded_finish_cutoff_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sweep_start_cutoff_preserves_fresh_same_id_turn() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(4_573_001));
+        let user_msg_id = MessageId::new(9_101);
+        let sweep_started_before = Instant::now();
+        let fresh_token = Arc::new(CancelToken::new());
+
+        assert!(
+            handle
+                .try_start_turn(fresh_token.clone(), UserId::new(7), user_msg_id)
+                .await
+        );
+        let result = handle
+            .finish_turn_if_matches_started_before(
+                user_msg_id,
+                sweep_started_before,
+                test_persistence(),
+            )
+            .await;
+
+        assert!(result.removed_token.is_none());
+        let snapshot = handle.snapshot().await;
+        assert_eq!(snapshot.active_user_message_id, Some(user_msg_id));
+        assert!(
+            snapshot
+                .cancel_token
+                .as_ref()
+                .is_some_and(|token| Arc::ptr_eq(token, &fresh_token))
+        );
+    }
+}
+
+#[cfg(test)]
 mod actor_hydrate_regression_tests {
     use super::test_support::TEST_ENV_LOCK;
     use super::*;

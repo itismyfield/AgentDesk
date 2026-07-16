@@ -39,7 +39,7 @@ use crate::services::provider::ProviderKind;
 mod abandon_guard;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
-    finalize_owner_dead_cleanup_if_same_turn, finalize_probe_cleanup_if_same_turn,
+    finalize_owner_dead_cleanup_if_same_turn,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -160,20 +160,13 @@ async fn edit_placeholder_safe(
 /// badge) or has already been replaced with a delivered response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum PlaceholderProbe {
-    /// The current Discord content still matches a known placeholder pattern.
-    /// Safe to overwrite with the abandoned badge.
+    /// Known placeholder content; an abandoned edit is permitted.
     StillPlaceholder,
-    /// Discord content has been replaced with a real response. Do NOT
-    /// overwrite — the user has been served. Caller should still drop the
-    /// inflight state file so the sweeper does not re-trigger every pass.
+    /// Real response content; preserve it and finalize as delivered.
     AlreadyDelivered,
-    /// Discord returned 404 / 403 / 410 — the message or channel is
-    /// permanently gone. Any edit attempt would fail; evict the state row.
+    /// Permanent 404 / 403 / 410; editing cannot succeed.
     MessageGone,
-    /// Probe could not determine the message state (transient Discord error,
-    /// rate-limit, transport failure, 5xx). Caller MUST leave the inflight
-    /// row untouched so a later sweep can retry; do NOT delete the state
-    /// file and do NOT issue any destructive edit.
+    /// Transient/unknown failure; preserve everything for a later retry.
     ProbeFailed,
 }
 
@@ -346,6 +339,7 @@ async fn run_placeholder_sweep_pass(
     stalled_tracker: &mut StalledEditTracker,
 ) -> SweepPassReport {
     let mut report = SweepPassReport::default();
+    let sweep_started_before = std::time::Instant::now();
     let states = load_inflight_states_for_sweep(provider);
     report.scanned = states.len();
     stalled_tracker.retain_live(provider, &states);
@@ -408,6 +402,7 @@ async fn run_placeholder_sweep_pass(
                 &shared.token_hash,
                 &state,
                 age_secs,
+                sweep_started_before,
                 &mut report,
             )
             .await;
@@ -546,8 +541,13 @@ async fn run_placeholder_sweep_pass(
                         // Response already on screen: terminal delivery is certain.
                         // Release the matching mailbox/inflight even if its reusable
                         // tmux pane remains live; preserve that session itself.
-                        finalize_probe_cleanup_if_same_turn(
-                            shared, provider, &state, age_secs, probe,
+                        abandon_guard::finalize_probe_cleanup_if_same_turn(
+                            shared,
+                            provider,
+                            &state,
+                            age_secs,
+                            sweep_started_before,
+                            probe,
                         )
                         .await;
                         tracing::info!(
@@ -562,8 +562,13 @@ async fn run_placeholder_sweep_pass(
                         // The Discord message is permanently unreachable, but that
                         // is not terminal-delivery evidence. Re-probe owner death
                         // after the awaited GET before touching mailbox/state.
-                        finalize_probe_cleanup_if_same_turn(
-                            shared, provider, &state, age_secs, probe,
+                        abandon_guard::finalize_probe_cleanup_if_same_turn(
+                            shared,
+                            provider,
+                            &state,
+                            age_secs,
+                            sweep_started_before,
+                            probe,
                         )
                         .await;
                         continue;
@@ -630,11 +635,14 @@ async fn run_placeholder_sweep_pass(
                 //      returns PreserveRetry, which keeps both mailbox and row.
                 // `inflight_state_still_same_turn` covers (2) and (3); edit
                 // success covers (1), and the production cleanup plan covers (4).
-                // TODO(#4573 slice B): add a persisted turn generation so reuse of
-                // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited
                     && finalize_owner_dead_cleanup_if_same_turn(
-                        shared, provider, &state, age_secs, true,
+                        shared,
+                        provider,
+                        &state,
+                        age_secs,
+                        sweep_started_before,
+                        true,
                     )
                     .await
                 {
@@ -777,6 +785,7 @@ async fn sweep_orphan_status_panel(
     token_hash: &str,
     state: &InflightTurnState,
     age_secs: u64,
+    sweep_started_before: std::time::Instant,
     report: &mut SweepPassReport,
 ) {
     let Some(panel_msg) = panel_reclaim_target(state, age_secs) else {
@@ -850,7 +859,15 @@ async fn sweep_orphan_status_panel(
         // (deleted, or — on transient failure — enqueued to the durable store) the
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
-        finalize_owner_dead_cleanup_if_same_turn(shared, provider, state, age_secs, false).await;
+        finalize_owner_dead_cleanup_if_same_turn(
+            shared,
+            provider,
+            state,
+            age_secs,
+            sweep_started_before,
+            false,
+        )
+        .await;
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
         && let Some(panel_msg_id) = state.status_message_id
     {

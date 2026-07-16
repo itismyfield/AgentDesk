@@ -248,6 +248,7 @@ pub(super) async fn finalize_abandoned_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &InflightTurnState,
+    sweep_started_before: std::time::Instant,
     evidence: AbandonedCleanupEvidence,
 ) -> AbandonedTmuxCleanupOutcome {
     let owner_decision = if evidence.terminal_delivered() {
@@ -261,11 +262,12 @@ pub(super) async fn finalize_abandoned_mailbox(
     }
 
     let channel = serenity::ChannelId::new(state.channel_id);
-    let finish = super::super::mailbox_finish_turn_if_matches(
+    let finish = super::super::mailbox_finish_turn_if_matches_started_before(
         shared,
         provider,
         channel,
         serenity::MessageId::new(state.user_msg_id),
+        sweep_started_before,
     )
     .await;
     let actions =
@@ -334,12 +336,14 @@ async fn finalize_cleanup_if_same_turn(
     provider: &ProviderKind,
     state: &InflightTurnState,
     age_secs: u64,
+    sweep_started_before: std::time::Instant,
     evidence: AbandonedCleanupEvidence,
 ) -> bool {
     if !super::inflight_state_still_same_turn(provider, state, age_secs) {
         return false;
     }
-    let cleanup = finalize_abandoned_mailbox(shared, provider, state, evidence).await;
+    let cleanup =
+        finalize_abandoned_mailbox(shared, provider, state, sweep_started_before, evidence).await;
     let same_turn = super::inflight_state_still_same_turn(provider, state, age_secs);
     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
     if should_detach_after_cleanup(same_turn, deleted) {
@@ -353,12 +357,21 @@ pub(super) async fn finalize_probe_cleanup_if_same_turn(
     provider: &ProviderKind,
     state: &InflightTurnState,
     age_secs: u64,
+    sweep_started_before: std::time::Instant,
     probe: super::PlaceholderProbe,
 ) -> bool {
     let Some(evidence) = abandoned_cleanup_evidence_for_probe(probe) else {
         return false;
     };
-    finalize_cleanup_if_same_turn(shared, provider, state, age_secs, evidence).await
+    finalize_cleanup_if_same_turn(
+        shared,
+        provider,
+        state,
+        age_secs,
+        sweep_started_before,
+        evidence,
+    )
+    .await
 }
 
 pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
@@ -366,6 +379,7 @@ pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
     provider: &ProviderKind,
     state: &InflightTurnState,
     age_secs: u64,
+    sweep_started_before: std::time::Instant,
     repair_visible_on_revival: bool,
 ) -> bool {
     if !super::inflight_state_still_same_turn(provider, state, age_secs) {
@@ -375,6 +389,7 @@ pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
         shared,
         provider,
         state,
+        sweep_started_before,
         AbandonedCleanupEvidence::OwnerDeath,
     )
     .await;
