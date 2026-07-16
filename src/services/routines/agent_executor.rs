@@ -1741,9 +1741,8 @@ fn retry_scheduled_result(
     retry_count: i32,
     next_retry_at: DateTime<Utc>,
 ) -> Value {
-    let mut retry_result = result_json.unwrap_or_else(|| {
-        merge_pending_result(run, "retry_scheduled", Some(message), None)
-    });
+    let mut retry_result = result_json
+        .unwrap_or_else(|| merge_pending_result(run, "retry_scheduled", Some(message), None));
     if let Some(object) = retry_result.as_object_mut() {
         object.insert(
             "status".to_string(),

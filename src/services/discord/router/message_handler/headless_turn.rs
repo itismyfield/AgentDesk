@@ -636,8 +636,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // Fresh routines use the same provider-severance machinery as `/goal fresh`:
     // clear in-memory, DB, stale IDs, and live-TUI bindings; skip restoration;
     // and force a cold provider launch. Prompt rewriting remains goal-only.
-    let force_fresh_provider_session =
-        fresh_context_severance || routine_agent_identity_changed;
+    let force_fresh_provider_session = fresh_context_severance || routine_agent_identity_changed;
     let severance = persist_boundary_before_provider_clear(
         fresh_context_severance,
         force_fresh_provider_session,

@@ -3302,13 +3302,8 @@ impl RoutineStore {
         .await
         .map_err(|e| anyhow!("close run {run_id}: lock running run: {e}"))?;
 
-        let Some((
-            routine_id,
-            schedule,
-            current_next_due_at,
-            started_at,
-            current_result_json,
-        )) = target
+        let Some((routine_id, schedule, current_next_due_at, started_at, current_result_json)) =
+            target
         else {
             tx.commit().await?;
             return Ok(false);
@@ -3491,10 +3486,7 @@ fn preserve_fresh_context_evidence(
         closing_result = Some(json!({}));
     }
     if let Some(object) = closing_result.as_mut().and_then(Value::as_object_mut) {
-        object.insert(
-            "fresh_context_guaranteed".to_string(),
-            Value::Bool(true),
-        );
+        object.insert("fresh_context_guaranteed".to_string(), Value::Bool(true));
     }
     closing_result
 }
