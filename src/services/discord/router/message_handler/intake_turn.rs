@@ -2229,15 +2229,6 @@ pub(super) async fn handle_text_message(
                 .len();
         let queued_card_rendered = false;
         if enqueue_outcome.enqueued {
-            let queued_transition = (shared, http, channel_id, user_msg_id, &enqueue_outcome);
-            note_busy_tui_followup_queued(
-                queued_transition.0,
-                queued_transition.1,
-                queued_transition.2,
-                queued_transition.3,
-                queued_transition.4,
-            )
-            .await;
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
         } else {
             apply_tui_busy_enqueue_refusal(
@@ -2302,9 +2293,7 @@ pub(super) async fn handle_text_message(
             "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
-        if !enqueue_outcome.enqueued {
-            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
-        }
+        tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
         super::super::super::saturating_decrement_global_active(shared);
         shared.turn_start_times.remove(&channel_id);
         post_adk_session_status(

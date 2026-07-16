@@ -876,29 +876,6 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     true
 }
 
-pub(super) async fn note_busy_tui_followup_queued(
-    shared: &Arc<SharedData>,
-    http: &Arc<serenity::http::Http>,
-    channel_id: serenity::ChannelId,
-    user_msg_id: serenity::MessageId,
-    outcome: &MailboxEnqueueOutcome,
-) {
-    let emoji = if outcome.merged {
-        super::super::super::queue_reactions::QUEUE_MERGED_PENDING_REACTION
-    } else {
-        super::super::super::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
-    };
-    super::super::super::queue_marker::note_added_current(
-        shared,
-        http,
-        channel_id,
-        user_msg_id,
-        emoji,
-        "tui_busy_pre_submit_queued",
-    )
-    .await;
-}
-
 pub(super) async fn enqueue_busy_tui_followup_for_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -930,108 +907,6 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
         ),
     )
     .await
-}
-
-#[cfg(all(test, unix))]
-mod busy_requeue_reaction_tests {
-    use super::*;
-
-    struct ScopedRuntimeRoot {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        _temp: tempfile::TempDir,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for ScopedRuntimeRoot {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
-
-    fn scoped_runtime_root() -> ScopedRuntimeRoot {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-        let temp = tempfile::tempdir().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
-        ScopedRuntimeRoot {
-            _lock: lock,
-            _temp: temp,
-            previous,
-        }
-    }
-
-    fn compact(source: &str) -> String {
-        source.split_whitespace().collect()
-    }
-
-    #[test]
-    fn intake_busy_requeue_calls_queue_transition_and_does_not_clear_accepted_state() {
-        let intake = compact(include_str!("intake_turn.rs"));
-        assert!(intake.contains(&compact(
-            r#"
-                if enqueue_outcome.enqueued {
-                    let queued_transition = (
-                        shared,
-                        http,
-                        channel_id,
-                        user_msg_id,
-                        &enqueue_outcome,
-                    );
-                    note_busy_tui_followup_queued(
-                        queued_transition.0,
-                        queued_transition.1,
-                        queued_transition.2,
-                        queued_transition.3,
-                        queued_transition.4,
-                    )
-                    .await;
-            "#,
-        )));
-        assert!(intake.contains(&compact(
-            r#"
-                if !enqueue_outcome.enqueued {
-                    tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
-                }
-            "#,
-        )));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn accepted_busy_requeue_keeps_hourglass_and_adds_queue_marker() {
-        let _root = scoped_runtime_root();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let http = Arc::new(serenity::Http::new("Bot test-token"));
-        let channel_id = serenity::ChannelId::new(100_000_004_248_301);
-        let message_id = serenity::MessageId::new(100_000_004_248_302);
-        crate::services::discord::turn_view_reconciler::note_intake_turn_started_current(
-            &shared,
-            &http,
-            channel_id,
-            message_id,
-            "test_seed_busy_pending",
-        )
-        .await;
-        let outcome = MailboxEnqueueOutcome {
-            enqueued: true,
-            merged: false,
-            ..Default::default()
-        };
-
-        note_busy_tui_followup_queued(&shared, &http, channel_id, message_id, &outcome).await;
-
-        let ops = shared.turn_view_reconciler.ops();
-        assert_eq!(
-            ops.iter().filter(|op| op.add && op.emoji == '⏳').count(),
-            1
-        );
-        assert!(ops.iter().any(|op| op.add && op.emoji == '📬'));
-        assert!(ops.iter().all(|op| !(op.emoji == '⏳' && !op.add)));
-    }
 }
 
 #[cfg(unix)]
