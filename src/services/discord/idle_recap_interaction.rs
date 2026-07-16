@@ -1299,10 +1299,7 @@ mod tests {
         .await;
         assert_eq!(outcome, RecapCompactOutcome::AlreadyClaimed);
         assert!(outcome.preserves_recap_card());
-        assert_eq!(
-            injections.load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
+        assert_eq!(injections.load(std::sync::atomic::Ordering::SeqCst), 0);
         let pointer = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<String>)>(
             "SELECT idle_recap_message_id, idle_recap_channel_id, instance_id
              FROM sessions
