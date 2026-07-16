@@ -502,10 +502,8 @@ fn claude_tui_spinner_status_is_known(status: &str) -> bool {
     if status.chars().any(char::is_whitespace) {
         return false;
     }
-    status
-        .trim_end_matches(|character| matches!(character, '\'' | '’'))
-        .to_ascii_lowercase()
-        .ends_with("ing")
+    let lower = status.to_ascii_lowercase();
+    lower.ends_with("ing") || lower.ends_with("in'") || lower.ends_with("in’")
 }
 
 fn line_has_claude_tui_spinner_status_fragment(line: &str) -> bool {
@@ -2132,6 +2130,7 @@ earlier assistant prose
             "· Thinking…",
             "✳ Beboppin'…",
             "✳ Beboppin'… (12s)",
+            "✳ Dilly-dallying…",
             "✦ Mapping distant galaxies…",
             "✦ Mapping distant galaxies… (12s",
             "· Compacting conversation… (30s)",
