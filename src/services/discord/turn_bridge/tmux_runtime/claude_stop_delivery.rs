@@ -83,20 +83,13 @@ fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentit
         let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        if json.get("type").and_then(serde_json::Value::as_str) != Some("user") {
+        let Some((_prompt, user_entry_id)) =
+            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
+                &json,
+            )
+        else {
             continue;
-        }
-        let user_entry_id = json
-            .get("uuid")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                json.get("message")
-                    .and_then(|message| message.get("uuid"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .map(str::trim)
-            .filter(|entry_id| !entry_id.is_empty())
-            .map(str::to_string);
+        };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         line.as_bytes().hash(&mut hasher);
         latest = Some(ClaudeStopTurnIdentity {
@@ -110,6 +103,10 @@ fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentit
     }
 }
 
+fn transcript_identity_allows_delivery(identity: Option<&ClaudeStopTurnIdentity>) -> bool {
+    identity.is_none_or(ClaudeStopTurnIdentity::still_current)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClaudeStopClaimOutcome {
     Skipped,
@@ -119,22 +116,20 @@ enum ClaudeStopClaimOutcome {
 
 struct ClaudeStopDeliveryReservation<'a> {
     token: &'a CancelToken,
-    committed: bool,
 }
 
 impl<'a> ClaudeStopDeliveryReservation<'a> {
     fn claim(token: &'a CancelToken) -> Option<Self> {
-        token.claim_claude_interrupt().then_some(Self {
-            token,
-            committed: false,
-        })
+        token.claim_claude_interrupt().then_some(Self { token })
     }
 
     fn finish(&mut self, outcome: ClaudeStopClaimOutcome) {
         match outcome {
-            ClaudeStopClaimOutcome::DeliverySucceeded => self.committed = true,
+            ClaudeStopClaimOutcome::DeliverySucceeded => {
+                debug_assert!(self.token.claude_interrupt_claim_is_committed());
+            }
             ClaudeStopClaimOutcome::Skipped | ClaudeStopClaimOutcome::DeliveryFailed => {
-                debug_assert!(!self.committed);
+                debug_assert!(!self.token.claude_interrupt_claim_is_committed());
             }
         }
     }
@@ -142,7 +137,7 @@ impl<'a> ClaudeStopDeliveryReservation<'a> {
 
 impl Drop for ClaudeStopDeliveryReservation<'_> {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.token.claude_interrupt_claim_is_committed() {
             let released = self.token.release_claude_interrupt_claim();
             debug_assert!(released, "undelivered Claude stop claim must roll back");
         }
@@ -428,49 +423,28 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         };
     };
 
-    // Revalidate both token generation and the latest transcript user-entry
-    // identity immediately before provider I/O. The second fence is deliberately
-    // adjacent to the write: a delayed stale stop must not escape a newer turn
-    // that reused the same tmux session.
-    let generation_matches = token.claude_interrupt_generation() == expected_generation;
-    let turn_identity_matches = turn_identity
-        .as_ref()
-        .is_some_and(ClaudeStopTurnIdentity::still_current);
-    if !generation_matches || !turn_identity_matches {
-        tracing::warn!(
-            "claude turn interrupt stale before delivery: session={} expected_generation={} current_generation={} turn_identity_available={} turn_identity_matches={} reason={} mechanism={:?} phase={}",
-            session_name,
-            expected_generation,
-            token.claude_interrupt_generation(),
-            turn_identity.is_some(),
-            turn_identity_matches,
-            reason,
-            delivery,
-            phase.as_str()
-        );
-        return ProviderTurnInterruptOutcome {
-            tmux_session,
-            sent_keys: false,
-            fallback_sigint_pid: None,
-            missing_tmux_session: false,
-            sigint_target_missing: false,
-        };
-    }
-
+    // The session-level generation check and provider write run under one lock in
+    // `lock_current_claude_interrupt_session`; a newer turn cannot publish itself
+    // between the check and the Escape/FIFO write. Transcript identity is
+    // supplemental only: when the turn-start entry has fallen outside the bounded
+    // tail window, fail open after the authoritative session-generation check.
     let session_for_task = session_name.clone();
     let token_for_task = Arc::clone(token);
-    let turn_identity = turn_identity.expect("turn identity checked above");
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
     let delivery_result = tokio::task::spawn_blocking(move || {
-        let current_generation = token_for_task.claude_interrupt_generation();
-        let turn_identity_matches = turn_identity.still_current();
-        if current_generation != expected_generation || !turn_identity_matches {
+        let Some(delivery_guard) = token_for_task
+            .lock_current_claude_interrupt_session(&session_for_task)
+        else {
             return Err(format!(
-                "stale Claude stop before provider write: expected_generation={} current_generation={} turn_identity_matches={}",
-                expected_generation, current_generation, turn_identity_matches
+                "stale Claude stop session generation before provider write: expected_generation={expected_generation}"
+            ));
+        };
+        if !transcript_identity_allows_delivery(turn_identity.as_ref()) {
+            return Err(format!(
+                "stale Claude stop transcript identity before provider write: generation={expected_generation}"
             ));
         }
-        match delivery {
+        delivery_guard.commit_success(match delivery {
             ClaudeTurnInterruptDelivery::TuiEscape => {
                 match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
                     Ok(output) if output.status.success() => Ok(()),
@@ -488,11 +462,11 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 let line = build_claude_interrupt_control_line(&request_id);
                 write_line_to_wrapper_fifo(&input_fifo, &line)
             }
-        }
+        })
     })
     .await;
 
-    let delivered = match delivery_result {
+    let (claim_outcome, delivered) = match delivery_result {
         Ok(Ok(())) => {
             tracing::info!(
                 "claude turn interrupt delivered (session preserved): session={} generation={} reason={} mechanism={:?} phase={}",
@@ -502,8 +476,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 delivery,
                 phase.as_str()
             );
-            reservation.finish(ClaudeStopClaimOutcome::DeliverySucceeded);
-            true
+            (ClaudeStopClaimOutcome::DeliverySucceeded, true)
         }
         Ok(Err(error)) => {
             // Deliberately NO SIGINT fallback: a failed turn-cancel must not
@@ -519,7 +492,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 phase.as_str(),
                 error
             );
-            false
+            (ClaudeStopClaimOutcome::DeliveryFailed, false)
         }
         Err(error) => {
             tracing::warn!(
@@ -531,9 +504,10 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 phase.as_str(),
                 error
             );
-            false
+            (ClaudeStopClaimOutcome::DeliveryFailed, false)
         }
     };
+    reservation.finish(claim_outcome);
 
     ProviderTurnInterruptOutcome {
         tmux_session,
@@ -562,6 +536,12 @@ mod tests {
         let decision = decide_claimed_claude_stop_delivery(delivery, phase);
         let outcome = match (decision, delivery_succeeded) {
             (ClaudeStopDeliveryDecision::Deliver(_), true) => {
+                token.bind_claude_tmux_session("claude-stop-policy-test");
+                token
+                    .lock_current_claude_interrupt_session("claude-stop-policy-test")
+                    .expect("test generation must acquire delivery guard")
+                    .commit_success(Ok::<(), ()>(()))
+                    .expect("test delivery must commit");
                 ClaudeStopClaimOutcome::DeliverySucceeded
             }
             (ClaudeStopDeliveryDecision::Deliver(_), false) => {
@@ -759,6 +739,47 @@ mod tests {
         });
         std::fs::write(path, format!("{user}\n{assistant}\n"))
             .expect("write Claude transcript fixture");
+    }
+
+    #[test]
+    fn missing_turn_identity_fails_open_after_session_generation_check() {
+        assert!(
+            transcript_identity_allows_delivery(None),
+            "a long-running turn whose user entry fell outside the tail window must still reach Escape"
+        );
+    }
+
+    #[test]
+    fn tool_result_user_envelope_does_not_advance_turn_identity() {
+        let temp = tempfile::tempdir().expect("temp transcript root");
+        let path = temp.path().join("turn.jsonl");
+        write_turn(&path, Some("turn-a"), "first");
+        let identity =
+            ClaudeStopTurnIdentity::capture(path.to_str().unwrap()).expect("capture turn identity");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                writeln!(
+                    file,
+                    "{}",
+                    serde_json::json!({
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [{ "type": "tool_result", "content": "done" }]
+                        },
+                        "uuid": "tool-result-a"
+                    })
+                )
+            })
+            .expect("append tool_result fixture");
+
+        assert!(
+            identity.still_current(),
+            "tool_result activity inside one turn must not make a valid stop stale"
+        );
     }
 
     #[test]

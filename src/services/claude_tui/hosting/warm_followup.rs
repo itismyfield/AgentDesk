@@ -679,8 +679,7 @@ pub(crate) fn try_claude_tui_warm_followup(
 ) -> ClaudeTuiWarmFollowupOutcome {
     debug_log("Existing Claude TUI tmux session found — sending follow-up");
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_claude_tmux_session(tmux_session_name);
     }
     let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
     let (busy_waited, recreate_before_submit, prompt_draft_cleared_before_submit) =

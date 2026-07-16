@@ -1907,8 +1907,7 @@ fn execute_streaming_local_tui_tmux(
     }
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_claude_tmux_session(tmux_session_name);
     }
 
     let _ = sender.send(StreamMessage::Init {
@@ -2949,8 +2948,7 @@ fn execute_streaming_local_tmux(
 
     // Store tmux session name in cancel token
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_claude_tmux_session(tmux_session_name);
     }
 
     emit_fresh_session_watcher_handoff(&sender, output_path, input_fifo_path, tmux_session_name);
@@ -3027,8 +3025,7 @@ fn send_followup_to_tmux(
 
     // Store tmux session name in cancel token
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_claude_tmux_session(tmux_session_name);
     }
 
     // Read output file from the offset

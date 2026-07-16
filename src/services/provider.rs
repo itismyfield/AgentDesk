@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+mod cancel_token_claude_interrupt;
+
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
 
@@ -996,9 +998,9 @@ pub struct CancelToken {
     /// mid-stream cancel that should kill the child process.
     completion_cleanup: AtomicBool,
     /// Claude turn-interrupt fence. Each `CancelToken` is a turn generation.
-    /// `false -> true` reserves one delivery attempt; a skipped or failed attempt
-    /// rolls it back, while a successful provider write leaves it committed.
-    claude_interrupt_claim: AtomicBool,
+    /// `0 -> 1` reserves one delivery attempt; a skipped or failed attempt
+    /// rolls it back to 0, while a successful provider write commits `1 -> 2`.
+    claude_interrupt_claim: AtomicU8,
     /// Monotonic Claude turn identity used for diagnostics and fence observability.
     claude_interrupt_generation: u64,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
@@ -1020,7 +1022,7 @@ impl CancelToken {
             watchdog_max_deadline_ms: AtomicI64::new(0),
             async_managed: AtomicBool::new(false),
             completion_cleanup: AtomicBool::new(false),
-            claude_interrupt_claim: AtomicBool::new(false),
+            claude_interrupt_claim: AtomicU8::new(0),
             claude_interrupt_generation: NEXT_CLAUDE_INTERRUPT_GENERATION
                 .fetch_add(1, Ordering::Relaxed),
             restart_mode: AtomicU8::new(0),
@@ -1054,24 +1056,6 @@ impl CancelToken {
 
     pub fn is_completion_cleanup(&self) -> bool {
         self.completion_cleanup.load(Ordering::Relaxed)
-    }
-
-    /// Reserve the Claude interrupt-delivery right for this turn.
-    pub(crate) fn claim_claude_interrupt(&self) -> bool {
-        self.claude_interrupt_claim
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
-
-    /// Release an undelivered reservation so a later stop can retry this turn.
-    pub(crate) fn release_claude_interrupt_claim(&self) -> bool {
-        self.claude_interrupt_claim
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
-
-    pub(crate) fn claude_interrupt_generation(&self) -> u64 {
-        self.claude_interrupt_generation
     }
 
     /// Cancel and clean up any associated tmux session.

@@ -450,7 +450,9 @@ pub(in crate::services::discord) fn bind_cancel_token_tmux_runtime(
     tmux_session_name: &str,
     reason: &str,
 ) -> Option<u32> {
-    if let Ok(mut guard) = token.tmux_session.lock() {
+    if matches!(provider, ProviderKind::Claude) {
+        token.bind_claude_tmux_session(tmux_session_name);
+    } else if let Ok(mut guard) = token.tmux_session.lock() {
         if guard.as_deref() != Some(tmux_session_name) {
             *guard = Some(tmux_session_name.to_string());
         }
