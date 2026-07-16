@@ -1,7 +1,7 @@
 use crate::services::platform::BinaryResolution;
 use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -995,12 +995,20 @@ pub struct CancelToken {
     /// observers; provider cancel watchdogs must not treat that as a live
     /// mid-stream cancel that should kill the child process.
     completion_cleanup: AtomicBool,
+    /// Claude turn-interrupt fence. Each `CancelToken` is a turn generation, so
+    /// a successful compare-and-swap elects exactly one stop-delivery owner
+    /// without suppressing the next token on the same provider session.
+    claude_interrupt_claim: AtomicBool,
+    /// Monotonic Claude turn identity used for diagnostics and fence observability.
+    claude_interrupt_generation: u64,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
 }
 
 impl CancelToken {
     pub fn new() -> Self {
+        static NEXT_CLAUDE_INTERRUPT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
         Self {
             cancelled: AtomicBool::new(false),
             child_pid: Mutex::new(None),
@@ -1012,6 +1020,9 @@ impl CancelToken {
             watchdog_max_deadline_ms: AtomicI64::new(0),
             async_managed: AtomicBool::new(false),
             completion_cleanup: AtomicBool::new(false),
+            claude_interrupt_claim: AtomicBool::new(false),
+            claude_interrupt_generation: NEXT_CLAUDE_INTERRUPT_GENERATION
+                .fetch_add(1, Ordering::Relaxed),
             restart_mode: AtomicU8::new(0),
         }
     }
@@ -1043,6 +1054,17 @@ impl CancelToken {
 
     pub fn is_completion_cleanup(&self) -> bool {
         self.completion_cleanup.load(Ordering::Relaxed)
+    }
+
+    /// Elect the single Claude interrupt-delivery owner for this turn.
+    pub(crate) fn claim_claude_interrupt(&self) -> bool {
+        self.claude_interrupt_claim
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn claude_interrupt_generation(&self) -> u64 {
+        self.claude_interrupt_generation
     }
 
     /// Cancel and clean up any associated tmux session.

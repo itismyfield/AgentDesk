@@ -10,11 +10,16 @@ use std::time::Duration;
 // OS-level PID-exit observation moved verbatim into sibling leaf modules; the
 // async orchestration + session-teardown logic stays here and reaches the
 // moved items by their original bare names via these glob/explicit re-imports.
+mod claude_stop_delivery;
 mod interrupt_policy;
 mod pid_exit;
 mod process_backend_cancel;
 mod process_table;
 
+use claude_stop_delivery::{
+    ClaudeStopDeliveryDecision, claim_claude_stop_delivery, classify_tui_interrupt_phase,
+    decide_claimed_claude_stop_delivery,
+};
 use interrupt_policy::*;
 use pid_exit::wait_for_pid_exit;
 use process_backend_cancel::{
@@ -164,7 +169,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     // the turn and the next message warm-resumes instead of cold-starting.
     if matches!(provider, ProviderKind::Claude) {
         let _ = plan; // claude takes the dedicated session-preserving path below
-        return interrupt_claude_turn_session_preserving(tmux_session, reason).await;
+        return interrupt_claude_turn_session_preserving(token, tmux_session, reason).await;
     }
 
     // #1260: an empty key list means "no keys to send; go straight to the
@@ -441,7 +446,10 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
 /// teardown for `CleanupSession` stays in `cancel_active_token`. Delivery is
 /// chosen per host (`claude_turn_interrupt_delivery`): ESC for the interactive
 /// TUI, or a stream-json `control_request{interrupt}` for the wrapper FIFO.
+/// A token-local CAS elects one owner before any runtime probe; interactive ESC
+/// additionally requires structured streaming state plus positive active-pane evidence.
 async fn interrupt_claude_turn_session_preserving(
+    token: &Arc<CancelToken>,
     tmux_session: Option<String>,
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
@@ -469,67 +477,242 @@ async fn interrupt_claude_turn_session_preserving(
         };
     };
 
-    let session_for_task = session_name.clone();
-    let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
-    let delivery_result = tokio::task::spawn_blocking(move || {
-        let is_wrapper = pane_foreground_is_provider_wrapper(&session_for_task);
-        let delivery = claude_turn_interrupt_delivery(is_wrapper);
-        let outcome = match delivery {
-            ClaudeTurnInterruptDelivery::TuiEscape => {
-                match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
-                    Ok(output) if output.status.success() => Ok(()),
-                    Ok(output) => Err(format!(
-                        "tmux send-keys Escape failed: status={}",
-                        output.status
-                    )),
-                    Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
-                }
-            }
-            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
-                let (_jsonl, input_fifo) = tmux_runtime_paths(&session_for_task);
-                let line = build_claude_interrupt_control_line(&request_id);
-                write_line_to_wrapper_fifo(&input_fifo, &line)
-            }
+    if !claim_claude_stop_delivery(token) {
+        tracing::info!(
+            "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism=not_probed runtime_kind=not_probed structured_state=not_probed pane_ready=not_probed pane_active=not_probed pane_has_draft=not_probed phase=not_probed decision={}",
+            session_name,
+            token.claude_interrupt_generation(),
+            reason,
+            ClaudeStopDeliveryDecision::SkipDuplicate.as_str()
+        );
+        return ProviderTurnInterruptOutcome {
+            tmux_session,
+            sent_keys: false,
+            fallback_sigint_pid: None,
+            missing_tmux_session: false,
+            sigint_target_missing: false,
         };
-        (delivery, outcome)
+    }
+
+    let session_for_probe = session_name.clone();
+    let probe_result = tokio::task::spawn_blocking(move || {
+        let is_wrapper = pane_foreground_is_provider_wrapper(&session_for_probe);
+        let delivery = claude_turn_interrupt_delivery(is_wrapper);
+        let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+            &session_for_probe,
+        );
+        let runtime_kind = binding
+            .as_ref()
+            .map(|binding| binding.runtime_kind)
+            .or_else(|| {
+                crate::services::tmux_common::resolve_tmux_runtime_kind_marker(
+                    &session_for_probe,
+                )
+            });
+        let (default_output_path, default_input_fifo_path) =
+            tmux_runtime_paths(&session_for_probe);
+        let wrapper_input_fifo_path = if matches!(
+            delivery,
+            ClaudeTurnInterruptDelivery::StreamJsonControlRequest
+        ) {
+            Some(
+                binding
+                    .as_ref()
+                    .and_then(|binding| binding.input_fifo_path.clone())
+                    .unwrap_or(default_input_fifo_path),
+            )
+        } else {
+            None
+        };
+        let structured_state = if matches!(delivery, ClaudeTurnInterruptDelivery::TuiEscape) {
+            binding.as_ref().and_then(|binding| {
+                crate::services::tui_turn_state::runtime_binding_turn_state(
+                    &ProviderKind::Claude,
+                    binding,
+                )
+            })
+        } else {
+            let output_path = binding
+                .as_ref()
+                .map(|binding| binding.output_path.clone())
+                .unwrap_or(default_output_path);
+            Some(
+                crate::services::tui_turn_state::observe_claude_jsonl_turn_state(
+                    std::path::Path::new(&output_path),
+                ),
+            )
+        };
+        let pane = if matches!(delivery, ClaudeTurnInterruptDelivery::TuiEscape) {
+            crate::services::platform::tmux::capture_pane(&session_for_probe, -160)
+        } else {
+            None
+        };
+        let pane_ready = pane.as_deref().is_some_and(
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input,
+        );
+        let pane_active = pane.as_deref().is_some_and(
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_actively_streaming,
+        );
+        let pane_has_draft = pane.as_deref().is_some_and(
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft,
+        );
+        let phase = match delivery {
+            ClaudeTurnInterruptDelivery::TuiEscape => {
+                classify_tui_interrupt_phase(
+                    structured_state,
+                    pane_ready || pane_has_draft,
+                    pane_active,
+                )
+            }
+            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => match structured_state {
+                Some(crate::services::tui_turn_state::TuiTurnState::Idle) => {
+                    claude_stop_delivery::ClaudeTuiInterruptPhase::PromptReady
+                }
+                Some(crate::services::tui_turn_state::TuiTurnState::UserSubmitted) => {
+                    claude_stop_delivery::ClaudeTuiInterruptPhase::UserSubmitted
+                }
+                Some(crate::services::tui_turn_state::TuiTurnState::Streaming) => {
+                    claude_stop_delivery::ClaudeTuiInterruptPhase::ActiveGeneration
+                }
+                Some(crate::services::tui_turn_state::TuiTurnState::Unknown) | None => {
+                    claude_stop_delivery::ClaudeTuiInterruptPhase::Ambiguous
+                }
+            },
+        };
+        (
+            delivery,
+            runtime_kind,
+            wrapper_input_fifo_path,
+            structured_state,
+            pane_ready,
+            pane_active,
+            pane_has_draft,
+            phase,
+        )
     })
     .await;
 
-    let (delivery, delivered) = match delivery_result {
-        Ok((delivery, Ok(()))) => {
-            tracing::info!(
-                "claude turn interrupt delivered (session preserved): session={} reason={} mechanism={:?}",
+    let (
+        delivery,
+        runtime_kind,
+        wrapper_input_fifo_path,
+        structured_state,
+        pane_ready,
+        pane_active,
+        pane_has_draft,
+        phase,
+    ) = match probe_result {
+        Ok(probe) => probe,
+        Err(error) => {
+            tracing::warn!(
+                "claude turn interrupt probe join error: session={} reason={} generation={} decision=skip_ambiguous error={}",
                 session_name,
                 reason,
-                delivery
+                token.claude_interrupt_generation(),
+                error
             );
-            (Some(delivery), true)
+            return ProviderTurnInterruptOutcome {
+                tmux_session,
+                sent_keys: false,
+                fallback_sigint_pid: None,
+                missing_tmux_session: false,
+                sigint_target_missing: false,
+            };
         }
-        Ok((delivery, Err(error))) => {
+    };
+
+    let decision = decide_claimed_claude_stop_delivery(delivery, phase);
+    tracing::info!(
+        "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism={:?} runtime_kind={} structured_state={} pane_ready={} pane_active={} pane_has_draft={} phase={} decision={}",
+        session_name,
+        token.claude_interrupt_generation(),
+        reason,
+        delivery,
+        runtime_kind
+            .map(crate::services::agent_protocol::RuntimeHandoffKind::as_str)
+            .unwrap_or("unknown"),
+        structured_state.map(|state| state.as_str()).unwrap_or("unavailable"),
+        pane_ready,
+        pane_active,
+        pane_has_draft,
+        phase.as_str(),
+        decision.as_str()
+    );
+
+    let ClaudeStopDeliveryDecision::Deliver(delivery) = decision else {
+        return ProviderTurnInterruptOutcome {
+            tmux_session,
+            sent_keys: false,
+            fallback_sigint_pid: None,
+            missing_tmux_session: false,
+            sigint_target_missing: false,
+        };
+    };
+
+    let session_for_task = session_name.clone();
+    let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
+    let delivery_result = tokio::task::spawn_blocking(move || match delivery {
+        ClaudeTurnInterruptDelivery::TuiEscape => {
+            match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
+                Ok(output) if output.status.success() => Ok(()),
+                Ok(output) => Err(format!(
+                    "tmux send-keys Escape failed: status={}",
+                    output.status
+                )),
+                Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+            }
+        }
+        ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
+            let Some(input_fifo) = wrapper_input_fifo_path else {
+                return Err("claude wrapper input FIFO unavailable after probe".to_string());
+            };
+            let line = build_claude_interrupt_control_line(&request_id);
+            write_line_to_wrapper_fifo(&input_fifo, &line)
+        }
+    })
+    .await;
+
+    let delivered = match delivery_result {
+        Ok(Ok(())) => {
+            tracing::info!(
+                "claude turn interrupt delivered (session preserved): session={} generation={} reason={} mechanism={:?} phase={}",
+                session_name,
+                token.claude_interrupt_generation(),
+                reason,
+                delivery,
+                phase.as_str()
+            );
+            true
+        }
+        Ok(Err(error)) => {
             // Deliberately NO SIGINT fallback: a failed turn-cancel must not
             // escalate to a session-kill. The cooperative cancel flag still
             // flips in `cancel_active_token`, and the watcher reconciles the
             // turn on its next pass.
             tracing::warn!(
-                "claude turn interrupt delivery failed (session left intact, no SIGINT escalation): session={} reason={} mechanism={:?} error={}",
+                "claude turn interrupt delivery failed (session left intact, no SIGINT escalation): session={} generation={} reason={} mechanism={:?} phase={} error={}",
                 session_name,
+                token.claude_interrupt_generation(),
                 reason,
                 delivery,
+                phase.as_str(),
                 error
             );
-            (Some(delivery), false)
+            false
         }
         Err(error) => {
             tracing::warn!(
-                "claude turn interrupt join error: session={} reason={} error={}",
+                "claude turn interrupt join error: session={} generation={} reason={} mechanism={:?} phase={} error={}",
                 session_name,
+                token.claude_interrupt_generation(),
                 reason,
+                delivery,
+                phase.as_str(),
                 error
             );
-            (None, false)
+            false
         }
     };
-    let _ = delivery;
 
     ProviderTurnInterruptOutcome {
         tmux_session,
@@ -637,7 +820,9 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     interrupt_outcome: &ProviderTurnInterruptOutcome,
     reason: &str,
 ) {
-    if cleanup_policy.should_cleanup_tmux() {
+    if cleanup_policy.should_cleanup_tmux()
+        || matches!(provider, ProviderKind::Claude) && !interrupt_outcome.sent_keys
+    {
         return;
     }
 
