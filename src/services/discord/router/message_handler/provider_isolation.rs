@@ -655,7 +655,9 @@ mod thread_role_inheritance_tests {
             "token",
             Some(binding),
             false,
-            DispatchProfile::Full,
+            super::super::super::super::prompt_builder::PromptProfiles::foreground(
+                DispatchProfile::Full,
+            ),
             None,
             None,
             None,

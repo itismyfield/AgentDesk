@@ -1831,7 +1831,7 @@ pub(super) async fn handle_text_message(
         token,
         role_binding.as_ref(),
         reply_to_user_message,
-        dispatch_profile,
+        PromptProfiles::foreground(dispatch_profile),
         dispatch_type_str.as_deref(),
         current_task_context.as_ref(),
         sak_for_system,

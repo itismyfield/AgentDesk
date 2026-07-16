@@ -664,10 +664,6 @@ pub(super) fn resolve_workspace(
         .or_else(|| default_workspace(&agent.id))
 }
 
-// #3034: consumed by `settings::content::load_shared_prompt_for_profile`, the
-// profile-aware shared-prompt loader (unwired in prod but a real feature
-// surface). Keep the agentdesk_config resolver (and its fallback) live.
-#[allow(dead_code)]
 pub(super) fn load_shared_prompt_path() -> Option<String> {
     load_agentdesk_config()
         .and_then(|config| config.shared_prompt.as_deref().map(expand_tilde))

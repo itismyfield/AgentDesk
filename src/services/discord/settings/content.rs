@@ -192,14 +192,6 @@ pub(super) fn extract_first_heading(content: &str) -> Option<String> {
     None
 }
 
-// #3034: unwired-in-prod but real feature surface (profile-partitioned shared
-// prompt); kept live alongside the org_schema/agentdesk_config/role_map path
-// resolvers. Remove together if the profile loader is dropped.
-#[allow(dead_code)]
-pub(in crate::services::discord) fn load_shared_prompt() -> Option<String> {
-    load_shared_prompt_for_profile("full")
-}
-
 /// Profile-aware loader for the shared agent rules.
 ///
 /// `_shared.prompt.md` may be partitioned with HTML-comment markers so that
@@ -221,7 +213,6 @@ pub(in crate::services::discord) fn load_shared_prompt() -> Option<String> {
 /// ```
 ///
 /// Files without any markers behave exactly like before (whole content kept).
-#[allow(dead_code)] // #3034: unwired-in-prod profile loader feature surface.
 pub(in crate::services::discord) fn load_shared_prompt_for_profile(
     profile: &str,
 ) -> Option<String> {
@@ -236,65 +227,284 @@ pub(in crate::services::discord) fn load_shared_prompt_for_profile(
         .or_else(load_shared_prompt_path_from_role_map)?;
 
     let raw = fs::read_to_string(Path::new(&path_str)).ok()?;
-    let filtered = strip_non_matching_profile_sections(&raw, profile);
-    const MAX_CHARS: usize = 6_000;
-    if filtered.chars().count() <= MAX_CHARS {
-        return Some(filtered);
+    let sections = matching_profile_sections(&raw, profile);
+    const MAX_CHARS: usize = 12_000;
+    let (filtered, truncated) = join_complete_sections_with_limit(&sections, MAX_CHARS);
+    if truncated {
+        tracing::warn!(
+            target: "agentdesk.shared_prompt",
+            path = %path_str,
+            profile,
+            max_chars = MAX_CHARS,
+            kept_chars = filtered.chars().count(),
+            "shared prompt exceeded character budget; truncated at a complete section boundary"
+        );
     }
-    let truncated: String = filtered.chars().take(MAX_CHARS).collect();
-    Some(truncated)
+    if filtered.trim().is_empty() {
+        return None;
+    }
+    Some(filtered)
+}
+
+#[derive(Debug)]
+enum ProfileSectionNode {
+    Text(String),
+    Profile {
+        name: String,
+        open_marker: String,
+        close_marker: Option<String>,
+        children: Vec<ProfileSectionNode>,
+    },
+}
+
+fn profile_open_marker(line: &str) -> Option<String> {
+    line.trim()
+        .strip_prefix("<!-- profile:")
+        .and_then(|rest| rest.strip_suffix("-->"))
+        .map(|profile| profile.trim().to_ascii_lowercase())
+}
+
+fn parse_profile_nodes(
+    lines: &[&str],
+    cursor: &mut usize,
+    nested: bool,
+) -> (Vec<ProfileSectionNode>, bool) {
+    let mut nodes = Vec::new();
+    while *cursor < lines.len() {
+        let line = lines[*cursor];
+        if let Some(name) = profile_open_marker(line) {
+            let open_marker = format!("{line}\n");
+            *cursor += 1;
+            let (children, closed) = parse_profile_nodes(lines, cursor, true);
+            nodes.push(ProfileSectionNode::Profile {
+                name,
+                open_marker,
+                close_marker: closed.then(|| "<!-- /profile -->\n".to_string()),
+                children,
+            });
+            continue;
+        }
+        if line.trim() == "<!-- /profile -->" {
+            *cursor += 1;
+            if nested {
+                return (nodes, true);
+            }
+            continue;
+        }
+
+        let mut text = String::new();
+        while *cursor < lines.len()
+            && profile_open_marker(lines[*cursor]).is_none()
+            && lines[*cursor].trim() != "<!-- /profile -->"
+        {
+            text.push_str(lines[*cursor]);
+            text.push('\n');
+            *cursor += 1;
+        }
+        if !text.is_empty() {
+            nodes.push(ProfileSectionNode::Text(text));
+        }
+    }
+    (nodes, false)
+}
+
+fn render_profile_nodes(
+    nodes: &[ProfileSectionNode],
+    target: &str,
+    parent_matches: bool,
+    force_keep: bool,
+) -> String {
+    let mut rendered = String::new();
+    for node in nodes {
+        match node {
+            ProfileSectionNode::Text(text) => {
+                if parent_matches || force_keep {
+                    rendered.push_str(text);
+                }
+            }
+            ProfileSectionNode::Profile {
+                name,
+                open_marker,
+                close_marker,
+                children,
+            } => {
+                if force_keep || close_marker.is_none() {
+                    rendered.push_str(open_marker);
+                    rendered.push_str(&render_profile_nodes(children, target, true, true));
+                    if let Some(close_marker) = close_marker {
+                        rendered.push_str(close_marker);
+                    }
+                } else {
+                    let section_matches = parent_matches && (name == "all" || name == target);
+                    rendered.push_str(&render_profile_nodes(
+                        children,
+                        target,
+                        section_matches,
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+    rendered
+}
+
+fn matching_profile_sections(raw: &str, profile: &str) -> Vec<String> {
+    let lines: Vec<_> = raw.lines().collect();
+    let mut cursor = 0;
+    let (nodes, _) = parse_profile_nodes(&lines, &mut cursor, false);
+    let target = profile.trim().to_ascii_lowercase();
+    nodes
+        .iter()
+        .map(|node| render_profile_nodes(std::slice::from_ref(node), &target, true, false))
+        .filter(|section| !section.trim().is_empty())
+        .collect()
+}
+
+fn compact_blank_lines(raw: &str) -> String {
+    let mut compact = String::with_capacity(raw.len());
+    let mut previous_blank = false;
+    for line in raw.lines() {
+        let blank = line.trim().is_empty();
+        if !blank || !previous_blank {
+            compact.push_str(line);
+            compact.push('\n');
+        }
+        previous_blank = blank;
+    }
+    compact.trim_end().to_string()
+}
+
+fn join_complete_sections_with_limit(sections: &[String], max_chars: usize) -> (String, bool) {
+    let mut accepted = String::new();
+    let mut rendered = String::new();
+    for section in sections {
+        let mut candidate = accepted.clone();
+        candidate.push_str(section);
+        let compact = compact_blank_lines(&candidate);
+        if compact.chars().count() > max_chars {
+            return (rendered, true);
+        }
+        accepted = candidate;
+        rendered = compact;
+    }
+    (rendered, false)
 }
 
 /// Strip `<!-- profile: X -->` ... `<!-- /profile -->` blocks whose `X` does not
 /// match `profile` (case-insensitive). Blocks tagged `all`, untagged content, and
-/// matching blocks are preserved. Marker lines themselves are removed for clean
-/// output. Unbalanced markers degrade gracefully — the whole section is kept.
-#[allow(dead_code)] // #3034: helper for the unwired-in-prod profile loader.
+/// matching blocks are preserved. Marker lines for balanced sections are removed
+/// for clean output. Unbalanced sections keep their marker lines so malformed input
+/// is not silently discarded.
+#[cfg(test)]
 fn strip_non_matching_profile_sections(raw: &str, profile: &str) -> String {
-    let target = profile.trim().to_ascii_lowercase();
-    let mut out = String::with_capacity(raw.len());
-    let mut current_profile: Option<String> = None;
+    let sections = matching_profile_sections(raw, profile);
+    compact_blank_lines(&sections.concat())
+}
 
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed
-            .strip_prefix("<!-- profile:")
-            .and_then(|s| s.strip_suffix("-->"))
-        {
-            current_profile = Some(rest.trim().to_ascii_lowercase());
-            continue;
-        }
-        if trimmed == "<!-- /profile -->" {
-            current_profile = None;
-            continue;
-        }
-        let keep = match current_profile.as_deref() {
-            None => true,
-            Some("all") => true,
-            Some(p) => p == target,
-        };
-        if keep {
-            out.push_str(line);
-            out.push('\n');
-        }
+#[cfg(test)]
+mod shared_prompt_profile_tests {
+    use super::*;
+
+    const SAMPLE: &str = "head\n\
+        <!-- profile: all -->\n\
+        always\n\
+        <!-- /profile -->\n\
+        <!-- profile: full -->\n\
+        only-full\n\
+        <!-- /profile -->\n\
+        <!-- profile: review-lite -->\n\
+        only-review\n\
+        <!-- /profile -->\n\
+        <!-- profile: headless -->\n\
+        only-headless\n\
+        <!-- /profile -->\n\
+        tail\n";
+
+    #[test]
+    fn profiles_keep_only_all_unmarked_and_matching_sections() {
+        let full = strip_non_matching_profile_sections(SAMPLE, "full");
+        assert!(full.contains("always"));
+        assert!(full.contains("only-full"));
+        assert!(!full.contains("only-review"));
+        assert!(!full.contains("only-headless"));
+        assert!(full.contains("head"));
+        assert!(full.contains("tail"));
+        assert!(!full.contains("<!-- profile:"));
+
+        let review = strip_non_matching_profile_sections(SAMPLE, "review-lite");
+        assert!(review.contains("always"));
+        assert!(review.contains("only-review"));
+        assert!(!review.contains("only-full"));
+
+        let headless = strip_non_matching_profile_sections(SAMPLE, "headless");
+        assert!(headless.contains("always"));
+        assert!(headless.contains("only-headless"));
+        assert!(!headless.contains("only-full"));
     }
 
-    // Collapse 3+ consecutive blank lines that profile stripping may produce.
-    let mut compact = String::with_capacity(out.len());
-    let mut blank_run = 0usize;
-    for line in out.lines() {
-        if line.trim().is_empty() {
-            blank_run += 1;
-            if blank_run <= 1 {
-                compact.push('\n');
-            }
-        } else {
-            blank_run = 0;
-            compact.push_str(line);
-            compact.push('\n');
-        }
+    #[test]
+    fn unclosed_nonmatching_section_preserves_its_content() {
+        let raw = "before\n<!-- profile: full -->\nUNFINISHED FULL\ntail\n";
+        let out = strip_non_matching_profile_sections(raw, "headless");
+        assert_eq!(out, "before\n<!-- profile: full -->\nUNFINISHED FULL\ntail");
     }
-    compact.trim_end().to_string()
+
+    #[test]
+    fn nested_close_restores_outer_profile_state() {
+        let raw = "<!-- profile: full -->\nouter-start\n\
+                   <!-- profile: headless -->\ninner-headless\n<!-- /profile -->\n\
+                   OUTER FULL TAIL\n<!-- /profile -->\n";
+        let headless = strip_non_matching_profile_sections(raw, "headless");
+        assert!(!headless.contains("outer-start"));
+        assert!(!headless.contains("inner-headless"));
+        assert!(!headless.contains("OUTER FULL TAIL"));
+        let full = strip_non_matching_profile_sections(raw, "full");
+        assert!(full.contains("outer-start"));
+        assert!(!full.contains("inner-headless"));
+        assert!(full.contains("OUTER FULL TAIL"));
+    }
+
+    #[test]
+    fn unclosed_outer_section_preserves_nested_nonmatching_content() {
+        let raw = "<!-- profile: full -->\nouter-start\n\
+                   <!-- profile: headless -->\ninner-headless\n<!-- /profile -->\n\
+                   UNFINISHED OUTER TAIL\n";
+        let review = strip_non_matching_profile_sections(raw, "review-lite");
+        assert!(review.contains("<!-- profile: full -->"));
+        assert!(review.contains("outer-start"));
+        assert!(review.contains("<!-- profile: headless -->"));
+        assert!(review.contains("inner-headless"));
+        assert!(review.contains("<!-- /profile -->"));
+        assert!(review.contains("UNFINISHED OUTER TAIL"));
+    }
+
+    #[test]
+    fn compaction_collapses_two_or_more_blank_lines_to_one() {
+        assert_eq!(compact_blank_lines("alpha\n\n\n\nbeta\n"), "alpha\n\nbeta");
+    }
+
+    #[test]
+    fn character_limit_keeps_only_complete_profile_sections() {
+        let first = format!(
+            "<!-- profile: all -->\n{}\nFIRST SECTION END\n<!-- /profile -->\n",
+            "a".repeat(40)
+        );
+        let second = format!(
+            "<!-- profile: full -->\nSECOND SECTION START\n{}\nSECOND SECTION END\n<!-- /profile -->\n",
+            "b".repeat(80)
+        );
+        let sections = matching_profile_sections(&(first + &second), "full");
+        let first_only = compact_blank_lines(&sections[0]);
+        let (out, truncated) =
+            join_complete_sections_with_limit(&sections, first_only.chars().count() + 1);
+
+        assert!(truncated);
+        assert_eq!(out, first_only);
+        assert!(out.contains("FIRST SECTION END"));
+        assert!(!out.contains("SECOND SECTION START"));
+        assert!(!out.contains("SECOND SECTION END"));
+    }
 }
 
 pub(in crate::services::discord) fn load_review_tuning_guidance() -> Option<String> {

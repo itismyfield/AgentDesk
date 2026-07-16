@@ -940,7 +940,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         token,
         role_binding.as_ref(),
         false,
-        dispatch_profile,
+        PromptProfiles::headless(dispatch_profile),
         None,
         None,
         sak_for_system,
@@ -1385,6 +1385,12 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
 
 #[cfg(test)]
 mod recovery_context_take_order_tests {
+    use super::super::super::super::prompt_builder::{
+        DispatchProfile, PromptProfiles, build_system_prompt_with_manifest,
+    };
+    use super::super::super::super::settings::RoleBinding;
+    use poise::serenity_prelude::ChannelId;
+
     fn recovery_context_take_call() -> String {
         format!(
             "{}{}",
@@ -1461,6 +1467,78 @@ mod recovery_context_take_order_tests {
             take_pos < manifest_use_pos,
             "headless real turn must take recovery context before prompt manifest capture"
         );
+    }
+
+    #[test]
+    fn actual_headless_assembly_selects_only_all_and_headless_shared_sections() {
+        let module_src = include_str!("headless_turn.rs");
+        let builder_pos = module_src
+            .find("let built_system_prompt = build_system_prompt_with_manifest(")
+            .expect("headless prompt assembly exists");
+        let builder_call = &module_src[builder_pos..];
+        let call_end = builder_call
+            .find("\n    );")
+            .expect("headless prompt assembly call closes");
+        let builder_call = &builder_call[..call_end];
+        assert!(builder_call.contains("PromptProfiles::headless(dispatch_profile)"));
+        assert!(!builder_call.contains("PromptProfiles::foreground"));
+
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+        let shared_prompt_path = crate::runtime_layout::shared_prompt_path(runtime_root.path());
+        std::fs::create_dir_all(shared_prompt_path.parent().expect("shared prompt parent"))
+            .expect("create shared prompt parent");
+        std::fs::write(
+            shared_prompt_path,
+            "<!-- profile: all -->\nHEADLESS ACTUAL ALL 4560\n<!-- /profile -->\n\
+             <!-- profile: full -->\nHEADLESS ACTUAL FULL 4560\n<!-- /profile -->\n\
+             <!-- profile: headless -->\nHEADLESS ACTUAL HEADLESS 4560\n<!-- /profile -->\n",
+        )
+        .expect("write shared prompt");
+        let binding = RoleBinding {
+            role_id: "headless-actual-profile-4560".to_string(),
+            prompt_file: runtime_root
+                .path()
+                .join("missing-role-prompt.md")
+                .display()
+                .to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            quality_feedback_injection_enabled: false,
+            memory: Default::default(),
+        };
+        let built = build_system_prompt_with_manifest(
+            "ctx",
+            &[],
+            "/nonexistent-headless-workspace-4560",
+            ChannelId::new(1),
+            ChannelId::new(1),
+            "tok",
+            Some(&binding),
+            false,
+            PromptProfiles::headless(DispatchProfile::Full),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
+            Some("turn-headless-actual-profile-4560"),
+        );
+
+        assert!(built.system_prompt.contains("HEADLESS ACTUAL ALL 4560"));
+        assert!(
+            built
+                .system_prompt
+                .contains("HEADLESS ACTUAL HEADLESS 4560")
+        );
+        assert!(!built.system_prompt.contains("HEADLESS ACTUAL FULL 4560"));
     }
 }
 
