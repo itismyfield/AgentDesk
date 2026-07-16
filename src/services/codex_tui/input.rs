@@ -1307,7 +1307,9 @@ fn pane_has_dim_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
     let prompt_idx = recent_bottom_up
         .iter()
         .take(LEGACY_PROMPT_BOTTOM_WINDOW)
-        .position(|line| line_is_dim_legacy_codex_prompt(line));
+        .position(|line| {
+            line_is_codex_compact_prompt_marker(&strip_ansi_escape_sequences(line))
+        });
     let status_idx = recent_bottom_up
         .iter()
         .take(LEGACY_STATUS_BOTTOM_WINDOW)
@@ -1316,7 +1318,7 @@ fn pane_has_dim_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
         return false;
     };
 
-    status_idx < prompt_idx
+    status_idx < prompt_idx && line_is_dim_legacy_codex_prompt(recent_bottom_up[prompt_idx])
 }
 
 fn line_is_legacy_codex_prompt(line: &str) -> bool {
@@ -2291,6 +2293,21 @@ The documentation example ends with:
 \x1b[0;1m›\x1b[0m Use /skills to list available skills\n\
 \n\
 \x1b[0m  \x1b[38;2;246;226;183mgpt-5.5 xhigh\x1b[2m\x1b[39m · \x1b[0m\x1b[38;2;171;223;167m~/.adk/release/workspaces/baby";
+        let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
+
+        assert!(!marker);
+        assert!(draft);
+    }
+
+    #[test]
+    fn compact_codex_current_non_dim_draft_overrides_scrollback_dim_placeholder() {
+        let pane = concat!(
+            "\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n",
+            "\n",
+            "\x1b[0;1m›\x1b[0m keep my unsent draft\n",
+            "\n",
+            "  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left",
+        );
         let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
 
         assert!(!marker);
