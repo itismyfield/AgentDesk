@@ -30,10 +30,12 @@ use super::formatting::{
 };
 use super::gateway::edit_outbound_message;
 use super::inflight::{
-    InflightTurnState, delete_inflight_state_file, emit_reap_abandoned_rebind_origin,
-    load_inflight_states_for_sweep, parse_started_at_unix, reap_abandoned_rebind_origin_locked,
-    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin,
+    DEAD_WATCHER_PROVEN_DEAD_SECS, InflightTurnState, delete_inflight_state_file,
+    emit_reap_abandoned_rebind_origin, load_inflight_states_for_sweep, parse_started_at_unix,
+    reap_abandoned_rebind_origin_locked, should_reap_abandoned_rebind_origin,
+    sweep_reap_dead_watcher_rebind_origin,
 };
+use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -99,6 +101,71 @@ fn classify_age(age_secs: u64) -> SweepDecision {
     } else {
         SweepDecision::Active
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeActivityEvidence {
+    Recent,
+    Inactive,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbandonedTmuxCleanupDecision {
+    Kill,
+    NoKillMarkerOnly,
+}
+
+fn abandoned_tmux_cleanup_decision(
+    has_usable_session_name: bool,
+    pane: PaneLiveness,
+    activity: RuntimeActivityEvidence,
+) -> AbandonedTmuxCleanupDecision {
+    if has_usable_session_name
+        && pane == PaneLiveness::DeadOrAbsent
+        && activity == RuntimeActivityEvidence::Inactive
+    {
+        AbandonedTmuxCleanupDecision::Kill
+    } else {
+        AbandonedTmuxCleanupDecision::NoKillMarkerOnly
+    }
+}
+
+fn runtime_activity_evidence(session_name: &str) -> RuntimeActivityEvidence {
+    let latest_nanos = crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(
+        session_name,
+    );
+    if latest_nanos <= 0 {
+        return RuntimeActivityEvidence::Unknown;
+    }
+    let latest_secs = latest_nanos / 1_000_000_000;
+    let now_secs = chrono::Utc::now().timestamp();
+    let age_secs = now_secs.saturating_sub(latest_secs).max(0) as u64;
+    if age_secs < DEAD_WATCHER_PROVEN_DEAD_SECS {
+        RuntimeActivityEvidence::Recent
+    } else {
+        RuntimeActivityEvidence::Inactive
+    }
+}
+
+fn abandoned_tmux_cleanup_decision_for(
+    state: &InflightTurnState,
+) -> AbandonedTmuxCleanupDecision {
+    if state.user_msg_id == 0 {
+        return AbandonedTmuxCleanupDecision::NoKillMarkerOnly;
+    }
+    let Some(session_name) = state.tmux_session_name.as_deref() else {
+        return AbandonedTmuxCleanupDecision::NoKillMarkerOnly;
+    };
+    let session_name = session_name.trim();
+    if session_name.is_empty() {
+        return AbandonedTmuxCleanupDecision::NoKillMarkerOnly;
+    }
+    abandoned_tmux_cleanup_decision(
+        true,
+        crate::services::tmux_diagnostics::tmux_session_pane_liveness(session_name),
+        runtime_activity_evidence(session_name),
+    )
 }
 
 fn build_stalled_placeholder(state: &InflightTurnState) -> String {
@@ -542,20 +609,12 @@ async fn run_placeholder_sweep_pass(
                         // does not retry every pass for the rest of the
                         // process lifetime.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            finalize_abandoned_mailbox(shared, provider, &state).await;
+                            let cleanup_killed =
+                                finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
+                                    .await;
                             let _ = delete_inflight_state_file(provider, state.channel_id);
-                            if let (Some(provider_kind), msg_id) = (
-                                ProviderKind::from_str(&state.provider),
-                                state.current_msg_id,
-                            ) {
-                                if msg_id != 0 {
-                                    let key = super::placeholder_controller::PlaceholderKey {
-                                        provider: provider_kind,
-                                        channel_id: serenity::ChannelId::new(state.channel_id),
-                                        message_id: serenity::MessageId::new(msg_id),
-                                    };
-                                    shared.ui.placeholder_controller.detach(&key);
-                                }
+                            if cleanup_killed {
+                                detach_abandoned_placeholder_controller(shared, &state);
                             }
                         }
                         tracing::info!(
@@ -571,7 +630,10 @@ async fn run_placeholder_sweep_pass(
                         // (404 / 403 / 410). An edit attempt would fail
                         // anyway; drop the inflight row.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            finalize_abandoned_mailbox(shared, provider, &state).await;
+                            let _ = finalize_abandoned_mailbox_if_proven_dead(
+                                shared, provider, &state,
+                            )
+                            .await;
                             let _ = delete_inflight_state_file(provider, state.channel_id);
                         }
                         continue;
@@ -602,6 +664,14 @@ async fn run_placeholder_sweep_pass(
                     channel_id = state.channel_id,
                     msg_id = state.current_msg_id,
                 );
+                let cleanup_decision = abandoned_tmux_cleanup_decision_for(&state);
+                if cleanup_decision == AbandonedTmuxCleanupDecision::NoKillMarkerOnly {
+                    if inflight_state_still_same_turn(provider, &state, age_secs) {
+                        let _ = delete_inflight_state_file(provider, state.channel_id);
+                        report.abandoned += 1;
+                    }
+                    continue;
+                }
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
@@ -624,25 +694,16 @@ async fn run_placeholder_sweep_pass(
                 // `inflight_state_still_same_turn` covers (2) and (3); edit
                 // success covers (1).
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    finalize_abandoned_mailbox(shared, provider, &state).await;
+                    let cleanup_killed =
+                        finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state).await;
                     if delete_inflight_state_file(provider, state.channel_id) {
                         report.abandoned += 1;
                     }
                     // codex round-10 P3 on PR #1308: detach the controller's
                     // Active row that was tracking this card so the
                     // cap-bounded map does not retain a non-evictable entry.
-                    if let (Some(provider_kind), msg_id) = (
-                        ProviderKind::from_str(&state.provider),
-                        state.current_msg_id,
-                    ) {
-                        if msg_id != 0 {
-                            let key = super::placeholder_controller::PlaceholderKey {
-                                provider: provider_kind,
-                                channel_id: serenity::ChannelId::new(state.channel_id),
-                                message_id: serenity::MessageId::new(msg_id),
-                            };
-                            shared.ui.placeholder_controller.detach(&key);
-                        }
+                    if cleanup_killed {
+                        detach_abandoned_placeholder_controller(shared, &state);
                     }
                 }
             }
@@ -709,27 +770,26 @@ impl StalledEditTracker {
     }
 }
 
-/// Drop the per-channel mailbox active turn that the abandoned inflight was
-/// driving and reuse the regular turn-cancellation cleanup path. Without
-/// this:
-///   - the channel's `cancel_token` and `global_active` counter stay set,
-///     so subsequent user messages see an in-flight turn and get queued
-///     behind a placeholder that is already terminal,
-///   - the orphaned child process / tmux session keeps running outside the
-///     mailbox where no watchdog can reach it, and
-///   - any soft-queued user messages stay buffered with no dequeue
-///     trigger.
-///
-/// `cancel_active_token` handles (1)+(2) — sets the cancelled flag, kills
-/// the PID tree, and tears down the tmux session. The deferred idle queue
-/// kickoff covers (3): same hook that the normal cancellation path uses.
-async fn finalize_abandoned_mailbox(
+/// Finalize and cancel an abandoned turn only after independent tmux and
+/// runtime-activity evidence proves its owner is gone. Every other outcome is
+/// marker-only so a live or indeterminate session remains untouched.
+async fn finalize_abandoned_mailbox_if_proven_dead(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &InflightTurnState,
-) {
+) -> bool {
+    if abandoned_tmux_cleanup_decision_for(state) != AbandonedTmuxCleanupDecision::Kill {
+        return false;
+    }
+
     let channel = serenity::ChannelId::new(state.channel_id);
-    let finish = super::mailbox_finish_turn(shared, provider, channel).await;
+    let finish = super::mailbox_finish_turn_if_matches(
+        shared,
+        provider,
+        channel,
+        serenity::MessageId::new(state.user_msg_id),
+    )
+    .await;
     if let Some(removed_token) = finish.removed_token {
         super::turn_bridge::cancel_active_token(
             &removed_token,
@@ -739,14 +799,17 @@ async fn finalize_abandoned_mailbox(
             "placeholder_sweeper abandoned",
         );
         super::saturating_decrement_global_active(shared);
-    }
-    if finish.has_pending {
-        super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel,
-            "placeholder_sweeper_abandon",
-        );
+        if finish.has_pending {
+            super::schedule_deferred_idle_queue_kickoff(
+                shared.clone(),
+                provider.clone(),
+                channel,
+                "placeholder_sweeper_abandon",
+            );
+        }
+        true
+    } else {
+        false
     }
 }
 
@@ -755,6 +818,22 @@ async fn finalize_abandoned_mailbox(
 /// mtime is not significantly fresher than our snapshot. Returns `false`
 /// when the file is gone (original turn completed mid-await) or has been
 /// replaced by a new turn for the same channel.
+fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &InflightTurnState) {
+    if let (Some(provider_kind), msg_id) = (
+        ProviderKind::from_str(&state.provider),
+        state.current_msg_id,
+    )
+    && msg_id != 0
+    {
+        let key = super::placeholder_controller::PlaceholderKey {
+            provider: provider_kind,
+            channel_id: serenity::ChannelId::new(state.channel_id),
+            message_id: serenity::MessageId::new(msg_id),
+        };
+        shared.ui.placeholder_controller.detach(&key);
+    }
+}
+
 fn inflight_state_still_same_turn(
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
@@ -831,6 +910,18 @@ async fn sweep_orphan_status_panel(
     let Some(panel_msg) = panel_reclaim_target(state, age_secs) else {
         return;
     };
+    // The abandoned-state policy is fail-closed: without independent evidence
+    // that the tmux owner is dead and inactive, retain the Discord panel and
+    // remove only our stale marker. This also covers panel-only/TUI-direct
+    // rows, which have no real user-message identity to finalize safely.
+    if abandoned_tmux_cleanup_decision_for(state) == AbandonedTmuxCleanupDecision::NoKillMarkerOnly
+    {
+        if inflight_state_still_same_turn(provider, state, age_secs) {
+            let _ = delete_inflight_state_file(provider, state.channel_id);
+            report.abandoned += 1;
+        }
+        return;
+    }
     // Do not delete a panel a replacement turn now owns, or one whose turn has
     // already completed (state file gone).
     if !inflight_state_still_same_turn(provider, state, age_secs) {
@@ -890,8 +981,11 @@ async fn sweep_orphan_status_panel(
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
         if inflight_state_still_same_turn(provider, state, age_secs) {
-            finalize_abandoned_mailbox(shared, provider, state).await;
-            let _ = delete_inflight_state_file(provider, state.channel_id);
+            let cleanup_killed =
+                finalize_abandoned_mailbox_if_proven_dead(shared, provider, state).await;
+            if cleanup_killed {
+                let _ = delete_inflight_state_file(provider, state.channel_id);
+            }
         }
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
         && let Some(panel_msg_id) = state.status_message_id
@@ -1232,9 +1326,11 @@ mod safety_net_threshold_tests {
     //! explicit-signal wire (D / A / B / C) must have time to fire
     //! before the sweeper does anything destructive.
     use super::{
-        ABANDON_THRESHOLD_SECS, INITIAL_DELAY_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
-        panel_reclaim_target,
+        ABANDON_THRESHOLD_SECS, AbandonedTmuxCleanupDecision, INITIAL_DELAY_SECS,
+        RuntimeActivityEvidence, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
+        abandoned_tmux_cleanup_decision, panel_reclaim_target,
     };
+    use crate::services::platform::tmux::PaneLiveness;
     use crate::services::provider::ProviderKind;
 
     fn sweep_state_with_panel(status_message_id: Option<u64>) -> super::InflightTurnState {
@@ -1311,5 +1407,78 @@ mod safety_net_threshold_tests {
         let target = panel_reclaim_target(&state, ABANDON_THRESHOLD_SECS);
 
         assert_eq!(target, None);
+    }
+
+    #[test]
+    fn no_death_evidence_keeps_the_tmux_session() {
+        assert_eq!(
+            abandoned_tmux_cleanup_decision(
+                true,
+                PaneLiveness::DeadOrAbsent,
+                RuntimeActivityEvidence::Unknown,
+            ),
+            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_tmux_name_is_marker_only_without_a_probe() {
+        assert_eq!(
+            abandoned_tmux_cleanup_decision(
+                false,
+                PaneLiveness::DeadOrAbsent,
+                RuntimeActivityEvidence::Inactive,
+            ),
+            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+        );
+    }
+
+    #[test]
+    fn panel_only_state_is_marker_only() {
+        let mut state = sweep_state_with_panel(Some(5001));
+        state.user_msg_id = 0;
+
+        assert_eq!(
+            super::abandoned_tmux_cleanup_decision_for(&state),
+            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+        );
+    }
+
+    #[test]
+    fn confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup() {
+        assert_eq!(
+            abandoned_tmux_cleanup_decision(
+                true,
+                PaneLiveness::DeadOrAbsent,
+                RuntimeActivityEvidence::Inactive,
+            ),
+            AbandonedTmuxCleanupDecision::Kill,
+        );
+    }
+
+    #[test]
+    fn live_pane_keeps_the_tmux_session_even_when_activity_is_not_recent() {
+        assert_eq!(
+            abandoned_tmux_cleanup_decision(
+                true,
+                PaneLiveness::Live,
+                RuntimeActivityEvidence::Inactive,
+            ),
+            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+        );
+    }
+
+    #[test]
+    fn ambiguous_pane_and_activity_evidence_is_marker_only() {
+        for (pane, activity) in [
+            (PaneLiveness::ProbeError, RuntimeActivityEvidence::Inactive),
+            (PaneLiveness::DeadOrAbsent, RuntimeActivityEvidence::Recent),
+            (PaneLiveness::Live, RuntimeActivityEvidence::Unknown),
+        ] {
+            assert_eq!(
+                abandoned_tmux_cleanup_decision(true, pane, activity),
+                AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+            );
+        }
     }
 }
