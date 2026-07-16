@@ -242,8 +242,9 @@ fi
 exit 0
 """,
             "xattr": "#!/bin/sh\nexit 0\n",
-            "sleep": "#!/bin/sh\nexit 0\n",
+            "sleep": "#!/bin/sh\nexec /bin/sleep 0.01\n",
             "psql": """#!/bin/sh
+while [ ! -f "$PROBE_READY" ]; do /bin/sleep 0.01; done
 printf 'psql %s\\n' "${PGDATABASE:-missing}" >> "$EVENT_LOG"
 case "${PGDATABASE:-}" in
   *:15432/*) [ "${FAIL_CANONICAL:-0}" != 1 ] ;;
@@ -251,6 +252,7 @@ case "${PGDATABASE:-}" in
 esac
 """,
             "ruby": """#!/bin/sh
+printf 'ruby %s\\n' "$*" >> "$EVENT_LOG"
 while [ "$#" -gt 3 ]; do shift; done
 port=$1
 output=$2
@@ -267,8 +269,8 @@ printf 'postgresql://agentdesk@127.0.0.1:%s/agentdesk?sslmode=require' "$port" >
             """#!/bin/sh
 printf 'wrapper %s\\n' "$*" >> "$EVENT_LOG"
 case "$1" in
-  --check-config) grep -q '^PG_TUNNEL_SSH_TARGET=[A-Za-z0-9_.:@-][A-Za-z0-9_.:@-]*$' "$2" ;;
-  --probe-remote) trap 'printf "probe-term\\n" >> "$EVENT_LOG"; exit 0' TERM; while :; do /bin/sleep 1; done ;;
+  --check-config) grep -q '^PG_TUNNEL_SSH_TARGET=[A-Za-z0-9_.:@][A-Za-z0-9_.:@-]*$' "$2" ;;
+  --probe-remote) trap 'printf "probe-term\\n" >> "$EVENT_LOG"; exit 0' TERM; : > "$PROBE_READY"; while :; do /bin/sleep 1; done ;;
   --canonical-kind) printf '%s\\n' "${MANUAL_KIND:-none}" ;;
   --restore-canonical) printf 'restore %s\\n' "$3" >> "$EVENT_LOG" ;;
   *) exit 1 ;;
@@ -306,9 +308,18 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             f"FAIL_CANONICAL={int(fail_canonical)}\n"
             f"JOB_LOADED={int(job_loaded)}\n"
             f"MANUAL_KIND={shlex.quote(manual_kind)}\n"
-            "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL JOB_LOADED MANUAL_KIND\n"
+            f"PROBE_READY={shlex.quote(str(home / 'probe.ready'))}\n"
+            "DATABASE_URL=postgresql://agentdesk@db.internal:5432/agentdesk?sslmode=require\n"
+            "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL JOB_LOADED MANUAL_KIND PROBE_READY DATABASE_URL\n"
+            f"FAKE_BIN={shlex.quote(str(fake_bin))}\n"
             f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin:/usr/sbin:/sbin\n"
             "export PATH\n"
+            "ruby() { \"$FAKE_BIN/ruby\" \"$@\"; }\n"
+            "psql() { \"$FAKE_BIN/psql\" \"$@\"; }\n"
+            "launchctl() { \"$FAKE_BIN/launchctl\" \"$@\"; }\n"
+            "xattr() { \"$FAKE_BIN/xattr\" \"$@\"; }\n"
+            "command -v psql >/dev/null || exit 97\n"
+            "command -v ruby >/dev/null || exit 98\n"
             + prelude
             + "\n"
             + self._cleanup_helpers()
@@ -482,8 +493,9 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             home = Path(tmp) / "home"
             home.mkdir()
             p, _, event_log = self._run_block(adk, home)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             events = event_log.read_text(encoding="utf-8")
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr + events)
+            self.assertIn("psql postgresql://", events, p.stdout + p.stderr + events)
             probe_sql = events.index("psql postgresql://")
             cleanup = events.index("probe-term", probe_sql)
             bootstrap = events.index("launchctl bootstrap", cleanup)

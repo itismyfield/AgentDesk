@@ -1674,7 +1674,7 @@ RUBY
 
 _pg_sql_probe() {
     local local_port=$1 conninfo_file password_file attempt=0
-    local -a psql_env=()
+    local -a psql_env=(env)
     command -v psql >/dev/null 2>&1 || return 1
     conninfo_file=$(mktemp "${TMPDIR:-/tmp}/agentdesk-pg-probe.XXXXXX") || return 1
     password_file=$(mktemp "${TMPDIR:-/tmp}/agentdesk-pgpass.XXXXXX") || return 1
