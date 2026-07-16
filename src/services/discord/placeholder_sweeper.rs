@@ -107,14 +107,6 @@ fn classify_age(age_secs: u64) -> SweepDecision {
     }
 }
 
-fn cleanup_decision_allows_state_delete(
-    decision: AbandonedTmuxCleanupDecision,
-    cleanup_killed: bool,
-) -> bool {
-    decision == AbandonedTmuxCleanupDecision::TerminalMarkerOnly
-        || (decision == AbandonedTmuxCleanupDecision::Kill && cleanup_killed)
-}
-
 fn build_stalled_placeholder(state: &InflightTurnState) -> String {
     let started_at_unix = parse_started_at_unix(&state.started_at).unwrap_or_else(|| {
         // Fall back to now only for malformed legacy state. The normal path
@@ -558,12 +550,7 @@ async fn run_placeholder_sweep_pass(
                             let cleanup =
                                 finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
                                     .await;
-                            if cleanup_decision_allows_state_delete(
-                                cleanup.decision,
-                                cleanup.cleanup_killed,
-                            ) {
-                                let _ = delete_inflight_state_file(provider, state.channel_id);
-                            }
+                            cleanup.delete_state_if_allowed(provider, &state);
                             if cleanup.cleanup_killed {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }
@@ -584,12 +571,7 @@ async fn run_placeholder_sweep_pass(
                             let cleanup =
                                 finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
                                     .await;
-                            if cleanup_decision_allows_state_delete(
-                                cleanup.decision,
-                                cleanup.cleanup_killed,
-                            ) {
-                                let _ = delete_inflight_state_file(provider, state.channel_id);
-                            }
+                            cleanup.delete_state_if_allowed(provider, &state);
                         }
                         continue;
                     }
@@ -659,11 +641,7 @@ async fn run_placeholder_sweep_pass(
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
                     let cleanup =
                         finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state).await;
-                    if cleanup_decision_allows_state_delete(
-                        cleanup.decision,
-                        cleanup.cleanup_killed,
-                    ) && delete_inflight_state_file(provider, state.channel_id)
-                    {
+                    if cleanup.delete_state_if_allowed(provider, &state) {
                         report.abandoned += 1;
                     }
                     // codex round-10 P3 on PR #1308: detach the controller's
@@ -907,11 +885,8 @@ async fn sweep_orphan_status_panel(
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
         if inflight_state_still_same_turn(provider, state, age_secs) {
-            let cleanup =
-                finalize_abandoned_mailbox_if_proven_dead(shared, provider, state).await;
-            if cleanup_decision_allows_state_delete(cleanup.decision, cleanup.cleanup_killed) {
-                let _ = delete_inflight_state_file(provider, state.channel_id);
-            }
+            let cleanup = finalize_abandoned_mailbox_if_proven_dead(shared, provider, state).await;
+            cleanup.delete_state_if_allowed(provider, state);
         }
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
         && let Some(panel_msg_id) = state.status_message_id
@@ -1253,9 +1228,9 @@ mod safety_net_threshold_tests {
     //! before the sweeper does anything destructive.
     use super::{
         ABANDON_THRESHOLD_SECS, AbandonedTmuxCleanupDecision, INITIAL_DELAY_SECS,
-        STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS, cleanup_decision_allows_state_delete,
-        panel_reclaim_target,
+        STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS, panel_reclaim_target,
     };
+    use super::abandon_guard::cleanup_decision_allows_state_delete;
     use crate::services::provider::ProviderKind;
 
     fn sweep_state_with_panel(status_message_id: Option<u64>) -> super::InflightTurnState {

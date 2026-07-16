@@ -3,7 +3,9 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use super::super::SharedData;
-use super::super::inflight::{DEAD_WATCHER_PROVEN_DEAD_SECS, InflightTurnState};
+use super::super::inflight::{
+    DEAD_WATCHER_PROVEN_DEAD_SECS, InflightTurnState, delete_inflight_state_file,
+};
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
 
@@ -36,10 +38,7 @@ pub(super) fn abandoned_tmux_cleanup_decision(
     }
 }
 
-fn runtime_activity_evidence_from(
-    latest_nanos: i64,
-    now_secs: i64,
-) -> RuntimeActivityEvidence {
+fn runtime_activity_evidence_from(latest_nanos: i64, now_secs: i64) -> RuntimeActivityEvidence {
     if latest_nanos <= 0 {
         return RuntimeActivityEvidence::Unknown;
     }
@@ -101,6 +100,33 @@ pub(super) async fn abandoned_tmux_cleanup_decision_for(
 pub(super) struct AbandonedTmuxCleanupOutcome {
     pub(super) decision: AbandonedTmuxCleanupDecision,
     pub(super) cleanup_killed: bool,
+}
+
+impl AbandonedTmuxCleanupOutcome {
+    fn allows_state_delete(self) -> bool {
+        self.decision == AbandonedTmuxCleanupDecision::TerminalMarkerOnly
+            || (self.decision == AbandonedTmuxCleanupDecision::Kill && self.cleanup_killed)
+    }
+
+    pub(super) fn delete_state_if_allowed(
+        self,
+        provider: &ProviderKind,
+        state: &InflightTurnState,
+    ) -> bool {
+        self.allows_state_delete() && delete_inflight_state_file(provider, state.channel_id)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn cleanup_decision_allows_state_delete(
+    decision: AbandonedTmuxCleanupDecision,
+    cleanup_killed: bool,
+) -> bool {
+    AbandonedTmuxCleanupOutcome {
+        decision,
+        cleanup_killed,
+    }
+    .allows_state_delete()
 }
 
 /// Finalize and cancel an abandoned turn only after independent tmux and
