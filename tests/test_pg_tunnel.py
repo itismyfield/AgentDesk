@@ -294,9 +294,9 @@ if [ "$1" = bootout ]; then
   bootout_count=$(grep -c '^bootout ' "$LAUNCHCTL_LOG" || true)
   [ "$bootout_count" -lt 2 ] || : > "$ROLLBACK_BOOTOUT"
 fi
-if [ "$1" = bootstrap ] && [ "${FAIL_RESTORE_BOOTSTRAP:-0}" = 1 ]; then
-  bootstrap_count=$(grep -c '^bootstrap ' "$LAUNCHCTL_LOG" || true)
-  [ "$bootstrap_count" -lt 2 ] || exit 1
+if [ "$1" = bootstrap ] && [ -f "$ROLLBACK_BOOTOUT" ]; then
+  [ "${FAIL_RESTORE_BOOTSTRAP:-0}" != 1 ] || exit 1
+  : > "$ROLLBACK_READY"
 fi
 exit 0
 """,
@@ -330,18 +330,16 @@ printf 'psql host=%s hostaddr=%s port=%s user=%s db=%s sslmode=%s timeout=%s pas
 [ -n "${PGPASSFILE:-}" ] && [ -s "$PGPASSFILE" ] || exit 85
 case "${PGPORT:-}" in
   15432)
-    rollback_active=0
-    if grep -q '^restore ' "$EVENT_LOG"; then
-      rollback_active=1
-    elif [ -f "$LAUNCHCTL_LOG" ]; then
-      bootstrap_count=$(grep -c '^bootstrap ' "$LAUNCHCTL_LOG" || true)
-      [ "$bootstrap_count" -lt 2 ] || rollback_active=1
-    fi
-    if [ "$rollback_active" -eq 0 ] && [ "${FAIL_CANONICAL:-0}" = 1 ]; then exit 1; fi
-    if [ "$rollback_active" -eq 1 ]; then
-      if [ "${FAIL_ROLLBACK_READINESS:-0}" = 1 ]; then exit 1; fi
+    if [ ! -f "$ROLLBACK_READY" ]; then
+      printf 'psql-state canonical\n' >> "$EVENT_LOG"
+      [ "${FAIL_CANONICAL:-0}" != 1 ] || exit 1
+    else
+      printf 'psql-state rollback\n' >> "$EVENT_LOG"
+      [ "${FAIL_ROLLBACK_READINESS:-0}" != 1 ] || exit 1
       rollback_attempt=0
-      [ ! -f "$ROLLBACK_PSQL_COUNT" ] || rollback_attempt=$(cat "$ROLLBACK_PSQL_COUNT")
+      if [ -f "$ROLLBACK_PSQL_COUNT" ]; then
+        IFS= read -r rollback_attempt < "$ROLLBACK_PSQL_COUNT"
+      fi
       rollback_attempt=$((rollback_attempt + 1))
       printf '%s\n' "$rollback_attempt" > "$ROLLBACK_PSQL_COUNT"
       [ "$rollback_attempt" -ge "${ROLLBACK_READY_ATTEMPT:-1}" ] || exit 1
@@ -386,7 +384,11 @@ case "$1" in
   --probe-remote) exec "$FAKE_BIN/probe" ;;
   --canonical-kind) [ "${FAIL_KIND_SNAPSHOT:-0}" != 1 ] || exit 1; printf '%s\\n' "${MANUAL_KIND:-none}" ;;
   --take-over-canonical) printf 'takeover\\n' >> "$EVENT_LOG" ;;
-  --restore-canonical) printf 'restore %s\\n' "$3" >> "$EVENT_LOG"; [ "${FAIL_MANUAL_RESTORE:-0}" != 1 ] ;;
+  --restore-canonical)
+    printf 'restore %s\\n' "$3" >> "$EVENT_LOG"
+    [ "${FAIL_MANUAL_RESTORE:-0}" != 1 ] || exit 1
+    : > "$ROLLBACK_READY"
+    ;;
   *) exit 1 ;;
 esac
 """,
@@ -434,10 +436,11 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             f"PROBE_READY={shlex.quote(str(home / 'probe.ready'))}\n"
             f"ROLLBACK_STATE={shlex.quote(str(rollback_state))}\n"
             f"ROLLBACK_BOOTOUT={shlex.quote(str(home / 'rollback.bootout'))}\n"
+            f"ROLLBACK_READY={shlex.quote(str(home / 'rollback.ready'))}\n"
             f"ROLLBACK_LISTENER_COUNT={shlex.quote(str(home / 'rollback-listener.count'))}\n"
             f"ROLLBACK_PSQL_COUNT={shlex.quote(str(home / 'rollback-psql.count'))}\n"
             "DATABASE_URL=postgresql://agentdesk:s3cr3t@db.internal:5432/agentdesk?sslmode=require\n"
-            "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL FAIL_ROLLBACK_READINESS FAIL_BACKUP_COPY FAIL_KIND_SNAPSHOT FAIL_RESTORE_BOOTSTRAP FAIL_MANUAL_RESTORE FAIL_LISTENER_ABSENCE ROLLBACK_LISTENER_CHECKS ROLLBACK_READY_ATTEMPT JOB_LOADED MANUAL_KIND PROBE_READY ROLLBACK_BOOTOUT ROLLBACK_LISTENER_COUNT ROLLBACK_PSQL_COUNT DATABASE_URL\n"
+            "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL FAIL_ROLLBACK_READINESS FAIL_BACKUP_COPY FAIL_KIND_SNAPSHOT FAIL_RESTORE_BOOTSTRAP FAIL_MANUAL_RESTORE FAIL_LISTENER_ABSENCE ROLLBACK_LISTENER_CHECKS ROLLBACK_READY_ATTEMPT JOB_LOADED MANUAL_KIND PROBE_READY ROLLBACK_BOOTOUT ROLLBACK_READY ROLLBACK_LISTENER_COUNT ROLLBACK_PSQL_COUNT DATABASE_URL\n"
             f"FAKE_BIN={shlex.quote(str(fake_bin))}\n"
             f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin:/usr/sbin:/sbin\n"
             "export FAKE_BIN PATH\n"
@@ -471,11 +474,18 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             kind = "dir" if path.is_dir() else "file"
             files.append(f"{path.relative_to(home)} [{kind}]")
         listing = "\n".join(files) if files else "<empty>"
+        safe_logs = []
+        for name in ("events.log", "launchctl.log"):
+            path = home / name
+            if path.is_file():
+                safe_logs.append(f"{name}:\n{path.read_text(encoding='utf-8')}")
+        log_output = "\n".join(safe_logs) if safe_logs else "<none>"
         return (
             f"returncode={p.returncode}\n"
             f"stdout:\n{p.stdout}\n"
             f"stderr:\n{p.stderr}\n"
-            f"home files:\n{listing}"
+            f"home files:\n{listing}\n"
+            f"safe harness logs:\n{log_output}"
         )
 
     @staticmethod
