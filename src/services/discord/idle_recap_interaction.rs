@@ -361,20 +361,13 @@ async fn handle_idle_recap_compact_interaction(
     let outcome = run_native_compact_once(
         target,
         move || async move {
-            claim_recap_compact_pointer(
-                &pool_for_claim,
-                &target_for_claim,
-                message_id,
-                channel_id,
-            )
-            .await
-            .map_err(|error| error.to_string())
+            claim_recap_compact_pointer(&pool_for_claim, &target_for_claim, message_id, channel_id)
+                .await
+                .map_err(|error| error.to_string())
         },
         |tmux_session_name| {
             std::future::ready(
-                crate::services::tmux_diagnostics::tmux_session_has_live_pane(
-                    tmux_session_name,
-                ),
+                crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
             )
         },
         |request| async move { inject_native_compact(request).await },
