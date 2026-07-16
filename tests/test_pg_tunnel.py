@@ -301,6 +301,20 @@ fi
 exit 0
 """,
             "xattr": "#!/bin/sh\nexit 0\n",
+            "lsof": """#!/bin/sh
+printf 'lsof %s\n' "$*" >> "$EVENT_LOG"
+if [ "${FAIL_LISTENER_ABSENCE:-0}" = 1 ]; then exit 0; fi
+if [ -f "$ROLLBACK_BOOTOUT" ] && [ "${ROLLBACK_LISTENER_CHECKS:-0}" -gt 0 ]; then
+  current=0
+  if [ -f "$ROLLBACK_LISTENER_COUNT" ]; then
+    IFS= read -r current < "$ROLLBACK_LISTENER_COUNT"
+  fi
+  current=$((current + 1))
+  printf '%s\n' "$current" > "$ROLLBACK_LISTENER_COUNT"
+  [ "$current" -gt "$ROLLBACK_LISTENER_CHECKS" ] || exit 0
+fi
+exit 1
+""",
             "sleep": "#!/bin/sh\nexec /bin/sleep 0.01\n",
             "psql": """#!/bin/sh
 while [ ! -f "$PROBE_READY" ]; do /bin/sleep 0.01; done
@@ -431,18 +445,6 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             "psql() { \"$FAKE_BIN/psql\" \"$@\"; }\n"
             "launchctl() { \"$FAKE_BIN/launchctl\" \"$@\"; }\n"
             "xattr() { \"$FAKE_BIN/xattr\" \"$@\"; }\n"
-            "lsof() {\n"
-            "  printf 'lsof %s\\n' \"$*\" >> \"$EVENT_LOG\"\n"
-            "  [ \"${FAIL_LISTENER_ABSENCE:-0}\" != 1 ] || return 0\n"
-            "  if [ -f \"$ROLLBACK_BOOTOUT\" ] && [ \"${ROLLBACK_LISTENER_CHECKS:-0}\" -gt 0 ]; then\n"
-            "    local current=0\n"
-            "    [ ! -f \"$ROLLBACK_LISTENER_COUNT\" ] || current=$(<\"$ROLLBACK_LISTENER_COUNT\")\n"
-            "    current=$((current + 1))\n"
-            "    printf '%s\\n' \"$current\" > \"$ROLLBACK_LISTENER_COUNT\"\n"
-            "    [ \"$current\" -gt \"$ROLLBACK_LISTENER_CHECKS\" ] || return 0\n"
-            "  fi\n"
-            "  return 1\n"
-            "}\n"
             "cp() { \"$FAKE_BIN/cp\" \"$@\"; }\n"
             "command -v psql >/dev/null || exit 97\n"
             "command -v ruby >/dev/null || exit 98\n"
@@ -459,6 +461,22 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             ["bash", "-c", script], capture_output=True, text=True, timeout=30
         )
         return p, launchctl_log, event_log
+
+    @staticmethod
+    def _block_failure_diagnostics(
+        p: subprocess.CompletedProcess, home: Path
+    ) -> str:
+        files = []
+        for path in sorted(home.rglob("*"), key=lambda item: str(item)):
+            kind = "dir" if path.is_dir() else "file"
+            files.append(f"{path.relative_to(home)} [{kind}]")
+        listing = "\n".join(files) if files else "<empty>"
+        return (
+            f"returncode={p.returncode}\n"
+            f"stdout:\n{p.stdout}\n"
+            f"stderr:\n{p.stderr}\n"
+            f"home files:\n{listing}"
+        )
 
     @staticmethod
     def _cleanup_helpers() -> str:
@@ -841,11 +859,15 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 old_wrapper="#!/bin/sh\nexit 99\n",
                 manual_kind="tcp",
             )
-            self.assertNotEqual(p.returncode, 0)
-            self.assertIn("restore tcp", event_log.read_text(encoding="utf-8"))
+            diagnostics = self._block_failure_diagnostics(p, home)
+            self.assertNotEqual(p.returncode, 0, diagnostics)
+            self.assertIn(
+                "restore tcp", event_log.read_text(encoding="utf-8"), diagnostics
+            )
             self.assertEqual(
                 (home / "rollback-state.txt").read_text(encoding="utf-8"),
                 "armed=0 backup=\n",
+                diagnostics,
             )
 
     def test_rollback_waits_for_listener_absence_before_manual_restore(self):
@@ -1091,14 +1113,17 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 old_plist="old-plist\n",
             )
             events = event_log.read_text(encoding="utf-8")
-            self.assertNotEqual(p.returncode, 0)
-            rollback_attempts = int(
-                (home / "rollback-psql.count").read_text(encoding="utf-8")
-            )
-            self.assertEqual(rollback_attempts, 45, events)
+            diagnostics = self._block_failure_diagnostics(p, home)
+            self.assertNotEqual(p.returncode, 0, diagnostics)
+            rollback_count = home / "rollback-psql.count"
+            if not rollback_count.is_file():
+                self.fail(diagnostics)
+            rollback_attempts = int(rollback_count.read_text(encoding="utf-8"))
+            self.assertEqual(rollback_attempts, 45, events + "\n" + diagnostics)
             self.assertEqual(
                 (home / "rollback-state.txt").read_text(encoding="utf-8"),
                 "armed=0 backup=\n",
+                diagnostics,
             )
 
     @staticmethod
