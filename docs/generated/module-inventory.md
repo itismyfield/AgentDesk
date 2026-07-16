@@ -511,7 +511,7 @@
 | `services::discord::idle_recap::context_display` | `src/services/discord/idle_recap/context_display.rs` | 154 | 154 | 0 |  |
 | `services::discord::idle_recap::relay_integrity` | `src/services/discord/idle_recap/relay_integrity.rs` | 213 | 160 | 53 |  |
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 301 | 287 | 14 |  |
-| `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 545 | 494 | 51 |  |
+| `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 709 | 636 | 73 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 5817 | 608 | 5209 |  |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 550 | 189 | 361 |  |
