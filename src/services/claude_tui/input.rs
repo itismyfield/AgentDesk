@@ -1577,9 +1577,7 @@ fn snapshot_allows_prompt_readiness(
         return false;
     }
     if snapshot.capture_available
-        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(
-            &snapshot.pane_tail,
-        )
+        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&snapshot.pane_tail)
     {
         return false;
     }
@@ -1682,7 +1680,8 @@ fn prompt_ready_timeout_should_clear_followup_draft(
     snapshot: &PromptReadinessSnapshot,
     requeue_enabled: bool,
 ) -> bool {
-    readiness.is_followup() && requeue_enabled
+    readiness.is_followup()
+        && requeue_enabled
         && snapshot.tmux_pane_alive
         && snapshot.capture_available
         && snapshot.prompt_draft_detected
@@ -2521,10 +2520,7 @@ mod tests {
             "Followup intent alone must not bypass a genuine cold auth block"
         );
         assert!(
-            prompt_marker_confirms_prompt_ready(
-                PromptReadinessKind::ProvenWarmFollowup,
-                &idle,
-            ),
+            prompt_marker_confirms_prompt_ready(PromptReadinessKind::ProvenWarmFollowup, &idle,),
             "recorded-turn warm provenance may ignore a persistent warning"
         );
         assert!(
@@ -2960,10 +2956,8 @@ line 13";
             "Followup intent alone must not bypass a genuine cold auth block"
         );
         assert!(
-            snapshot_allows_prompt_readiness(
-                PromptReadinessKind::ProvenWarmFollowup,
-                &warm_idle,
-            ) && transcript_idle,
+            snapshot_allows_prompt_readiness(PromptReadinessKind::ProvenWarmFollowup, &warm_idle,)
+                && transcript_idle,
             "recorded-turn warm provenance may ignore a stale warning only when idle"
         );
 

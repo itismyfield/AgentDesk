@@ -2057,9 +2057,7 @@ earlier assistant prose
 ❯
 ────────────────────────────────────────────────────
   🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
-        assert!(!tmux_line_is_claude_tui_spinner_progress(
-            "✳ Architecting…"
-        ));
+        assert!(!tmux_line_is_claude_tui_spinner_progress("✳ Architecting…"));
         assert!(tmux_line_is_claude_tui_structured_spinner(
             "✳ Architecting…"
         ));
