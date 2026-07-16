@@ -569,10 +569,9 @@ async fn run_placeholder_sweep_pass(
                         // (404 / 403 / 410). An edit attempt would fail
                         // anyway; drop the inflight row.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            let _ = finalize_abandoned_mailbox_if_proven_dead(
-                                shared, provider, &state,
-                            )
-                            .await;
+                            let _ =
+                                finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
+                                    .await;
                             let _ = delete_inflight_state_file(provider, state.channel_id);
                         }
                         continue;
@@ -718,8 +717,7 @@ fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &Inf
     if let (Some(provider_kind), msg_id) = (
         ProviderKind::from_str(&state.provider),
         state.current_msg_id,
-    )
-    && msg_id != 0
+    ) && msg_id != 0
     {
         let key = super::placeholder_controller::PlaceholderKey {
             provider: provider_kind,

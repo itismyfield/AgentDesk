@@ -48,9 +48,9 @@ mod rebind_reap;
 // so `inflight::*` paths stay byte-identical after the #3835 move.
 pub(super) use self::rebind_reap::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, INFLIGHT_STALENESS_THRESHOLD_SECS, RebindReapOutcome,
-    emit_reap_abandoned_rebind_origin,
-    inflight_state_is_stale, ownerless_external_input_inflight_is_stale, parse_started_at_unix,
-    parse_updated_at_unix, reap_abandoned_rebind_origin_locked, reap_orphan_inflight_locks,
+    emit_reap_abandoned_rebind_origin, inflight_state_is_stale,
+    ownerless_external_input_inflight_is_stale, parse_started_at_unix, parse_updated_at_unix,
+    reap_abandoned_rebind_origin_locked, reap_orphan_inflight_locks,
     rebind_origin_deadline_secs_env, should_reap_abandoned_rebind_origin,
     sweep_reap_dead_watcher_rebind_origin,
 };
@@ -62,8 +62,7 @@ use self::rebind_reap::{reap_abandoned_rebind_origin_locked_in_root, rebind_orig
 // `super::*` unchanged without emitting unused-import warnings in the lib build.
 #[cfg(test)]
 use self::rebind_reap::{
-    ORPHAN_LOCK_REAP_MIN_AGE_SECS,
-    REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, WatcherLiveness,
+    ORPHAN_LOCK_REAP_MIN_AGE_SECS, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, WatcherLiveness,
     ownerless_external_input_inflight_is_stale_at, proven_dead_from_signals,
     reap_dead_watcher_rebind_origin_locked, reap_dead_watcher_rebind_origin_locked_in_root,
     reap_orphan_inflight_locks_in_root, should_reap_dead_watcher_rebind_origin,
