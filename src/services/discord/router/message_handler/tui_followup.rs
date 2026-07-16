@@ -936,6 +936,35 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
 mod busy_requeue_reaction_tests {
     use super::*;
 
+    fn compact(source: &str) -> String {
+        source.split_whitespace().collect()
+    }
+
+    #[test]
+    fn intake_busy_requeue_calls_queue_transition_and_does_not_clear_accepted_state() {
+        let intake = compact(include_str!("intake_turn.rs"));
+        assert!(intake.contains(&compact(
+            r#"
+                if enqueue_outcome.enqueued {
+                    note_busy_tui_followup_queued(
+                        shared,
+                        http,
+                        channel_id,
+                        user_msg_id,
+                        &enqueue_outcome,
+                    )
+                    .await;
+            "#,
+        )));
+        assert!(intake.contains(&compact(
+            r#"
+                if !enqueue_outcome.enqueued {
+                    tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
+                }
+            "#,
+        )));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn accepted_busy_requeue_keeps_hourglass_and_adds_queue_marker() {
         let shared = crate::services::discord::make_shared_data_for_tests();
