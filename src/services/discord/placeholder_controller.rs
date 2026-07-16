@@ -669,7 +669,8 @@ impl PlaceholderController {
         if !entry.detached.load(Ordering::Acquire) {
             return;
         }
-        self.entries.remove_if(key, |_, current| Arc::ptr_eq(current, &entry));
+        self.entries
+            .remove_if(key, |_, current| Arc::ptr_eq(current, &entry));
     }
 
     /// Drop a key from the controller without emitting any Discord PATCH.
@@ -862,7 +863,10 @@ mod detach_incarnation_tests {
             PlaceholderControllerOutcome::Rejected
         );
         detach.await.expect("detach task joins");
-        assert_ne!(old_slot.inner.lock().await.state, PlaceholderLifecycle::Active);
+        assert_ne!(
+            old_slot.inner.lock().await.state,
+            PlaceholderLifecycle::Active
+        );
         assert_eq!(
             controller
                 .ensure_active(gateway.as_ref(), key(), input())
@@ -879,9 +883,7 @@ mod detach_incarnation_tests {
         let controller = PlaceholderController::default();
 
         controller.begin_detach(&key()).await;
-        let outcome = controller
-            .ensure_active(&gateway, key(), input())
-            .await;
+        let outcome = controller.ensure_active(&gateway, key(), input()).await;
 
         assert_eq!(outcome, PlaceholderControllerOutcome::Rejected);
         assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
