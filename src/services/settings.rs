@@ -471,6 +471,16 @@ impl SettingsService {
             let saved = if values.contains_key(RUNTIME_CONFIG_EXPLICIT_KEYS_META) {
                 None
             } else {
+                // Also serialize initial writes when no runtime-config row exists to lock.
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                    .bind("runtime-config")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        ServiceError::internal(format!("{error}"))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("put_runtime_config.lock_pg")
+                    })?;
                 sqlx::query_scalar::<_, String>(
                     "SELECT value FROM kv_meta WHERE key = $1 LIMIT 1 FOR UPDATE",
                 )
