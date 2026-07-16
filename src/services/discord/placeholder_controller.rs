@@ -605,8 +605,12 @@ impl PlaceholderController {
             snapshot.progress_line.as_deref(),
         );
 
+        let Some(edit_lease) = entry.begin_edit() else {
+            return PlaceholderControllerOutcome::AlreadyTerminal;
+        };
         let edit_result =
             edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
+        drop(edit_lease);
 
         match edit_result {
             Ok(_) => {
