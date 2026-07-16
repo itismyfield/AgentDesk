@@ -20,7 +20,8 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
-    fold_read_output_result, register_child_pid, spawn_cancel_watchdog,
+    cancel_token_claude_interrupt::submit_claude_wrapper_followup, fold_read_output_result,
+    register_child_pid, spawn_cancel_watchdog,
 };
 use crate::services::provider_hosting::ProviderSessionDriver;
 use crate::services::remote::RemoteProfile;
@@ -2996,10 +2997,8 @@ fn send_followup_to_tmux(
         }
     });
 
-    // Publish the new generation before the prompt becomes reachable. Marking
-    // submission still waits for a successful flush so a pre-write stop cannot
-    // consume this turn's interrupt claim.
-    let write_result = crate::services::provider::cancel_token_claude_interrupt::submit_claude_wrapper_followup(
+    // Publish before the prompt is reachable; mark only after a successful flush.
+    let write_result = submit_claude_wrapper_followup(
         cancel_token.as_deref(),
         tmux_session_name,
         || {
