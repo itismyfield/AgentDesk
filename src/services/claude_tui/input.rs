@@ -61,6 +61,7 @@ const STARTUP_DIALOG_DISMISS_SETTLE: Duration = Duration::from_millis(500);
 pub enum PromptReadinessKind {
     FreshTurn,
     Followup,
+    ProvenWarmFollowup,
 }
 
 /// Resolve the Follow-up readiness budget from the live config snapshot,
@@ -134,22 +135,30 @@ impl PromptReadinessKind {
     fn timeout(self) -> Duration {
         match self {
             Self::FreshTurn => FRESH_PROMPT_READY_TIMEOUT,
-            Self::Followup => followup_prompt_ready_timeout(),
+            Self::Followup | Self::ProvenWarmFollowup => followup_prompt_ready_timeout(),
         }
     }
 
     fn event_budget(self) -> Duration {
         match self {
             Self::FreshTurn => FRESH_PROMPT_READY_EVENT_BUDGET,
-            Self::Followup => FOLLOWUP_PROMPT_READY_EVENT_BUDGET,
+            Self::Followup | Self::ProvenWarmFollowup => FOLLOWUP_PROMPT_READY_EVENT_BUDGET,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::FreshTurn => "fresh",
-            Self::Followup => "follow-up",
+            Self::Followup | Self::ProvenWarmFollowup => "follow-up",
         }
+    }
+
+    fn is_followup(self) -> bool {
+        matches!(self, Self::Followup | Self::ProvenWarmFollowup)
+    }
+
+    fn allows_stale_mcp_auth_warning(self) -> bool {
+        matches!(self, Self::ProvenWarmFollowup)
     }
 }
 
@@ -361,20 +370,26 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
         session_name,
         PROMPT_READY_CAPTURE_SCROLLBACK,
     );
-    let prompt_marker_detected = pane.as_deref().is_some_and(pane_looks_ready_for_prompt);
+    prompt_readiness_snapshot_from_capture(
+        pane.as_deref(),
+        crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name),
+    )
+}
+
+fn prompt_readiness_snapshot_from_capture(
+    pane: Option<&str>,
+    tmux_pane_alive: bool,
+) -> PromptReadinessSnapshot {
+    let prompt_marker_detected = pane.is_some_and(pane_looks_ready_for_prompt);
     let prompt_draft_detected = pane
-        .as_deref()
         .is_some_and(crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft);
     let pane_tail = pane
-        .as_deref()
         .map(prompt_ready_debug_tail)
         .unwrap_or_else(|| "<capture unavailable>".to_string());
     PromptReadinessSnapshot {
         prompt_marker_detected,
         prompt_draft_detected,
-        tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
-            session_name,
-        ),
+        tmux_pane_alive,
         capture_available: pane.is_some(),
         pane_tail,
     }
@@ -939,7 +954,7 @@ pub fn send_followup_prompt_or_idle_transcript(
     let actions = plan_prompt_submit(prompt)?;
     wait_for_prompt_ready_or_idle_transcript(
         session_name,
-        PromptReadinessKind::Followup,
+        PromptReadinessKind::ProvenWarmFollowup,
         cancel_token,
         transcript_path,
     )?;
@@ -971,17 +986,14 @@ fn wait_for_prompt_ready_inner(
     let timeout = readiness.timeout();
     let start = Instant::now();
 
-    // #3889: a fresh cold-boot can land on the MCP-authentication-required
+    // #3889/#4528: a cold pane can land on the MCP-authentication-required
     // welcome screen, which paints composer chrome (so it reads READY) yet
     // silently drops every prompt submission until the operator runs `/mcp`.
-    // Detect it up front and fail fast with an actionable, non-timeout reason
-    // instead of blind-waiting the full readiness timeout and then rebooting
-    // into the same blocked screen. Scoped to FreshTurn (the cold-boot case):
-    // Claude Code v2.1.209 can leave the same warning visible in a usable warm
-    // session, so Followup readiness must rely on the real composer/busy state.
-    // The check only re-captures when the banner is actually present, so a
-    // healthy fresh boot pays just one extra capture.
-    if matches!(readiness, PromptReadinessKind::FreshTurn) {
+    // Detect it up front and fail fast with an actionable, non-timeout reason.
+    // Only the hosted existing-session path supplies ProvenWarmFollowup after a
+    // recorded turn; a plain Followup intent is not proof that this warning is
+    // stale. The check only re-captures when the banner is actually present.
+    if !readiness.allows_stale_mcp_auth_warning() {
         let snapshot = prompt_readiness_snapshot(session_name);
         if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)? {
             log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
@@ -1027,9 +1039,9 @@ fn wait_for_prompt_ready_inner(
         );
     }
 
-    // #3889/#4528: an idle transcript must not bypass the FreshTurn cold-boot
-    // auth block. A warm Followup may retain the same warning in a usable Claude
-    // Code session, but the confirming pane capture must still reject busy chrome.
+    // #3889/#4528: an idle transcript must not bypass an auth block without
+    // recorded-turn warm provenance. Even proven warm reuse must still reject
+    // live busy chrome in the confirming pane capture.
     if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path)
         && pane_allows_prompt_readiness(session_name, readiness)
     {
@@ -1109,8 +1121,8 @@ fn wait_for_prompt_ready_inner(
             );
             return Ok(());
         }
-        // #3889/#4528: the auth warning gates only FreshTurn. Warm Followup
-        // readiness still honors the live draft and transcript state below.
+        // #3889/#4528: only proven warm reuse may treat this banner as stale.
+        // Every path still honors the live draft and busy state below.
         if snapshot_allows_prompt_readiness(readiness, &snapshot)
             && transcript_idle_confirms_prompt_ready(&snapshot, transcript_path)
         {
@@ -1327,9 +1339,9 @@ fn wait_for_prompt_ready_polling(
     let mut active_turn_extension_logged = false;
     loop {
         check_prompt_cancel(cancel_token)?;
-        // #3889/#4528: preserve the FreshTurn cold-boot auth gate without
-        // treating a persistent warning as a warm Followup block. Short-circuit
-        // ordering keeps the pane capture off the non-idle poll cadence.
+        // #3889/#4528: preserve the auth gate unless the caller supplied
+        // recorded-turn warm provenance. Short-circuit ordering keeps the pane
+        // capture off the non-idle poll cadence.
         if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path)
             && pane_allows_prompt_readiness(session_name, readiness)
         {
@@ -1343,10 +1355,9 @@ fn wait_for_prompt_ready_polling(
         }
         let snapshot = prompt_readiness_snapshot(session_name);
         check_prompt_cancel(cancel_token)?;
-        // #3889/#4528: fail fast only for the FreshTurn cold-boot screen. Claude
-        // Code v2.1.209 may retain this warning after a successful warm turn, so
-        // Followup readiness proceeds to the real composer/busy classification.
-        if matches!(readiness, PromptReadinessKind::FreshTurn) {
+        // #3889/#4528: plain Followup callers may point at a genuine cold pane,
+        // so only recorded-turn warm provenance can bypass the stable auth block.
+        if !readiness.allows_stale_mcp_auth_warning() {
             if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)?
             {
                 log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
@@ -1399,8 +1410,8 @@ fn wait_for_prompt_ready_polling(
                 }
             }
         }
-        // #3889/#4528: keep the FreshTurn auth belt-and-suspenders gate while
-        // allowing a warm Followup warning to follow the real idle/busy state.
+        // #3889/#4528: apply the same provenance-aware auth policy to the
+        // transcript-idle fallback; draft and busy state still veto every kind.
         if snapshot_allows_prompt_readiness(readiness, &snapshot)
             && transcript_idle_confirms_prompt_ready(&snapshot, transcript_path)
         {
@@ -1553,16 +1564,11 @@ fn prompt_marker_confirms_prompt_ready(
         && snapshot_allows_prompt_readiness(readiness, snapshot)
 }
 
-/// #3889/#4528: an MCP-auth warning is a terminal readiness block only for a
-/// FreshTurn cold boot. Claude Code v2.1.209 can retain the same warning in a
-/// usable warm session, so Followup ignores that warning but still rejects an
-/// unsent prompt draft and the narrow positive busy signals in the captured
-/// pane. Followup additionally fails closed on a structurally valid spinner +
-/// duration footer even when its verb is newer than the shared busy classifier's
-/// allowlist. Keeping that conservative extension Followup-only avoids changing
-/// FreshTurn and existing shared-classifier semantics. The draft and busy checks
-/// are also load-bearing for transcript-idle fallback paths that do not require
-/// a prompt marker.
+/// #3889/#4528: an MCP-auth warning blocks readiness unless the caller proves
+/// this is hosted reuse after a recorded turn. A plain Followup intent can also
+/// target a genuine cold/auth-blocked pane, so it receives no exemption. Draft
+/// and live busy evidence veto every readiness kind, including proven warm reuse
+/// and transcript-idle fallback paths that do not require a prompt marker.
 fn snapshot_allows_prompt_readiness(
     readiness: PromptReadinessKind,
     snapshot: &PromptReadinessSnapshot,
@@ -1571,17 +1577,13 @@ fn snapshot_allows_prompt_readiness(
         return false;
     }
     if snapshot.capture_available
-        && (crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(
+        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(
             &snapshot.pane_tail,
-        ) || (matches!(readiness, PromptReadinessKind::Followup)
-            && crate::services::tmux_common::tmux_capture_indicates_claude_tui_structured_spinner(
-                &snapshot.pane_tail,
-            )))
+        )
     {
         return false;
     }
-    matches!(readiness, PromptReadinessKind::Followup)
-        || !snapshot_indicates_mcp_auth_block(snapshot)
+    readiness.allows_stale_mcp_auth_warning() || !snapshot_indicates_mcp_auth_block(snapshot)
 }
 
 /// Whether the snapshot's captured pane shows the MCP-authentication-required
@@ -1596,12 +1598,12 @@ fn snapshot_indicates_mcp_auth_block(snapshot: &PromptReadinessSnapshot) -> bool
         )
 }
 
-/// #3889/#4528: apply the same readiness-kind auth policy to the transcript-idle
-/// path, which has no live snapshot of its own. Callers MUST gate this behind the
-/// transcript-idle check via short-circuit `&&` so the pane is captured only at
-/// the confirm boundary. Followup ignores only the auth warning; an unsent draft
-/// or positive busy signal in the captured pane still blocks readiness. A blind
-/// capture cannot assert a draft, busy frame, or FreshTurn auth block.
+/// #3889/#4528: apply the same provenance-aware auth policy to the transcript-
+/// idle path, which has no live snapshot of its own. Callers MUST gate this
+/// behind the transcript-idle check via short-circuit `&&` so the pane is
+/// captured only at the confirm boundary. Only ProvenWarmFollowup ignores the
+/// auth warning; draft or busy evidence still blocks it. A blind capture cannot
+/// assert a draft, busy frame, or auth block.
 fn pane_allows_prompt_readiness(session_name: &str, readiness: PromptReadinessKind) -> bool {
     snapshot_allows_prompt_readiness(readiness, &prompt_readiness_snapshot(session_name))
 }
@@ -1680,8 +1682,7 @@ fn prompt_ready_timeout_should_clear_followup_draft(
     snapshot: &PromptReadinessSnapshot,
     requeue_enabled: bool,
 ) -> bool {
-    matches!(readiness, PromptReadinessKind::Followup)
-        && requeue_enabled
+    readiness.is_followup() && requeue_enabled
         && snapshot.tmux_pane_alive
         && snapshot.capture_available
         && snapshot.prompt_draft_detected
@@ -2009,6 +2010,10 @@ mod tests {
             FOLLOWUP_PROMPT_READY_TIMEOUT
         );
         assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+        assert_eq!(
+            PromptReadinessKind::ProvenWarmFollowup.timeout().as_secs(),
+            45
+        );
         assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
     }
 
@@ -2381,6 +2386,24 @@ mod tests {
     }
 
     #[test]
+    fn readiness_snapshot_derives_marker_draft_and_tail_from_one_capture() {
+        let pane = "\
+earlier output
+────────────────────────────────────────────────────
+❯ pending draft
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+
+        let snapshot = prompt_readiness_snapshot_from_capture(Some(pane), true);
+
+        assert!(snapshot.prompt_marker_detected);
+        assert!(snapshot.prompt_draft_detected);
+        assert!(snapshot.capture_available);
+        assert!(snapshot.tmux_pane_alive);
+        assert_eq!(snapshot.pane_tail, pane);
+    }
+
+    #[test]
     fn prompt_marker_does_not_confirm_readiness_when_draft_is_present() {
         let snapshot = PromptReadinessSnapshot {
             prompt_marker_detected: true,
@@ -2463,11 +2486,11 @@ mod tests {
     }
 
     // #4528: Claude Code v2.1.209 can keep the MCP-auth warning visible after a
-    // successful turn. Followup readiness must accept the real idle composer but
-    // still reject a pane carrying Claude TUI positive busy chrome. FreshTurn
-    // keeps the #3889 cold-boot block for the same warning fixture.
+    // successful turn. Only a caller with recorded-turn warm provenance may
+    // accept the idle composer; plain Followup remains a cold/auth-blocked pane.
+    // Positive busy chrome vetoes every kind.
     #[test]
-    fn mcp_auth_warning_warm_followup_is_ready_but_busy_pane_is_not() {
+    fn mcp_auth_warning_requires_warm_provenance_and_idle_pane() {
         let idle_pane = "\
 ╭─── Claude Code v2.1.209 ───────────────────────────╮
 │            Welcome back 오부장!                    │
@@ -2492,8 +2515,15 @@ mod tests {
 
         assert!(snapshot_indicates_mcp_auth_block(&idle));
         assert!(
-            prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &idle),
-            "a persistent MCP warning must not block a usable warm follow-up composer"
+            !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &idle),
+            "Followup intent alone must not bypass a genuine cold auth block"
+        );
+        assert!(
+            prompt_marker_confirms_prompt_ready(
+                PromptReadinessKind::ProvenWarmFollowup,
+                &idle,
+            ),
+            "recorded-turn warm provenance may ignore a persistent warning"
         );
         assert!(
             !prompt_marker_confirms_prompt_ready(PromptReadinessKind::FreshTurn, &idle),
@@ -2523,17 +2553,23 @@ mod tests {
 
         assert!(snapshot_indicates_mcp_auth_block(&busy));
         assert!(crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(busy_pane));
-        assert!(
-            !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &busy),
-            "positive generating chrome must remain not-ready despite the ignored warning"
-        );
+        for readiness in [
+            PromptReadinessKind::FreshTurn,
+            PromptReadinessKind::Followup,
+            PromptReadinessKind::ProvenWarmFollowup,
+        ] {
+            assert!(
+                !prompt_marker_confirms_prompt_ready(readiness, &busy),
+                "positive generating chrome must veto readiness for {readiness:?}"
+            );
+        }
     }
 
     #[test]
-    fn mcp_auth_warning_unknown_duration_spinner_keeps_followup_not_ready() {
-        // Claude Code 2.1.209 ships spinner verbs beyond the shared busy
-        // classifier's compatibility allowlist. The stale prompt marker must not
-        // override a structurally valid duration-only spinner footer.
+    fn mcp_auth_warning_unknown_duration_spinner_keeps_warm_followup_not_ready() {
+        // Claude Code 2.1.209 ships spinner phrases beyond the legacy verb
+        // allowlist. The shared structural classifier must veto the stale prompt
+        // marker even when warm provenance permits the auth warning itself.
         let pane = "\
  ⚠ 1 MCP server needs authentication · run /mcp
  ✳ Architecting… (12s)
@@ -2551,18 +2587,15 @@ mod tests {
 
         assert!(snapshot_indicates_mcp_auth_block(&snapshot));
         assert!(
-            !crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane),
-            "mutation precondition: the shared allowlist intentionally does not know Architecting"
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane),
+            "shared live-turn classification must include unknown structured spinner phrases"
         );
         assert!(
-            crate::services::tmux_common::tmux_capture_indicates_claude_tui_structured_spinner(
-                pane,
+            !prompt_marker_confirms_prompt_ready(
+                PromptReadinessKind::ProvenWarmFollowup,
+                &snapshot,
             ),
-            "spinner glyph + status verb + duration must identify the live footer without esc text"
-        );
-        assert!(
-            !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot),
-            "a duration-only unknown-verb spinner must veto stale Followup readiness"
+            "a duration-only unknown-phrase spinner must veto proven warm readiness"
         );
     }
 
@@ -2874,9 +2907,9 @@ line 13";
         ));
     }
 
-    // #3889/#4528: transcript-idle fallback applies the same kind-aware policy
-    // as marker readiness. FreshTurn rejects the auth welcome pane, while a warm
-    // Followup ignores only that warning and still rejects an unsent draft.
+    // #3889/#4528: transcript-idle fallback applies the same provenance-aware
+    // policy as marker readiness. Plain Followup rejects an auth welcome pane;
+    // only ProvenWarmFollowup may ignore that warning, and drafts still veto it.
     #[test]
     fn idle_transcript_fallback_applies_kind_aware_mcp_auth_gate() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -2910,9 +2943,9 @@ line 13";
             "MCP-auth welcome pane must not confirm FreshTurn via idle transcript"
         );
         assert!(
-            !(snapshot_allows_prompt_readiness(PromptReadinessKind::Followup, &blocked)
+            !(snapshot_allows_prompt_readiness(PromptReadinessKind::ProvenWarmFollowup, &blocked)
                 && transcript_idle),
-            "an unsent draft must block Followup despite the idle transcript and ignored warning"
+            "an unsent draft must block proven warm reuse despite an idle transcript"
         );
 
         let warm_idle = PromptReadinessSnapshot {
@@ -2920,9 +2953,16 @@ line 13";
             ..blocked.clone()
         };
         assert!(
-            snapshot_allows_prompt_readiness(PromptReadinessKind::Followup, &warm_idle)
-                && transcript_idle,
-            "a warm Followup may ignore the persistent warning only when the composer is idle"
+            !(snapshot_allows_prompt_readiness(PromptReadinessKind::Followup, &warm_idle)
+                && transcript_idle),
+            "Followup intent alone must not bypass a genuine cold auth block"
+        );
+        assert!(
+            snapshot_allows_prompt_readiness(
+                PromptReadinessKind::ProvenWarmFollowup,
+                &warm_idle,
+            ) && transcript_idle,
+            "recorded-turn warm provenance may ignore a stale warning only when idle"
         );
 
         // No regression: a normal recorded-turn idle pane (no welcome banner)
@@ -2968,6 +3008,10 @@ line 13";
     fn prompt_ready_timeouts_are_split_for_fresh_and_followup_turns() {
         assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
         assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+        assert_eq!(
+            PromptReadinessKind::ProvenWarmFollowup.timeout().as_secs(),
+            45
+        );
     }
 
     #[test]
@@ -2977,6 +3021,7 @@ line 13";
         for kind in [
             PromptReadinessKind::FreshTurn,
             PromptReadinessKind::Followup,
+            PromptReadinessKind::ProvenWarmFollowup,
         ] {
             assert!(
                 kind.event_budget() < kind.timeout(),
@@ -3302,6 +3347,11 @@ line 13";
         // budget should be cleared (only when requeue is enabled).
         assert!(prompt_ready_timeout_should_clear_followup_draft(
             PromptReadinessKind::Followup,
+            &draft,
+            true
+        ));
+        assert!(prompt_ready_timeout_should_clear_followup_draft(
+            PromptReadinessKind::ProvenWarmFollowup,
             &draft,
             true
         ));
