@@ -47,9 +47,10 @@ mod rebind_reap;
 // discord-module / inflight-core lib code at its original `pub(super)` visibility
 // so `inflight::*` paths stay byte-identical after the #3835 move.
 pub(super) use self::rebind_reap::{
-    INFLIGHT_STALENESS_THRESHOLD_SECS, RebindReapOutcome, emit_reap_abandoned_rebind_origin,
-    inflight_state_is_stale, ownerless_external_input_inflight_is_stale, parse_started_at_unix,
-    parse_updated_at_unix, reap_abandoned_rebind_origin_locked, reap_orphan_inflight_locks,
+    DEAD_WATCHER_PROVEN_DEAD_SECS, INFLIGHT_STALENESS_THRESHOLD_SECS, RebindReapOutcome,
+    emit_reap_abandoned_rebind_origin, inflight_state_is_stale,
+    ownerless_external_input_inflight_is_stale, parse_started_at_unix, parse_updated_at_unix,
+    reap_abandoned_rebind_origin_locked, reap_orphan_inflight_locks,
     rebind_origin_deadline_secs_env, should_reap_abandoned_rebind_origin,
     sweep_reap_dead_watcher_rebind_origin,
 };
@@ -61,8 +62,7 @@ use self::rebind_reap::{reap_abandoned_rebind_origin_locked_in_root, rebind_orig
 // `super::*` unchanged without emitting unused-import warnings in the lib build.
 #[cfg(test)]
 use self::rebind_reap::{
-    DEAD_WATCHER_PROVEN_DEAD_SECS, ORPHAN_LOCK_REAP_MIN_AGE_SECS,
-    REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, WatcherLiveness,
+    ORPHAN_LOCK_REAP_MIN_AGE_SECS, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, WatcherLiveness,
     ownerless_external_input_inflight_is_stale_at, proven_dead_from_signals,
     reap_dead_watcher_rebind_origin_locked, reap_dead_watcher_rebind_origin_locked_in_root,
     reap_orphan_inflight_locks_in_root, should_reap_dead_watcher_rebind_origin,
@@ -3644,6 +3644,40 @@ mod stall_recovery_tests {
         let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
         assert_eq!(still_there.len(), 1);
         assert_eq!(still_there[0].user_msg_id, 4242);
+    }
+
+    #[test]
+    fn generation_guarded_sweeper_clear_preserves_row_that_progressed_after_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let snapshot = build_inflight_for_guard_tests(ProviderKind::Claude, 10, 4242);
+        save_inflight_state_in_root(temp.path(), &snapshot).unwrap();
+        let observed = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude)
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let mut progressed = observed.clone();
+        progressed.current_msg_id = progressed.current_msg_id.saturating_add(1);
+        progressed.updated_at = "2099-01-01 00:00:01".to_string();
+        progressed.save_generation = observed.save_generation.saturating_add(1);
+        force_write_state(temp.path(), &progressed);
+
+        let outcome =
+            super::clear_store::clear_inflight_state_if_matches_identity_generation_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                observed.channel_id,
+                &InflightTurnIdentity::from_state(&observed),
+                observed.effective_finalizer_turn_id(),
+                &observed.updated_at,
+                observed.save_generation,
+            );
+
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        let surviving = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(surviving.len(), 1);
+        assert_eq!(surviving[0].save_generation, progressed.save_generation);
+        assert_eq!(surviving[0].current_msg_id, progressed.current_msg_id);
     }
 
     /// No on-disk row → `Missing`. Idempotency safety net.

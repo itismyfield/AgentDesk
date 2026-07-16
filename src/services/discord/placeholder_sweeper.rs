@@ -7,9 +7,9 @@
 //! killed without emitting a terminal event. The sweeper periodically scans
 //! every persisted inflight state per provider; for placeholders whose
 //! `updated_at` has not advanced in a configurable window, it edits the
-//! Discord message into a "stalled" or "abandoned" state and (when
-//! abandoning) clears the inflight state file so the message is not
-//! re-processed by the regular cleanup race.
+//! Discord message into a "stalled" or "abandoned" state and clears the
+//! inflight state only after terminal-safe or completed cleanup. Uncertain
+//! owner evidence preserves the row for a later retry.
 //!
 //! Scope notes for the initial landing:
 //! - AgentDesk-tracked inflight states only. Operator-level Claude Code
@@ -36,6 +36,12 @@ use super::inflight::{
 };
 use crate::services::provider::ProviderKind;
 
+mod abandon_guard;
+use abandon_guard::{
+    AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
+    finalize_owner_dead_cleanup_if_same_turn,
+};
+
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
 /// stalled. Below this threshold the sweeper does nothing.
 ///
@@ -50,8 +56,8 @@ use crate::services::provider::ProviderKind;
 pub(crate) const STALL_THRESHOLD_SECS: u64 = 300;
 
 /// Age at which the placeholder is treated as abandoned. The sweeper edits
-/// the message to its terminal "abandoned" form and clears the inflight
-/// state file.
+/// the message to its terminal "abandoned" form and clears inflight state only
+/// when tmux cleanup is terminal-safe or actually completes.
 ///
 /// #2438 (#2427 final): bumped 300 → 1800 (30 min). At this point the
 /// sweeper is the **last** layer: every explicit signal that should
@@ -154,20 +160,13 @@ async fn edit_placeholder_safe(
 /// badge) or has already been replaced with a delivered response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum PlaceholderProbe {
-    /// The current Discord content still matches a known placeholder pattern.
-    /// Safe to overwrite with the abandoned badge.
+    /// Known placeholder content; an abandoned edit is permitted.
     StillPlaceholder,
-    /// Discord content has been replaced with a real response. Do NOT
-    /// overwrite — the user has been served. Caller should still drop the
-    /// inflight state file so the sweeper does not re-trigger every pass.
+    /// Real response content; preserve it and finalize as delivered.
     AlreadyDelivered,
-    /// Discord returned 404 / 403 / 410 — the message or channel is
-    /// permanently gone. Any edit attempt would fail; evict the state row.
+    /// Permanent 404 / 403 / 410; editing cannot succeed.
     MessageGone,
-    /// Probe could not determine the message state (transient Discord error,
-    /// rate-limit, transport failure, 5xx). Caller MUST leave the inflight
-    /// row untouched so a later sweep can retry; do NOT delete the state
-    /// file and do NOT issue any destructive edit.
+    /// Transient/unknown failure; preserve everything for a later retry.
     ProbeFailed,
 }
 
@@ -340,6 +339,7 @@ async fn run_placeholder_sweep_pass(
     stalled_tracker: &mut StalledEditTracker,
 ) -> SweepPassReport {
     let mut report = SweepPassReport::default();
+    let sweep_started_before = std::time::Instant::now();
     let states = load_inflight_states_for_sweep(provider);
     report.scanned = states.len();
     stalled_tracker.retain_live(provider, &states);
@@ -402,6 +402,7 @@ async fn run_placeholder_sweep_pass(
                 &shared.token_hash,
                 &state,
                 age_secs,
+                sweep_started_before,
                 &mut report,
             )
             .await;
@@ -537,43 +538,39 @@ async fn run_placeholder_sweep_pass(
             SweepDecision::Abandoned => {
                 match probe {
                     PlaceholderProbe::AlreadyDelivered => {
-                        // Response already on screen. Do NOT overwrite —
-                        // just evict the stale inflight row so the sweeper
-                        // does not retry every pass for the rest of the
-                        // process lifetime.
-                        if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            finalize_abandoned_mailbox(shared, provider, &state).await;
-                            let _ = delete_inflight_state_file(provider, state.channel_id);
-                            if let (Some(provider_kind), msg_id) = (
-                                ProviderKind::from_str(&state.provider),
-                                state.current_msg_id,
-                            ) {
-                                if msg_id != 0 {
-                                    let key = super::placeholder_controller::PlaceholderKey {
-                                        provider: provider_kind,
-                                        channel_id: serenity::ChannelId::new(state.channel_id),
-                                        message_id: serenity::MessageId::new(msg_id),
-                                    };
-                                    shared.ui.placeholder_controller.detach(&key);
-                                }
-                            }
-                        }
+                        // Response already on screen: terminal delivery is certain.
+                        // Release the matching mailbox/inflight even if its reusable
+                        // tmux pane remains live; preserve that session itself.
+                        abandon_guard::finalize_probe_cleanup_if_same_turn(
+                            shared,
+                            provider,
+                            &state,
+                            age_secs,
+                            sweep_started_before,
+                            probe,
+                        )
+                        .await;
                         tracing::info!(
                             "[placeholder_sweeper] skipped abandon overwrite for {}/{} — \
-                             content already delivered, state evicted (#2415)",
+                             content already delivered; cleanup policy applied (#2415)",
                             state.channel_id,
                             state.current_msg_id
                         );
                         continue;
                     }
                     PlaceholderProbe::MessageGone => {
-                        // The Discord message is permanently unreachable
-                        // (404 / 403 / 410). An edit attempt would fail
-                        // anyway; drop the inflight row.
-                        if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            finalize_abandoned_mailbox(shared, provider, &state).await;
-                            let _ = delete_inflight_state_file(provider, state.channel_id);
-                        }
+                        // The Discord message is permanently unreachable, but that
+                        // is not terminal-delivery evidence. Re-probe owner death
+                        // after the awaited GET before touching mailbox/state.
+                        abandon_guard::finalize_probe_cleanup_if_same_turn(
+                            shared,
+                            provider,
+                            &state,
+                            age_secs,
+                            sweep_started_before,
+                            probe,
+                        )
+                        .await;
                         continue;
                     }
                     PlaceholderProbe::ProbeFailed => {
@@ -585,6 +582,10 @@ async fn run_placeholder_sweep_pass(
                     PlaceholderProbe::StillPlaceholder => {
                         // Fall through to the original abort-edit path.
                     }
+                }
+                let cleanup_decision = abandoned_tmux_cleanup_decision_for(&state).await;
+                if cleanup_decision == AbandonedTmuxCleanupDecision::PreserveRetry {
+                    continue;
                 }
                 // #2438 (#2427 final): time-based abandon is now a pure
                 // safety net — the four explicit-signal wires (D
@@ -602,6 +603,15 @@ async fn run_placeholder_sweep_pass(
                     channel_id = state.channel_id,
                     msg_id = state.current_msg_id,
                 );
+                // Re-probe immediately before the edit so a revived session wins.
+                if !cleanup_decision.allows_discord_cleanup()
+                    || !abandoned_tmux_cleanup_decision_for(&state)
+                        .await
+                        .allows_discord_cleanup()
+                    || !inflight_state_still_same_turn(provider, &state, age_secs)
+                {
+                    continue;
+                }
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
@@ -611,7 +621,7 @@ async fn run_placeholder_sweep_pass(
                     &text,
                 )
                 .await;
-                // Recheck after the awaited edit covers three concerns:
+                // Recheck after the awaited edit covers four concerns:
                 //   1. Edit failure (rate limit / 5xx): leave state for the
                 //      next pass to retry.
                 //   2. New turn raced in during the await (different
@@ -621,29 +631,22 @@ async fn run_placeholder_sweep_pass(
                 //      gone): turn_bridge already finalized its mailbox —
                 //      calling mailbox_finish_turn again would no-op or
                 //      corrupt a freshly started follow-up turn.
+                //   4. The tmux pane revived during the edit: owner-death planning
+                //      returns PreserveRetry, which keeps both mailbox and row.
                 // `inflight_state_still_same_turn` covers (2) and (3); edit
-                // success covers (1).
-                if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    finalize_abandoned_mailbox(shared, provider, &state).await;
-                    if delete_inflight_state_file(provider, state.channel_id) {
-                        report.abandoned += 1;
-                    }
-                    // codex round-10 P3 on PR #1308: detach the controller's
-                    // Active row that was tracking this card so the
-                    // cap-bounded map does not retain a non-evictable entry.
-                    if let (Some(provider_kind), msg_id) = (
-                        ProviderKind::from_str(&state.provider),
-                        state.current_msg_id,
-                    ) {
-                        if msg_id != 0 {
-                            let key = super::placeholder_controller::PlaceholderKey {
-                                provider: provider_kind,
-                                channel_id: serenity::ChannelId::new(state.channel_id),
-                                message_id: serenity::MessageId::new(msg_id),
-                            };
-                            shared.ui.placeholder_controller.detach(&key);
-                        }
-                    }
+                // success covers (1), and the production cleanup plan covers (4).
+                if edited
+                    && finalize_owner_dead_cleanup_if_same_turn(
+                        shared,
+                        provider,
+                        &state,
+                        age_secs,
+                        sweep_started_before,
+                        true,
+                    )
+                    .await
+                {
+                    report.abandoned += 1;
                 }
             }
         }
@@ -709,52 +712,8 @@ impl StalledEditTracker {
     }
 }
 
-/// Drop the per-channel mailbox active turn that the abandoned inflight was
-/// driving and reuse the regular turn-cancellation cleanup path. Without
-/// this:
-///   - the channel's `cancel_token` and `global_active` counter stay set,
-///     so subsequent user messages see an in-flight turn and get queued
-///     behind a placeholder that is already terminal,
-///   - the orphaned child process / tmux session keeps running outside the
-///     mailbox where no watchdog can reach it, and
-///   - any soft-queued user messages stay buffered with no dequeue
-///     trigger.
-///
-/// `cancel_active_token` handles (1)+(2) — sets the cancelled flag, kills
-/// the PID tree, and tears down the tmux session. The deferred idle queue
-/// kickoff covers (3): same hook that the normal cancellation path uses.
-async fn finalize_abandoned_mailbox(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &InflightTurnState,
-) {
-    let channel = serenity::ChannelId::new(state.channel_id);
-    let finish = super::mailbox_finish_turn(shared, provider, channel).await;
-    if let Some(removed_token) = finish.removed_token {
-        super::turn_bridge::cancel_active_token(
-            &removed_token,
-            super::TmuxCleanupPolicy::CleanupSession {
-                termination_reason_code: Some("placeholder_sweeper_abandon"),
-            },
-            "placeholder_sweeper abandoned",
-        );
-        super::saturating_decrement_global_active(shared);
-    }
-    if finish.has_pending {
-        super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel,
-            "placeholder_sweeper_abandon",
-        );
-    }
-}
-
-/// True when the inflight state on disk for `state.channel_id` still names
-/// the same turn (matching `user_msg_id` and `current_msg_id`) AND the file
-/// mtime is not significantly fresher than our snapshot. Returns `false`
-/// when the file is gone (original turn completed mid-await) or has been
-/// replaced by a new turn for the same channel.
+/// True when the inflight state on disk still names the same turn and its
+/// mtime is not significantly fresher than the sweep snapshot.
 fn inflight_state_still_same_turn(
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
@@ -826,11 +785,22 @@ async fn sweep_orphan_status_panel(
     token_hash: &str,
     state: &InflightTurnState,
     age_secs: u64,
+    sweep_started_before: std::time::Instant,
     report: &mut SweepPassReport,
 ) {
     let Some(panel_msg) = panel_reclaim_target(state, age_secs) else {
         return;
     };
+    // The abandoned-state policy is fail-closed: live, recent, or uncertain
+    // evidence keeps the Discord panel and inflight row for a later retry.
+    // Panel-only/TUI-direct rows have no real user-message identity to finalize,
+    // so only those terminal-marker rows can discard their stale marker.
+    if !abandoned_tmux_cleanup_decision_for(state)
+        .await
+        .allows_discord_cleanup()
+    {
+        return;
+    }
     // Do not delete a panel a replacement turn now owns, or one whose turn has
     // already completed (state file gone).
     if !inflight_state_still_same_turn(provider, state, age_secs) {
@@ -889,10 +859,15 @@ async fn sweep_orphan_status_panel(
         // (deleted, or — on transient failure — enqueued to the durable store) the
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
-        if inflight_state_still_same_turn(provider, state, age_secs) {
-            finalize_abandoned_mailbox(shared, provider, state).await;
-            let _ = delete_inflight_state_file(provider, state.channel_id);
-        }
+        finalize_owner_dead_cleanup_if_same_turn(
+            shared,
+            provider,
+            state,
+            age_secs,
+            sweep_started_before,
+            false,
+        )
+        .await;
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
         && let Some(panel_msg_id) = state.status_message_id
     {
