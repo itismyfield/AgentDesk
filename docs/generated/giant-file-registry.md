@@ -35,7 +35,7 @@
 | `src/services/discord/turn_view_reconciler.rs` | 2214 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2887 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2077 | discord-relay | 2026-10-31 | #3840 |
-| `src/services/tmux_common.rs` | 1259 | discord-relay | 2026-10-31 | #3924 |
+| `src/services/tmux_common.rs` | 1273 | discord-relay | 2026-10-31 | #3924 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 
 ## Grandfathered
