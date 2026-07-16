@@ -47,6 +47,20 @@ const API_FRICTION_OBSERVATION_QUERY: &str = r#"
             LIMIT $1
             "#;
 
+const CONFIRM_AGENT_TURN_STARTED_QUERY: &str = r#"
+            UPDATE routine_runs
+            SET result_json = jsonb_set(
+                    COALESCE(result_json, '{}'::jsonb),
+                    '{fresh_context_guaranteed}',
+                    'true'::jsonb,
+                    true
+                ),
+                updated_at = NOW()
+            WHERE id = $1
+              AND turn_id = $2
+              AND action = 'agent'
+            "#;
+
 #[derive(Debug)]
 pub struct ResumeRoutineRequiresNextDueAt;
 
@@ -2386,6 +2400,17 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn confirm_agent_turn_started(&self, run_id: &str, turn_id: &str) -> Result<bool> {
+        let result = sqlx::query(CONFIRM_AGENT_TURN_STARTED_QUERY)
+            .bind(run_id)
+            .bind(turn_id)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| anyhow!("confirm routine agent turn started {run_id}: {e}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn schedule_agent_retry(
         &self,
         run_id: &str,
@@ -3256,26 +3281,34 @@ impl RoutineStore {
 
         let mut tx = self.pool.begin().await?;
 
-        let target: Option<(String, Option<String>, Option<DateTime<Utc>>, DateTime<Utc>)> =
-            sqlx::query_as(
-                r#"
-            SELECT r.id, r.schedule, r.next_due_at, rr.started_at
+        let target: Option<(
+            String,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            DateTime<Utc>,
+            Option<Value>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT r.id, r.schedule, r.next_due_at, rr.started_at, rr.result_json
             FROM routine_runs rr
             JOIN routines r ON r.id = rr.routine_id
             WHERE rr.id = $1
               AND rr.status = 'running'
             FOR UPDATE OF rr, r
             "#,
-            )
-            .bind(run_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| anyhow!("close run {run_id}: lock running run: {e}"))?;
+        )
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("close run {run_id}: lock running run: {e}"))?;
 
-        let Some((routine_id, schedule, current_next_due_at, started_at)) = target else {
+        let Some((routine_id, schedule, current_next_due_at, started_at, current_result_json)) =
+            target
+        else {
             tx.commit().await?;
             return Ok(false);
         };
+        result_json = preserve_fresh_context_evidence(result_json, current_result_json.as_ref());
         let scheduled_next_due_at = if close.next_due_at.should_update() {
             close.next_due_at.value()
         } else if let Some(schedule) = schedule.as_deref() {
@@ -3437,6 +3470,27 @@ fn validate_max_retries(max_retries: Option<i32>) -> Result<()> {
     Ok(())
 }
 
+fn preserve_fresh_context_evidence(
+    mut closing_result: Option<Value>,
+    current_result: Option<&Value>,
+) -> Option<Value> {
+    let verified = current_result
+        .and_then(|value| value.get("fresh_context_guaranteed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !verified {
+        return closing_result;
+    }
+
+    if closing_result.is_none() {
+        closing_result = Some(json!({}));
+    }
+    if let Some(object) = closing_result.as_mut().and_then(Value::as_object_mut) {
+        object.insert("fresh_context_guaranteed".to_string(), Value::Bool(true));
+    }
+    closing_result
+}
+
 fn checkpoint_size_error(
     checkpoint: &Value,
     max_checkpoint_bytes: usize,
@@ -3506,9 +3560,9 @@ struct CloseRun<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        API_FRICTION_OBSERVATION_QUERY, checkpoint_size_error,
+        API_FRICTION_OBSERVATION_QUERY, CONFIRM_AGENT_TURN_STARTED_QUERY, checkpoint_size_error,
         include_automation_candidate_card_observations, precomputed_observation_from_kv,
-        resume_without_next_due_is_invalid, truncate_chars,
+        preserve_fresh_context_evidence, resume_without_next_due_is_invalid, truncate_chars,
     };
     use crate::api_caller_observability::{AuthStrength, LOG_TARGET, RequestPrincipal};
     use chrono::{TimeZone, Utc};
@@ -3579,6 +3633,57 @@ mod tests {
         let checkpoint = serde_json::json!({"payload": "abcdef"});
         assert!(checkpoint_size_error(&checkpoint, 8).unwrap().is_some());
         assert!(checkpoint_size_error(&checkpoint, 128).unwrap().is_none());
+    }
+
+    #[test]
+    fn confirmation_can_merge_evidence_after_terminal_close_for_matching_turn() {
+        assert!(CONFIRM_AGENT_TURN_STARTED_QUERY.contains("AND turn_id = $2"));
+        assert!(CONFIRM_AGENT_TURN_STARTED_QUERY.contains("AND action = 'agent'"));
+        assert!(!CONFIRM_AGENT_TURN_STARTED_QUERY.contains("status = 'running'"));
+        assert!(CONFIRM_AGENT_TURN_STARTED_QUERY.contains("jsonb_set"));
+        assert!(
+            !CONFIRM_AGENT_TURN_STARTED_QUERY.contains("result_json = $3"),
+            "late confirmation must merge evidence without replacing terminal result metadata"
+        );
+    }
+
+    #[test]
+    fn close_preserves_verified_fresh_context_evidence_from_locked_row() {
+        let closing = Some(serde_json::json!({
+            "status": "completed",
+            "fresh_context_guaranteed": false
+        }));
+        let current = serde_json::json!({
+            "status": "started",
+            "fresh_context_guaranteed": true
+        });
+
+        let merged = preserve_fresh_context_evidence(closing, Some(&current)).expect("result");
+
+        assert_eq!(merged.get("status"), Some(&serde_json::json!("completed")));
+        assert_eq!(
+            merged.get("fresh_context_guaranteed"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
+    fn close_does_not_invent_unverified_fresh_context_evidence() {
+        let closing = Some(serde_json::json!({
+            "status": "completed",
+            "fresh_context_guaranteed": false
+        }));
+        let current = serde_json::json!({
+            "status": "started",
+            "fresh_context_guaranteed": false
+        });
+
+        let merged = preserve_fresh_context_evidence(closing, Some(&current)).expect("result");
+
+        assert_eq!(
+            merged.get("fresh_context_guaranteed"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[test]

@@ -189,18 +189,27 @@ fn rollout_binding_matches(
         && paths_match(&marker.rollout_path, selected_path)
 }
 
-fn snapshot_is_strictly_input_ready(snapshot: &PromptReadinessSnapshot) -> bool {
-    snapshot.tmux_pane_alive
-        && snapshot.capture_available
-        && snapshot.composer_marker_detected
-        && !snapshot.prompt_draft_detected
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarmInputDecision {
+    ReusePane,
+    Fallback(CodexWarmFallbackReason),
+}
+
+fn decide_warm_input(snapshot: &PromptReadinessSnapshot) -> WarmInputDecision {
+    if snapshot.tmux_pane_alive && snapshot.capture_available && snapshot.composer_marker_detected {
+        if snapshot.prompt_draft_detected {
+            WarmInputDecision::Fallback(CodexWarmFallbackReason::StrandedDraft)
+        } else {
+            WarmInputDecision::ReusePane
+        }
+    } else {
+        WarmInputDecision::Fallback(CodexWarmFallbackReason::InputReadinessFailed)
+    }
 }
 
 fn snapshot_has_stranded_draft(snapshot: &PromptReadinessSnapshot) -> bool {
-    snapshot.tmux_pane_alive
-        && snapshot.capture_available
-        && snapshot.composer_marker_detected
-        && snapshot.prompt_draft_detected
+    decide_warm_input(snapshot)
+        == WarmInputDecision::Fallback(CodexWarmFallbackReason::StrandedDraft)
 }
 
 fn submit_failure_allows_fallback(
@@ -341,10 +350,9 @@ pub(crate) fn try_codex_tui_warm_followup(
             return CodexWarmFollowupOutcome::Terminal(Ok(()));
         }
         let snapshot = super::input::prompt_readiness_snapshot(tmux_session_name);
-        let reason = if snapshot_has_stranded_draft(&snapshot) {
-            CodexWarmFallbackReason::StrandedDraft
-        } else {
-            CodexWarmFallbackReason::InputReadinessFailed
+        let reason = match decide_warm_input(&snapshot) {
+            WarmInputDecision::Fallback(reason) => reason,
+            WarmInputDecision::ReusePane => CodexWarmFallbackReason::InputReadinessFailed,
         };
         log_fallback(tmux_session_name, reason, &error);
         return CodexWarmFollowupOutcome::Fallback(reason);
@@ -353,12 +361,7 @@ pub(crate) fn try_codex_tui_warm_followup(
         return CodexWarmFollowupOutcome::Terminal(Ok(()));
     }
     let ready_snapshot = super::input::prompt_readiness_snapshot(tmux_session_name);
-    if !snapshot_is_strictly_input_ready(&ready_snapshot) {
-        let reason = if snapshot_has_stranded_draft(&ready_snapshot) {
-            CodexWarmFallbackReason::StrandedDraft
-        } else {
-            CodexWarmFallbackReason::InputReadinessFailed
-        };
+    if let WarmInputDecision::Fallback(reason) = decide_warm_input(&ready_snapshot) {
         log_fallback(
             tmux_session_name,
             reason,
@@ -586,6 +589,38 @@ mod tests {
         assert_eq!(
             decide_warm_eligibility(options),
             WarmEligibilityDecision::Fallback(CodexWarmFallbackReason::LaunchOptionsChanged)
+        );
+    }
+
+    #[test]
+    fn warm_input_decision_reuses_only_live_empty_composer() {
+        let ready = PromptReadinessSnapshot {
+            composer_marker_detected: true,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "idle Codex composer".to_string(),
+        };
+        assert_eq!(decide_warm_input(&ready), WarmInputDecision::ReusePane);
+
+        for mutate in [
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.tmux_pane_alive = false,
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.capture_available = false,
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.composer_marker_detected = false,
+        ] {
+            let mut snapshot = ready.clone();
+            mutate(&mut snapshot);
+            assert_eq!(
+                decide_warm_input(&snapshot),
+                WarmInputDecision::Fallback(CodexWarmFallbackReason::InputReadinessFailed)
+            );
+        }
+
+        let mut draft = ready;
+        draft.prompt_draft_detected = true;
+        assert_eq!(
+            decide_warm_input(&draft),
+            WarmInputDecision::Fallback(CodexWarmFallbackReason::StrandedDraft)
         );
     }
 

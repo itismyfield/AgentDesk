@@ -1483,7 +1483,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_runtime_config_object_and_non_object_keep_only_blob_authority() {
+    async fn put_pg_runtime_config_object_and_non_object_keep_only_blob_authority() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         upsert_test_kv(&pool, "runtime-config", r#"{"old":true}"#).await;
@@ -1601,7 +1601,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn startup_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion() {
+    async fn startup_pg_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         upsert_test_kv(&pool, "runtime-config", r#"{"maxEntryRetries":99}"#).await;
@@ -1618,7 +1618,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cli_put_get_set_round_trip_survives_startup_seed() {
+    async fn cli_pg_put_get_set_round_trip_survives_startup_seed() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         let mut config = crate::config::Config::default();
@@ -1663,7 +1663,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn runtime_config_delete_failure_rolls_back_blob_and_every_mirror() {
+    async fn runtime_config_pg_delete_failure_rolls_back_blob_and_every_mirror() {
         let database = TestDatabase::create().await;
         let pool = database.connect().await;
         let old_blob = r#"{"maxEntryRetries":4,"marker":"old"}"#;

@@ -617,7 +617,8 @@ pub fn emit_relay_delivery(
 /// reuses the `PlaceholderCleanupOperation` vocab (`delete_terminal` /
 /// `delete_nonterminal` / `edit_terminal` / `edit_preserve`) or a site-specific
 /// descriptive verb, and `outcome` is one of `committed` | `already_gone` |
-/// `failed` | `skipped_committed_terminal`. The outcome doubles as the event
+/// `failed` | `skipped_committed_terminal` | `skipped_terminal_retry_pending`.
+/// The outcome doubles as the event
 /// `status` (correlation column) so a query can split committed deletes from
 /// guard-skips without parsing the payload.
 #[allow(clippy::too_many_arguments)]

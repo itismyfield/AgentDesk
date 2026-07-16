@@ -35,7 +35,7 @@
 | `src/services/discord/turn_view_reconciler.rs` | 2214 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2887 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2077 | discord-relay | 2026-10-31 | #3840 |
-| `src/services/tmux_common.rs` | 1099 | discord-relay | 2026-10-31 | #3924 |
+| `src/services/tmux_common.rs` | 1311 | discord-relay | 2026-10-31 | #3924 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 
 ## Grandfathered
@@ -83,15 +83,15 @@
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
 | `src/services/claude.rs` | 2965 |
-| `src/services/claude_tui/input.rs` | 1932 |
+| `src/services/claude_tui/input.rs` | 1961 |
 | `src/services/codex.rs` | 3131 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
-| `src/services/codex_tui/input.rs` | 1659 |
+| `src/services/codex_tui/input.rs` | 1670 |
 | `src/services/discord/commands/text_commands.rs` | 1482 |
 | `src/services/discord/formatting.rs` | 2566 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
 | `src/services/discord/mod.rs` | 4168 |
-| `src/services/discord/router/message_handler/headless_turn.rs` | 1387 |
+| `src/services/discord/router/message_handler/headless_turn.rs` | 1381 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1815 |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1496 |
@@ -103,9 +103,9 @@
 | `src/services/platform/binary_resolver.rs` | 1392 |
 | `src/services/provider.rs` | 1818 |
 | `src/services/qwen.rs` | 2198 |
-| `src/services/routines/agent_executor.rs` | 2021 |
+| `src/services/routines/agent_executor.rs` | 2130 |
 | `src/services/routines/discord_log.rs` | 1593 |
-| `src/services/routines/store.rs` | 3505 |
+| `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1102 |
 | `src/services/tui_prompt_dedupe.rs` | 1970 |
 | `src/services/turn_orchestrator.rs` | 3262 |

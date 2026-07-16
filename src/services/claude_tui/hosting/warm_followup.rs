@@ -321,7 +321,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         // envelope is authoritative but the prompt glyph is not visible.
         match crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
             tmux_session_name,
-            crate::services::claude_tui::input::PromptReadinessKind::Followup,
+            crate::services::claude_tui::input::PromptReadinessKind::ProvenWarmFollowup,
             cancel_token.as_deref(),
             &transcript_path,
         ) {
