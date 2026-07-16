@@ -392,21 +392,6 @@ owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3405"
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold in #3635: the dead-watcher rebind-origin
-# reap added a second reap branch to the rebind-origin arm of the sweep loop
-# (the watcher-owned #897 orphan the #3581 None-owner predicate can never touch).
-# The file was already at 993 prod LoC (razor-thin under the threshold) from the
-# accreted #3003/#3581/#3641 sweep-arm logic; the contained #3635 branch tipped
-# it over. The pure reap-eligibility logic lives in inflight.rs — the sweeper
-# arm is the orchestration shell. Decompose the per-arm sweep handlers
-# (placeholder edit / status-panel / rebind reap) into a sweep-handlers submodule
-# once the rebind-origin lifecycle (#3581/#3635) stabilizes.
-file = "src/services/discord/placeholder_sweeper.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#3405"
-
 # NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
 # #3779 extracted auto-heal attempt accounting into a sibling module, dropping
 # the root below the prod-giant threshold. Its entry and ratchet baseline are

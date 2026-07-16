@@ -547,6 +547,20 @@ impl PlaceholderController {
         }
     }
 
+    /// Invalidate only the render coalescer for a live entry. The sweeper uses
+    /// this after an external Discord edit races with owner revival so the next
+    /// ordinary live render must PATCH the visible card back to Active.
+    pub(super) async fn invalidate_render_cache(&self, key: &PlaceholderKey) -> bool {
+        let Some(entry) = self.entries.get(key).map(|entry| entry.clone()) else {
+            return false;
+        };
+        let mut guarded = entry.lock().await;
+        guarded.last_rendered = None;
+        guarded.last_live_events_block = None;
+        guarded.last_live_events_edit_at = None;
+        true
+    }
+
     /// Drop a key from the controller without emitting any Discord PATCH.
     /// Used by the rollover retarget path on `turn_bridge`: when the old
     /// `current_msg_id` is overwritten with a frozen response chunk, the
@@ -937,5 +951,28 @@ mod live_events_tests {
             .await;
         assert_eq!(outcome, PlaceholderControllerOutcome::Coalesced);
         assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn render_cache_invalidation_forces_identical_live_rerender() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let first = controller
+            .ensure_active(gateway.as_ref(), key(), input())
+            .await;
+        let coalesced = controller
+            .ensure_active(gateway.as_ref(), key(), input())
+            .await;
+
+        assert_eq!(first, PlaceholderControllerOutcome::Edited);
+        assert_eq!(coalesced, PlaceholderControllerOutcome::Coalesced);
+        assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);
+        assert!(controller.invalidate_render_cache(&key()).await);
+
+        let repaired = controller
+            .ensure_active(gateway.as_ref(), key(), input())
+            .await;
+        assert_eq!(repaired, PlaceholderControllerOutcome::Edited);
+        assert_eq!(gateway.edits.load(Ordering::SeqCst), 2);
     }
 }
