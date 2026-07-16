@@ -666,7 +666,7 @@
 | `services::discord::router::message_handler::attachments` | `src/services/discord/router/message_handler/attachments.rs` | 142 | 114 | 28 |  |
 | `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 87 | 87 | 0 |  |
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 313 | 222 | 91 |  |
-| `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1693 | 1370 | 323 | giant-file |
+| `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1694 | 1370 | 324 | giant-file |
 | `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3166 | 2837 | 329 | giant-file |
 | `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 696 | 601 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction` | `src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs` | 36 | 36 | 0 |  |
@@ -1031,17 +1031,17 @@
 | `services::review_decision::review_state_repo` | `src/services/review_decision/review_state_repo.rs` | 33 | 33 | 0 |  |
 | `services::review_decision::tuning_aggregate` | `src/services/review_decision/tuning_aggregate.rs` | 469 | 469 | 0 |  |
 | `services::review_decision::worktree_stale` | `src/services/review_decision/worktree_stale.rs` | 728 | 553 | 175 |  |
-| `services::routines` | `src/services/routines/mod.rs` | 48 | 38 | 10 |  |
+| `services::routines` | `src/services/routines/mod.rs` | 52 | 41 | 11 |  |
 | `services::routines::action` | `src/services/routines/action.rs` | 365 | 237 | 128 |  |
-| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2509 | 2026 | 483 | giant-file |
+| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2653 | 2115 | 538 | giant-file |
 | `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 2051 | 1593 | 458 | giant-file |
 | `services::routines::fresh_session_reaper` | `src/services/routines/fresh_session_reaper.rs` | 395 | 215 | 180 |  |
 | `services::routines::loader` | `src/services/routines/loader.rs` | 2313 | 670 | 1643 |  |
 | `services::routines::migrated` | `src/services/routines/migrated.rs` | 1257 | 854 | 403 |  |
-| `services::routines::runtime` | `src/services/routines/runtime.rs` | 1047 | 871 | 176 |  |
+| `services::routines::runtime` | `src/services/routines/runtime.rs` | 1053 | 872 | 181 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 133 | 64 | 69 |  |
 | `services::routines::session_control` | `src/services/routines/session_control.rs` | 1065 | 899 | 166 |  |
-| `services::routines::store` | `src/services/routines/store.rs` | 4167 | 3505 | 662 | giant-file |
+| `services::routines::store` | `src/services/routines/store.rs` | 4193 | 3531 | 662 | giant-file |
 | `services::scheduled_messages` | `src/services/scheduled_messages.rs` | 1249 | 940 | 309 |  |
 | `services::scheduled_messages::evidence` | `src/services/scheduled_messages/evidence.rs` | 132 | 132 | 0 |  |
 | `services::scheduled_messages::timing` | `src/services/scheduled_messages/timing.rs` | 53 | 53 | 0 |  |

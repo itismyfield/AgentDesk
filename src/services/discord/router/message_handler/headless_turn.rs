@@ -1,8 +1,6 @@
 use super::*;
 
-fn valid_routine_metadata(
-    metadata: Option<&serde_json::Value>,
-) -> Option<&serde_json::Value> {
+fn valid_routine_metadata(metadata: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
     let metadata = metadata?;
     metadata
         .get("routine_id")

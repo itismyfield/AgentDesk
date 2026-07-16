@@ -585,8 +585,7 @@ impl RoutineAgentExecutor {
         attempt_kind: &str,
         pause_on_terminal_failure: bool,
     ) -> Result<Option<RoutineRunOutcome>> {
-        let fresh_context_guaranteed =
-            fresh_context_guaranteed_from_result(result_json.as_ref());
+        let fresh_context_guaranteed = fresh_context_guaranteed_from_result(result_json.as_ref());
         match running_failure_recovery_plan(&run, failed_agent_id, attempt_kind) {
             AgentFailureRecoveryPlan::Retry {
                 retry_count_after_increment: retry_count,
@@ -1132,11 +1131,8 @@ impl RoutineAgentExecutor {
             ));
         }
         let started = outcome.status.as_str() == "started";
-        let provider_fresh_context =
-            fresh_context_guaranteed(&claimed.execution_strategy, started);
-        if !started
-            && let Some(object) = result_json.as_object_mut()
-        {
+        let provider_fresh_context = fresh_context_guaranteed(&claimed.execution_strategy, started);
+        if !started && let Some(object) = result_json.as_object_mut() {
             object.insert(
                 "status".to_string(),
                 Value::String(outcome.status.as_str().to_string()),
@@ -1183,8 +1179,7 @@ impl RoutineAgentExecutor {
             provider_fresh_context,
             durable_confirmation_persisted,
         );
-        result_json =
-            result_with_fresh_context_guarantee(result_json, fresh_context_guaranteed);
+        result_json = result_with_fresh_context_guarantee(result_json, fresh_context_guaranteed);
 
         // #3022: persist run -> fresh-session ownership now that the session is
         // up, so boot recovery can reap this exact session if a dcserver restart
@@ -1748,10 +1743,7 @@ fn pending_result_without_fresh_context_guarantee(
     status: &str,
     error: Option<&str>,
 ) -> Value {
-    result_with_fresh_context_guarantee(
-        merge_pending_result(run, status, error, None),
-        false,
-    )
+    result_with_fresh_context_guarantee(merge_pending_result(run, status, error, None), false)
 }
 
 fn merge_pending_result(
@@ -2507,8 +2499,7 @@ mod tests {
         let run = running_run_with_result(json!({
             "fresh_context_guaranteed": true
         }));
-        let completion =
-            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
+        let completion = completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
 
         assert_eq!(
             completed_result(&run, &completion, "done").get("fresh_context_guaranteed"),
