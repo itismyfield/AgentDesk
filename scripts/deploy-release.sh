@@ -115,6 +115,15 @@ STAGED_BINARY=""
 POLICIES_STAGED=""
 LAUNCHD_MIGRATED_STAGED=""
 RELEASE_ROOT_SCRIPTS_STAGED=""
+PG_TUNNEL_PREFLIGHT_PID=""
+PG_TUNNEL_PREFLIGHT_DSN_FILE=""
+PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
+PG_TUNNEL_ROLLBACK_ARMED=0
+PG_TUNNEL_ROLLBACK_DIR=""
+PG_TUNNEL_ROLLBACK_JOB_LOADED=0
+PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
+PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
+PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
 DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
 DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
@@ -815,8 +824,70 @@ _rollback_release_binary() {
     fi
 }
 
+_cleanup_owned_pg_tunnel_preflight() {
+    local pid="${PG_TUNNEL_PREFLIGHT_PID:-}" attempts=0
+    if [ -n "$pid" ]; then
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 25 ]; do
+                sleep 0.2
+                attempts=$((attempts + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        fi
+        # Reap the child on every exit path, including an early SSH failure.
+        wait "$pid" 2>/dev/null || true
+    fi
+    PG_TUNNEL_PREFLIGHT_PID=""
+    [ -z "${PG_TUNNEL_PREFLIGHT_DSN_FILE:-}" ] || rm -f "$PG_TUNNEL_PREFLIGHT_DSN_FILE" 2>/dev/null || true
+    [ -z "${PG_TUNNEL_PREFLIGHT_PASSWORD_FILE:-}" ] || rm -f "$PG_TUNNEL_PREFLIGHT_PASSWORD_FILE" 2>/dev/null || true
+    PG_TUNNEL_PREFLIGHT_DSN_FILE=""
+    PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
+}
+
+_rollback_pg_tunnel_migration() {
+    local domain="${PG_TUNNEL_LAUNCHD_DOMAIN:-}" bin="${PG_TUNNEL_BIN:-}"
+    local plist="${PG_TUNNEL_PLIST_PATH:-}" backup="${PG_TUNNEL_ROLLBACK_DIR:-}"
+    [ "${PG_TUNNEL_ROLLBACK_ARMED:-0}" = 1 ] || return 0
+    [ -n "$domain" ] && [ -n "$bin" ] && [ -n "$plist" ] && [ -n "$backup" ] || return 0
+
+    echo "↩ Restoring previous PG tunnel state..." >&2
+    launchctl bootout "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null || true
+    if [ -e "$backup/wrapper" ]; then
+        install -m 0755 "$backup/wrapper" "$bin" 2>/dev/null || true
+    else
+        rm -f "$bin" 2>/dev/null || true
+    fi
+    if [ -e "$backup/plist" ]; then
+        cp -p "$backup/plist" "$plist.tmp" 2>/dev/null \
+            && mv -f "$plist.tmp" "$plist" 2>/dev/null || true
+    else
+        rm -f "$plist" "$plist.tmp" 2>/dev/null || true
+    fi
+    if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ] && [ -f "$plist" ]; then
+        launchctl bootstrap "$domain" "$plist" 2>/dev/null || true
+    elif [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ] \
+      && [ -x "${PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE:-}" ] \
+      && [ -r "${PG_TUNNEL_ROLLBACK_MANUAL_CONFIG:-}" ]; then
+        "$PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE" --restore-canonical \
+            "$PG_TUNNEL_ROLLBACK_MANUAL_CONFIG" \
+            "$PG_TUNNEL_ROLLBACK_MANUAL_KIND" >/dev/null 2>&1 || true
+    fi
+    PG_TUNNEL_ROLLBACK_ARMED=0
+    rm -rf "$backup" 2>/dev/null || true
+    PG_TUNNEL_ROLLBACK_DIR=""
+    PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
+    PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
+}
+
 _cleanup_on_exit() {
     local status=$?
+    _cleanup_owned_pg_tunnel_preflight
+    if [ "$status" -ne 0 ]; then
+        _rollback_pg_tunnel_migration
+    fi
     # #3858: if the binary was promoted (ROLLBACK_ARMED) but the deploy never
     # reached DEPLOY_OK, restore the last-known-good binary and restart BEFORE the
     # staging cleanup below. This catches ANY non-zero exit after promotion — an
@@ -1406,18 +1477,19 @@ if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
     _apply_launchd_env_file_to_shell "$REL_LAUNCHD_ENV_FILE"
 fi
 
-echo "▸ Preflight PostgreSQL migration integrity via doctor..."
-DOCTOR_JSON_TMP=$(mktemp "${TMPDIR:-/tmp}/agentdesk-doctor.XXXXXX.json")
-set +e
-"$SOURCE_BINARY" doctor --json >"$DOCTOR_JSON_TMP" 2>/dev/null
-DOCTOR_RC=$?
-set -e
-if [ ! -s "$DOCTOR_JSON_TMP" ]; then
-    echo "✗ Doctor preflight did not return JSON output."
-    rm -f "$DOCTOR_JSON_TMP"
-    exit 1
-fi
-if ! python3 - "$DOCTOR_JSON_TMP" <<'PY'
+_doctor_postgres_preflight() {
+    local label=$1 doctor_json_tmp doctor_rc
+    doctor_json_tmp=$(mktemp "${TMPDIR:-/tmp}/agentdesk-doctor.XXXXXX.json") || return 1
+    set +e
+    "$SOURCE_BINARY" doctor --json >"$doctor_json_tmp" 2>/dev/null
+    doctor_rc=$?
+    set -e
+    if [ ! -s "$doctor_json_tmp" ]; then
+        echo "✗ ${label} did not return JSON output."
+        rm -f "$doctor_json_tmp"
+        return 1
+    fi
+    if ! python3 - "$doctor_json_tmp" <<'PY'
 import json
 import sys
 
@@ -1451,14 +1523,18 @@ else:
     print(f"✗ Doctor postgres preflight failed: status={status}, detail={detail}, actual={actual}")
 raise SystemExit(1)
 PY
-then
-    rm -f "$DOCTOR_JSON_TMP"
-    exit 1
-fi
-if [ "$DOCTOR_RC" -ne 0 ]; then
-    echo "⚠ doctor command returned non-zero ($DOCTOR_RC), but postgres preflight check passed."
-fi
-rm -f "$DOCTOR_JSON_TMP"
+    then
+        rm -f "$doctor_json_tmp"
+        return 1
+    fi
+    if [ "$doctor_rc" -ne 0 ]; then
+        echo "⚠ doctor command returned non-zero ($doctor_rc), but postgres preflight check passed."
+    fi
+    rm -f "$doctor_json_tmp"
+}
+
+echo "▸ Preflight PostgreSQL migration integrity via doctor..."
+_doctor_postgres_preflight "Doctor preflight"
 
 # Copy and sign the binary before stopping release. This keeps a missing
 # certificate or failed codesign from taking down a healthy dcserver.
@@ -1469,6 +1545,223 @@ chmod +x "$STAGED_BINARY"
 xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
 sign_binary_with_fallback "$STAGED_BINARY"
 _clean_release_build_cache_after_staging
+
+# ── Fail-closed PostgreSQL tunnel migration (#4378) ───────────────────────────
+# Prove the new remote Unix-socket route on an alternate local port, then replace
+# and prove the canonical launchd route before dcserver is stopped. A missing
+# machine-local config is a node gate; a present but invalid or unusable config
+# aborts without disrupting dcserver.
+PG_TUNNEL_LABEL="com.agentdesk.pg-tunnel"
+PG_TUNNEL_PLIST_PATH="$HOME/Library/LaunchAgents/$PG_TUNNEL_LABEL.plist"
+PG_TUNNEL_BIN="$ADK_REL/bin/pg-tunnel.sh"
+PG_TUNNEL_CONFIG="$ADK_REL/config/pg-tunnel.env"
+PG_TUNNEL_LAUNCHD_DOMAIN="$(_launchd_domain)"
+
+_pg_xml_escape() {
+    local s=$1
+    s=${s//&/\&amp;}
+    s=${s//</\&lt;}
+    s=${s//>/\&gt;}
+    s=${s//\"/\&quot;}
+    s=${s//\'/\&apos;}
+    printf '%s' "$s"
+}
+
+_install_pg_tunnel_plist() {
+    local label_x bin_x config_x root_x
+    label_x=$(_pg_xml_escape "$PG_TUNNEL_LABEL") || return 1
+    bin_x=$(_pg_xml_escape "$PG_TUNNEL_BIN") || return 1
+    config_x=$(_pg_xml_escape "$PG_TUNNEL_CONFIG") || return 1
+    root_x=$(_pg_xml_escape "$ADK_REL") || return 1
+    mkdir -p "$HOME/Library/LaunchAgents" || return 1
+    cat > "$PG_TUNNEL_PLIST_PATH.tmp" <<PLIST_EOF || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label_x</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$bin_x</string>
+    <string>$config_x</string>
+    <string>-N</string>
+    <string>-T</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ConnectTimeout=10</string>
+    <string>-o</string><string>ServerAliveInterval=15</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-L</string><string>127.0.0.1:15432:/tmp/.s.PGSQL.5432</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$root_x/logs/pg-tunnel.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$root_x/logs/pg-tunnel.launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>AGENTDESK_ROOT_DIR</key><string>$root_x</string>
+  </dict>
+</dict>
+</plist>
+PLIST_EOF
+    mv -f "$PG_TUNNEL_PLIST_PATH.tmp" "$PG_TUNNEL_PLIST_PATH" || return 1
+}
+
+_pg_write_probe_conninfo() {
+    local local_port=$1 output=$2 password_output=$3
+    local config_path="$ADK_REL/config/agentdesk.yaml"
+    command -v ruby >/dev/null 2>&1 || return 1
+    if [ -n "${DATABASE_URL:-}" ]; then
+        DATABASE_URL="$DATABASE_URL" ruby -ruri - "$local_port" "$output" "$password_output" \
+            2>/dev/null <<'RUBY'
+port, output, password_output = ARGV
+uri = URI.parse(ENV.fetch("DATABASE_URL"))
+raise "unsupported database URL scheme" unless %w[postgres postgresql].include?(uri.scheme)
+password = URI::DEFAULT_PARSER.unescape(uri.password) if uri.password
+uri.password = nil if password
+if uri.query
+  query = URI.decode_www_form(uri.query)
+  query.reject! do |key, value|
+    case key
+    when "password"
+      password = value
+      true
+    when "host", "hostaddr", "port"
+      true
+    else
+      false
+    end
+  end
+  uri.query = query.empty? ? nil : URI.encode_www_form(query)
+end
+uri.host = "127.0.0.1"
+uri.port = Integer(port, 10)
+File.open(output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(uri.to_s) }
+if password
+  escaped = password.gsub("\\", "\\\\").gsub(":", "\\:")
+  File.open(password_output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+    file.write("127.0.0.1:#{port}:*:*:#{escaped}\n")
+  end
+end
+RUBY
+        return
+    fi
+    [ -r "$config_path" ] || return 1
+    ruby -ryaml -ruri - "$config_path" "$local_port" "$output" "$password_output" \
+        2>/dev/null <<'RUBY'
+config_path, port, output, password_output = ARGV
+config = YAML.safe_load_file(config_path, aliases: true) || {}
+db = config.fetch("database", {})
+raise "database disabled" unless db["enabled"] == true
+user = db.fetch("user").to_s
+name = db.fetch("dbname").to_s
+raise "database user or name missing" if user.empty? || name.empty?
+uri = URI::Generic.build(
+  scheme: "postgresql", userinfo: URI.encode_www_form_component(user),
+  host: "127.0.0.1", port: Integer(port, 10), path: "/#{URI.encode_www_form_component(name)}"
+)
+File.open(output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(uri.to_s) }
+if db.key?("password") && !db["password"].nil?
+  escaped = db["password"].to_s.gsub("\\", "\\\\").gsub(":", "\\:")
+  File.open(password_output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+    file.write("127.0.0.1:#{port}:*:*:#{escaped}\n")
+  end
+end
+RUBY
+}
+
+_pg_sql_probe() {
+    local local_port=$1 conninfo_file password_file attempt=0
+    local -a psql_env=()
+    command -v psql >/dev/null 2>&1 || return 1
+    conninfo_file=$(mktemp "${TMPDIR:-/tmp}/agentdesk-pg-probe.XXXXXX") || return 1
+    password_file=$(mktemp "${TMPDIR:-/tmp}/agentdesk-pgpass.XXXXXX") || return 1
+    PG_TUNNEL_PREFLIGHT_DSN_FILE="$conninfo_file"
+    PG_TUNNEL_PREFLIGHT_PASSWORD_FILE="$password_file"
+    chmod 600 "$conninfo_file" "$password_file" || return 1
+    _pg_write_probe_conninfo "$local_port" "$conninfo_file" "$password_file" || return 1
+    if [ -s "$password_file" ]; then
+        psql_env=(env PGPASSFILE="$password_file")
+    fi
+    while [ "$attempt" -lt 20 ]; do
+        if PGDATABASE="$(<"$conninfo_file")" "${psql_env[@]}" psql --no-psqlrc \
+          -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' >/dev/null 2>&1; then
+            rm -f "$conninfo_file" "$password_file"
+            PG_TUNNEL_PREFLIGHT_DSN_FILE=""
+            PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+_migrate_pg_tunnel_before_release_stop() {
+    local probe_port wrapper_source="$REPO/scripts/pg_tunnel.sh"
+    [ -f "$PG_TUNNEL_CONFIG" ] || {
+        echo "▸ PG tunnel config absent: $PG_TUNNEL_CONFIG"
+        echo "  Supervisor NOT armed on this node (machine-local node gate)."
+        return 0
+    }
+    [ -x "$wrapper_source" ] || { echo "✗ PG tunnel wrapper missing: $wrapper_source"; return 1; }
+    "$wrapper_source" --check-config "$PG_TUNNEL_CONFIG" || {
+        echo "✗ PG tunnel config invalid: $PG_TUNNEL_CONFIG"
+        return 1
+    }
+
+    probe_port=$((20000 + ($$ % 20000)))
+    echo "▸ Proving remote PostgreSQL Unix-socket route on alternate port..."
+    "$wrapper_source" --probe-remote "$PG_TUNNEL_CONFIG" "$probe_port" \
+        >/dev/null 2>&1 &
+    PG_TUNNEL_PREFLIGHT_PID=$!
+    if ! _pg_sql_probe "$probe_port"; then
+        echo "✗ Remote PostgreSQL Unix-socket SQL probe failed"
+        _cleanup_owned_pg_tunnel_preflight
+        return 1
+    fi
+    _cleanup_owned_pg_tunnel_preflight
+
+    PG_TUNNEL_ROLLBACK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-pg-rollback.XXXXXX") || return 1
+    PG_TUNNEL_ROLLBACK_ARMED=1
+    PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE="$wrapper_source"
+    [ ! -e "$PG_TUNNEL_BIN" ] || cp -p "$PG_TUNNEL_BIN" "$PG_TUNNEL_ROLLBACK_DIR/wrapper" || return 1
+    [ ! -e "$PG_TUNNEL_PLIST_PATH" ] || cp -p "$PG_TUNNEL_PLIST_PATH" "$PG_TUNNEL_ROLLBACK_DIR/plist" || return 1
+    cp -p "$PG_TUNNEL_CONFIG" "$PG_TUNNEL_ROLLBACK_DIR/config" || return 1
+    PG_TUNNEL_ROLLBACK_MANUAL_CONFIG="$PG_TUNNEL_ROLLBACK_DIR/config"
+    if launchctl print "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" >/dev/null 2>&1; then
+        PG_TUNNEL_ROLLBACK_JOB_LOADED=1
+    else
+        PG_TUNNEL_ROLLBACK_MANUAL_KIND=$(
+            "$wrapper_source" --canonical-kind 2>/dev/null || printf '%s\n' none
+        )
+    fi
+
+    install -m 0755 "$wrapper_source" "$PG_TUNNEL_BIN" || return 1
+    _install_pg_tunnel_plist || return 1
+    xattr -d com.apple.quarantine "$PG_TUNNEL_PLIST_PATH" 2>/dev/null || true
+    launchctl bootout "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" 2>/dev/null || true
+    if ! launchctl bootstrap "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
+        echo "✗ PG tunnel bootstrap failed"
+        return 1
+    fi
+    echo "▸ Proving canonical PostgreSQL tunnel readiness on :15432..."
+    if ! _pg_sql_probe 15432; then
+        echo "✗ Canonical PostgreSQL tunnel SQL readiness failed"
+        return 1
+    fi
+
+    rm -rf "$PG_TUNNEL_ROLLBACK_DIR" || return 1
+    PG_TUNNEL_ROLLBACK_DIR=""
+    PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
+    PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
+    PG_TUNNEL_ROLLBACK_ARMED=0
+    echo "✓ PG tunnel migrated and SQL-ready before release stop"
+}
+
+_migrate_pg_tunnel_before_release_stop
 
 # #4381: a deploy restarts dcserver, so a short relay gap is EXPECTED here.
 # Touch the marker the out-of-band relay watchdog checks; while it is fresh
@@ -2546,101 +2839,6 @@ PLIST_EOF
     fi
 else
     echo "⚠ Relay watchdog staging FAILED (source: $REPO/scripts/relay_watchdog.py)"
-fi
-
-# ── Consumer-owned PostgreSQL SSH tunnel supervisor (#4378) ──────────────────
-# This is deliberately a separate launchd lifetime from dcserver: dcserver may
-# crash-loop while PG is absent (#4379), but the process that restores PG must
-# remain alive.  Like the relay watchdog above, this block is after DEPLOY_OK
-# and entirely fail-open so an ops-side install failure cannot turn a healthy,
-# health-confirmed binary deploy into a rollback or skip peer propagation.
-PG_TUNNEL_LABEL="com.agentdesk.pg-tunnel"
-PG_TUNNEL_PLIST_PATH="$HOME/Library/LaunchAgents/$PG_TUNNEL_LABEL.plist"
-PG_TUNNEL_BIN="$ADK_REL/bin/pg-tunnel.sh"
-PG_TUNNEL_CONFIG="$ADK_REL/config/pg-tunnel.env"
-echo "▸ Staging consumer-owned PG tunnel supervisor (#4378)..."
-if install -m 0755 "$REPO/scripts/pg_tunnel.sh" "$PG_TUNNEL_BIN"; then
-    # Machine-local config is the node-identity gate.  It is intentionally not
-    # shipped by the repo: mac-mini and future nodes must never arm a tunnel
-    # pointed back at themselves merely because cluster deploy propagated.
-    if [ -f "$PG_TUNNEL_CONFIG" ]; then
-        _pg_xml_escape() {
-            local s=$1
-            s=${s//&/\&amp;}
-            s=${s//</\&lt;}
-            s=${s//>/\&gt;}
-            s=${s//\"/\&quot;}
-            s=${s//\'/\&apos;}
-            printf '%s' "$s"
-        }
-        _install_pg_tunnel_plist() {
-            local label_x bin_x config_x root_x
-            label_x=$(_pg_xml_escape "$PG_TUNNEL_LABEL") || return 1
-            bin_x=$(_pg_xml_escape "$PG_TUNNEL_BIN") || return 1
-            config_x=$(_pg_xml_escape "$PG_TUNNEL_CONFIG") || return 1
-            root_x=$(_pg_xml_escape "$ADK_REL") || return 1
-            mkdir -p "$HOME/Library/LaunchAgents" || return 1
-            cat > "$PG_TUNNEL_PLIST_PATH.tmp" <<PLIST_EOF || return 1
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$label_x</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$bin_x</string>
-    <string>$config_x</string>
-    <string>-N</string>
-    <string>-T</string>
-    <string>-o</string><string>BatchMode=yes</string>
-    <string>-o</string><string>ConnectTimeout=10</string>
-    <string>-o</string><string>ServerAliveInterval=15</string>
-    <string>-o</string><string>ServerAliveCountMax=3</string>
-    <string>-o</string><string>ExitOnForwardFailure=yes</string>
-    <string>-L</string><string>127.0.0.1:15432:/tmp/.s.PGSQL.5432</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>$root_x/logs/pg-tunnel.launchd.out.log</string>
-  <key>StandardErrorPath</key><string>$root_x/logs/pg-tunnel.launchd.err.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>AGENTDESK_ROOT_DIR</key><string>$root_x</string>
-  </dict>
-</dict>
-</plist>
-PLIST_EOF
-            # Atomic publish: launchd never observes a partially-written XML.
-            mv -f "$PG_TUNNEL_PLIST_PATH.tmp" "$PG_TUNNEL_PLIST_PATH" || return 1
-        }
-        if ! "$PG_TUNNEL_BIN" --check-config "$PG_TUNNEL_CONFIG"; then
-            echo "⚠ PG tunnel config invalid: $PG_TUNNEL_CONFIG — NOT armed"
-            echo "  Required: PG_TUNNEL_SSH_TARGET=mac-mini (or PG_TUNNEL_HOST alias)."
-        elif _install_pg_tunnel_plist; then
-            xattr -d com.apple.quarantine "$PG_TUNNEL_PLIST_PATH" 2>/dev/null || true
-            echo "⚠ PG tunnel deploy prerequisite: on mac-mini, bootout and remove BOTH"
-            echo "  reverse plists (com.agentdesk.macbook-pg-tunnel and"
-            echo "  com.agentdesk.macbook-memento-tunnel) before this job is activated."
-            # bootout+bootstrap (not kickstart): pick up both wrapper and plist.
-            launchctl bootout "$LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" 2>/dev/null || true
-            if launchctl bootstrap "$LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
-                echo "✓ PG tunnel supervisor armed ($PG_TUNNEL_LABEL)"
-            else
-                echo "⚠ PG tunnel bootstrap FAILED — dcserver PG path is unsupervised"
-            fi
-        else
-            rm -f "$PG_TUNNEL_PLIST_PATH.tmp" 2>/dev/null || true
-            echo "⚠ PG tunnel plist write FAILED ($PG_TUNNEL_PLIST_PATH) — not armed"
-            echo "  Deploy continues (fail-open): fix permissions/disk space and redeploy."
-        fi
-    else
-        echo "▸ PG tunnel config absent: $PG_TUNNEL_CONFIG"
-        echo "  Supervisor NOT armed on this node (machine-local node gate)."
-    fi
-else
-    echo "⚠ PG tunnel staging FAILED (source: $REPO/scripts/pg_tunnel.sh)"
 fi
 
 _write_release_source_manifest

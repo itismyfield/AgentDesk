@@ -33,6 +33,9 @@ class WrapperSafetyTests(unittest.TestCase):
             "/usr/bin/ssh -N -L 0.0.0.0:15432:/tmp/.s.PGSQL.5432 mac-mini",
             "/usr/bin/ssh -N -L127.0.0.1:15432:/tmp/.s.PGSQL.5432 mac-mini",
             "/usr/bin/ssh -N -L 127.0.0.1:15432:db:5432 host",
+            "/usr/bin/ssh -N -L 127.0.0.1:15432:127.0.0.1:54321 mac-mini",
+            "/usr/bin/ssh -N -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432.bak mac-mini",
+            "/usr/bin/ssh -N -L 127.0.0.1:15432:/tmp/.s.PGSQL.54321 mac-mini",
             "python monitor.py ssh -N -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432 host",
             "/usr/bin/notssh -N -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432 host",
         ]
@@ -101,10 +104,37 @@ class WrapperSafetyTests(unittest.TestCase):
         self.assertIn("-L 127.0.0.1:15432:/tmp/.s.PGSQL.5432", text)
         self.assertNotIn("-L 127.0.0.1:15432:127.0.0.1:5432", text)
 
-    def test_check_config_does_not_claim_remote_socket_validation(self):
+    def test_remote_probe_rejects_unrestricted_arguments_and_ports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "pg-tunnel.env"
+            config.write_text("PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8")
+            for argv in (
+                ["--probe-remote", str(config)],
+                ["--probe-remote", str(config), "15432"],
+                ["--probe-remote", str(config), "1023"],
+                ["--probe-remote", str(config), "65536"],
+                ["--probe-remote", str(config), "not-a-port"],
+                ["--probe-remote", str(config), "25432", "-oProxyCommand=bad"],
+            ):
+                with self.subTest(argv=argv):
+                    p = subprocess.run(
+                        [str(WRAPPER), *argv], capture_output=True, text=True
+                    )
+                    self.assertNotEqual(p.returncode, 0)
+
+    def test_remote_probe_executes_only_exact_unix_socket_forward(self):
         text = WRAPPER.read_text(encoding="utf-8")
-        self.assertIn("doctor PostgreSQL preflight", text)
-        self.assertIn("must not be treated as remote reachability", text)
+        self.assertIn('[ "$#" -eq 3 ] || die "usage: $0 --probe-remote CONFIG PORT"', text)
+        self.assertIn('-L "127.0.0.1:$3:/tmp/.s.PGSQL.5432"', text)
+        self.assertIn('"$PG_TUNNEL_SSH_TARGET"', text)
+
+    def test_probe_cleanup_always_waits_after_term_and_kill(self):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index("_cleanup_owned_pg_tunnel_preflight() {")
+        end = deploy.index("_rollback_pg_tunnel_migration() {", start)
+        cleanup = deploy[start:end]
+        self.assertLess(cleanup.index('kill -TERM "$pid"'), cleanup.index('wait "$pid"'))
+        self.assertLess(cleanup.index('kill -KILL "$pid"'), cleanup.index('wait "$pid"'))
 
 
 class DeploymentWiringTests(unittest.TestCase):
@@ -112,16 +142,10 @@ class DeploymentWiringTests(unittest.TestCase):
 
     @staticmethod
     def _pg_block() -> str:
-        lines = DEPLOY.read_text(encoding="utf-8").splitlines()
-        start = next(
-            i
-            for i, line in enumerate(lines)
-            if 'PG_TUNNEL_LABEL="com.agentdesk.pg-tunnel"' in line
-        )
-        end = next(
-            i for i, line in enumerate(lines) if "PG tunnel staging FAILED" in line
-        )
-        return "\n".join(lines[start : end + 2])
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index("PG_TUNNEL_LABEL=\"com.agentdesk.pg-tunnel\"")
+        end = deploy.index("# #4381: a deploy restarts dcserver", start)
+        return deploy[start:end]
 
     def test_ci_script_checks_runs_this_suite(self):
         ci = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
@@ -173,53 +197,137 @@ class DeploymentWiringTests(unittest.TestCase):
 
     def test_machine_local_env_gates_bootout_and_bootstrap(self):
         block = self._pg_block()
-        gate = block.index('if [ -f "$PG_TUNNEL_CONFIG" ]; then')
+        gate = block.index('[ -f "$PG_TUNNEL_CONFIG" ] || {')
         bootout = block.index(
-            'launchctl bootout "$LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL"'
+            'launchctl bootout "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL"'
         )
         bootstrap = block.index(
-            'launchctl bootstrap "$LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"'
+            'launchctl bootstrap "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"'
         )
         self.assertLess(gate, bootout)
         self.assertLess(gate, bootstrap)
         self.assertIn("Supervisor NOT armed on this node", block)
 
-    def test_block_is_after_deploy_ok_and_before_manifest(self):
+    def test_block_is_before_release_stop_and_deploy_success(self):
         deploy = DEPLOY.read_text(encoding="utf-8")
         block_at = deploy.index('PG_TUNNEL_LABEL="com.agentdesk.pg-tunnel"')
-        self.assertLess(deploy.index("DEPLOY_OK=1"), block_at)
-        self.assertLess(block_at, deploy.index("_write_release_source_manifest", block_at))
+        migrate_at = deploy.index("_migrate_pg_tunnel_before_release_stop", block_at)
+        stop_at = deploy.index('echo "▸ Stopping release..."', migrate_at)
+        self.assertLess(migrate_at, stop_at)
+        self.assertLess(stop_at, deploy.index("DEPLOY_OK=1", stop_at))
 
-    def _run_block(self, adk_rel: Path, home: Path) -> tuple[subprocess.CompletedProcess, Path]:
+    def _run_block(
+        self,
+        adk_rel: Path,
+        home: Path,
+        *,
+        fail_probe: bool = False,
+        fail_canonical: bool = False,
+        job_loaded: bool = False,
+        old_wrapper: str | None = None,
+        old_plist: str | None = None,
+        manual_kind: str = "none",
+    ) -> tuple[subprocess.CompletedProcess, Path, Path]:
         fake_bin = home / "fake-bin"
         fake_bin.mkdir(parents=True)
+        event_log = home / "events.log"
         launchctl_log = home / "launchctl.log"
-        launchctl = fake_bin / "launchctl"
-        launchctl.write_text(
-            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$LAUNCHCTL_LOG"\n',
+        for name, body in {
+            "launchctl": """#!/bin/sh
+printf 'launchctl %s\\n' "$*" >> "$EVENT_LOG"
+printf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"
+if [ "$1" = print ]; then
+  if [ "${JOB_LOADED:-0}" = 1 ]; then exit 0; else exit 1; fi
+fi
+exit 0
+""",
+            "xattr": "#!/bin/sh\nexit 0\n",
+            "sleep": "#!/bin/sh\nexit 0\n",
+            "psql": """#!/bin/sh
+printf 'psql %s\\n' "${PGDATABASE:-missing}" >> "$EVENT_LOG"
+case "${PGDATABASE:-}" in
+  *:15432/*) [ "${FAIL_CANONICAL:-0}" != 1 ] ;;
+  *) [ "${FAIL_PROBE:-0}" != 1 ] ;;
+esac
+""",
+            "ruby": """#!/bin/sh
+while [ "$#" -gt 3 ]; do shift; done
+port=$1
+output=$2
+printf 'postgresql://agentdesk@127.0.0.1:%s/agentdesk?sslmode=require' "$port" > "$output"
+""",
+        }.items():
+            path = fake_bin / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o755)
+        repo = home / "repo"
+        (repo / "scripts").mkdir(parents=True)
+        wrapper = repo / "scripts/pg_tunnel.sh"
+        wrapper.write_text(
+            """#!/bin/sh
+printf 'wrapper %s\\n' "$*" >> "$EVENT_LOG"
+case "$1" in
+  --check-config) grep -q '^PG_TUNNEL_SSH_TARGET=[A-Za-z0-9_.:@-][A-Za-z0-9_.:@-]*$' "$2" ;;
+  --probe-remote) trap 'printf "probe-term\\n" >> "$EVENT_LOG"; exit 0' TERM; while :; do /bin/sleep 1; done ;;
+  --canonical-kind) printf '%s\\n' "${MANUAL_KIND:-none}" ;;
+  --restore-canonical) printf 'restore %s\\n' "$3" >> "$EVENT_LOG" ;;
+  *) exit 1 ;;
+esac
+""",
             encoding="utf-8",
         )
-        xattr = fake_bin / "xattr"
-        xattr.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        launchctl.chmod(0o755)
-        xattr.chmod(0o755)
+        wrapper.chmod(0o755)
+        if old_wrapper is not None:
+            (adk_rel / "bin/pg-tunnel.sh").write_text(old_wrapper, encoding="utf-8")
+        plist_path = home / "Library/LaunchAgents/com.agentdesk.pg-tunnel.plist"
+        if old_plist is not None:
+            plist_path.parent.mkdir(parents=True)
+            plist_path.write_text(old_plist, encoding="utf-8")
+        prelude = """
+PG_TUNNEL_PREFLIGHT_PID=""
+PG_TUNNEL_PREFLIGHT_DSN_FILE=""
+PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
+PG_TUNNEL_ROLLBACK_ARMED=0
+PG_TUNNEL_ROLLBACK_DIR=""
+PG_TUNNEL_ROLLBACK_JOB_LOADED=0
+PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
+PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
+PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
+_launchd_domain() { printf '%s\\n' gui/999999; }
+"""
         script = (
             "set -euo pipefail\n"
-            f"REPO={shlex.quote(str(REPO_ROOT))}\n"
+            f"REPO={shlex.quote(str(repo))}\n"
             f"ADK_REL={shlex.quote(str(adk_rel))}\n"
             f"HOME={shlex.quote(str(home))}\n"
-            "LAUNCHD_DOMAIN=gui/999999\n"
+            f"EVENT_LOG={shlex.quote(str(event_log))}\n"
             f"LAUNCHCTL_LOG={shlex.quote(str(launchctl_log))}\n"
-            "export LAUNCHCTL_LOG\n"
+            f"FAIL_PROBE={int(fail_probe)}\n"
+            f"FAIL_CANONICAL={int(fail_canonical)}\n"
+            f"JOB_LOADED={int(job_loaded)}\n"
+            f"MANUAL_KIND={shlex.quote(manual_kind)}\n"
+            "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL JOB_LOADED MANUAL_KIND\n"
             f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin:/usr/sbin:/sbin\n"
             "export PATH\n"
+            + prelude
+            + "\n"
+            + self._cleanup_helpers()
+            + "\ntrap '_status=$?; _cleanup_owned_pg_tunnel_preflight; "
+            "[ \"$_status\" -eq 0 ] || _rollback_pg_tunnel_migration' EXIT\n"
             + self._pg_block()
-            + "\necho HARNESS-END\n"
+            + "\nprintf 'release-stop\\n' >> \"$EVENT_LOG\"\necho HARNESS-END\n"
         )
         p = subprocess.run(
             ["bash", "-c", script], capture_output=True, text=True, timeout=30
         )
-        return p, launchctl_log
+        return p, launchctl_log, event_log
+
+    @staticmethod
+    def _cleanup_helpers() -> str:
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index("_cleanup_owned_pg_tunnel_preflight() {")
+        end = deploy.index("_cleanup_on_exit() {", start)
+        return deploy[start:end]
 
     def test_generated_plist_is_valid_and_round_trips_metachar_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,7 +339,7 @@ class DeploymentWiringTests(unittest.TestCase):
             )
             home = Path(tmp) / "home & <operator>"
             home.mkdir()
-            p, launchctl_log = self._run_block(adk, home)
+            p, launchctl_log, _ = self._run_block(adk, home)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertIn("HARNESS-END", p.stdout)
             self.assertTrue(launchctl_log.is_file())
@@ -270,7 +378,7 @@ class DeploymentWiringTests(unittest.TestCase):
                 (adk / sub).mkdir(parents=True)
             home = Path(tmp) / "home"
             home.mkdir()
-            p, launchctl_log = self._run_block(adk, home)
+            p, launchctl_log, _ = self._run_block(adk, home)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertIn("Supervisor NOT armed on this node", p.stdout)
             self.assertFalse(launchctl_log.exists())
@@ -285,10 +393,106 @@ class DeploymentWiringTests(unittest.TestCase):
             )
             home = Path(tmp) / "home"
             home.mkdir()
-            p, launchctl_log = self._run_block(adk, home)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            p, launchctl_log, _ = self._run_block(adk, home)
+            self.assertNotEqual(p.returncode, 0)
             self.assertIn("config invalid", p.stdout)
             self.assertFalse(launchctl_log.exists())
+
+    def test_remote_sql_failure_stops_before_canonical_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config/pg-tunnel.env").write_text(
+                "PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            home.mkdir()
+            p, launchctl_log, event_log = self._run_block(
+                adk, home, fail_probe=True
+            )
+            self.assertNotEqual(p.returncode, 0)
+            events = event_log.read_text(encoding="utf-8")
+            self.assertIn("probe-term", events)
+            self.assertNotIn("bootstrap", events)
+            self.assertNotIn("release-stop", events)
+            self.assertFalse(launchctl_log.exists())
+
+    def test_canonical_failure_restores_wrapper_plist_and_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config/pg-tunnel.env").write_text(
+                "PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            home.mkdir()
+            p, _, event_log = self._run_block(
+                adk,
+                home,
+                fail_canonical=True,
+                job_loaded=True,
+                old_wrapper="old-wrapper\n",
+                old_plist="old-plist\n",
+            )
+            self.assertNotEqual(p.returncode, 0)
+            self.assertEqual(
+                (adk / "bin/pg-tunnel.sh").read_text(encoding="utf-8"),
+                "old-wrapper\n",
+            )
+            self.assertEqual(
+                (
+                    home / "Library/LaunchAgents/com.agentdesk.pg-tunnel.plist"
+                ).read_text(encoding="utf-8"),
+                "old-plist\n",
+            )
+            events = event_log.read_text(encoding="utf-8")
+            self.assertGreaterEqual(events.count("launchctl bootstrap"), 2)
+            self.assertNotIn("release-stop", events)
+
+    def test_canonical_failure_restores_manual_tcp_tunnel_with_source_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config/pg-tunnel.env").write_text(
+                "PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            home.mkdir()
+            p, _, event_log = self._run_block(
+                adk,
+                home,
+                fail_canonical=True,
+                old_wrapper="#!/bin/sh\nexit 99\n",
+                manual_kind="tcp",
+            )
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("restore tcp", event_log.read_text(encoding="utf-8"))
+
+    def test_success_order_is_remote_sql_then_canonical_sql_then_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config/pg-tunnel.env").write_text(
+                "PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            home.mkdir()
+            p, _, event_log = self._run_block(adk, home)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            events = event_log.read_text(encoding="utf-8")
+            probe_sql = events.index("psql postgresql://")
+            cleanup = events.index("probe-term", probe_sql)
+            bootstrap = events.index("launchctl bootstrap", cleanup)
+            canonical_sql = events.index(":15432/", bootstrap)
+            stop = events.index("release-stop", canonical_sql)
+            self.assertLess(probe_sql, cleanup)
+            self.assertLess(cleanup, bootstrap)
+            self.assertLess(bootstrap, canonical_sql)
+            self.assertLess(canonical_sql, stop)
 
 
 if __name__ == "__main__":
