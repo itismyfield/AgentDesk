@@ -20,8 +20,10 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
-    cancel_token_claude_interrupt::submit_claude_wrapper_followup, fold_read_output_result,
-    register_child_pid, spawn_cancel_watchdog,
+    cancel_token_claude_interrupt::{
+        observe_claude_wrapper_followup, submit_claude_wrapper_followup,
+    },
+    fold_read_output_result, register_child_pid, spawn_cancel_watchdog,
 };
 use crate::services::provider_hosting::ProviderSessionDriver;
 use crate::services::remote::RemoteProfile;
@@ -3024,17 +3026,15 @@ fn send_followup_to_tmux(
     debug_log("Follow-up message sent to input FIFO");
 
     // Read output file from the offset
-    let read_result = read_output_file_until_result(
-        output_path,
-        start_offset,
-        sender.clone(),
-        cancel_token.clone(),
-        SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Claude),
-    );
-    if let Some(ref token) = cancel_token {
-        token.clear_claude_interrupt_submit_pending();
-    }
-    let read_result = read_result?;
+    let read_result = observe_claude_wrapper_followup(cancel_token.as_deref(), || {
+        read_output_file_until_result(
+            output_path,
+            start_offset,
+            sender.clone(),
+            cancel_token.clone(),
+            SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Claude),
+        )
+    })?;
 
     let outcome = classify_followup_result(
         read_result,

@@ -46,6 +46,20 @@ where
     Ok(())
 }
 
+pub(crate) fn observe_claude_wrapper_followup<R, Read>(
+    token: Option<&CancelToken>,
+    read: Read,
+) -> Result<R, String>
+where
+    Read: FnOnce() -> Result<R, String>,
+{
+    let result = read();
+    if let Some(token) = token {
+        token.clear_claude_interrupt_submit_pending();
+    }
+    result
+}
+
 impl CancelToken {
     /// Publish this turn before its Claude pane can become reachable.
     ///
@@ -169,6 +183,28 @@ mod tests {
             .is_err()
         );
         assert!(!token.claude_interrupt_submit_pending());
+    }
+
+    #[test]
+    fn wrapper_followup_read_end_clears_submit_pending() {
+        for expected_ok in [true, false] {
+            let token = CancelToken::new();
+            token.mark_claude_interrupt_submit_pending();
+
+            let observed = observe_claude_wrapper_followup(Some(&token), || {
+                if expected_ok {
+                    Ok("completed")
+                } else {
+                    Err("read failed".to_string())
+                }
+            });
+
+            assert_eq!(observed.is_ok(), expected_ok);
+            assert!(
+                !token.claude_interrupt_submit_pending(),
+                "terminal and error read exits must close the submitted window"
+            );
+        }
     }
 
     #[test]
