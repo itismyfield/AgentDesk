@@ -213,13 +213,24 @@ fn request(channel_id: ChannelId, message_id: u64, text: &str) -> IntakeRequest 
 }
 
 fn queued_intervention(message_id: u64, pending_uploads: Vec<String>) -> Intervention {
+    let queued_generation = crate::services::discord::runtime_store::load_generation();
     Intervention {
         author_id: UserId::new(4350),
         author_is_bot: false,
         message_id: MessageId::new(message_id),
-        queued_generation: crate::services::discord::runtime_store::load_generation(),
+        queued_generation,
         source_message_ids: vec![MessageId::new(message_id)],
-        source_message_queued_generations: Vec::new(),
+        // A genuine human-authored queued message always carries a
+        // `user_instruction` source marker from the enqueue path (see
+        // intake_gate/queue_effects.rs), so `preserve_on_cancel()` is true.
+        // Mirror that here instead of an empty vec so the forwarded outbox
+        // row records `Some(true)` for the multinode preserve tri-state (#4550).
+        source_message_queued_generations: vec![
+            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                MessageId::new(message_id),
+                queued_generation,
+            ),
+        ],
         source_text_segments: Vec::new(),
         text: format!("queued-{message_id}"),
         mode: InterventionMode::Soft,
@@ -406,10 +417,7 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
     .fetch_one(&pool)
     .await
     .expect("forwarded queue row");
-    assert_eq!(
-        row,
-        (owner.to_string(), "claude".to_string(), Some(true))
-    );
+    assert_eq!(row, (owner.to_string(), "claude".to_string(), Some(true)));
     assert!(shared.core.lock().await.sessions.is_empty());
     assert!(
         shared

@@ -1110,12 +1110,11 @@ mod pg_tests {
             other => panic!("expected Forwarded, got {other:?}"),
         };
 
-        let row: (String, String, String, String, String, i32, Option<bool>) =
-            sqlx::query_as(
-                "SELECT target_instance_id, channel_id, user_msg_id, agent_id,
+        let row: (String, String, String, String, String, i32, Option<bool>) = sqlx::query_as(
+            "SELECT target_instance_id, channel_id, user_msg_id, agent_id,
                         status, attempt_no, preserve_on_cancel
                  FROM intake_outbox WHERE id = $1",
-            )
+        )
         .bind(outbox_id)
         .fetch_one(&pool)
         .await

@@ -1260,12 +1260,11 @@ mod helper_tests {
             (automation_id, Some(false)),
             (legacy_id, None),
         ] {
-            let row: IntakeOutboxRow =
-                sqlx::query_as("SELECT * FROM intake_outbox WHERE id = $1")
-                    .bind(id)
-                    .fetch_one(&pool)
-                    .await
-                    .expect("read preservation row");
+            let row: IntakeOutboxRow = sqlx::query_as("SELECT * FROM intake_outbox WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read preservation row");
             assert_eq!(row.preserve_on_cancel, expected);
         }
 
@@ -1788,12 +1787,11 @@ mod helper_tests {
         );
 
         // New row → pending, attempt_no=2, parent points at stuck.
-        let new_row: (String, i32, Option<i64>, String, String, Option<bool>) =
-            sqlx::query_as(
-                "SELECT status, attempt_no, parent_outbox_id, channel_id, user_msg_id,
+        let new_row: (String, i32, Option<i64>, String, String, Option<bool>) = sqlx::query_as(
+            "SELECT status, attempt_no, parent_outbox_id, channel_id, user_msg_id,
                         preserve_on_cancel
                  FROM intake_outbox WHERE id = $1",
-            )
+        )
         .bind(new_id)
         .fetch_one(&pool)
         .await

@@ -378,9 +378,7 @@ mod tests {
 
     #[test]
     fn worker_executor_forwards_restored_preservation_instead_of_literal_false() {
-        let executor_source = include_str!(
-            "../discord/router/message_handler/intake_turn.rs"
-        );
+        let executor_source = include_str!("../discord/router/message_handler/intake_turn.rs");
         let start = executor_source
             .find("pub(crate) async fn execute_intake_turn_core(")
             .expect("worker executor exists");
