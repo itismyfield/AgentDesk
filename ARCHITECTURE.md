@@ -1068,6 +1068,7 @@ src/
 │   │   ├── shell.rs
 │   │   └── tmux.rs
 │   ├── provider/
+│   │   ├── cancel_token_claude_interrupt.rs
 │   │   └── provider_conformance_invariant_tests.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
