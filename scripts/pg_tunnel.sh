@@ -12,9 +12,14 @@ set -euo pipefail
 #   PG_TUNNEL_SSH_TARGET=mac-mini
 # PG_TUNNEL_HOST is accepted as a backwards-friendly alias.  No config file is
 # shipped in the repository; deploy-release.sh only arms launchd when the local
-# file exists and passes --check-config.
+# file exists and passes --check-config.  The doctor PostgreSQL preflight
+# validates the remote socket before deployment; --check-config only validates
+# local machine configuration and must not be treated as remote reachability.
 
-TAKEOVER_PATTERN='^([^[:space:]]*/)?ssh[[:space:]].*-L[[:space:]]+127[.]0[.]0[.]1:15432:'
+# A migration deploy must take over both the new socket target and the old TCP
+# target on the exact loopback listener. Other bind addresses and ports remain
+# outside this ownership boundary.
+TAKEOVER_PATTERN='^([^[:space:]]*/)?ssh[[:space:]].*-L[[:space:]]+127[.]0[.]0[.]1:15432:(/tmp/[.]s[.]PGSQL[.]5432|127[.]0[.]0[.]1:5432)([[:space:]]|$)'
 EXPECTED_SSH_ARGS=(
     -N
     -T
@@ -23,7 +28,7 @@ EXPECTED_SSH_ARGS=(
     -o ServerAliveInterval=15
     -o ServerAliveCountMax=3
     -o ExitOnForwardFailure=yes
-    -L 127.0.0.1:15432:127.0.0.1:5432
+    -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432
 )
 
 die() {

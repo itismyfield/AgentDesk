@@ -2597,7 +2597,7 @@ if install -m 0755 "$REPO/scripts/pg_tunnel.sh" "$PG_TUNNEL_BIN"; then
     <string>-o</string><string>ServerAliveInterval=15</string>
     <string>-o</string><string>ServerAliveCountMax=3</string>
     <string>-o</string><string>ExitOnForwardFailure=yes</string>
-    <string>-L</string><string>127.0.0.1:15432:127.0.0.1:5432</string>
+    <string>-L</string><string>127.0.0.1:15432:/tmp/.s.PGSQL.5432</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

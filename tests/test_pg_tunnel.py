@@ -24,16 +24,17 @@ class WrapperSafetyTests(unittest.TestCase):
         pattern = shlex.split(line.split("=", 1)[1])[0]
 
         matching = [
+            "/usr/bin/ssh -f -N -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432 mac-mini",
             "/usr/bin/ssh -f -N -L 127.0.0.1:15432:127.0.0.1:5432 mac-mini",
-            "ssh -N -o BatchMode=yes -L  127.0.0.1:15432:db:5432 host",
         ]
         rejected = [
-            "/usr/bin/ssh -N -R 15432:127.0.0.1:5432 mac-book",
-            "/usr/bin/ssh -N -L 127.0.0.1:15433:127.0.0.1:5432 mac-mini",
-            "/usr/bin/ssh -N -L 0.0.0.0:15432:127.0.0.1:5432 mac-mini",
-            "/usr/bin/ssh -N -L127.0.0.1:15432:127.0.0.1:5432 mac-mini",
-            "python monitor.py ssh -N -L 127.0.0.1:15432:db:5432 host",
-            "/usr/bin/notssh -N -L 127.0.0.1:15432:db:5432 host",
+            "/usr/bin/ssh -N -R 15432:/tmp/.s.PGSQL.5432 mac-book",
+            "/usr/bin/ssh -N -L 127.0.0.1:15433:/tmp/.s.PGSQL.5432 mac-mini",
+            "/usr/bin/ssh -N -L 0.0.0.0:15432:/tmp/.s.PGSQL.5432 mac-mini",
+            "/usr/bin/ssh -N -L127.0.0.1:15432:/tmp/.s.PGSQL.5432 mac-mini",
+            "/usr/bin/ssh -N -L 127.0.0.1:15432:db:5432 host",
+            "python monitor.py ssh -N -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432 host",
+            "/usr/bin/notssh -N -L 127.0.0.1:15432:/tmp/.s.PGSQL.5432 host",
         ]
         for command in matching:
             with self.subTest(command=command):
@@ -94,6 +95,16 @@ class WrapperSafetyTests(unittest.TestCase):
             )
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("non-canonical ssh arguments", p.stderr)
+
+    def test_wrapper_pins_unix_socket_forward_and_rejects_tcp_target(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("-L 127.0.0.1:15432:/tmp/.s.PGSQL.5432", text)
+        self.assertNotIn("-L 127.0.0.1:15432:127.0.0.1:5432", text)
+
+    def test_check_config_does_not_claim_remote_socket_validation(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("doctor PostgreSQL preflight", text)
+        self.assertIn("must not be treated as remote reachability", text)
 
 
 class DeploymentWiringTests(unittest.TestCase):
@@ -228,8 +239,27 @@ class DeploymentWiringTests(unittest.TestCase):
             plist_path = home / "Library/LaunchAgents/com.agentdesk.pg-tunnel.plist"
             with plist_path.open("rb") as f:
                 plist = plistlib.load(f)
-            self.assertEqual(plist["ProgramArguments"][0], str(adk / "bin/pg-tunnel.sh"))
-            self.assertEqual(plist["ProgramArguments"][1], str(adk / "config/pg-tunnel.env"))
+            self.assertEqual(
+                plist["ProgramArguments"],
+                [
+                    str(adk / "bin/pg-tunnel.sh"),
+                    str(adk / "config/pg-tunnel.env"),
+                    "-N",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=10",
+                    "-o",
+                    "ServerAliveInterval=15",
+                    "-o",
+                    "ServerAliveCountMax=3",
+                    "-o",
+                    "ExitOnForwardFailure=yes",
+                    "-L",
+                    "127.0.0.1:15432:/tmp/.s.PGSQL.5432",
+                ],
+            )
             self.assertTrue(plist["KeepAlive"])
             self.assertEqual(plist["ThrottleInterval"], 10)
 
