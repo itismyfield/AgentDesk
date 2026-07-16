@@ -129,7 +129,8 @@ fn deliver_claimed_claude_stop<R, Write>(
 where
     Write: FnOnce() -> Result<R, String>,
 {
-    let Some(delivery_guard) = token.lock_current_claude_interrupt_session(tmux_session_name) else {
+    let Some(delivery_guard) = token.lock_current_claude_interrupt_session(tmux_session_name)
+    else {
         return Err("stale Claude stop session generation before provider write".to_string());
     };
     if !transcript_identity_allows_delivery(transcript_identity) {
@@ -463,18 +464,14 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 }
                 ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
                     let Some(input_fifo) = wrapper_input_fifo_path else {
-                        return Err(
-                            "claude wrapper input FIFO unavailable after probe".to_string()
-                        );
+                        return Err("claude wrapper input FIFO unavailable after probe".to_string());
                     };
                     let line = build_claude_interrupt_control_line(&request_id);
                     write_line_to_wrapper_fifo(&input_fifo, &line)
                 }
             },
         )
-        .map_err(|error| {
-            format!("{error}: expected_generation={expected_generation}")
-        })
+        .map_err(|error| format!("{error}: expected_generation={expected_generation}"))
     })
     .await;
 
