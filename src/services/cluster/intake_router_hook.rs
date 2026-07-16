@@ -303,6 +303,7 @@ pub(crate) struct IntakeRouterContext<'a> {
     pub reply_to_user_message: bool,
     pub defer_watcher_resume: bool,
     pub wait_for_completion: bool,
+    pub preserve_on_cancel: bool,
     pub node_override_instance_id: Option<&'a str>,
     pub has_nonportable_uploads: bool,
 }
@@ -773,6 +774,7 @@ fn build_payload_for_insert(
         reply_to_user_message: ctx.reply_to_user_message,
         defer_watcher_resume: ctx.defer_watcher_resume,
         wait_for_completion: ctx.wait_for_completion,
+        preserve_on_cancel: ctx.preserve_on_cancel,
         agent_id: agent_id.to_string(),
     }
 }
@@ -887,6 +889,7 @@ mod pg_tests {
             reply_to_user_message: false,
             defer_watcher_resume: false,
             wait_for_completion: false,
+            preserve_on_cancel: false,
             node_override_instance_id: None,
             has_nonportable_uploads: false,
         }
@@ -1093,11 +1096,9 @@ mod pg_tests {
         )
         .await;
 
-        let decision = try_route_intake(
-            &pool,
-            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-enforce"),
-        )
-        .await;
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-enforce");
+        ctx.preserve_on_cancel = true;
+        let decision = try_route_intake(&pool, &ctx).await;
         let outbox_id = match decision {
             IntakeRouterDecision::Forwarded {
                 target_instance_id,
@@ -1109,10 +1110,12 @@ mod pg_tests {
             other => panic!("expected Forwarded, got {other:?}"),
         };
 
-        let row: (String, String, String, String, String, i32) = sqlx::query_as(
-            "SELECT target_instance_id, channel_id, user_msg_id, agent_id,
-             status, attempt_no FROM intake_outbox WHERE id = $1",
-        )
+        let row: (String, String, String, String, String, i32, Option<bool>) =
+            sqlx::query_as(
+                "SELECT target_instance_id, channel_id, user_msg_id, agent_id,
+                        status, attempt_no, preserve_on_cancel
+                 FROM intake_outbox WHERE id = $1",
+            )
         .bind(outbox_id)
         .fetch_one(&pool)
         .await
@@ -1123,6 +1126,7 @@ mod pg_tests {
         assert_eq!(row.3, "agent-enforce");
         assert_eq!(row.4, "pending");
         assert_eq!(row.5, 1);
+        assert_eq!(row.6, Some(true));
 
         pool.close().await;
         pg_db.drop().await;
