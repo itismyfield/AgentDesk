@@ -1051,11 +1051,9 @@ fn active_composer_visible_prompt_draft_in_pane(pane: &str) -> Option<&str> {
         .skip(body_start)
         .position(|line| line_is_codex_composer_edge(line))?;
     let body_end = body_start + top_edge_offset;
-    let mut drafts = recent[body_start..body_end]
+    recent[body_start..body_end]
         .iter()
-        .filter_map(|line| codex_composer_body_draft_text(line));
-    let draft = drafts.next()?;
-    drafts.next().is_none().then_some(draft)
+        .find_map(|line| codex_composer_body_draft_text(line))
 }
 
 fn clear_cancelled_partial_prompt_draft(
@@ -2191,6 +2189,19 @@ The documentation example ends with:
     }
 
     #[test]
+    fn codex_box_composer_with_multiple_cursor_lines_is_detected_as_draft() {
+        let pane = "\
+╭──────────────────────────────────────────────────────────────╮
+│ first wrapped segment ▌                                      │
+│ second wrapped segment ▌                                     │
+╰──────────────────────────────────────────────────────────────╯
+  Esc to interrupt   Ctrl+J newline   ⏎ send";
+
+        assert!(pane_has_codex_prompt_draft(pane));
+        assert!(active_composer_visible_prompt_draft_in_pane(pane).is_some());
+    }
+
+    #[test]
     fn codex_box_placeholder_is_not_detected_as_draft() {
         let pane = "\
 ╭──────────────────────────────────────────────────────────────╮
@@ -2218,7 +2229,7 @@ The documentation example ends with:
     }
 
     #[test]
-    fn current_codex_idle_pane_requires_dim_placeholder_evidence() {
+    fn current_codex_idle_pane_uses_dim_evidence_to_override_plain_draft() {
         let pane = concat!(
             "╭─────────────────────────────────────────╮\n",
             "│ >_ OpenAI Codex (v0.144.4)              │\n",
@@ -2228,11 +2239,13 @@ The documentation example ends with:
             "\n",
             "  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left",
         );
+        let plain = strip_ansi_escape_sequences(pane);
+        let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
 
         assert!(pane_looks_ready_for_codex_prompt_with_ansi(pane));
-        assert!(!pane_has_codex_prompt_draft(&strip_ansi_escape_sequences(
-            pane
-        )));
+        assert!(pane_has_codex_prompt_draft(&plain));
+        assert!(marker);
+        assert!(!draft);
     }
 
     #[test]
