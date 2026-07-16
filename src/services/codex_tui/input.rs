@@ -399,42 +399,39 @@ pub fn is_prompt_ready_cancelled_error(error: &str) -> bool {
 /// is visible. Returned regardless of timing so callers can log the
 /// state at decision points.
 pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot {
-    let pane = crate::services::platform::tmux::capture_pane(
-        session_name,
-        PROMPT_READY_CAPTURE_SCROLLBACK,
-    );
-    // Preserve ANSI attributes for Codex compact-mode prompts. Codex renders
-    // canned prompt suggestions in dim text, while user drafts are normal
-    // text. Plain capture loses that distinction and can make an idle compact
-    // prompt look like a still-running turn.
+    // ANSI capture is the canonical snapshot. Its deterministic plain-text
+    // projection keeps marker and draft classification tied to the same pane
+    // revision, while retaining the dim-placeholder signal plain capture loses.
     let pane_with_escapes = crate::services::platform::tmux::capture_pane_with_escapes(
         session_name,
         PROMPT_READY_CAPTURE_SCROLLBACK,
     );
-    let composer_marker_detected = pane_with_escapes
+    let (composer_marker_detected, prompt_draft_detected, pane_tail) = pane_with_escapes
         .as_deref()
-        .is_some_and(pane_looks_ready_for_codex_prompt_with_ansi)
-        || pane
-            .as_deref()
-            .is_some_and(pane_looks_ready_for_codex_prompt);
-    let dim_placeholder_detected = pane_with_escapes
-        .as_deref()
-        .is_some_and(pane_has_dim_legacy_codex_prompt_in_pane);
-    let prompt_draft_detected =
-        !dim_placeholder_detected && pane.as_deref().is_some_and(pane_has_codex_prompt_draft);
-    let pane_tail = pane
-        .as_deref()
-        .map(prompt_ready_debug_tail)
-        .unwrap_or_else(|| "<capture unavailable>".to_string());
+        .map(prompt_readiness_from_ansi_pane)
+        .unwrap_or_else(|| (false, false, "<capture unavailable>".to_string()));
     PromptReadinessSnapshot {
         composer_marker_detected,
         prompt_draft_detected,
         tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
             session_name,
         ),
-        capture_available: pane.is_some(),
+        capture_available: pane_with_escapes.is_some(),
         pane_tail,
     }
+}
+
+fn prompt_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, String) {
+    let pane = strip_ansi_escape_sequences(pane_with_escapes);
+    let composer_marker_detected = pane_looks_ready_for_codex_prompt_with_ansi(pane_with_escapes);
+    let dim_placeholder_detected = pane_has_dim_legacy_codex_prompt_in_pane(pane_with_escapes);
+    let prompt_draft_detected =
+        !dim_placeholder_detected && pane_has_codex_prompt_draft(&pane);
+    (
+        composer_marker_detected,
+        prompt_draft_detected,
+        prompt_ready_debug_tail(&pane),
+    )
 }
 
 /// Block until the Codex TUI composer is visible or `timeout` elapses.
@@ -1018,8 +1015,11 @@ pub(crate) fn prompt_draft_matches(
 /// bottom-most composer. A historical `› prompt` line in scrollback is never
 /// submission-retry evidence.
 fn active_composer_visible_prompt_draft(snapshot: &PromptReadinessSnapshot) -> Option<&str> {
-    let recent: Vec<&str> = snapshot
-        .pane_tail
+    active_composer_visible_prompt_draft_in_pane(&snapshot.pane_tail)
+}
+
+fn active_composer_visible_prompt_draft_in_pane(pane: &str) -> Option<&str> {
+    let recent: Vec<&str> = pane
         .lines()
         .map(str::trim_end)
         .filter(|line| !line.trim().is_empty())
@@ -1027,7 +1027,7 @@ fn active_composer_visible_prompt_draft(snapshot: &PromptReadinessSnapshot) -> O
         .take(PROMPT_READY_SCAN_LINES)
         .collect();
 
-    if recent_has_codex_compact_prompt(&recent) {
+    if recent_has_codex_compact_composer(&recent) {
         return recent
             .get(1)
             .and_then(|line| codex_visible_prompt_draft_text(line));
@@ -1111,6 +1111,13 @@ fn classify_prompt_submit_confirmation(
     }
 }
 
+fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive
+        && snapshot.capture_available
+        && snapshot.composer_marker_detected
+        && !snapshot.prompt_draft_detected
+}
+
 /// Submit one Discord follow-up to an already-live Codex composer.
 ///
 /// The Enter key is sent at most once. A possible delivery error never causes
@@ -1129,6 +1136,16 @@ pub(crate) fn submit_codex_followup_prompt(
             return CodexFollowupPromptSubmitOutcome::NotSubmitted { error };
         }
     };
+    // The warm-flow post-wait probe cannot make the send atomic with tmux.
+    // Take one final canonical snapshot immediately before mutating the
+    // composer so a just-arrived user draft or active turn is never appended
+    // to or submitted as the Discord follow-up.
+    let final_snapshot = prompt_readiness_snapshot(session_name);
+    if !snapshot_allows_warm_followup_submit(&final_snapshot) {
+        return CodexFollowupPromptSubmitOutcome::NotSubmitted {
+            error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
+        };
+    }
     let mut executor = TmuxTuiActionExecutor::default();
     let action_result =
         run_actions_with_executor(session_name, &actions, cancel_token, &mut executor);
@@ -1223,10 +1240,6 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
     if recent.is_empty() || recent_has_codex_active_turn(&recent) {
         return false;
     }
-    if pane_has_legacy_codex_prompt(&recent) {
-        return true;
-    }
-
     if recent_has_codex_compact_prompt(&recent) {
         return true;
     }
@@ -1290,28 +1303,6 @@ fn pane_has_dim_legacy_codex_prompt_in_pane(pane: &str) -> bool {
     pane_has_dim_legacy_codex_prompt(&recent)
 }
 
-fn pane_has_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
-    const LEGACY_PROMPT_BOTTOM_WINDOW: usize = 4;
-    const LEGACY_STATUS_BOTTOM_WINDOW: usize = 3;
-
-    let prompt_idx = recent_bottom_up
-        .iter()
-        .take(LEGACY_PROMPT_BOTTOM_WINDOW)
-        .position(|line| line_is_legacy_codex_prompt(line));
-    let status_idx = recent_bottom_up
-        .iter()
-        .take(LEGACY_STATUS_BOTTOM_WINDOW)
-        .position(|line| line_is_legacy_codex_status(line));
-    let (Some(prompt_idx), Some(status_idx)) = (prompt_idx, status_idx) else {
-        return false;
-    };
-
-    // The compact Codex TUI prompt renders the model/status line below the
-    // `›` prompt. With bottom-up indexing that means the status row must have
-    // a smaller index than the prompt row.
-    status_idx < prompt_idx
-}
-
 fn pane_has_dim_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
     const LEGACY_PROMPT_BOTTOM_WINDOW: usize = 4;
     const LEGACY_STATUS_BOTTOM_WINDOW: usize = 3;
@@ -1336,8 +1327,7 @@ fn line_is_legacy_codex_prompt(line: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix('›') else {
         return false;
     };
-    let rest = rest.trim();
-    rest.is_empty() || CODEX_COMPACT_PLACEHOLDER_PROMPTS.contains(&rest)
+    rest.trim().is_empty()
 }
 
 fn line_is_dim_legacy_codex_prompt(line: &str) -> bool {
@@ -1353,19 +1343,6 @@ fn line_is_dim_legacy_codex_prompt(line: &str) -> bool {
     line.find('›')
         .map(|idx| contains_dim_sgr(&line[idx + '›'.len_utf8()..]))
         .unwrap_or(false)
-}
-
-const CODEX_COMPACT_PLACEHOLDER_PROMPTS: &[&str] = &[
-    "Explain this codebase",
-    "Summarize recent commits",
-    "Use /skills to list available skills",
-    "Write tests for @filename",
-];
-
-fn line_is_legacy_codex_status(line: &str) -> bool {
-    let trimmed = line.trim();
-    (trimmed.contains("gpt-") && trimmed.contains('·'))
-        || line_is_codex_fast_context_status(trimmed)
 }
 
 fn line_is_codex_fast_context_status(line: &str) -> bool {
@@ -1395,7 +1372,8 @@ fn recent_has_codex_active_turn(recent_bottom_up: &[&str]) -> bool {
 }
 
 fn line_is_codex_status_with_ansi(line: &str) -> bool {
-    line_is_legacy_codex_status(&strip_ansi_escape_sequences(line))
+    line_is_codex_compact_status_line(&strip_ansi_escape_sequences(line))
+        || line_is_codex_fast_context_status(&strip_ansi_escape_sequences(line))
 }
 
 fn contains_dim_sgr(input: &str) -> bool {
@@ -1446,6 +1424,13 @@ fn strip_ansi_escape_sequences(input: &str) -> String {
 }
 
 fn recent_has_codex_compact_prompt(recent: &[&str]) -> bool {
+    recent_has_codex_compact_composer(recent)
+        && recent
+            .get(1)
+            .is_some_and(line_is_legacy_codex_prompt)
+}
+
+fn recent_has_codex_compact_composer(recent: &[&str]) -> bool {
     let Some(prompt_idx) = recent
         .iter()
         .take(COMPACT_PROMPT_BOTTOM_WINDOW)
@@ -1453,34 +1438,13 @@ fn recent_has_codex_compact_prompt(recent: &[&str]) -> bool {
     else {
         return false;
     };
-    prompt_idx == 1 && line_is_codex_compact_status_line(recent[0])
+    prompt_idx == 1
+        && (line_is_codex_compact_status_line(recent[0])
+            || line_is_codex_fast_context_status(recent[0]))
 }
 
 fn pane_has_codex_prompt_draft(pane: &str) -> bool {
-    let recent: Vec<&str> = pane
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .rev()
-        .take(PROMPT_READY_SCAN_LINES)
-        .collect();
-    if recent
-        .iter()
-        .take(FOOTER_HINT_BOTTOM_WINDOW + COMPOSER_FOOTER_ADJACENCY_LINES)
-        .any(|line| codex_prompt_marker_line_has_draft(line))
-    {
-        return true;
-    }
-
-    let has_footer = recent
-        .iter()
-        .take(FOOTER_HINT_BOTTOM_WINDOW)
-        .any(|line| line_is_codex_footer_hint(line));
-    has_footer
-        && recent
-            .iter()
-            .take(COMPOSER_EDGE_BOTTOM_WINDOW + COMPOSER_FOOTER_ADJACENCY_LINES + 1)
-            .any(|line| codex_composer_body_line_has_draft(line))
+    active_composer_visible_prompt_draft_in_pane(pane).is_some()
 }
 
 #[allow(dead_code)] // #3034: test-only (draft-clear path retired).
@@ -1503,8 +1467,7 @@ fn codex_visible_prompt_draft_text(line: &str) -> Option<&str> {
     let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
     if let Some(rest) = trimmed.strip_prefix('›') {
         let text = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
-        return (!text.is_empty() && !CODEX_COMPACT_PLACEHOLDER_PROMPTS.contains(&text))
-            .then_some(text);
+        return (!text.is_empty()).then_some(text);
     }
     codex_composer_body_draft_text(line)
 }
@@ -1517,28 +1480,22 @@ fn line_is_codex_compact_prompt_marker(line: &str) -> bool {
 fn line_is_codex_compact_status_line(line: &str) -> bool {
     let trimmed = line.trim();
     let parts: Vec<&str> = trimmed.split('·').map(str::trim).collect();
-    if parts.len() < 4 || !parts[0].starts_with("gpt-") || !parts[1].starts_with("gpt-") {
+    if parts.len() < 2 || !parts[0].starts_with("gpt-") {
         return false;
     }
-    let has_effort = parts[1].split_whitespace().any(|word| {
-        matches!(
-            word,
-            "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-        )
+    let has_effort = parts.iter().any(|part| {
+        part.split_whitespace().any(|word| {
+            matches!(
+                word,
+                "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        })
     });
     let has_path = parts
         .iter()
-        .skip(2)
+        .skip(1)
         .any(|part| part.starts_with("~/") || part.starts_with('/'));
     has_effort && has_path
-}
-
-fn codex_prompt_marker_line_has_draft(line: &str) -> bool {
-    codex_visible_prompt_draft_text(line).is_some()
-}
-
-fn codex_composer_body_line_has_draft(line: &str) -> bool {
-    codex_composer_body_draft_text(line).is_some()
 }
 
 fn codex_composer_body_draft_text(line: &str) -> Option<&str> {
@@ -2182,7 +2139,7 @@ more output\n\
 
   gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
 
-        assert!(pane_looks_ready_for_codex_prompt(pane));
+        assert!(!pane_looks_ready_for_codex_prompt(pane));
         assert!(pane_has_codex_prompt_draft(pane));
     }
 
@@ -2262,18 +2219,19 @@ The documentation example ends with:
     }
 
     #[test]
-    fn current_codex_idle_pane_is_ready() {
-        let pane = "\
-╭─────────────────────────────────────────╮\n\
-│ >_ OpenAI Codex (v0.144.4)              │\n\
-╰─────────────────────────────────────────╯\n\
-\n\
-› Use /skills to list available skills\n\
-\n\
-  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left";
+    fn current_codex_idle_pane_requires_dim_placeholder_evidence() {
+        let pane = concat!(
+            "╭─────────────────────────────────────────╮\n",
+            "│ >_ OpenAI Codex (v0.144.4)              │\n",
+            "╰─────────────────────────────────────────╯\n",
+            "\n",
+            "\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n",
+            "\n",
+            "  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left",
+        );
 
-        assert!(pane_looks_ready_for_codex_prompt(pane));
-        assert!(!pane_has_codex_prompt_draft(pane));
+        assert!(pane_looks_ready_for_codex_prompt_with_ansi(pane));
+        assert!(!pane_has_codex_prompt_draft(&strip_ansi_escape_sequences(pane)));
     }
 
     #[test]
@@ -2288,52 +2246,108 @@ The documentation example ends with:
         assert!(!pane_looks_ready_for_codex_prompt(pane));
     }
 
-    #[test]
-    fn compact_codex_placeholder_prompt_is_ready() {
-        let pane = "\
-─ Worked for 4m 03s ────────────────────────────────────────────\n\
-\n\
-› Explain this codebase\n\
-\n\
-  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
-        assert!(pane_looks_ready_for_codex_prompt(pane));
-    }
-
-    #[test]
-    fn compact_codex_recent_commits_placeholder_is_ready() {
-        let pane = "\
-─ Worked for 1m 21s ────────────────────────────────────────────\n\
-\n\
-› Summarize recent commits\n\
-\n\
-  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
-        assert!(pane_looks_ready_for_codex_prompt(pane));
-        assert!(!pane_has_codex_prompt_draft(pane));
-    }
-
-    #[test]
-    fn compact_codex_write_tests_placeholder_is_ready() {
-        let pane = "\
-─ Worked for 3m 08s ────────────────────────────────────────────\n\
-\n\
-› Write tests for @filename\n\
-\n\
-  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
-        assert!(pane_looks_ready_for_codex_prompt(pane));
-        assert!(!pane_has_codex_prompt_draft(pane));
-    }
 
     #[test]
     fn compact_codex_dim_placeholder_is_ready_without_plain_allowlist() {
         let pane = concat!(
             "─ Worked for 3m 08s ────────────────────────────────────────────\n",
             "\n",
-            "\x1b[0;1m›\x1b[0m \x1b[2mRefactor selected code\n",
+            "\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\n",
             "\n",
             "\x1b[0m  \x1b[38;2;246;226;183mgpt-5.5 xhigh\x1b[2m\x1b[39m",
             " · \x1b[0m\x1b[38;2;171;223;167m~/.adk/release/workspaces/baby\n",
         );
-        assert!(pane_looks_ready_for_codex_prompt_with_ansi(pane));
+        let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
+
+        assert!(marker);
+        assert!(!draft);
+    }
+
+    #[test]
+    fn compact_codex_non_dim_exact_placeholder_text_is_a_draft() {
+        let pane = "\
+─ Worked for 3m 08s ────────────────────────────────────────────\n\
+\n\
+\x1b[0;1m›\x1b[0m Use /skills to list available skills\n\
+\n\
+\x1b[0m  \x1b[38;2;246;226;183mgpt-5.5 xhigh\x1b[2m\x1b[39m · \x1b[0m\x1b[38;2;171;223;167m~/.adk/release/workspaces/baby";
+        let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
+
+        assert!(!marker);
+        assert!(draft);
+    }
+
+    #[test]
+    fn compact_codex_partial_and_multiline_user_drafts_are_not_placeholders() {
+        let partial = "\
+─ Worked for 3m 08s ────────────────────────────────────────────\n\
+\n\
+› Use /skills to list available\n\
+\n\
+  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
+        let multiline = "\
+╭──────────────────────────────────────────────────────────────╮\n\
+│ Use /skills to list available skills                          │\n\
+│ then summarize the result ▌                                   │\n\
+╰──────────────────────────────────────────────────────────────╯\n\
+  Esc to interrupt   Ctrl+J newline   ⏎ send";
+
+        assert!(pane_has_codex_prompt_draft(partial));
+        assert!(pane_has_codex_prompt_draft(multiline));
+        assert!(!pane_looks_ready_for_codex_prompt(partial));
+    }
+
+    #[test]
+    fn canonical_ansi_snapshot_draft_and_busy_state_block_reuse() {
+        let draft = "\
+› Use /skills to list available skills\n\
+\n\
+  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
+        let busy = "\
+• Working (0s • esc to interrupt)\n\
+\n\
+\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n\
+\n\
+  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
+
+        let (draft_marker, draft_detected, _) = prompt_readiness_from_ansi_pane(draft);
+        let (busy_marker, busy_detected, _) = prompt_readiness_from_ansi_pane(busy);
+        assert!(!draft_marker);
+        assert!(draft_detected);
+        assert!(!busy_marker);
+        assert!(!busy_detected);
+    }
+
+    #[test]
+    fn compact_codex_history_text_is_not_a_composer_without_bottom_layout() {
+        let pane = "\
+The assistant quoted this old Codex frame:\n\
+› Use /skills to list available skills\n\
+  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby\n\
+then continued with a response.";
+
+        assert!(!pane_looks_ready_for_codex_prompt(pane));
+        assert!(!pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn final_submit_gate_requires_a_live_empty_canonical_snapshot() {
+        let ready = submit_snapshot(true, true, true, false);
+        assert!(snapshot_allows_warm_followup_submit(&ready));
+
+        for mutate in [
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.tmux_pane_alive = false,
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.capture_available = false,
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.composer_marker_detected = false,
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.prompt_draft_detected = true,
+        ] {
+            let mut rejected = ready.clone();
+            mutate(&mut rejected);
+            assert!(
+                !snapshot_allows_warm_followup_submit(&rejected),
+                "final submit must reject every mutated readiness guard"
+            );
+        }
     }
 
     #[test]
@@ -2345,6 +2359,7 @@ The documentation example ends with:
 \n\
 \x1b[0m  \x1b[38;2;246;226;183mgpt-5.5 xhigh\x1b[2m\x1b[39m · \x1b[0m\x1b[38;2;171;223;167m~/.adk/release/workspaces/baby";
         assert!(!pane_looks_ready_for_codex_prompt_with_ansi(pane));
+        assert!(pane_has_codex_prompt_draft(&strip_ansi_escape_sequences(pane)));
     }
 
     #[test]
