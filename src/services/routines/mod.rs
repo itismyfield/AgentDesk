@@ -31,3 +31,18 @@ pub use store::{
     DeleteRoutineResult, NewRoutine, RoutinePatch, RoutineStore,
     is_resume_routine_requires_next_due_at, validate_routine_schedule,
 };
+
+pub(crate) fn fresh_context_guaranteed(execution_strategy: &str) -> bool {
+    execution_strategy == "fresh"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fresh_context_guaranteed;
+
+    #[test]
+    fn fresh_context_guarantee_follows_execution_strategy() {
+        assert!(fresh_context_guaranteed("fresh"));
+        assert!(!fresh_context_guaranteed("persistent"));
+    }
+}

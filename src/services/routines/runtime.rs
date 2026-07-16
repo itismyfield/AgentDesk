@@ -7,6 +7,7 @@ use std::{collections::HashSet, path::PathBuf};
 use super::action::RoutineAction;
 use super::agent_executor::RoutineAgentExecutor;
 use super::discord_log::RoutineDiscordLogger;
+use super::fresh_context_guaranteed;
 use super::loader::{
     MAX_AUTOMATION_INVENTORY_ITEMS, MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES,
     MAX_OBSERVATION_PAYLOAD_BYTES, MAX_OBSERVATIONS_PER_TICK, ObservationLimits,
@@ -156,7 +157,7 @@ pub async fn execute_claimed_script_run(
     claimed: ClaimedRoutineRun,
     pause_on_terminal_failure: bool,
 ) -> Result<Option<RoutineRunOutcome>> {
-    let fresh_context_guaranteed = false;
+    let fresh_context_guaranteed = fresh_context_guaranteed(&claimed.execution_strategy);
     let agent = load_tick_agent_context(store, claimed.agent_id.as_deref()).await?;
     let observations = match store
         .fetch_recent_run_observations(
