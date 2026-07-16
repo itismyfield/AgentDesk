@@ -342,7 +342,9 @@ pub(super) async fn run_terminal_outcome_delivery(
         }
     } else {
         queue_retry_silence::apply(
-            claude_tui_followup_pre_submit_requeue_candidate, &mut full_response, &mut inflight_state,
+            claude_tui_followup_pre_submit_requeue_candidate,
+            &mut full_response,
+            &mut inflight_state,
         );
         // Check for stale resume failure BEFORE any other response handling.
         // This path is driven by explicit error/result events, not assistant text.
@@ -798,7 +800,7 @@ pub(super) async fn run_terminal_outcome_delivery(
             }
         }
 
-        let outcome = handle_delivery_epilogue(
+        handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
             DeliveryEpilogueContext {
                 shared_owned: &shared_owned,
@@ -843,9 +845,6 @@ pub(super) async fn run_terminal_outcome_delivery(
             },
         )
         .await;
-        match outcome {
-            DeliveryEpilogueOutcome::Continue => {}
-        }
     }
     TerminalOutcomeDeliveryOutput {
         outcome: TerminalOutcomeDeliveryOutcome::Completed,

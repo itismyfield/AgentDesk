@@ -57,13 +57,12 @@ mod tests {
             "#,
         )));
 
-        let terminal_delivery =
-            compact(include_str!("../turn_bridge/terminal_outcome_delivery.rs"));
-        assert!(terminal_delivery.contains(&compact(
+        let queue_retry_silence = compact(include_str!(
+            "../turn_bridge/terminal_outcome_delivery/queue_retry_silence.rs"
+        ));
+        assert!(queue_retry_silence.contains(&compact(
             r#"
-                if claude_tui_followup_pre_submit_requeue_candidate
-                    && !super::super::router::queue_status_card_enabled()
-                {
+                if retry_candidate && !super::super::super::router::queue_status_card_enabled() {
             "#,
         )));
 

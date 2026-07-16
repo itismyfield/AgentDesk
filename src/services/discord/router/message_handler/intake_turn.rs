@@ -1809,7 +1809,6 @@ pub(super) async fn handle_text_message(
             github_issue_url: info.github_issue_url.as_deref(),
         }
     });
-    let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
     let memory_recall_manifest = super::super::super::prompt_builder::MemoryRecallManifestInput {
         should_recall: memento_recall_gate.should_recall,
         gate_reason: memento_recall_gate.reason,
@@ -1837,7 +1836,7 @@ pub(super) async fn handle_text_message(
         sak_for_system,
         memory_injection_plan.longterm_catalog_for_system_prompt,
         Some(&memory_settings),
-        memento_mcp_available,
+        crate::services::mcp_config::provider_has_memento_mcp(&provider),
         matches!(&provider, ProviderKind::Claude),
         recovery_context_for_manifest.as_ref(),
         channel_recent_context.as_ref(),
@@ -2229,7 +2228,8 @@ pub(super) async fn handle_text_message(
                 .intervention_queue
                 .len();
         let want_queued_card = super::super::queue_status_presentation::queue_status_card_enabled()
-            && !turn_kind.is_background_trigger() && channel_id == original_channel_id;
+            && !turn_kind.is_background_trigger()
+            && channel_id == original_channel_id;
         let mut queued_card_rendered = false;
         if enqueue_outcome.enqueued && want_queued_card {
             let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
