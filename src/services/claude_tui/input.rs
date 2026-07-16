@@ -1555,17 +1555,21 @@ fn prompt_marker_confirms_prompt_ready(
 
 /// #3889/#4528: an MCP-auth warning is a terminal readiness block only for a
 /// FreshTurn cold boot. Claude Code v2.1.209 can retain the same warning in a
-/// usable warm session, so Followup ignores that warning but still rejects the
-/// narrow positive busy signals in the captured pane. Followup additionally
-/// fails closed on a structurally valid spinner + duration footer even when its
-/// verb is newer than the shared busy classifier's allowlist. Keeping that
-/// conservative extension Followup-only avoids changing FreshTurn and existing
-/// shared-classifier semantics. The explicit busy checks are also load-bearing
-/// for transcript-idle fallback paths that do not require a prompt marker.
+/// usable warm session, so Followup ignores that warning but still rejects an
+/// unsent prompt draft and the narrow positive busy signals in the captured
+/// pane. Followup additionally fails closed on a structurally valid spinner +
+/// duration footer even when its verb is newer than the shared busy classifier's
+/// allowlist. Keeping that conservative extension Followup-only avoids changing
+/// FreshTurn and existing shared-classifier semantics. The draft and busy checks
+/// are also load-bearing for transcript-idle fallback paths that do not require
+/// a prompt marker.
 fn snapshot_allows_prompt_readiness(
     readiness: PromptReadinessKind,
     snapshot: &PromptReadinessSnapshot,
 ) -> bool {
+    if snapshot.prompt_draft_detected {
+        return false;
+    }
     if snapshot.capture_available
         && (crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(
             &snapshot.pane_tail,
@@ -1595,9 +1599,9 @@ fn snapshot_indicates_mcp_auth_block(snapshot: &PromptReadinessSnapshot) -> bool
 /// #3889/#4528: apply the same readiness-kind auth policy to the transcript-idle
 /// path, which has no live snapshot of its own. Callers MUST gate this behind the
 /// transcript-idle check via short-circuit `&&` so the pane is captured only at
-/// the confirm boundary. Followup ignores only the auth warning; the captured
-/// pane's positive busy signals still block readiness. A blind capture cannot
-/// assert either a busy frame or a FreshTurn auth block.
+/// the confirm boundary. Followup ignores only the auth warning; an unsent draft
+/// or positive busy signal in the captured pane still blocks readiness. A blind
+/// capture cannot assert a draft, busy frame, or FreshTurn auth block.
 fn pane_allows_prompt_readiness(session_name: &str, readiness: PromptReadinessKind) -> bool {
     snapshot_allows_prompt_readiness(readiness, &prompt_readiness_snapshot(session_name))
 }
@@ -2872,7 +2876,7 @@ line 13";
 
     // #3889/#4528: transcript-idle fallback applies the same kind-aware policy
     // as marker readiness. FreshTurn rejects the auth welcome pane, while a warm
-    // Followup may accept it when no positive busy signal is present.
+    // Followup ignores only that warning and still rejects an unsent draft.
     #[test]
     fn idle_transcript_fallback_applies_kind_aware_mcp_auth_gate() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -2906,9 +2910,19 @@ line 13";
             "MCP-auth welcome pane must not confirm FreshTurn via idle transcript"
         );
         assert!(
-            snapshot_allows_prompt_readiness(PromptReadinessKind::Followup, &blocked)
+            !(snapshot_allows_prompt_readiness(PromptReadinessKind::Followup, &blocked)
+                && transcript_idle),
+            "an unsent draft must block Followup despite the idle transcript and ignored warning"
+        );
+
+        let warm_idle = PromptReadinessSnapshot {
+            prompt_draft_detected: false,
+            ..blocked.clone()
+        };
+        assert!(
+            snapshot_allows_prompt_readiness(PromptReadinessKind::Followup, &warm_idle)
                 && transcript_idle,
-            "a warm Followup may ignore the persistent warning when the pane is idle"
+            "a warm Followup may ignore the persistent warning only when the composer is idle"
         );
 
         // No regression: a normal recorded-turn idle pane (no welcome banner)

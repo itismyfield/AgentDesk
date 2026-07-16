@@ -280,18 +280,41 @@ pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
 /// A conservative readiness-only busy signal for a Claude TUI spinner footer
 /// whose status verb is newer than the shared busy classifier's allowlist.
 /// The full structure is required: spinner glyph + one `-ing` status verb +
-/// ellipsis + a parenthesized duration. Callers can therefore fail closed on a
-/// live footer such as `✳ Architecting… (12s)` without treating ordinary prose
-/// or an idle composer as busy.
+/// ellipsis + a parenthesized duration. Candidates inside Markdown fenced code
+/// blocks are excluded so an exact spinner example in idle assistant prose does
+/// not block readiness.
 pub(crate) fn tmux_capture_indicates_claude_tui_structured_spinner(capture: &str) -> bool {
-    let non_empty = capture
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>();
-    let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
-    non_empty[start..]
+    let lines = capture.lines().collect::<Vec<_>>();
+    let recent_start = lines
         .iter()
-        .any(|line| tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line)))
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .rev()
+        .nth(CLAUDE_TUI_ACTIVE_SCAN_LINES.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let mut open_fence = None;
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(marker) = claude_tui_markdown_fence_marker(line) {
+            match open_fence {
+                Some((open_char, open_len))
+                    if marker.0 == open_char && marker.1 >= open_len =>
+                {
+                    open_fence = None;
+                }
+                None => open_fence = Some(marker),
+                _ => {}
+            }
+            continue;
+        }
+        if index >= recent_start
+            && open_fence.is_none()
+            && tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// #3521: `true` when the Claude TUI pane shows a BACKGROUND AGENT still pending — the
@@ -383,6 +406,19 @@ fn tmux_line_is_claude_tui_spinner_progress(line: &str) -> bool {
 fn is_claude_tui_spinner_glyph(glyph: char) -> bool {
     const SPINNER_GLYPHS: [char; 8] = ['·', '✢', '✳', '✶', '✻', '✽', '✦', '∗'];
     SPINNER_GLYPHS.contains(&glyph)
+}
+
+fn claude_tui_markdown_fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = trim_prompt_line(line).trim_start_matches(|character: char| {
+        matches!(character, '│' | '┃' | '┆' | '┊' | '▏' | '▕')
+    });
+    let trimmed = trimmed.trim_start();
+    let marker = trimmed.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let length = trimmed.chars().take_while(|character| *character == marker).count();
+    (length >= 3).then_some((marker, length))
 }
 
 fn tmux_line_is_claude_tui_structured_spinner(line: &str) -> bool {
@@ -1992,10 +2028,22 @@ another line of prior output";
 
     #[test]
     fn structured_spinner_accepts_unknown_duration_verb_without_interrupt_copy() {
-        let line = "✳ Architecting… (12s)";
-        assert!(!tmux_line_is_claude_tui_spinner_progress(line));
-        assert!(tmux_line_is_claude_tui_structured_spinner(line));
-        assert!(tmux_capture_indicates_claude_tui_structured_spinner(line));
+        let capture = "\
+earlier assistant prose
+✳ Architecting… (12s)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        assert!(!tmux_line_is_claude_tui_spinner_progress(
+            "✳ Architecting… (12s)"
+        ));
+        assert!(tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting… (12s)"
+        ));
+        assert!(tmux_capture_indicates_claude_tui_structured_spinner(
+            capture
+        ));
     }
 
     #[test]
@@ -2008,6 +2056,17 @@ another line of prior output";
         ));
         assert!(!tmux_line_is_claude_tui_structured_spinner(
             "Architecting… (12s)"
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_structured_spinner(
+            "\
+Here is the exact status-line format:
+```text
+✳ Architecting… (12s)
+```
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on"
         ));
     }
 
