@@ -2831,7 +2831,15 @@ pub(super) async fn handle_text_message(
 }
 
 #[cfg(test)]
-mod user_turn_placeholder_identity_tests {
+mod recovery_context_take_order_tests {
+    fn recovery_context_take_call() -> String {
+        format!(
+            "{}{}",
+            "let session_retry_context = ",
+            "take_session_retry_context(shared, channel_id, Some(&turn_id));"
+        )
+    }
+
     #[test]
     fn discord_user_turn_keeps_user_and_streaming_placeholder_ids_separate() {
         let module_src = include_str!("intake_turn.rs");
@@ -2852,17 +2860,6 @@ mod user_turn_placeholder_identity_tests {
             bridge_context.contains("is_external_input_tui_direct: false"),
             "Discord-origin user turns must remain outside the synthetic TUI-direct path"
         );
-    }
-}
-
-#[cfg(test)]
-mod recovery_context_take_order_tests {
-    fn recovery_context_take_call() -> String {
-        format!(
-            "{}{}",
-            "let session_retry_context = ",
-            "take_session_retry_context(shared, channel_id, Some(&turn_id));"
-        )
     }
 
     #[test]

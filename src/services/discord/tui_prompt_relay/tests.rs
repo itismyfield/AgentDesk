@@ -3552,10 +3552,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         "the notification/task-card identity must not remain the streaming anchor after placeholder success"
     );
     let snapshot = super::super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-    assert_eq!(
-        snapshot.active_user_message_id,
-        Some(placeholder_anchor_id)
-    );
+    assert_eq!(snapshot.active_user_message_id, Some(placeholder_anchor_id));
     assert!(snapshot.cancel_token.is_some());
     let state = super::super::inflight::load_inflight_state(&provider, channel_id.get())
         .expect("typed TUI prompt must create synthetic inflight");
