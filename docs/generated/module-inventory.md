@@ -887,7 +887,7 @@
 | `services::discord::turn_finalizer::finalize_context` | `src/services/discord/turn_finalizer/finalize_context.rs` | 179 | 148 | 31 |  |
 | `services::discord::turn_finalizer::reconcile` | `src/services/discord/turn_finalizer/reconcile.rs` | 221 | 221 | 0 |  |
 | `services::discord::turn_finalizer::watcher_backstop` | `src/services/discord/turn_finalizer/watcher_backstop.rs` | 273 | 210 | 63 |  |
-| `services::discord::turn_view_reconciler` | `src/services/discord/turn_view_reconciler.rs` | 2253 | 2253 | 0 | giant-file |
+| `services::discord::turn_view_reconciler` | `src/services/discord/turn_view_reconciler.rs` | 2257 | 2257 | 0 | giant-file |
 | `services::discord::turn_view_reconciler::orphan_sweep` | `src/services/discord/turn_view_reconciler/orphan_sweep.rs` | 611 | 321 | 290 |  |
 | `services::discord::turn_view_reconciler::queue_repair` | `src/services/discord/turn_view_reconciler/queue_repair.rs` | 31 | 31 | 0 |  |
 | `services::discord::turn_view_reconciler::reaction_set` | `src/services/discord/turn_view_reconciler/reaction_set.rs` | 23 | 23 | 0 |  |

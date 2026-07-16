@@ -1452,7 +1452,11 @@ impl TurnViewReconciler {
             return;
         };
         let record = PersistedTargetState {
-            version: QUEUED_HOURGLASS_STATE_VERSION,
+            version: if applied.applied.is_queue_marker() {
+                QUEUED_HOURGLASS_STATE_VERSION
+            } else {
+                PERSISTED_STATE_VERSION
+            },
             provider: shared.provider.as_str().to_string(),
             kind: target.kind.as_str().to_string(),
             channel_id: target.channel_id.get(),

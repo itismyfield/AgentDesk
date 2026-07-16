@@ -1488,7 +1488,7 @@
     `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
     `turn_finalizer/reconcile.rs` 221 prod LoC, and
     `turn_finalizer/cleanup.rs` 565 prod LoC. No PG lease/schema change.
-  - `src/services/discord/turn_view_reconciler.rs` (2253 prod lines; +41 from #4248/#4329 review hardening: queued-state schema v2 invalidates v1 queue records while keeping v1 pending-anchor recovery compatible, and multi-reaction transitions compensate already-applied operations on partial failure; #4248 moves
+  - `src/services/discord/turn_view_reconciler.rs` (2257 prod lines; +45 from #4248/#4329 review hardening: queued-state schema v2 invalidates v1 queue records while keeping v1 pending-anchor recovery compatible, and multi-reaction transitions compensate already-applied operations on partial failure; #4248 moves
     the derived reaction mapping into `turn_view_reconciler/reaction_set.rs` and
     makes queued user-message views include an immediate `⏳` alongside their
     queue-kind marker; promotion removes only the queue-kind marker and terminal
