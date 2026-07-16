@@ -109,15 +109,27 @@ pub(super) async fn abandoned_tmux_cleanup_decision_for(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AbandonedCleanupEvidence {
+    OwnerDeath,
+    TerminalDelivered,
+}
+
+impl AbandonedCleanupEvidence {
+    fn terminal_delivered(self) -> bool {
+        self == Self::TerminalDelivered
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct AbandonedTmuxCleanupOutcome {
     pub(super) decision: AbandonedTmuxCleanupDecision,
-    pub(super) cleanup_killed: bool,
-    cleanup_committed: bool,
+    cleanup_killed: bool,
+    discord_cleanup_committed: bool,
 }
 
 impl AbandonedTmuxCleanupOutcome {
     fn allows_state_delete(self) -> bool {
-        self.cleanup_committed
+        self.discord_cleanup_committed
             || self.decision == AbandonedTmuxCleanupDecision::TerminalMarkerOnly
             || (self.decision == AbandonedTmuxCleanupDecision::Kill && self.cleanup_killed)
     }
@@ -137,10 +149,8 @@ impl AbandonedTmuxCleanupOutcome {
     }
 }
 
-fn cleanup_policy_for_terminal_evidence(
-    terminal_delivered: bool,
-) -> super::super::TmuxCleanupPolicy {
-    if terminal_delivered {
+fn cleanup_policy_for(evidence: AbandonedCleanupEvidence) -> super::super::TmuxCleanupPolicy {
+    if evidence.terminal_delivered() {
         super::super::TmuxCleanupPolicy::PreserveSession
     } else {
         super::super::TmuxCleanupPolicy::CleanupSession {
@@ -157,56 +167,55 @@ fn should_finish_mailbox(
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct CleanupWiring {
-    pub cleanup_committed: bool,
-    pub finish_mailbox: bool,
-    pub allows_state_delete: bool,
-}
-
-#[cfg(test)]
-pub(super) fn cleanup_wiring(
+fn outcome_from_evidence_for_test(
     state: &InflightTurnState,
-    decision: AbandonedTmuxCleanupDecision,
-    cleanup_committed: bool,
+    evidence: AbandonedCleanupEvidence,
+    owner_decision: AbandonedTmuxCleanupDecision,
+    discord_cleanup_committed: bool,
     cleanup_killed: bool,
-) -> CleanupWiring {
-    let outcome = AbandonedTmuxCleanupOutcome {
-        decision,
-        cleanup_killed,
-        cleanup_committed,
+) -> (AbandonedTmuxCleanupOutcome, super::super::TmuxCleanupPolicy, bool) {
+    let decision = if evidence.terminal_delivered() {
+        AbandonedTmuxCleanupDecision::Kill
+    } else {
+        owner_decision
     };
-    CleanupWiring {
-        cleanup_committed,
-        finish_mailbox: should_finish_mailbox(state, decision),
-        allows_state_delete: outcome.allows_state_delete(),
-    }
+    (
+        AbandonedTmuxCleanupOutcome {
+            decision,
+            cleanup_killed,
+            discord_cleanup_committed,
+        },
+        cleanup_policy_for(evidence),
+        should_finish_mailbox(state, decision),
+    )
 }
 
 #[cfg(test)]
 pub(super) fn cleanup_decision_allows_state_delete(
     decision: AbandonedTmuxCleanupDecision,
     cleanup_killed: bool,
-    cleanup_committed: bool,
+    discord_cleanup_committed: bool,
 ) -> bool {
     AbandonedTmuxCleanupOutcome {
         decision,
         cleanup_killed,
-        cleanup_committed,
+        discord_cleanup_committed,
     }
     .allows_state_delete()
 }
 
-/// Finalize and cancel an abandoned turn after owner-death evidence, or after
-/// Discord proves the terminal response was already delivered. The latter must
-/// release mailbox state without killing a reusable live tmux session.
-pub(super) async fn finalize_abandoned_mailbox(
+/// Finalize an abandoned mailbox from one explicit evidence source. Terminal
+/// delivery may skip owner probing and preserves the reusable tmux session;
+/// owner-death cleanup re-probes and keeps the destructive cleanup policy.
+async fn finalize_abandoned_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &InflightTurnState,
-    cleanup_committed: bool,
+    evidence: AbandonedCleanupEvidence,
+    discord_cleanup_committed: bool,
 ) -> AbandonedTmuxCleanupOutcome {
-    let decision = if cleanup_committed {
+    let terminal_delivered = evidence.terminal_delivered();
+    let decision = if terminal_delivered {
         AbandonedTmuxCleanupDecision::Kill
     } else {
         abandoned_tmux_cleanup_decision_for(state).await
@@ -215,7 +224,7 @@ pub(super) async fn finalize_abandoned_mailbox(
         return AbandonedTmuxCleanupOutcome {
             decision,
             cleanup_killed: false,
-            cleanup_committed,
+            discord_cleanup_committed,
         };
     }
 
@@ -230,7 +239,7 @@ pub(super) async fn finalize_abandoned_mailbox(
     if let Some(removed_token) = finish.removed_token {
         super::super::turn_bridge::cancel_active_token(
             &removed_token,
-            cleanup_policy_for_terminal_evidence(cleanup_committed),
+            cleanup_policy_for(evidence),
             "placeholder_sweeper abandoned",
         );
         super::super::saturating_decrement_global_active(shared);
@@ -245,24 +254,55 @@ pub(super) async fn finalize_abandoned_mailbox(
         AbandonedTmuxCleanupOutcome {
             decision,
             cleanup_killed: true,
-            cleanup_committed,
+            discord_cleanup_committed,
         }
     } else {
         AbandonedTmuxCleanupOutcome {
             decision,
             cleanup_killed: false,
-            cleanup_committed,
+            discord_cleanup_committed,
         }
     }
+}
+
+pub(super) async fn finalize_terminal_delivered_mailbox(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+) -> AbandonedTmuxCleanupOutcome {
+    finalize_abandoned_mailbox(
+        shared,
+        provider,
+        state,
+        AbandonedCleanupEvidence::TerminalDelivered,
+        true,
+    )
+    .await
+}
+
+pub(super) async fn finalize_owner_dead_mailbox(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    discord_cleanup_committed: bool,
+) -> AbandonedTmuxCleanupOutcome {
+    finalize_abandoned_mailbox(
+        shared,
+        provider,
+        state,
+        AbandonedCleanupEvidence::OwnerDeath,
+        discord_cleanup_committed,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AbandonedTmuxCleanupDecision, RuntimeActivityEvidence, abandoned_tmux_cleanup_decision,
-        abandoned_tmux_cleanup_decision_for, cleanup_decision_allows_state_delete,
-        cleanup_policy_for_terminal_evidence, cleanup_wiring, run_blocking_cleanup_probe,
-        runtime_activity_evidence_from, should_finish_mailbox,
+        AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RuntimeActivityEvidence,
+        abandoned_tmux_cleanup_decision, abandoned_tmux_cleanup_decision_for,
+        cleanup_decision_allows_state_delete, cleanup_policy_for, outcome_from_evidence_for_test,
+        run_blocking_cleanup_probe, runtime_activity_evidence_from, should_finish_mailbox,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::platform::tmux::PaneLiveness;
@@ -370,15 +410,51 @@ mod tests {
     }
 
     #[test]
-    fn terminal_delivery_releases_mailbox_without_killing_reusable_tmux() {
+    fn evidence_wires_finalize_policy_probe_and_state_convergence() {
+        let state = sweep_state();
+        let (delivered, delivered_policy, delivered_finish) = outcome_from_evidence_for_test(
+            &state,
+            AbandonedCleanupEvidence::TerminalDelivered,
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+            true,
+            false,
+        );
+        assert_eq!(delivered.decision, AbandonedTmuxCleanupDecision::Kill);
         assert_eq!(
-            cleanup_policy_for_terminal_evidence(true),
+            delivered_policy,
             crate::services::discord::TmuxCleanupPolicy::PreserveSession,
         );
+        assert!(delivered_finish);
+        assert!(delivered.allows_state_delete());
+
+        let (revived, revived_policy, revived_finish) = outcome_from_evidence_for_test(
+            &state,
+            AbandonedCleanupEvidence::OwnerDeath,
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+            true,
+            false,
+        );
+        assert_eq!(revived.decision, AbandonedTmuxCleanupDecision::PreserveRetry);
         assert!(matches!(
-            cleanup_policy_for_terminal_evidence(false),
+            revived_policy,
             crate::services::discord::TmuxCleanupPolicy::CleanupSession { .. }
         ));
+        assert!(!revived_finish);
+
+        let (dead, dead_policy, dead_finish) = outcome_from_evidence_for_test(
+            &state,
+            AbandonedCleanupEvidence::OwnerDeath,
+            AbandonedTmuxCleanupDecision::Kill,
+            true,
+            false,
+        );
+        assert_eq!(dead.decision, AbandonedTmuxCleanupDecision::Kill);
+        assert!(matches!(
+            dead_policy,
+            crate::services::discord::TmuxCleanupPolicy::CleanupSession { .. }
+        ));
+        assert!(dead_finish);
+        assert!(dead.allows_state_delete());
     }
 
     #[test]
@@ -400,32 +476,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn committed_edit_wires_zero_id_to_delete_without_mailbox_finish() {
-        let mut state = sweep_state();
-        state.user_msg_id = 0;
-        let wiring = cleanup_wiring(
-            &state,
-            AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
-            true,
-            false,
-        );
-        assert!(wiring.cleanup_committed);
-        assert!(!wiring.finish_mailbox);
-        assert!(wiring.allows_state_delete);
-    }
-
-    #[test]
-    fn committed_edit_wires_tokenless_kill_to_state_delete() {
-        let wiring = cleanup_wiring(
-            &sweep_state(),
-            AbandonedTmuxCleanupDecision::Kill,
-            true,
-            false,
-        );
-        assert!(wiring.finish_mailbox);
-        assert!(wiring.allows_state_delete);
-    }
 
     #[test]
     fn runtime_activity_zero_and_negative_are_unknown() {

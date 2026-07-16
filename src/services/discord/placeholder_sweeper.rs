@@ -38,7 +38,8 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 use abandon_guard::{
-    AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for, finalize_abandoned_mailbox,
+    AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
+    finalize_owner_dead_mailbox, finalize_terminal_delivered_mailbox,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -547,7 +548,7 @@ async fn run_placeholder_sweep_pass(
                         // tmux pane remains live; preserve that session itself.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             let cleanup =
-                                finalize_abandoned_mailbox(shared, provider, &state, true).await;
+                                finalize_terminal_delivered_mailbox(shared, provider, &state).await;
                             let same_turn =
                                 inflight_state_still_same_turn(provider, &state, age_secs);
                             let deleted =
@@ -565,17 +566,17 @@ async fn run_placeholder_sweep_pass(
                         continue;
                     }
                     PlaceholderProbe::MessageGone => {
-                        // The Discord message is permanently unreachable
-                        // (404 / 403 / 410). An edit attempt would fail, but this
-                        // alone is not terminal-delivery evidence: still require
-                        // owner-death evidence before destructive cleanup.
+                        // The Discord message is permanently unreachable, but that
+                        // is not terminal-delivery evidence. Re-probe owner death
+                        // after the awaited GET before touching mailbox/state.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             let cleanup =
-                                finalize_abandoned_mailbox(shared, provider, &state, true).await;
+                                finalize_owner_dead_mailbox(shared, provider, &state, true).await;
                             let same_turn =
                                 inflight_state_still_same_turn(provider, &state, age_secs);
-                            let deleted =
-                                same_turn && cleanup.delete_state_if_allowed(provider, &state);
+                            let deleted = same_turn
+                                && cleanup.decision == AbandonedTmuxCleanupDecision::Kill
+                                && cleanup.delete_state_if_allowed(provider, &state);
                             if should_detach_after_cleanup(same_turn, deleted) {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }
@@ -647,7 +648,8 @@ async fn run_placeholder_sweep_pass(
                 // TODO(#4573 slice B): add a persisted turn generation so reuse of
                 // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    let cleanup = finalize_abandoned_mailbox(shared, provider, &state, true).await;
+                    let cleanup =
+                        finalize_owner_dead_mailbox(shared, provider, &state, true).await;
                     let same_turn = inflight_state_still_same_turn(provider, &state, age_secs);
                     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, &state);
                     if should_detach_after_cleanup(same_turn, deleted) {
@@ -887,7 +889,7 @@ async fn sweep_orphan_status_panel(
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
         if inflight_state_still_same_turn(provider, state, age_secs) {
-            let cleanup = finalize_abandoned_mailbox(shared, provider, state, false).await;
+            let cleanup = finalize_owner_dead_mailbox(shared, provider, state, false).await;
             cleanup.delete_state_if_allowed(provider, state);
         }
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
