@@ -323,7 +323,19 @@ fn abandoned_placeholder_key(
     })
 }
 
-fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &InflightTurnState) {
+pub(super) async fn begin_abandoned_placeholder_detach(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+) {
+    if let Some(key) = abandoned_placeholder_key(state) {
+        shared.ui.placeholder_controller.begin_detach(&key).await;
+    }
+}
+
+pub(super) fn finish_abandoned_placeholder_detach(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+) {
     if let Some(key) = abandoned_placeholder_key(state) {
         shared.ui.placeholder_controller.finish_detach(&key);
     }
@@ -363,7 +375,7 @@ async fn finalize_cleanup_if_same_turn(
     let same_turn = super::inflight_state_still_same_turn(provider, state, age_secs);
     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
     if should_detach_after_cleanup(same_turn, deleted) {
-        detach_abandoned_placeholder_controller(shared, state);
+        finish_abandoned_placeholder_detach(shared, state);
     }
     deleted
 }
@@ -418,7 +430,7 @@ pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
     }
     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
     if should_detach_after_cleanup(same_turn, deleted) {
-        detach_abandoned_placeholder_controller(shared, state);
+        finish_abandoned_placeholder_detach(shared, state);
     }
     deleted
 }

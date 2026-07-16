@@ -39,7 +39,8 @@ use crate::services::provider::ProviderKind;
 mod abandon_guard;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
-    finalize_owner_dead_cleanup_if_same_turn,
+    begin_abandoned_placeholder_detach, finalize_owner_dead_cleanup_if_same_turn,
+    finish_abandoned_placeholder_detach,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -612,12 +613,7 @@ async fn run_placeholder_sweep_pass(
                 {
                     continue;
                 }
-                let key = super::placeholder_controller::PlaceholderKey {
-                    provider: provider.clone(),
-                    channel_id: serenity::ChannelId::new(state.channel_id),
-                    message_id: serenity::MessageId::new(state.current_msg_id),
-                };
-                shared.ui.placeholder_controller.begin_detach(&key).await;
+                begin_abandoned_placeholder_detach(shared, &state).await;
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
@@ -654,7 +650,7 @@ async fn run_placeholder_sweep_pass(
                 {
                     report.abandoned += 1;
                 } else {
-                    shared.ui.placeholder_controller.finish_detach(&key);
+                    finish_abandoned_placeholder_detach(shared, &state);
                 }
             }
         }
