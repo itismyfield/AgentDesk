@@ -396,9 +396,9 @@ fn line_has_claude_tui_interrupt_chrome(line: &str) -> bool {
         return false;
     };
     let before_interrupt = &line[..interrupt_start];
-    let has_status_group = before_interrupt.rfind('(').is_some_and(|open| {
-        !before_interrupt[open + 1..].contains(')') && before_interrupt[open + 1..].contains('·')
-    });
+    let has_status_group = before_interrupt.starts_with('(')
+        && !before_interrupt[1..].contains(')')
+        && before_interrupt[1..].contains('·');
     let spinner_prefix = line.chars().next().is_some_and(is_claude_tui_spinner_glyph);
     has_status_group || (spinner_prefix && lower[..interrupt_start].contains('…'))
 }
@@ -462,9 +462,12 @@ fn tmux_line_is_claude_tui_structured_spinner(line: &str) -> bool {
     if !claude_tui_spinner_status_phrase_is_compact(status) {
         return false;
     }
+    if !claude_tui_spinner_status_is_known(status) {
+        return false;
+    }
     let suffix = suffix.trim_start();
     if suffix.is_empty() {
-        return claude_tui_spinner_status_is_known(status);
+        return true;
     }
     if !suffix.starts_with('(') {
         return false;
@@ -2040,6 +2043,18 @@ some earlier assistant prose still on screen
 
         assert!(!tmux_capture_indicates_claude_tui_busy(capture));
         assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
+
+        let parenthesized_prose = "\
+⏺ The footer shows (12s · esc to interrupt) while the turn is running.
+✻ Baked for 2s
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done";
+        assert!(!tmux_capture_indicates_claude_tui_busy(parenthesized_prose));
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(
+            parenthesized_prose
+        ));
     }
 
     // #3107 codex re-review (F2 PARTIAL close): a spinner-progress line keyed on
@@ -2139,9 +2154,11 @@ earlier assistant prose
         assert!(!tmux_line_is_claude_tui_structured_spinner(
             "· Thinking through the problem…"
         ));
-        assert!(!tmux_line_is_claude_tui_structured_spinner("✳ Done…"));
+        for line in ["✳ Done…", "✳ Done… (12s)"] {
+            assert!(!tmux_line_is_claude_tui_structured_spinner(line));
+        }
         assert!(!tmux_capture_indicates_claude_tui_busy(
-            "✳ Done…\n────────────────────────────────────────\n❯"
+            "✳ Done… (12s)\n────────────────────────────────────────\n❯"
         ));
         assert!(!tmux_line_is_claude_tui_structured_spinner(
             "✳ This ordinary prose has far too many words to be compact status chrome…"
