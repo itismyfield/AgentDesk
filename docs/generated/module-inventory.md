@@ -423,7 +423,7 @@
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 | 32 | 17 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 2554 | 1403 | 1151 | giant-file |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 5 | 5 | 0 |  |
-| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2777 | 1656 | 1121 | giant-file |
+| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2779 | 1658 | 1121 | giant-file |
 | `services::codex_tui::rollout_index` | `src/services/codex_tui/rollout_index.rs` | 1200 | 618 | 582 |  |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 4254 | 1329 | 2925 | giant-file |
 | `services::codex_tui::rollout_tail::parser` | `src/services/codex_tui/rollout_tail/parser.rs` | 405 | 405 | 0 |  |
