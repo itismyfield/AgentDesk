@@ -884,6 +884,7 @@ mod tests {
             bridge_current_msg_id: Some(state.current_msg_id),
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(state.user_msg_id),
+            mailbox_turn_started_at_ms: None,
             queue_depth: 0,
             pending_discord_callback_msg_id: None,
             pending_thread_proof: false,

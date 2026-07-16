@@ -67,6 +67,9 @@ use auto_heal_attempts::{
 };
 
 const FROZEN_BUSY_JSONL_READY_FALLBACK_AGE: Duration = Duration::from_secs(10 * 60);
+// Cover the observed three-second admission race with a 10x margin while
+// bounding delayed reclamation of a genuinely orphaned token to 30 seconds.
+const ORPHAN_PENDING_TOKEN_ADMISSION_GRACE: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 type IdleTmuxReattachInflightCandidateHook =
@@ -170,6 +173,7 @@ pub(in crate::services::discord) struct RelayRecoveryEvidence {
     pub bridge_inflight_present: bool,
     pub mailbox_has_cancel_token: bool,
     pub mailbox_active_user_msg_id: Option<u64>,
+    pub mailbox_turn_started_at_ms: Option<i64>,
     pub queue_depth: usize,
     pub pending_thread_proof: bool,
     pub stale_thread_proof: bool,
@@ -303,6 +307,7 @@ fn evidence_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryEviden
         bridge_inflight_present: snapshot.bridge_inflight_present,
         mailbox_has_cancel_token: snapshot.mailbox_has_cancel_token,
         mailbox_active_user_msg_id: snapshot.mailbox_active_user_msg_id,
+        mailbox_turn_started_at_ms: snapshot.mailbox_turn_started_at_ms,
         queue_depth: snapshot.queue_depth,
         pending_thread_proof: snapshot.pending_thread_proof,
         stale_thread_proof: snapshot.stale_thread_proof,
@@ -337,12 +342,23 @@ fn eligible_stale_thread_proof(snapshot: &RelayHealthSnapshot) -> bool {
         && snapshot.tmux_alive != Some(true)
 }
 
-fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot) -> bool {
+fn orphan_pending_token_within_admission_grace(
+    snapshot: &RelayHealthSnapshot,
+    now_ms: i64,
+) -> bool {
+    snapshot.mailbox_turn_started_at_ms.is_some_and(|started_at_ms| {
+        now_ms.saturating_sub(started_at_ms)
+            < ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64
+    })
+}
+
+fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot, now_ms: i64) -> bool {
     snapshot.mailbox_has_cancel_token
         && !snapshot.bridge_inflight_present
         && !snapshot.watcher_attached
         && snapshot.tmux_alive != Some(true)
         && !is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
+        && !orphan_pending_token_within_admission_grace(snapshot, now_ms)
 }
 
 fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
@@ -445,15 +461,23 @@ pub(in crate::services::discord) fn plan_relay_recovery(
             )
         }
         RelayStallState::OrphanPendingToken => {
-            let eligible = eligible_orphan_pending_token(snapshot);
+            let eligible = eligible_orphan_pending_token(snapshot, now_ms);
+            let admission_grace = orphan_pending_token_within_admission_grace(snapshot, now_ms);
             (
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
                 "mailbox holds a cancel token without bridge, watcher, or live tmux evidence",
                 eligible,
                 (!eligible).then_some(if protected_tmux {
                     "protected_agentdesk_tmux_session"
-                } else {
+                } else if snapshot.bridge_inflight_present
+                    || snapshot.watcher_attached
+                    || snapshot.tmux_alive == Some(true)
+                {
                     "orphan_token_has_live_evidence"
+                } else if admission_grace {
+                    "orphan_token_within_admission_grace"
+                } else {
+                    "orphan_token_missing_required_evidence"
                 }),
             )
         }
@@ -582,6 +606,27 @@ pub(in crate::services::discord) async fn auto_apply_relay_recovery_for_shared(
     allowed_action: RelayRecoveryActionKind,
     source: RelayRecoveryApplySource,
 ) -> Result<RelayRecoveryResponse, RelayRecoveryError> {
+    auto_apply_relay_recovery_for_shared_at(
+        registry,
+        shared,
+        provider,
+        channel_id,
+        allowed_action,
+        source,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+}
+
+async fn auto_apply_relay_recovery_for_shared_at(
+    registry: &HealthRegistry,
+    shared: Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    allowed_action: RelayRecoveryActionKind,
+    source: RelayRecoveryApplySource,
+    now_ms: i64,
+) -> Result<RelayRecoveryResponse, RelayRecoveryError> {
     let snapshot = registry
         .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id)
         .await
@@ -590,7 +635,6 @@ pub(in crate::services::discord) async fn auto_apply_relay_recovery_for_shared(
             provider: Some(provider.as_str().to_string()),
         })?;
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
     let mut decision =
         plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
@@ -1534,6 +1578,7 @@ mod tests {
             bridge_current_msg_id: None,
             mailbox_has_cancel_token: false,
             mailbox_active_user_msg_id: None,
+            mailbox_turn_started_at_ms: None,
             queue_depth: 0,
             pending_discord_callback_msg_id: None,
             pending_thread_proof: false,
@@ -1758,6 +1803,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(9001),
+            mailbox_turn_started_at_ms: None,
             bridge_current_msg_id: Some(9002),
             last_capture_offset: Some(7968),
             last_relay_offset: 0,
@@ -1815,6 +1861,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(9001),
+            mailbox_turn_started_at_ms: None,
             bridge_current_msg_id: Some(9002),
             last_relay_ts_ms: Some(1_777_001_234_000),
             last_capture_offset: Some(7968),
@@ -2011,6 +2058,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(user_msg.get()),
+            mailbox_turn_started_at_ms: None,
             last_capture_offset: Some(128),
             last_relay_offset: 0,
             unread_bytes: Some(128),
@@ -2098,6 +2146,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(user_msg.get()),
+            mailbox_turn_started_at_ms: None,
             last_capture_offset: Some(output_len),
             last_relay_offset: output_len,
             unread_bytes: Some(0),
@@ -2296,6 +2345,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(stale_user_msg_id),
+            mailbox_turn_started_at_ms: None,
             bridge_current_msg_id: Some(footer_msg.get()),
             last_capture_offset: Some(output_len),
             last_relay_offset: output_len,
@@ -2416,6 +2466,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(user_msg.get()),
+            mailbox_turn_started_at_ms: None,
             last_capture_offset: Some(output_len),
             last_relay_offset: output_len,
             unread_bytes: Some(0),
@@ -2517,6 +2568,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(user_msg.get()),
+            mailbox_turn_started_at_ms: None,
             last_capture_offset: Some(128),
             last_relay_offset: 0,
             unread_bytes: Some(128),
@@ -2608,6 +2660,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(user_msg.get()),
+            mailbox_turn_started_at_ms: None,
             last_capture_offset: Some(128),
             last_relay_offset: 0,
             unread_bytes: Some(128),
@@ -2701,6 +2754,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(t1_msg.get()),
+            mailbox_turn_started_at_ms: None,
             last_capture_offset: Some(64),
             last_relay_offset: 0,
             unread_bytes: Some(64),
@@ -2768,15 +2822,41 @@ mod tests {
     }
 
     #[test]
-    fn orphan_pending_token_is_auto_heal_candidate_only_without_live_evidence() {
+    fn fresh_orphan_shape_is_guarded_by_admission_grace() {
         let decision = plan_relay_recovery(
             &RelayHealthSnapshot {
                 mailbox_has_cancel_token: true,
                 mailbox_active_user_msg_id: Some(9001),
+                mailbox_turn_started_at_ms: Some(1_000),
                 ..snapshot()
             },
             RelayStallState::OrphanPendingToken,
-            1_000,
+            10_000,
+        );
+
+        assert_eq!(
+            decision.action,
+            RelayRecoveryActionKind::ClearOrphanPendingToken
+        );
+        assert!(!decision.auto_heal.eligible);
+        assert_eq!(
+            decision.auto_heal.skipped_reason,
+            Some("orphan_token_within_admission_grace")
+        );
+        assert_eq!(decision.evidence.mailbox_turn_started_at_ms, Some(1_000));
+    }
+
+    #[test]
+    fn old_orphan_shape_remains_auto_heal_eligible() {
+        let decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                mailbox_has_cancel_token: true,
+                mailbox_active_user_msg_id: Some(9001),
+                mailbox_turn_started_at_ms: Some(1_000),
+                ..snapshot()
+            },
+            RelayStallState::OrphanPendingToken,
+            1_000 + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
         );
 
         assert_eq!(
@@ -2784,20 +2864,41 @@ mod tests {
             RelayRecoveryActionKind::ClearOrphanPendingToken
         );
         assert!(decision.auto_heal.eligible);
+        assert_eq!(decision.auto_heal.skipped_reason, None);
+    }
 
+    #[test]
+    fn orphan_token_live_evidence_and_agentdesk_tmux_stay_protected() {
         let live = plan_relay_recovery(
             &RelayHealthSnapshot {
                 mailbox_has_cancel_token: true,
+                mailbox_turn_started_at_ms: Some(1_000),
                 watcher_attached: true,
                 ..snapshot()
             },
             RelayStallState::OrphanPendingToken,
-            1_000,
+            60_000,
         );
         assert!(!live.auto_heal.eligible);
         assert_eq!(
             live.auto_heal.skipped_reason,
             Some("orphan_token_has_live_evidence")
+        );
+
+        let protected_tmux = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                mailbox_has_cancel_token: true,
+                mailbox_turn_started_at_ms: Some(1_000),
+                tmux_session: Some("AgentDesk-codex-protected".to_string()),
+                ..snapshot()
+            },
+            RelayStallState::OrphanPendingToken,
+            60_000,
+        );
+        assert!(!protected_tmux.auto_heal.eligible);
+        assert_eq!(
+            protected_tmux.auto_heal.skipped_reason,
+            Some("protected_agentdesk_tmux_session")
         );
     }
 
@@ -2846,6 +2947,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(3_779_101),
+            mailbox_turn_started_at_ms: None,
             last_capture_offset: Some(2_048),
             last_relay_offset: 0,
             unread_bytes: Some(2_048),
@@ -2899,7 +3001,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_apply_orphan_pending_token_clears_mailbox_token() {
+    async fn auto_apply_preserves_fresh_admission_token() {
         let _guard = auto_heal_test_lock().lock().await;
         clear_auto_heal_attempts_for_tests();
         let (_root_guard, _root_dir) = isolated_agentdesk_root();
@@ -2907,11 +3009,6 @@ mod tests {
         let (registry, shared) = registry_with_shared(provider.clone()).await;
         let channel = ChannelId::new(3_360_001);
         let token = start_test_turn(&shared, channel, MessageId::new(91)).await;
-        token
-            .tmux_session
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .replace("AgentDesk-codex-3360-dead-token-session".to_string());
         shared.restart.global_active.store(1, Ordering::Relaxed);
 
         let response = auto_apply_relay_recovery_for_shared(
@@ -2923,28 +3020,28 @@ mod tests {
             RelayRecoveryApplySource::ProbeAutoHeal,
         )
         .await
-        .expect("orphan token auto-heal should evaluate");
+        .expect("fresh admission auto-heal should evaluate");
 
-        assert!(response.applied);
+        assert!(!response.applied);
+        assert!(response.skipped);
         assert_eq!(
             response.decision.action,
             RelayRecoveryActionKind::ClearOrphanPendingToken
         );
-        assert_eq!(response.decision.evidence.tmux_alive, Some(false));
-        assert!(
-            response
-                .apply_result
-                .as_ref()
-                .is_some_and(|result| result.removed_mailbox_token)
+        assert_eq!(
+            response.decision.auto_heal.skipped_reason,
+            Some("orphan_token_within_admission_grace")
         );
+        assert_eq!(response.decision.evidence.tmux_alive, None);
+        assert!(response.decision.evidence.mailbox_turn_started_at_ms.is_some());
         assert!(
             super::super::mailbox_snapshot(&shared, channel)
                 .await
                 .cancel_token
-                .is_none()
+                .is_some()
         );
-        assert!(token.cancelled.load(Ordering::Relaxed));
-        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -2957,26 +3054,30 @@ mod tests {
         let channel = ChannelId::new(3_360_002);
         start_test_turn(&shared, channel, MessageId::new(92)).await;
 
-        let first = auto_apply_relay_recovery_for_shared(
+        let first = auto_apply_relay_recovery_for_shared_at(
             &registry,
             shared.clone(),
             &provider,
             channel.get(),
             RelayRecoveryActionKind::ClearOrphanPendingToken,
             RelayRecoveryApplySource::ProbeAutoHeal,
+            chrono::Utc::now().timestamp_millis()
+                + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
         )
         .await
         .expect("first orphan token auto-heal should evaluate");
         assert!(first.applied);
 
         start_test_turn(&shared, channel, MessageId::new(93)).await;
-        let second = auto_apply_relay_recovery_for_shared(
+        let second = auto_apply_relay_recovery_for_shared_at(
             &registry,
             shared.clone(),
             &provider,
             channel.get(),
             RelayRecoveryActionKind::ClearOrphanPendingToken,
             RelayRecoveryApplySource::ProbeAutoHeal,
+            chrono::Utc::now().timestamp_millis()
+                + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
         )
         .await
         .expect("second orphan token auto-heal should evaluate");
@@ -3012,13 +3113,15 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner())
             .replace("AgentDesk-codex-3360-watchdog-first".to_string());
         shared.restart.global_active.store(1, Ordering::Relaxed);
-        let first = auto_apply_relay_recovery_for_shared(
+        let first = auto_apply_relay_recovery_for_shared_at(
             &registry,
             shared.clone(),
             &provider,
             channel.get(),
             RelayRecoveryActionKind::ClearOrphanPendingToken,
             RelayRecoveryApplySource::StallWatchdog,
+            chrono::Utc::now().timestamp_millis()
+                + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
         )
         .await
         .expect("first watchdog orphan token auto-heal should evaluate");
@@ -3055,13 +3158,15 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner())
             .replace("AgentDesk-codex-3360-watchdog-second".to_string());
         shared.restart.global_active.store(1, Ordering::Relaxed);
-        let second = auto_apply_relay_recovery_for_shared(
+        let second = auto_apply_relay_recovery_for_shared_at(
             &registry,
             shared.clone(),
             &provider,
             channel.get(),
             RelayRecoveryActionKind::ClearOrphanPendingToken,
             RelayRecoveryApplySource::StallWatchdog,
+            chrono::Utc::now().timestamp_millis()
+                + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
         )
         .await
         .expect("second watchdog orphan token auto-heal should evaluate");

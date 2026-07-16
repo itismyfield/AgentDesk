@@ -282,6 +282,7 @@ mod tests {
                 RelayHealthSnapshot {
                     mailbox_has_cancel_token: true,
                     mailbox_active_user_msg_id: Some(9001),
+                    mailbox_turn_started_at_ms: None,
                     ..RelayHealthSnapshot::test_snapshot()
                 },
                 RelayStallState::OrphanPendingToken,
