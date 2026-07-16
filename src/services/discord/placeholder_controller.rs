@@ -123,8 +123,10 @@ impl PlaceholderEntrySlot {
     }
 
     async fn wait_for_active_edits(&self) {
+        let mut backoff = Duration::from_millis(1);
         while self.active_edits.load(Ordering::Acquire) != 0 {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(backoff).await;
+            backoff = backoff.saturating_mul(2).min(Duration::from_millis(50));
         }
     }
 }
@@ -674,6 +676,219 @@ impl PlaceholderController {
             self.entries
                 .remove_if(&key, |_, current| Arc::ptr_eq(current, &entry));
         }
+    }
+}
+
+#[cfg(test)]
+mod detach_incarnation_tests {
+    use super::*;
+    use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct BlockingGateway {
+        calls: AtomicUsize,
+        entered: tokio::sync::Semaphore,
+        release: tokio::sync::Semaphore,
+    }
+
+    impl BlockingGateway {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                entered: tokio::sync::Semaphore::new(0),
+                release: tokio::sync::Semaphore::new(0),
+            }
+        }
+    }
+
+    impl TurnGateway for BlockingGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async { Ok(MessageId::new(1)) })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.add_permits(1);
+                self.release
+                    .acquire()
+                    .await
+                    .expect("release semaphore remains open")
+                    .forget();
+                Ok(())
+            })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<
+            'a,
+            Result<crate::services::discord::formatting::ReplaceLongMessageOutcome, String>,
+        > {
+            Box::pin(async {
+                Ok(crate::services::discord::formatting::ReplaceLongMessageOutcome::EditedOriginal)
+            })
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a crate::services::discord::Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            Some(ProviderKind::Codex)
+        }
+    }
+
+    fn key() -> PlaceholderKey {
+        PlaceholderKey {
+            provider: ProviderKind::Codex,
+            channel_id: ChannelId::new(11),
+            message_id: MessageId::new(12),
+        }
+    }
+
+    fn input() -> PlaceholderActiveInput {
+        PlaceholderActiveInput {
+            reason: MonitorHandoffReason::ExplicitCall,
+            started_at_unix: 1_700_000_000,
+            tool_summary: Some("Monitor".to_string()),
+            command_summary: Some("session=detach-race".to_string()),
+            reason_detail: None,
+            context_line: None,
+            request_line: None,
+            progress_line: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn detach_during_active_patch_rejects_late_commit_and_lookup() {
+        let gateway = Arc::new(BlockingGateway::new());
+        let controller = Arc::new(PlaceholderController::default());
+        let old_slot = controller.entry(&key());
+        let ensure = {
+            let gateway = gateway.clone();
+            let controller = controller.clone();
+            tokio::spawn(async move {
+                controller
+                    .ensure_active(gateway.as_ref(), key(), input())
+                    .await
+            })
+        };
+        gateway
+            .entered
+            .acquire()
+            .await
+            .expect("gateway entry semaphore remains open")
+            .forget();
+
+        let detach = {
+            let controller = controller.clone();
+            tokio::spawn(async move {
+                controller.begin_detach(&key()).await;
+            })
+        };
+        while !old_slot.detached.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        gateway.release.add_permits(1);
+
+        assert_eq!(
+            ensure.await.expect("ensure task joins"),
+            PlaceholderControllerOutcome::Rejected
+        );
+        detach.await.expect("detach task joins");
+        assert_ne!(old_slot.inner.lock().await.state, PlaceholderLifecycle::Active);
+        assert_eq!(
+            controller
+                .ensure_active(gateway.as_ref(), key(), input())
+                .await,
+            PlaceholderControllerOutcome::Rejected
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+        controller.finish_detach(&key());
+    }
+
+    #[tokio::test]
+    async fn detach_first_rejects_active_without_patch() {
+        let gateway = BlockingGateway::new();
+        let controller = PlaceholderController::default();
+        let _slot = controller.entry(&key());
+
+        controller.begin_detach(&key()).await;
+        let outcome = controller
+            .ensure_active(&gateway, key(), input())
+            .await;
+
+        assert_eq!(outcome, PlaceholderControllerOutcome::Rejected);
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+        controller.finish_detach(&key());
+    }
+
+    #[tokio::test]
+    async fn uncontended_active_to_terminal_path_is_preserved() {
+        let gateway = BlockingGateway::new();
+        gateway.release.add_permits(2);
+        let controller = PlaceholderController::default();
+
+        let active = controller.ensure_active(&gateway, key(), input()).await;
+        let terminal = controller
+            .transition(&gateway, key(), PlaceholderLifecycle::Completed)
+            .await;
+        let repeated = controller
+            .transition(&gateway, key(), PlaceholderLifecycle::Aborted)
+            .await;
+
+        assert_eq!(active, PlaceholderControllerOutcome::Edited);
+        assert_eq!(terminal, PlaceholderControllerOutcome::Edited);
+        assert_eq!(repeated, PlaceholderControllerOutcome::AlreadyTerminal);
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            controller.entry(&key()).inner.lock().await.state,
+            PlaceholderLifecycle::Completed
+        );
     }
 }
 
