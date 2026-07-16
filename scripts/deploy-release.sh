@@ -856,10 +856,25 @@ _reset_pg_tunnel_rollback_state() {
     PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
 }
 
+_pg_canonical_listener_absent() {
+    command -v lsof >/dev/null 2>&1 || return 1
+    ! lsof -nP -a -iTCP@127.0.0.1:15432 -sTCP:LISTEN >/dev/null 2>&1
+}
+
+_pg_wait_canonical_listener_absent() {
+    local attempt=0
+    while [ "$attempt" -lt 25 ]; do
+        _pg_canonical_listener_absent && return 0
+        sleep 0.2
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 _rollback_pg_tunnel_migration() {
     local domain="${PG_TUNNEL_LAUNCHD_DOMAIN:-}" bin="${PG_TUNNEL_BIN:-}"
     local plist="${PG_TUNNEL_PLIST_PATH:-}" backup="${PG_TUNNEL_ROLLBACK_DIR:-}"
-    local restore_ok=1
+    local restore_ok=1 readiness_ok=0
     [ "${PG_TUNNEL_ROLLBACK_ARMED:-0}" = 1 ] || return 0
     if [ -z "$domain" ] || [ -z "$bin" ] || [ -z "$plist" ] || [ -z "$backup" ]; then
         echo "✗ PG tunnel rollback state is incomplete; recovery material retained at ${backup:-unknown}" >&2
@@ -907,16 +922,27 @@ _rollback_pg_tunnel_migration() {
     fi
 
     if [ "$restore_ok" = 1 ]; then
-        if _pg_sql_probe 15432; then
-            if rm -rf "$backup" 2>/dev/null; then
-                _reset_pg_tunnel_rollback_state
-                echo "✓ Previous PG tunnel state restored and SQL-ready" >&2
-                return 0
+        if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ] \
+          || [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ]; then
+            if _pg_sql_probe 15432; then
+                readiness_ok=1
+            else
+                echo "✗ Restored PG tunnel did not become SQL-ready on :15432" >&2
             fi
-            echo "✗ Previous PG tunnel is SQL-ready but rollback backup cleanup failed" >&2
+            _cleanup_owned_pg_tunnel_preflight
+        elif _pg_wait_canonical_listener_absent; then
+            readiness_ok=1
         else
-            echo "✗ Restored PG tunnel did not become SQL-ready on :15432" >&2
+            echo "✗ Restored no-tunnel state still has a listener on :15432" >&2
         fi
+    fi
+    if [ "$restore_ok" = 1 ] && [ "$readiness_ok" = 1 ]; then
+        if rm -rf "$backup" 2>/dev/null; then
+            _reset_pg_tunnel_rollback_state
+            echo "✓ Previous PG tunnel state restored and verified" >&2
+            return 0
+        fi
+        echo "✗ Previous PG tunnel state is verified but rollback backup cleanup failed" >&2
     fi
     echo "⚠ PG tunnel rollback incomplete; recovery material retained at $backup" >&2
     return 1
@@ -924,10 +950,12 @@ _rollback_pg_tunnel_migration() {
 
 _cleanup_on_exit() {
     local status=${1:-$?}
-    trap - EXIT INT TERM
+    trap - EXIT
+    trap '' INT TERM
     _cleanup_owned_pg_tunnel_preflight
     if [ "$status" -ne 0 ]; then
         _rollback_pg_tunnel_migration || true
+        _cleanup_owned_pg_tunnel_preflight
     fi
     # #3858: if the binary was promoted (ROLLBACK_ARMED) but the deploy never
     # reached DEPLOY_OK, restore the last-known-good binary and restart BEFORE the
@@ -1669,6 +1697,7 @@ port, output_dir, password_output = ARGV
 uri = URI.parse(ENV.fetch("DATABASE_URL"))
 raise "unsupported database URL scheme" unless %w[postgres postgresql].include?(uri.scheme)
 decode = ->(value) { URI::DEFAULT_PARSER.unescape(value.to_s) }
+host = uri.hostname.to_s
 user = decode.call(uri.user)
 name = decode.call(uri.path.to_s.sub(%r{\A/}, ""))
 password = decode.call(uri.password) if uri.password
@@ -1679,10 +1708,6 @@ option_env = {
   "connect_timeout" => "PGCONNECT_TIMEOUT",
   "fallback_application_name" => "PGAPPNAME",
   "gssencmode" => "PGGSSENCMODE",
-  "keepalives" => "PGKEEPALIVES",
-  "keepalives_count" => "PGKEEPALIVESCOUNT",
-  "keepalives_idle" => "PGKEEPALIVESIDLE",
-  "keepalives_interval" => "PGKEEPALIVESINTERVAL",
   "krbsrvname" => "PGKRBSRVNAME",
   "options" => "PGOPTIONS",
   "require_auth" => "PGREQUIREAUTH",
@@ -1694,11 +1719,14 @@ option_env = {
   "sslrootcert" => "PGSSLROOTCERT",
   "ssl_max_protocol_version" => "PGSSLMAXPROTOCOLVERSION",
   "ssl_min_protocol_version" => "PGSSLMINPROTOCOLVERSION",
-  "target_session_attrs" => "PGTARGETSESSIONATTRS",
-  "tcp_user_timeout" => "PGTCPUSER_TIMEOUT"
+  "target_session_attrs" => "PGTARGETSESSIONATTRS"
 }
 fields = {}
-URI.decode_www_form(uri.query.to_s).each do |key, value|
+uri.query.to_s.split("&", -1).each do |pair|
+  next if pair.empty?
+  encoded_key, encoded_value = pair.split("=", 2)
+  key = decode.call(encoded_key)
+  value = decode.call(encoded_value)
   case key
   when "password"
     password = value
@@ -1713,8 +1741,9 @@ URI.decode_www_form(uri.query.to_s).each do |key, value|
     fields[env_name] = value if env_name
   end
 end
-raise "database user or name missing" if user.empty? || name.empty?
-fields.merge!("PGHOST" => "127.0.0.1", "PGPORT" => Integer(port, 10).to_s,
+raise "database host, user, or name missing" if host.empty? || user.empty? || name.empty?
+fields.merge!("PGHOST" => host, "PGHOSTADDR" => "127.0.0.1",
+              "PGPORT" => Integer(port, 10).to_s,
               "PGUSER" => user, "PGDATABASE" => name)
 raise "NUL is not allowed in PostgreSQL settings" if fields.values.any? { |value| value.include?("\0") }
 fields.each do |env_name, value|
@@ -1724,9 +1753,11 @@ fields.each do |env_name, value|
 end
 if password
   raise "NUL is not allowed in PostgreSQL password" if password.include?("\0")
-  escape = ->(value) { value.to_s.gsub("\\", "\\\\").gsub(":", "\\:") }
+  escape = lambda do |value|
+    value.to_s.gsub("\\") { "\\\\" }.gsub(":") { "\\:" }
+  end
   File.open(password_output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
-    file.write(["127.0.0.1", port, name, user, password].map { |value| escape.call(value) }.join(":") + "\n")
+    file.write([host, port, name, user, password].map { |value| escape.call(value) }.join(":") + "\n")
   end
 end
 RUBY
@@ -1739,10 +1770,12 @@ config_path, port, output_dir, password_output = ARGV
 config = YAML.safe_load(File.read(config_path), aliases: true) || {}
 db = config.fetch("database", {})
 raise "database disabled" unless db["enabled"] == true
+host = db.fetch("host").to_s
 user = db.fetch("user").to_s
 name = db.fetch("dbname").to_s
-raise "database user or name missing" if user.empty? || name.empty?
-fields = { "PGHOST" => "127.0.0.1", "PGPORT" => Integer(port, 10).to_s,
+raise "database host, user, or name missing" if host.empty? || user.empty? || name.empty?
+fields = { "PGHOST" => host, "PGHOSTADDR" => "127.0.0.1",
+           "PGPORT" => Integer(port, 10).to_s,
            "PGUSER" => user, "PGDATABASE" => name }
 raise "NUL is not allowed in PostgreSQL settings" if fields.values.any? { |value| value.include?("\0") }
 fields.each do |env_name, value|
@@ -1753,9 +1786,11 @@ end
 if db.key?("password") && !db["password"].nil?
   password = db["password"].to_s
   raise "NUL is not allowed in PostgreSQL password" if password.include?("\0")
-  escape = ->(value) { value.to_s.gsub("\\", "\\\\").gsub(":", "\\:") }
+  escape = lambda do |value|
+    value.to_s.gsub("\\") { "\\\\" }.gsub(":") { "\\:" }
+  end
   File.open(password_output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
-    file.write(["127.0.0.1", port, name, user, password].map { |value| escape.call(value) }.join(":") + "\n")
+    file.write([host, port, name, user, password].map { |value| escape.call(value) }.join(":") + "\n")
   end
 end
 RUBY
@@ -1776,11 +1811,10 @@ _pg_sql_probe() {
     )
     local -a conninfo_names=(
         PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT
-        PGGSSENCMODE PGHOST PGKEEPALIVES PGKEEPALIVESCOUNT PGKEEPALIVESIDLE
-        PGKEEPALIVESINTERVAL PGKRBSRVNAME PGOPTIONS PGPORT PGREQUIREAUTH
-        PGSSLCERT PGSSLCRL PGSSLCRLDIR PGSSLKEY PGSSLMAXPROTOCOLVERSION
-        PGSSLMINPROTOCOLVERSION PGSSLMODE PGSSLROOTCERT PGTARGETSESSIONATTRS
-        PGTCPUSER_TIMEOUT PGUSER PGDATABASE
+        PGGSSENCMODE PGHOST PGHOSTADDR PGKRBSRVNAME PGOPTIONS PGPORT
+        PGREQUIREAUTH PGSSLCERT PGSSLCRL PGSSLCRLDIR PGSSLKEY
+        PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE
+        PGSSLROOTCERT PGTARGETSESSIONATTRS PGUSER PGDATABASE
     )
     command -v psql >/dev/null 2>&1 || return 1
     for name in "${clear_names[@]}"; do
@@ -1805,6 +1839,8 @@ _pg_sql_probe() {
     done
     if [ -s "$password_file" ]; then
         psql_env+=("PGPASSFILE=$password_file")
+    else
+        psql_env+=("PGPASSFILE=/dev/null")
     fi
     while [ "$attempt" -lt 20 ]; do
         if "${psql_env[@]}" psql --no-psqlrc \
@@ -1872,6 +1908,13 @@ _migrate_pg_tunnel_before_release_stop() {
     PG_TUNNEL_ROLLBACK_JOB_LOADED=0
     PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
     if launchctl print "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" >/dev/null 2>&1; then
+        if [ ! -f "$PG_TUNNEL_ROLLBACK_DIR/wrapper" ] \
+          || [ ! -f "$PG_TUNNEL_ROLLBACK_DIR/plist" ]; then
+            echo "✗ Loaded PG tunnel job lacks restorable wrapper/plist snapshots"
+            rm -rf "$PG_TUNNEL_ROLLBACK_DIR" 2>/dev/null || true
+            _reset_pg_tunnel_rollback_state
+            return 1
+        fi
         PG_TUNNEL_ROLLBACK_JOB_LOADED=1
     else
         if ! PG_TUNNEL_ROLLBACK_MANUAL_KIND=$(
@@ -1898,6 +1941,14 @@ _migrate_pg_tunnel_before_release_stop() {
     _install_pg_tunnel_plist || return 1
     xattr -d com.apple.quarantine "$PG_TUNNEL_PLIST_PATH" 2>/dev/null || true
     launchctl bootout "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" 2>/dev/null || true
+    if ! "$wrapper_source" --take-over-canonical; then
+        echo "✗ Failed to synchronously take over the canonical PG tunnel"
+        return 1
+    fi
+    if ! _pg_wait_canonical_listener_absent; then
+        echo "✗ Canonical PG tunnel listener survived synchronous takeover"
+        return 1
+    fi
     if ! launchctl bootstrap "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
         echo "✗ PG tunnel bootstrap failed"
         return 1

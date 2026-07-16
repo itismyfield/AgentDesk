@@ -172,6 +172,11 @@ case "${1:-}" in
         canonical_forward_kind
         exit 0
         ;;
+    --take-over-canonical)
+        [ "$#" -eq 1 ] || die "usage: $0 --take-over-canonical"
+        take_over_manual_tunnel
+        exit 0
+        ;;
     --restore-canonical)
         [ "$#" -eq 3 ] || die "usage: $0 --restore-canonical CONFIG KIND"
         load_config "$2"
