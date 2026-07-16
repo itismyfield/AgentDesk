@@ -1053,8 +1053,8 @@
 | `services::session_backend::terminal_usage` | `src/services/session_backend/terminal_usage.rs` | 212 | 106 | 106 |  |
 | `services::session_forwarding` | `src/services/session_forwarding.rs` | 493 | 315 | 178 |  |
 | `services::session_selector_validity` | `src/services/session_selector_validity.rs` | 395 | 149 | 246 |  |
-| `services::settings` | `src/services/settings.rs` | 1566 | 1059 | 507 | giant-file |
-| `services::settings::runtime_config_put` | `src/services/settings/runtime_config_put.rs` | 27 | 27 | 0 |  |
+| `services::settings` | `src/services/settings.rs` | 1668 | 1072 | 596 | giant-file |
+| `services::settings::runtime_config_put` | `src/services/settings/runtime_config_put.rs` | 44 | 44 | 0 |  |
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 535 | 508 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
