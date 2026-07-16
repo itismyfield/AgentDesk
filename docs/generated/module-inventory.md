@@ -119,7 +119,7 @@
 | `db::dispatches::outbox::notify` | `src/db/dispatches/outbox/notify.rs` | 75 | 75 | 0 |  |
 | `db::dispatches::outbox::retry` | `src/db/dispatches/outbox/retry.rs` | 60 | 60 | 0 |  |
 | `db::idempotency` | `src/db/idempotency.rs` | 659 | 302 | 357 |  |
-| `db::intake_outbox` | `src/db/intake_outbox.rs` | 2095 | 663 | 1432 |  |
+| `db::intake_outbox` | `src/db/intake_outbox.rs` | 2156 | 667 | 1489 |  |
 | `db::kanban` | `src/db/kanban.rs` | 1 | 1 | 0 |  |
 | `db::kanban_cards` | `src/db/kanban_cards/mod.rs` | 273 | 273 | 0 |  |
 | `db::kanban_cards::crud` | `src/db/kanban_cards/crud.rs` | 414 | 414 | 0 |  |
@@ -404,10 +404,10 @@
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1129 | 587 | 542 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
-| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2154 | 824 | 1330 |  |
+| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2157 | 826 | 1331 |  |
 | `services::cluster::intake_router_hook::session_owner` | `src/services/cluster/intake_router_hook/session_owner.rs` | 112 | 112 | 0 |  |
 | `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
-| `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 418 | 336 | 82 |  |
+| `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 452 | 337 | 115 |  |
 | `services::cluster::intake_worker_capabilities` | `src/services/cluster/intake_worker_capabilities.rs` | 152 | 152 | 0 |  |
 | `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1022 | 752 | 270 |  |
 | `services::cluster::registry_adapter_sink` | `src/services/cluster/registry_adapter_sink.rs` | 344 | 117 | 227 |  |
@@ -652,23 +652,23 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 34 | 34 | 0 |  |
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 | 48 | 0 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 203 | 143 | 60 |  |
-| `services::discord::router::intake_dispatch` | `src/services/discord/router/intake_dispatch.rs` | 262 | 262 | 0 |  |
+| `services::discord::router::intake_dispatch` | `src/services/discord/router/intake_dispatch.rs` | 263 | 263 | 0 |  |
 | `services::discord::router::intake_dispatch::notice` | `src/services/discord/router/intake_dispatch/notice.rs` | 90 | 74 | 16 |  |
-| `services::discord::router::intake_dispatch::queued` | `src/services/discord/router/intake_dispatch/queued.rs` | 99 | 99 | 0 |  |
-| `services::discord::router::intake_dispatch::skill` | `src/services/discord/router/intake_dispatch/skill.rs` | 45 | 45 | 0 |  |
-| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1654 | 1585 | 69 | giant-file |
+| `services::discord::router::intake_dispatch::queued` | `src/services/discord/router/intake_dispatch/queued.rs` | 100 | 100 | 0 |  |
+| `services::discord::router::intake_dispatch::skill` | `src/services/discord/router/intake_dispatch/skill.rs` | 46 | 46 | 0 |  |
+| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1656 | 1587 | 69 | giant-file |
 | `services::discord::router::intake_gate::busy_duplicate_notice` | `src/services/discord/router/intake_gate/busy_duplicate_notice.rs` | 55 | 27 | 28 |  |
 | `services::discord::router::intake_gate::component_events` | `src/services/discord/router/intake_gate/component_events.rs` | 41 | 41 | 0 |  |
 | `services::discord::router::intake_gate::gate` | `src/services/discord/router/intake_gate/gate.rs` | 155 | 102 | 53 |  |
 | `services::discord::router::intake_gate::queue_effects` | `src/services/discord/router/intake_gate/queue_effects.rs` | 1318 | 871 | 447 |  |
 | `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 632 | 283 | 349 |  |
 | `services::discord::router::intake_queue_transaction` | `src/services/discord/router/intake_queue_transaction.rs` | 1104 | 544 | 560 |  |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 206 | 206 | 0 |  |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 207 | 207 | 0 |  |
 | `services::discord::router::message_handler::attachments` | `src/services/discord/router/message_handler/attachments.rs` | 142 | 114 | 28 |  |
 | `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 87 | 87 | 0 |  |
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 313 | 222 | 91 |  |
 | `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1734 | 1381 | 353 | giant-file |
-| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3081 | 2727 | 354 | giant-file |
+| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3080 | 2726 | 354 | giant-file |
 | `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 699 | 604 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction` | `src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs` | 65 | 65 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 256 | 256 | 0 |  |
