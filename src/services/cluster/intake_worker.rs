@@ -304,6 +304,10 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
         has_reply_boundary: row.has_reply_boundary,
         dm_hint: row.dm_hint,
         turn_kind,
+        // NULL is the pre-0093/older-producer shape: the durable row has no
+        // author-classification proof, so fail safe to the historical
+        // drop-on-cancel behavior instead of guessing human intent. New
+        // leaders always persist Some(true/false).
         preserve_on_cancel: row.preserve_on_cancel.unwrap_or(false),
     })
 }
@@ -445,7 +449,7 @@ mod tests {
 // pre-execute branches we DO want to pin are already
 // covered at the helper level:
 //   - lost-claim race (sweep wins between claim and accept):
-//     `db::intake_outbox::helper_tests::mark_accepted_returns_false_when_sweep_already_reset_the_claim`
+//     `db::intake_outbox::postgres_tests::mark_accepted_returns_false_when_sweep_already_reset_the_claim`
 //   - 23505 classification, claim ordering, sweep correctness:
 //     same module's other 13 tests.
 // Phase 4 (leader hook integration) will re-add tick-level integration
