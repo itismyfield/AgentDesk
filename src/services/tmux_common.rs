@@ -289,9 +289,9 @@ pub(crate) fn tmux_capture_indicates_claude_tui_structured_spinner(capture: &str
         .filter(|l| !l.trim().is_empty())
         .collect::<Vec<_>>();
     let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
-    non_empty[start..].iter().any(|line| {
-        tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line))
-    })
+    non_empty[start..]
+        .iter()
+        .any(|line| tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line)))
 }
 
 /// #3521: `true` when the Claude TUI pane shows a BACKGROUND AGENT still pending — the

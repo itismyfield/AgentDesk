@@ -35,7 +35,7 @@
 | `src/services/discord/turn_view_reconciler.rs` | 2214 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2887 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2077 | discord-relay | 2026-10-31 | #3840 |
-| `src/services/tmux_common.rs` | 1099 | discord-relay | 2026-10-31 | #3924 |
+| `src/services/tmux_common.rs` | 1163 | discord-relay | 2026-10-31 | #3924 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 
 ## Grandfathered
@@ -83,7 +83,7 @@
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
 | `src/services/claude.rs` | 2969 |
-| `src/services/claude_tui/input.rs` | 1949 |
+| `src/services/claude_tui/input.rs` | 1957 |
 | `src/services/codex.rs` | 3131 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
 | `src/services/codex_tui/input.rs` | 1659 |
