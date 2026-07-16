@@ -355,10 +355,11 @@ mod placeholder_suppression_tests {
     fn footer_status_block() -> String {
         let long_tail = "└ cargo test --lib tmux ".repeat(120);
         let panel = format!(
-            "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nTools\n└ cargo test --lib tmux\nSubagents\n└ review inspect\n{long_tail}"
+            "🟢 진행 중\n\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n\nTools\n└ cargo test --lib tmux\nSubagents\n└ review inspect\n{long_tail}"
         );
         let status_block = discord::single_message_panel::compose_footer_status_block("⠋", &panel);
-        assert!(status_block.starts_with("⠋ 진행 중 — Claude (<t:1700000000:R>)"));
+        assert!(status_block.starts_with("⠋ 진행 중"));
+        assert!(status_block.contains("마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"));
         assert!(status_block.contains("Tools"));
         assert!(status_block.contains("Subagents"));
         assert!(status_block.contains('…'));
