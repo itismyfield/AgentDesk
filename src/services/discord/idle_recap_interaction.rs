@@ -562,7 +562,7 @@ async fn edit_deferred_ephemeral(
     }
 }
 
-fn truncate_interaction_body(body: &str) {
+fn truncate_interaction_body(body: &str) -> String {
     const LIMIT: usize = 1800;
     let mut out = String::new();
     let mut chars = body.chars();
