@@ -548,8 +548,7 @@ async fn run_placeholder_sweep_pass(
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             let cleanup =
                                 finalize_abandoned_mailbox(shared, provider, &state, true).await;
-                            cleanup.delete_state_if_allowed(provider, &state);
-                            if cleanup.cleanup_killed {
+                            if cleanup.delete_state_if_allowed(provider, &state) {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }
                         }
@@ -583,6 +582,10 @@ async fn run_placeholder_sweep_pass(
                         // Fall through to the original abort-edit path.
                     }
                 }
+                let cleanup_decision = abandoned_tmux_cleanup_decision_for(&state).await;
+                if cleanup_decision == AbandonedTmuxCleanupDecision::PreserveRetry {
+                    continue;
+                }
                 // #2438 (#2427 final): time-based abandon is now a pure
                 // safety net — the four explicit-signal wires (D
                 // TurnCompleted / A pane death / B heartbeat-gap / C
@@ -599,20 +602,11 @@ async fn run_placeholder_sweep_pass(
                     channel_id = state.channel_id,
                     msg_id = state.current_msg_id,
                 );
-                match abandoned_tmux_cleanup_decision_for(&state).await {
-                    AbandonedTmuxCleanupDecision::PreserveRetry => continue,
-                    AbandonedTmuxCleanupDecision::TerminalMarkerOnly => {
-                        if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            let _ = delete_inflight_state_file(provider, state.channel_id);
-                            report.abandoned += 1;
-                        }
-                        continue;
-                    }
-                    AbandonedTmuxCleanupDecision::Kill => {}
-                }
                 // Re-probe immediately before the edit so a revived session wins.
-                if abandoned_tmux_cleanup_decision_for(&state).await
-                    != AbandonedTmuxCleanupDecision::Kill
+                if !cleanup_decision.allows_discord_cleanup()
+                    || !abandoned_tmux_cleanup_decision_for(&state)
+                        .await
+                        .allows_discord_cleanup()
                     || !inflight_state_still_same_turn(provider, &state, age_secs)
                 {
                     continue;
@@ -718,11 +712,6 @@ impl StalledEditTracker {
     }
 }
 
-/// True when the inflight state on disk for `state.channel_id` still names
-/// the same turn (matching `user_msg_id` and `current_msg_id`) AND the file
-/// mtime is not significantly fresher than our snapshot. Returns `false`
-/// when the file is gone (original turn completed mid-await) or has been
-/// replaced by a new turn for the same channel.
 fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &InflightTurnState) {
     if let (Some(provider_kind), msg_id) = (
         ProviderKind::from_str(&state.provider),
@@ -738,6 +727,8 @@ fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &Inf
     }
 }
 
+/// True when the inflight state on disk still names the same turn and its
+/// mtime is not significantly fresher than the sweep snapshot.
 fn inflight_state_still_same_turn(
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
@@ -818,16 +809,11 @@ async fn sweep_orphan_status_panel(
     // evidence keeps the Discord panel and inflight row for a later retry.
     // Panel-only/TUI-direct rows have no real user-message identity to finalize,
     // so only those terminal-marker rows can discard their stale marker.
-    match abandoned_tmux_cleanup_decision_for(state).await {
-        AbandonedTmuxCleanupDecision::PreserveRetry => return,
-        AbandonedTmuxCleanupDecision::TerminalMarkerOnly => {
-            if inflight_state_still_same_turn(provider, state, age_secs) {
-                let _ = delete_inflight_state_file(provider, state.channel_id);
-                report.abandoned += 1;
-            }
-            return;
-        }
-        AbandonedTmuxCleanupDecision::Kill => {}
+    if !abandoned_tmux_cleanup_decision_for(state)
+        .await
+        .allows_discord_cleanup()
+    {
+        return;
     }
     // Do not delete a panel a replacement turn now owns, or one whose turn has
     // already completed (state file gone).
@@ -1299,6 +1285,7 @@ mod safety_net_threshold_tests {
         assert!(!cleanup_decision_allows_state_delete(
             AbandonedTmuxCleanupDecision::PreserveRetry,
             false,
+            false,
         ));
     }
 
@@ -1307,10 +1294,12 @@ mod safety_net_threshold_tests {
         assert!(!cleanup_decision_allows_state_delete(
             AbandonedTmuxCleanupDecision::Kill,
             false,
+            false,
         ));
         assert!(cleanup_decision_allows_state_delete(
             AbandonedTmuxCleanupDecision::Kill,
             true,
+            false,
         ));
     }
 
@@ -1318,6 +1307,7 @@ mod safety_net_threshold_tests {
     fn terminal_marker_only_can_remove_marker_without_tmux_cleanup() {
         assert!(cleanup_decision_allows_state_delete(
             AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
+            false,
             false,
         ));
     }
