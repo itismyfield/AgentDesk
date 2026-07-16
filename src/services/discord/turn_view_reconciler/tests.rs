@@ -1419,8 +1419,8 @@ async fn partial_queue_apply_failure_compensates_prior_hourglass() {
     let target = target_with(100_000_000_000_591, 100_000_000_000_592);
     clear_persisted(target);
     let reconciler = TurnViewReconciler::with_test_deliveries(vec![
-        TurnViewDelivery::Delivered,
         TurnViewDelivery::Failed,
+        TurnViewDelivery::Delivered,
         TurnViewDelivery::Delivered,
     ]);
 
@@ -1439,10 +1439,14 @@ async fn partial_queue_apply_failure_compensates_prior_hourglass() {
     let ops = reconciler.ops();
     assert_eq!(
         ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
-        vec![('📬', true), ('⏳', true), ('📬', false)],
+        vec![('📬', true), ('⏳', true), ('📬', false), ('📬', true)],
         "a second reaction failure must compensate the first successful mutation"
     );
-    assert!(snapshot_reactions(&reconciler, target).is_empty());
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('📬', "intake-a")],
+        "compensation must restore the pre-transition mailbox reaction"
+    );
     assert!(!persisted_exists(target));
 }
 
@@ -1579,7 +1583,6 @@ async fn dispatch_parent_retry_transient_keeps_persisted_pending_and_retries() {
 
     let retrying = TurnViewReconciler::with_test_deliveries(vec![
         combined_delivery,
-        TurnViewDelivery::Delivered,
         TurnViewDelivery::Delivered,
         TurnViewDelivery::Delivered,
     ]);

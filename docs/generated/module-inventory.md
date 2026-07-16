@@ -595,7 +595,7 @@
 | `services::discord::prompt_builder::memory_guidance` | `src/services/discord/prompt_builder/memory_guidance.rs` | 327 | 137 | 190 |  |
 | `services::discord::prompt_builder::section_dedupe` | `src/services/discord/prompt_builder/section_dedupe.rs` | 159 | 105 | 54 |  |
 | `services::discord::queue_dispatch` | `src/services/discord/queue_dispatch.rs` | 50 | 50 | 0 |  |
-| `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 2309 | 751 | 1558 |  |
+| `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 2310 | 751 | 1559 |  |
 | `services::discord::queue_marker` | `src/services/discord/queue_marker.rs` | 646 | 223 | 423 |  |
 | `services::discord::queue_overflow_dlq` | `src/services/discord/queue_overflow_dlq.rs` | 210 | 127 | 83 |  |
 | `services::discord::queue_reactions` | `src/services/discord/queue_reactions.rs` | 35 | 25 | 10 |  |

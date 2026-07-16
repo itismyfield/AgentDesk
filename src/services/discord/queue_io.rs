@@ -1028,6 +1028,7 @@ mod presleep_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn event_kick_no_start_with_nonempty_queue_arms_single_backstop() {
+        let _root = scoped_runtime_root();
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_048_201);
