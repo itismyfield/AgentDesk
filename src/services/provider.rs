@@ -1,7 +1,7 @@
 use crate::services::platform::BinaryResolution;
 use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
