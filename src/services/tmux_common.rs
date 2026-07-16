@@ -668,19 +668,27 @@ fn tmux_recent_lines_show_claude_tui_active_work(lines_reverse_ordered: &[&str])
         .rev()
         .copied()
         .collect::<Vec<_>>();
+    // Prompt-marker detection intentionally consumes only decisive in-flight
+    // chrome. A suffix-free early spinner can coexist briefly with an already
+    // painted empty composer, so it remains marker-ready here; the final
+    // readiness boundary independently applies the full structured-spinner busy
+    // veto to the same capture.
     tmux_recent_lines_show_claude_tui_interrupt_chrome(&forward)
-        || tmux_recent_forward_lines_show_claude_tui_active_work(&forward)
+        || tmux_recent_forward_lines_show_claude_tui_active_work_without_spinner(&forward)
 }
 
 fn tmux_recent_forward_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
+    lines
+        .iter()
+        .any(|line| tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line)))
+        || tmux_recent_forward_lines_show_claude_tui_active_work_without_spinner(lines)
+}
+
+fn tmux_recent_forward_lines_show_claude_tui_active_work_without_spinner(lines: &[&str]) -> bool {
     lines.iter().any(|line| {
         let line = trim_prompt_line(line);
         let lower = line.to_ascii_lowercase();
-        // Spinner verbs are recognized only through the same structural parser as
-        // every other status phrase, so quoted/trailing prose cannot bypass its
-        // exact-suffix gate merely because the verb is Actioning or Musing.
-        tmux_line_is_claude_tui_structured_spinner(line)
-            || lower.contains("current work")
+        lower.contains("current work")
             // NOTE: neither the footer context-usage bar (`🤖 Model │ ██░░ │ NN%`)
             // nor the completed-thinking summary line (`✻ Churned for 4m 56s`) is a
             // running signal — both render in IDLE/ready states too. #3051 keyed
