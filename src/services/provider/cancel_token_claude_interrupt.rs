@@ -73,10 +73,6 @@ impl CancelToken {
         })
     }
 
-    pub(crate) fn claude_interrupt_claim_is_committed(&self) -> bool {
-        self.claude_interrupt_claim.load(Ordering::Acquire) == 2
-    }
-
     /// Reserve the Claude interrupt-delivery right for this turn.
     pub(crate) fn claim_claude_interrupt(&self) -> bool {
         self.claude_interrupt_claim
@@ -142,7 +138,7 @@ mod tests {
             .commit_success(Ok::<(), ()>(()))
             .expect("current generation must deliver");
 
-        assert!(token.claude_interrupt_claim_is_committed());
+        assert!(!token.claim_claude_interrupt());
         assert!(!token.release_claude_interrupt_claim());
     }
 }

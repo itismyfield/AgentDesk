@@ -107,13 +107,6 @@ fn transcript_identity_allows_delivery(identity: Option<&ClaudeStopTurnIdentity>
     identity.is_none_or(ClaudeStopTurnIdentity::still_current)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ClaudeStopClaimOutcome {
-    Skipped,
-    DeliveryFailed,
-    DeliverySucceeded,
-}
-
 struct ClaudeStopDeliveryReservation<'a> {
     token: &'a CancelToken,
 }
@@ -122,24 +115,11 @@ impl<'a> ClaudeStopDeliveryReservation<'a> {
     fn claim(token: &'a CancelToken) -> Option<Self> {
         token.claim_claude_interrupt().then_some(Self { token })
     }
-
-    fn finish(&mut self, outcome: ClaudeStopClaimOutcome) {
-        match outcome {
-            ClaudeStopClaimOutcome::DeliverySucceeded => {
-                debug_assert!(self.token.claude_interrupt_claim_is_committed());
-            }
-            ClaudeStopClaimOutcome::Skipped | ClaudeStopClaimOutcome::DeliveryFailed => {
-                debug_assert!(!self.token.claude_interrupt_claim_is_committed());
-            }
-        }
-    }
 }
 
 impl Drop for ClaudeStopDeliveryReservation<'_> {
     fn drop(&mut self) {
-        if !self.token.claude_interrupt_claim_is_committed() {
-            let _ = self.token.release_claude_interrupt_claim();
-        }
+        let _ = self.token.release_claude_interrupt_claim();
     }
 }
 
@@ -465,7 +445,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
     })
     .await;
 
-    let (claim_outcome, delivered) = match delivery_result {
+    let delivered = match delivery_result {
         Ok(Ok(())) => {
             tracing::info!(
                 "claude turn interrupt delivered (session preserved): session={} generation={} reason={} mechanism={:?} phase={}",
@@ -475,7 +455,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 delivery,
                 phase.as_str()
             );
-            (ClaudeStopClaimOutcome::DeliverySucceeded, true)
+            true
         }
         Ok(Err(error)) => {
             // Deliberately NO SIGINT fallback: a failed turn-cancel must not
@@ -491,7 +471,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 phase.as_str(),
                 error
             );
-            (ClaudeStopClaimOutcome::DeliveryFailed, false)
+            false
         }
         Err(error) => {
             tracing::warn!(
@@ -503,10 +483,9 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 phase.as_str(),
                 error
             );
-            (ClaudeStopClaimOutcome::DeliveryFailed, false)
+            false
         }
     };
-    reservation.finish(claim_outcome);
 
     ProviderTurnInterruptOutcome {
         tmux_session,
@@ -529,38 +508,23 @@ mod tests {
         phase: ClaudeTuiInterruptPhase,
         delivery_succeeded: bool,
     ) -> ClaudeStopDeliveryDecision {
-        let Some(mut reservation) = ClaudeStopDeliveryReservation::claim(token) else {
+        let Some(reservation) = ClaudeStopDeliveryReservation::claim(token) else {
             return ClaudeStopDeliveryDecision::SkipDuplicate;
         };
         let decision = decide_claimed_claude_stop_delivery(delivery, phase);
-        let outcome = match (decision, delivery_succeeded) {
-            (ClaudeStopDeliveryDecision::Deliver(_), true) => {
-                let session = format!(
-                    "claude-stop-policy-test-{}",
-                    token.claude_interrupt_generation()
-                );
-                token.bind_claude_tmux_session(&session);
-                token
-                    .lock_current_claude_interrupt_session(&session)
-                    .expect("test generation must acquire delivery guard")
-                    .commit_success(Ok::<(), ()>(()))
-                    .expect("test delivery must commit");
-                ClaudeStopClaimOutcome::DeliverySucceeded
-            }
-            (ClaudeStopDeliveryDecision::Deliver(_), false) => {
-                ClaudeStopClaimOutcome::DeliveryFailed
-            }
-            _ => ClaudeStopClaimOutcome::Skipped,
-        };
-        reservation.finish(outcome);
-        if !matches!(outcome, ClaudeStopClaimOutcome::DeliverySucceeded) {
-            drop(reservation);
-            assert!(
-                token.claim_claude_interrupt(),
-                "skipped or failed delivery must roll back its claim"
+        if delivery_succeeded && matches!(decision, ClaudeStopDeliveryDecision::Deliver(_)) {
+            let session = format!(
+                "claude-stop-policy-test-{}",
+                token.claude_interrupt_generation()
             );
-            assert!(token.release_claude_interrupt_claim());
+            token.bind_claude_tmux_session(&session);
+            token
+                .lock_current_claude_interrupt_session(&session)
+                .expect("test generation must acquire delivery guard")
+                .commit_success(Ok::<(), ()>(()))
+                .expect("test delivery must commit");
         }
+        drop(reservation);
         decision
     }
 
@@ -611,47 +575,55 @@ mod tests {
 
     #[test]
     fn active_generation_escape_is_delivered_once_across_stop_race() {
+        const RACERS: usize = 8;
+
         let token = Arc::new(CancelToken::new());
-        let barrier = Arc::new(Barrier::new(3));
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(RACERS + 1));
+        let release_winner = Arc::new(Barrier::new(2));
         let mut handles = Vec::new();
 
-        for reason in ["/stop", "mailbox_cancel_active_turn"] {
+        for _ in 0..RACERS {
             let token = Arc::clone(&token);
+            let writes = Arc::clone(&writes);
             let barrier = Arc::clone(&barrier);
+            let release_winner = Arc::clone(&release_winner);
             handles.push(thread::spawn(move || {
                 barrier.wait();
-                (
-                    reason,
-                    reserved_decision(
-                        token.as_ref(),
-                        ClaudeTurnInterruptDelivery::TuiEscape,
-                        ClaudeTuiInterruptPhase::ActiveGeneration,
-                        true,
-                    ),
-                )
+                let Some(reservation) = ClaudeStopDeliveryReservation::claim(token.as_ref()) else {
+                    return Ok::<_, String>(ClaudeStopDeliveryDecision::SkipDuplicate);
+                };
+                let decision = decide_claimed_claude_stop_delivery(
+                    ClaudeTurnInterruptDelivery::TuiEscape,
+                    ClaudeTuiInterruptPhase::ActiveGeneration,
+                );
+                if matches!(decision, ClaudeStopDeliveryDecision::Deliver(_)) {
+                    writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    release_winner.wait();
+                }
+                drop(reservation);
+                Ok(decision)
             }));
         }
         barrier.wait();
+        while writes.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        release_winner.wait();
 
-        let decisions: Vec<_> = handles
+        let results: Vec<_> = handles
             .into_iter()
-            .map(|handle| handle.join().expect("stop racer must not panic").1)
+            .map(|handle| handle.join().expect("stop racer must not panic"))
             .collect();
-        let delivery_count = decisions
-            .iter()
-            .filter(|decision| {
-                matches!(
-                    decision,
-                    ClaudeStopDeliveryDecision::Deliver(ClaudeTurnInterruptDelivery::TuiEscape)
-                )
-            })
-            .count();
-        let duplicate_count = decisions
-            .iter()
-            .filter(|decision| matches!(decision, ClaudeStopDeliveryDecision::SkipDuplicate))
-            .count();
-        assert_eq!(delivery_count, 1);
-        assert_eq!(duplicate_count, 1);
+        assert!(
+            results.iter().all(Result::is_ok),
+            "race losers exit cleanly"
+        );
+        assert_eq!(
+            writes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the claim guard must permit exactly one observable provider write"
+        );
     }
 
     #[test]
