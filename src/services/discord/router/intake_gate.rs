@@ -1554,6 +1554,8 @@ pub(in crate::services::discord) async fn handle_event(
                     has_reply_boundary,
                     dm_hint: Some(is_dm),
                     turn_kind,
+                    preserve_on_cancel: !new_message.author.bot
+                        && !author_excluded_from_cancel_preservation,
                 },
                 origin: super::IntakeOrigin::LiveMessage,
                 preserve_on_cancel: !new_message.author.bot

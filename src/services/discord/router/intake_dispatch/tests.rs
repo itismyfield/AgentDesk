@@ -208,6 +208,7 @@ fn request(channel_id: ChannelId, message_id: u64, text: &str) -> IntakeRequest 
         has_reply_boundary: false,
         dm_hint: Some(false),
         turn_kind: TurnKind::Foreground,
+        preserve_on_cancel: false,
     }
 }
 
@@ -299,7 +300,7 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
             provider: ProviderKind::Claude,
             request: request(channel_id, 4_350_111, "plain live intake"),
             origin: IntakeOrigin::LiveMessage,
-            preserve_on_cancel: false,
+            preserve_on_cancel: true,
             has_nonportable_uploads: false,
             preloaded_uploads: Vec::new(),
             voice_announcement: None,
@@ -338,8 +339,8 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
     .await
     .expect("text skill forwards");
 
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT target_instance_id, provider FROM intake_outbox
+    let rows: Vec<(String, String, Option<bool>)> = sqlx::query_as(
+        "SELECT target_instance_id, provider, preserve_on_cancel FROM intake_outbox
          WHERE channel_id = $1 ORDER BY id",
     )
     .bind(channel_id.get().to_string())
@@ -349,9 +350,9 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
     assert_eq!(
         rows,
         vec![
-            (owner.to_string(), "claude".to_string()),
-            (owner.to_string(), "claude".to_string()),
-            (owner.to_string(), "claude".to_string()),
+            (owner.to_string(), "claude".to_string(), Some(true)),
+            (owner.to_string(), "claude".to_string(), Some(false)),
+            (owner.to_string(), "claude".to_string(), Some(false)),
         ]
     );
     assert!(
@@ -397,14 +398,18 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
         .await
         .expect("forwarded queued finish is a no-op");
 
-    let row: (String, String) = sqlx::query_as(
-        "SELECT target_instance_id, provider FROM intake_outbox WHERE channel_id = $1",
+    let row: (String, String, Option<bool>) = sqlx::query_as(
+        "SELECT target_instance_id, provider, preserve_on_cancel
+         FROM intake_outbox WHERE channel_id = $1",
     )
     .bind(channel_id.get().to_string())
     .fetch_one(&pool)
     .await
     .expect("forwarded queue row");
-    assert_eq!(row, (owner.to_string(), "claude".to_string()));
+    assert_eq!(
+        row,
+        (owner.to_string(), "claude".to_string(), Some(true))
+    );
     assert!(shared.core.lock().await.sessions.is_empty());
     assert!(
         shared

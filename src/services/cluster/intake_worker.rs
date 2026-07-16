@@ -304,6 +304,7 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
         has_reply_boundary: row.has_reply_boundary,
         dm_hint: row.dm_hint,
         turn_kind,
+        preserve_on_cancel: row.preserve_on_cancel.unwrap_or(false),
     })
 }
 
@@ -343,6 +344,7 @@ mod tests {
             reply_to_user_message: false,
             defer_watcher_resume: false,
             wait_for_completion: false,
+            preserve_on_cancel: None,
             agent_id: "agent-x".to_string(),
             status: "claimed".to_string(),
             claim_owner: Some("worker-1.local".to_string()),
@@ -362,6 +364,40 @@ mod tests {
         assert_eq!(req.request_owner_name, "Tester");
         assert_eq!(req.user_text, "hello");
         assert_eq!(req.turn_kind, TurnKind::Foreground);
+    }
+
+    #[test]
+    fn intake_request_from_row_restores_preservation_and_fails_safe_for_null() {
+        for (stored, expected) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let mut row = fake_row();
+            row.preserve_on_cancel = stored;
+            let request = intake_request_from_row(&row).expect("convert preservation");
+            assert_eq!(request.preserve_on_cancel, expected);
+        }
+    }
+
+    #[test]
+    fn worker_executor_forwards_restored_preservation_instead_of_literal_false() {
+        let executor_source = include_str!(
+            "../discord/router/message_handler/intake_turn.rs"
+        );
+        let start = executor_source
+            .find("pub(crate) async fn execute_intake_turn_core(")
+            .expect("worker executor exists");
+        let end = executor_source[start..]
+            .find("pub(super) async fn handle_text_message(")
+            .map(|offset| start + offset)
+            .expect("worker executor has a bounded body");
+        let executor = &executor_source[start..end];
+
+        assert!(
+            executor.contains("request.preserve_on_cancel,"),
+            "worker executor must pass the preservation bit restored from the durable row"
+        );
+        assert!(
+            !executor.contains("request.turn_kind,\n        false,"),
+            "worker executor must not restore the historical hardcoded false"
+        );
     }
 
     #[test]
