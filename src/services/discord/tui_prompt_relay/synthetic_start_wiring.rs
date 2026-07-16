@@ -162,6 +162,43 @@ pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
     anchor
 }
 
+pub(super) async fn establish_tui_direct_synthetic_lifecycle_anchor(
+    shared: &Arc<SharedData>,
+    command_http: Option<Arc<serenity::Http>>,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    notification_anchor_message_id: MessageId,
+    relay_prompt_decision: &RelayObservedPromptInjectionDecision,
+    lease_generation: u64,
+    current_turn_anchor_id: &mut Option<u64>,
+) -> SyntheticLifecycleAnchor {
+    let anchor = resolve_tui_direct_synthetic_lifecycle_anchor(
+        shared,
+        command_http,
+        channel_id,
+        prompt,
+        notification_anchor_message_id,
+        relay_prompt_decision,
+    )
+    .await;
+    *current_turn_anchor_id = Some(anchor.message_id.get());
+    started(
+        shared,
+        channel_id,
+        anchor.message_id,
+        lease_generation,
+        "tui_anchor_start",
+    )
+    .await;
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        channel_id.get(),
+        anchor.message_id.get(),
+    );
+    anchor
+}
+
 /// Run the shared synthetic-start wiring for a TUI-direct turn. It:
 ///   0. refuses prompt classes that the shared injected-prompt decision says do
 ///      not start an external turn,

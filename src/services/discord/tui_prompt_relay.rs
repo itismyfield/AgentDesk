@@ -578,34 +578,18 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             }
         };
         let synthetic_anchor =
-            synthetic_start_wiring::resolve_tui_direct_synthetic_lifecycle_anchor(
+            synthetic_start_wiring::establish_tui_direct_synthetic_lifecycle_anchor(
                 shared,
                 command_http.clone(),
                 channel_id,
                 &prompt,
                 notification_anchor_message_id,
                 &relay_prompt_decision,
+                lease.generation,
+                &mut current_turn_anchor_id,
             )
             .await;
         let anchor_message_id = synthetic_anchor.message_id;
-        // #3176: pin this turn's anchor id — it becomes the synthetic inflight's
-        // `user_msg_id` below, so the idle-tail drain-wait can recognise our own row.
-        current_turn_anchor_id = Some(anchor_message_id.get());
-        // Add before the anchor becomes findable so fast completion cannot re-leave ⏳.
-        started(
-            shared,
-            channel_id,
-            anchor_message_id,
-            lease.generation,
-            "tui_anchor_start",
-        )
-        .await;
-        crate::services::tui_prompt_dedupe::record_prompt_anchor(
-            &prompt.provider,
-            &prompt.tmux_session_name,
-            channel_id.get(),
-            anchor_message_id.get(),
-        );
         // #3174: turn-identity guard on the ⏳ lifecycle. A lease-gated completion
         // firing inside the sub-second notify+⏳-add window left a deferred marker;
         // now that THIS turn's anchor exists, drain it (⏳ → ✅ swap). P1: drain ONLY
