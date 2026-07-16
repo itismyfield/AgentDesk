@@ -400,7 +400,13 @@ fn line_has_claude_tui_interrupt_chrome(line: &str) -> bool {
         && !before_interrupt[1..].contains(')')
         && before_interrupt[1..].contains('·');
     let spinner_prefix = line.chars().next().is_some_and(is_claude_tui_spinner_glyph);
-    has_status_group || (spinner_prefix && lower[..interrupt_start].contains('…'))
+    let wrapped_status_tail = before_interrupt.is_empty()
+        && line[interrupt_start + "esc to interrupt".len()..]
+            .trim()
+            .starts_with(')');
+    has_status_group
+        || (spinner_prefix && lower[..interrupt_start].contains('…'))
+        || wrapped_status_tail
 }
 
 fn claude_tui_markdown_fence_marker(line: &str) -> Option<(char, usize)> {
@@ -480,7 +486,8 @@ fn claude_tui_spinner_status_phrase_is_compact(status: &str) -> bool {
         && status.chars().count() <= 48
         && status.split_whitespace().count() <= 5
         && status.chars().all(|character| {
-            character.is_alphanumeric() || matches!(character, ' ' | '-' | '_' | '/' | ':')
+            character.is_alphanumeric()
+                || matches!(character, ' ' | '-' | '_' | '/' | ':' | '\'' | '’')
         })
 }
 
@@ -492,7 +499,13 @@ fn claude_tui_spinner_status_is_known(status: &str) -> bool {
     {
         return true;
     }
-    !status.chars().any(char::is_whitespace) && status.to_ascii_lowercase().ends_with("ing")
+    if status.chars().any(char::is_whitespace) {
+        return false;
+    }
+    status
+        .trim_end_matches(|character| matches!(character, '\'' | '’'))
+        .to_ascii_lowercase()
+        .ends_with("ing")
 }
 
 fn line_has_claude_tui_spinner_status_fragment(line: &str) -> bool {
@@ -2117,6 +2130,8 @@ earlier assistant prose
         assert!(tmux_capture_indicates_claude_tui_busy(capture));
         for line in [
             "· Thinking…",
+            "✳ Beboppin'…",
+            "✳ Beboppin'… (12s)",
             "✦ Mapping distant galaxies…",
             "✦ Mapping distant galaxies… (12s",
             "· Compacting conversation… (30s)",
@@ -2138,6 +2153,18 @@ earlier assistant prose
         assert!(tmux_capture_indicates_claude_tui_busy(
             stale_prompt_busy_pane
         ));
+
+        let wrapped_spinner_pane = "\
+✳ Beboppin'… (12s · ↓ 1.2k tokens ·
+esc to interrupt)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2";
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(
+            wrapped_spinner_pane
+        ));
+        assert!(tmux_capture_indicates_claude_tui_busy(wrapped_spinner_pane));
     }
 
     #[test]
