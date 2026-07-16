@@ -273,7 +273,7 @@ pub(super) async fn finalize_abandoned_mailbox(
     }
 
     let channel = serenity::ChannelId::new(state.channel_id);
-    let finish = super::super::mailbox_finish_turn_if_matches_started_before_without_completion(
+    let finish = super::super::mailbox_finish::mailbox_finish_turn_if_matches_started_before_without_completion(
         shared,
         provider,
         channel,
@@ -284,10 +284,10 @@ pub(super) async fn finalize_abandoned_mailbox(
     let actions =
         abandoned_mailbox_finish_actions(finish.removed_token.is_some(), finish.has_pending);
     if actions.cancel_removed_token
-        && let Some(removed_token) = finish.removed_token
+        && let Some(removed_token) = finish.removed_token.as_ref()
     {
         super::super::turn_bridge::cancel_active_token(
-            &removed_token,
+            removed_token,
             plan.cleanup_policy,
             "placeholder_sweeper abandoned",
         );
