@@ -138,8 +138,7 @@ impl<'a> ClaudeStopDeliveryReservation<'a> {
 impl Drop for ClaudeStopDeliveryReservation<'_> {
     fn drop(&mut self) {
         if !self.token.claude_interrupt_claim_is_committed() {
-            let released = self.token.release_claude_interrupt_claim();
-            debug_assert!(released, "undelivered Claude stop claim must roll back");
+            let _ = self.token.release_claude_interrupt_claim();
         }
     }
 }
@@ -536,9 +535,13 @@ mod tests {
         let decision = decide_claimed_claude_stop_delivery(delivery, phase);
         let outcome = match (decision, delivery_succeeded) {
             (ClaudeStopDeliveryDecision::Deliver(_), true) => {
-                token.bind_claude_tmux_session("claude-stop-policy-test");
+                let session = format!(
+                    "claude-stop-policy-test-{}",
+                    token.claude_interrupt_generation()
+                );
+                token.bind_claude_tmux_session(&session);
                 token
-                    .lock_current_claude_interrupt_session("claude-stop-policy-test")
+                    .lock_current_claude_interrupt_session(&session)
                     .expect("test generation must acquire delivery guard")
                     .commit_success(Ok::<(), ()>(()))
                     .expect("test delivery must commit");
@@ -550,6 +553,14 @@ mod tests {
             _ => ClaudeStopClaimOutcome::Skipped,
         };
         reservation.finish(outcome);
+        if !matches!(outcome, ClaudeStopClaimOutcome::DeliverySucceeded) {
+            drop(reservation);
+            assert!(
+                token.claim_claude_interrupt(),
+                "skipped or failed delivery must roll back its claim"
+            );
+            assert!(token.release_claude_interrupt_claim());
+        }
         decision
     }
 
