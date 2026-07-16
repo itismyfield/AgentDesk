@@ -263,6 +263,7 @@ struct AppliedTarget {
     applied: TurnViewState,
     identity: ResolvedIdentity,
     start_attempt: Option<TurnStartAttempt>,
+    legacy_queue_marker: Option<char>,
 }
 
 #[derive(Clone, Copy)]
@@ -409,6 +410,7 @@ impl TurnViewReconciler {
             start_attempt: (applied == TurnViewState::Pending)
                 .then_some(start_attempt)
                 .flatten(),
+            legacy_queue_marker: None,
         }
     }
 
@@ -427,6 +429,7 @@ impl TurnViewReconciler {
             applied: TurnViewState::Pending,
             identity: current.identity.clone(),
             start_attempt: Some(start_attempt),
+            legacy_queue_marker: current.legacy_queue_marker,
         };
         self.targets.insert(target, updated.clone());
         self.persist_target(target, &updated, shared, source);
@@ -1006,6 +1009,7 @@ impl TurnViewReconciler {
                 applied,
                 desired,
                 current.is_none(),
+                current.as_ref().and_then(|entry| entry.legacy_queue_marker),
                 &resolved_identity,
                 source,
             )
@@ -1389,14 +1393,10 @@ impl TurnViewReconciler {
                 return None;
             }
         };
-        let supported_version = record.version == QUEUED_HOURGLASS_STATE_VERSION
-            || (record.version == PERSISTED_STATE_VERSION
-                && !matches!(
-                    record.applied.as_str(),
-                    "queued" | "queued_merged" | "queued_reconcile"
-                ));
-        if !supported_version
-            || record.provider != shared.provider.as_str()
+        if !matches!(
+            record.version,
+            PERSISTED_STATE_VERSION | QUEUED_HOURGLASS_STATE_VERSION
+        ) || record.provider != shared.provider.as_str()
             || TurnViewTargetKind::from_str(&record.kind) != Some(target.kind)
             || record.channel_id != target.channel_id.get()
             || record.message_id != target.message_id.get()
@@ -1414,7 +1414,7 @@ impl TurnViewReconciler {
             let _ = fs::remove_file(&path);
             return None;
         }
-        let Some(applied) = TurnViewState::from_str(&record.applied) else {
+        let Some(recorded_applied) = TurnViewState::from_str(&record.applied) else {
             tracing::warn!(
                 path = %path.display(),
                 applied = %record.applied,
@@ -1424,17 +1424,27 @@ impl TurnViewReconciler {
             let _ = fs::remove_file(&path);
             return None;
         };
-        if applied == TurnViewState::None {
+        if recorded_applied == TurnViewState::None {
             let _ = fs::remove_file(&path);
             return None;
         }
         let identity = self.resolve_persisted_identity(&record, shared, source)?;
-        Some(Self::applied_target(
+        let legacy_queue_marker = (record.version == PERSISTED_STATE_VERSION
+            && recorded_applied.is_queue_marker())
+        .then(|| reaction_set::for_state(recorded_applied)[0]);
+        let applied = if legacy_queue_marker.is_some() {
+            TurnViewState::None
+        } else {
+            recorded_applied
+        };
+        let mut target = Self::applied_target(
             TurnViewOwner::new(record.owner_generation, record.owner_turn_id),
             applied,
             identity,
             record.start_attempt_id.map(TurnStartAttempt),
-        ))
+        );
+        target.legacy_queue_marker = legacy_queue_marker;
+        Some(target)
     }
 
     fn persist_target(
@@ -1444,15 +1454,19 @@ impl TurnViewReconciler {
         shared: &SharedData,
         source: &'static str,
     ) {
-        if applied.applied == TurnViewState::None {
+        if applied.applied == TurnViewState::None && applied.legacy_queue_marker.is_none() {
             self.delete_persisted_target(target, source);
             return;
         }
         let Some(path) = Self::persisted_target_path(target) else {
             return;
         };
+        let applied_state = applied
+            .legacy_queue_marker
+            .and_then(TurnViewState::from_queue_marker_emoji)
+            .unwrap_or(applied.applied);
         let record = PersistedTargetState {
-            version: if applied.applied.is_queue_marker() {
+            version: if applied.applied.is_queue_marker() || applied.legacy_queue_marker.is_some() {
                 QUEUED_HOURGLASS_STATE_VERSION
             } else {
                 PERSISTED_STATE_VERSION
@@ -1463,7 +1477,7 @@ impl TurnViewReconciler {
             message_id: target.message_id.get(),
             owner_generation: applied.owner.generation,
             owner_turn_id: applied.owner.turn_id.clone(),
-            applied: applied.applied.as_str().to_string(),
+            applied: applied_state.as_str().to_string(),
             identity_label: applied.identity.label.clone(),
             token_hash: applied.identity.token_hash.clone(),
             start_attempt_id: applied.start_attempt.map(TurnStartAttempt::get),
@@ -1504,6 +1518,7 @@ impl TurnViewReconciler {
         applied: TurnViewState,
         desired: TurnViewState,
         cold: bool,
+        legacy_queue_marker: Option<char>,
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
@@ -1527,6 +1542,14 @@ impl TurnViewReconciler {
             return delivery;
         }
 
+        if let Some(emoji) = legacy_queue_marker {
+            let delivery = self
+                .apply_reaction(shared, target, emoji, false, identity, source)
+                .await;
+            if !delivery.delivered() {
+                return delivery;
+            }
+        }
         self.apply_diff(shared, target, applied, desired, identity, source)
             .await
     }

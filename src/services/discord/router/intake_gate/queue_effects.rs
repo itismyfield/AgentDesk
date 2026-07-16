@@ -1,4 +1,6 @@
-use super::super::intake_queue_transaction::{IntakeQueueCommitEffects, SoftInterventionSpec};
+use super::super::intake_queue_transaction::{
+    IntakeQueueCommitEffects, PendingReactionRepair, SoftInterventionSpec,
+};
 use super::*;
 use crate::services::discord::outbound::reaction_control::{
     ReactionControlReplyReason, send_reaction_control_reply,
@@ -140,7 +142,7 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
         policy: super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy,
-    ) -> Option<char> {
+    ) -> Option<PendingReactionRepair> {
         repair_queued_source_pending_reaction_from_mailbox(
             &self.data.shared,
             &self.ctx.http,
@@ -149,6 +151,22 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
             policy,
         )
         .await
+    }
+
+    async fn notify_pending_reaction_failure(
+        &mut self,
+        channel_id: serenity::ChannelId,
+        message_id: serenity::MessageId,
+    ) {
+        send_reaction_control_reply(
+            self.ctx,
+            &self.data.shared,
+            channel_id,
+            message_id,
+            ReactionControlReplyReason::QueueReactionFailed,
+            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
+        )
+        .await;
     }
 
     fn advance_checkpoint(
@@ -181,7 +199,7 @@ async fn repair_queued_source_pending_reaction_from_mailbox(
     channel_id: serenity::ChannelId,
     message_id: serenity::MessageId,
     policy: super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy,
-) -> Option<char> {
+) -> Option<PendingReactionRepair> {
     let snapshot = mailbox_snapshot(shared, channel_id).await;
     let intervention = snapshot.intervention_queue.iter().find(|intervention| {
         intervention.message_id == message_id
@@ -209,7 +227,7 @@ async fn repair_queued_source_pending_reaction_from_mailbox(
             emoji
         }
     };
-    crate::services::discord::queue_marker::note_added_queued_generation(
+    let delivered = crate::services::discord::queue_marker::note_added_queued_generation(
         shared,
         http,
         channel_id,
@@ -219,34 +237,36 @@ async fn repair_queued_source_pending_reaction_from_mailbox(
         "intake_gate_queue_pending",
     )
     .await;
-    let still_queued = mailbox_snapshot(shared, channel_id)
-        .await
-        .intervention_queue
-        .iter()
-        .any(|intervention| {
-            intervention.message_id == message_id
-                || intervention.source_message_ids.contains(&message_id)
-        });
-    if !still_queued {
-        crate::services::discord::queue_marker::note_removed_queued_generation(
-            shared,
-            http,
-            channel_id,
-            message_id,
-            emoji,
-            queued_generation,
-            "intake_gate_queue_pending_self_heal",
-        )
-        .await;
-        tracing::info!(
-            channel_id = channel_id.get(),
-            message = message_id.get(),
-            emoji = %emoji,
-            queued_generation,
-            "duplicate queue-pending reaction repaired after dequeue promotion; removed stale reaction"
-        );
+    if delivered {
+        let still_queued = mailbox_snapshot(shared, channel_id)
+            .await
+            .intervention_queue
+            .iter()
+            .any(|intervention| {
+                intervention.message_id == message_id
+                    || intervention.source_message_ids.contains(&message_id)
+            });
+        if !still_queued {
+            crate::services::discord::queue_marker::note_removed_queued_generation(
+                shared,
+                http,
+                channel_id,
+                message_id,
+                emoji,
+                queued_generation,
+                "intake_gate_queue_pending_self_heal",
+            )
+            .await;
+            tracing::info!(
+                channel_id = channel_id.get(),
+                message = message_id.get(),
+                emoji = %emoji,
+                queued_generation,
+                "duplicate queue-pending reaction repaired after dequeue promotion; removed stale reaction"
+            );
+        }
     }
-    Some(emoji)
+    Some(PendingReactionRepair { emoji, delivered })
 }
 
 #[cfg(test)]
@@ -417,7 +437,13 @@ mod duplicate_repair_interleaving_tests {
             super::super::super::intake_queue_transaction::IntakeQueuePendingReactionPolicy::QueueState,
         )
         .await;
-        assert_eq!(repaired, Some('📬'));
+        assert_eq!(
+            repaired,
+            Some(PendingReactionRepair {
+                emoji: '📬',
+                delivered: true,
+            })
+        );
 
         crate::services::discord::queue_marker::drain_dispatched_queue_markers(
             &shared,
@@ -491,7 +517,13 @@ mod duplicate_repair_interleaving_tests {
         )
         .await;
 
-        assert_eq!(repaired, Some('🔄'));
+        assert_eq!(
+            repaired,
+            Some(PendingReactionRepair {
+                emoji: '🔄',
+                delivered: true,
+            })
+        );
         assert!(reaction_is_present(&shared, message_id, '🔄'));
         assert!(!reaction_is_present(&shared, message_id, '📬'));
         assert!(!reaction_is_present(&shared, message_id, '➕'));

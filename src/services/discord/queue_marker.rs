@@ -21,11 +21,11 @@ pub(in crate::services::discord) async fn note_added_current(
     message_id: MessageId,
     emoji: char,
     source: &'static str,
-) {
+) -> bool {
     turn_view_reconciler::note_intake_queue_marker_added_current(
         shared, http, channel_id, message_id, emoji, source,
     )
-    .await;
+    .await
 }
 
 pub(in crate::services::discord) async fn note_added_queued_generation(
@@ -36,12 +36,12 @@ pub(in crate::services::discord) async fn note_added_queued_generation(
     emoji: char,
     generation: u64,
     source: &'static str,
-) {
+) -> bool {
     let generation = effective_queued_generation(shared, generation);
     turn_view_reconciler::note_intake_queue_marker_added(
         shared, http, channel_id, message_id, generation, emoji, source,
     )
-    .await;
+    .await
 }
 
 pub(in crate::services::discord) async fn note_removed_current(

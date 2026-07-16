@@ -40,6 +40,12 @@ mod tests {
                     && super::super::super::queue_status_presentation::queue_status_card_enabled();
             "#,
         )));
+        assert!(race_loss.contains(&compact(
+            r#"
+                if !reaction_delivered {
+                    crate::services::discord::outbound::reaction_control::send_reaction_control_reply_http(
+            "#,
+        )));
 
         let queue_retry_silence = compact(include_str!(
             "../turn_bridge/terminal_outcome_delivery/queue_retry_silence.rs"

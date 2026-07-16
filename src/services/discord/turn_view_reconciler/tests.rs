@@ -690,6 +690,41 @@ async fn persisted_v1_queued_state_is_invalidated_for_reapplication() {
 }
 
 #[tokio::test]
+async fn persisted_v1_queued_promotion_clears_legacy_marker_before_pending() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_165, 100_000_000_000_166);
+    clear_persisted(target);
+    let provider = shared.provider.as_str().to_string();
+    let record = persisted_record(&shared, target, &provider, "queued");
+    write_persisted(&record, target);
+
+    let reconciler = TurnViewReconciler::default();
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner(92, "persisted"),
+            TurnViewIdentity::Test("intake-a"),
+            TurnViewState::Pending,
+            "test_v1_queue_promotion",
+        )
+        .await;
+
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")],
+        "v1 queue promotion must explicitly remove the legacy queue marker before adding pending"
+    );
+    let ops = reconciler.ops();
+    assert!(
+        !ops[0].add && ops[0].emoji == '📬',
+        "legacy queue marker clear must precede the fresh pending add"
+    );
+    assert!(ops[1].add && ops[1].emoji == '⏳');
+}
+
+#[tokio::test]
 async fn regression_4049_attempt_scoped_clear_preserves_pending_without_start_attempt() {
     let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();

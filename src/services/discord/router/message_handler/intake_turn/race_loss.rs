@@ -393,7 +393,7 @@ pub(super) async fn handle_race_loss_enqueue(
         };
         queued_marker_notified =
             emoji == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION;
-        mailbox_reaction::note_queue_pending(
+        let reaction_delivered = mailbox_reaction::note_queue_pending(
             shared,
             http,
             channel_id,
@@ -402,6 +402,17 @@ pub(super) async fn handle_race_loss_enqueue(
             turn_start_attempt,
         )
         .await;
+        if !reaction_delivered {
+            crate::services::discord::outbound::reaction_control::send_reaction_control_reply_http(
+                http,
+                channel_id,
+                shared,
+                user_msg_id,
+                crate::services::discord::outbound::reaction_control::ReactionControlReplyReason::QueueReactionFailed,
+                "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
+            )
+            .await;
+        }
         // #2036 Surface 3: detect queue→start races where the
         // dispatch path consumed our mapping before this reaction
         // landed and proactively unstick the emoji.

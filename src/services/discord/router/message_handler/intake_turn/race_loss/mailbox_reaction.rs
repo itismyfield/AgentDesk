@@ -25,7 +25,7 @@ pub(super) async fn note_queue_pending(
     user_msg_id: MessageId,
     emoji: char,
     turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
-) {
+) -> bool {
     if emoji == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
         && let Some(turn_start_attempt) = turn_start_attempt
     {
@@ -50,5 +50,5 @@ pub(super) async fn note_queue_pending(
         emoji,
         "race_loss_message_queued",
     )
-    .await;
+    .await
 }

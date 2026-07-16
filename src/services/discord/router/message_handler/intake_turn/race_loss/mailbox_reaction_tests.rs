@@ -59,6 +59,36 @@ fn mailbox_add_count(shared: &SharedData, message_id: MessageId) -> usize {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn queue_pending_returns_reaction_delivery_failure() {
+    let _root = scoped_runtime_root();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared)
+        .expect("fresh shared data")
+        .turn_view_reconciler =
+        crate::services::discord::turn_view_reconciler::TurnViewReconciler::with_test_deliveries(
+            vec![crate::services::discord::turn_view_reconciler::TurnViewDelivery::Failed],
+        );
+    let http = Arc::new(serenity::Http::new("Bot test-token"));
+    let channel_id = ChannelId::new(455_400_000_000_080);
+    let message_id = MessageId::new(455_400_000_000_081);
+
+    let delivered = mailbox_reaction::note_queue_pending(
+        &shared,
+        &http,
+        channel_id,
+        message_id,
+        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+        None,
+    )
+    .await;
+
+    assert!(
+        !delivered,
+        "race-loss queue marker must expose delivery failure to its fallback caller"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn rejected_stale_attempt_cannot_clear_newer_pending() {
     let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();

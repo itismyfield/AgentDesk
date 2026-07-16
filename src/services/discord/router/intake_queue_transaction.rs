@@ -70,6 +70,12 @@ pub(super) enum IntakeQueuePendingReactionPolicy {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PendingReactionRepair {
+    pub(super) emoji: char,
+    pub(super) delivered: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct IntakeQueueCommitOptions {
     pub(super) pending_reaction: IntakeQueuePendingReactionPolicy,
     pub(super) advance_checkpoint: bool,
@@ -302,7 +308,13 @@ pub(super) trait IntakeQueueCommitEffects {
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
         policy: IntakeQueuePendingReactionPolicy,
-    ) -> Option<char>;
+    ) -> Option<PendingReactionRepair>;
+
+    async fn notify_pending_reaction_failure(
+        &mut self,
+        channel_id: serenity::ChannelId,
+        message_id: serenity::MessageId,
+    );
 
     fn advance_checkpoint(
         &mut self,
@@ -410,22 +422,40 @@ where
             }
         }
         IntakeQueueCommitStatus::Refused { reason } => {
-            if reason == Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
-                && let Some(emoji) = effects
+            let repair = if reason == Some(EnqueueRefusalReason::SourceIdAlreadyQueued) {
+                effects
                     .repair_queued_source_pending_reaction(
                         channel_id,
                         message_id,
                         options.pending_reaction,
                     )
                     .await
-            {
-                outcome.pending_reaction = PendingReactionDecision::Apply(emoji);
-                outcome
-                    .committed_steps
-                    .push(IntakeQueueCommittedStep::PendingReactionApplied);
             } else {
-                outcome.pending_reaction =
-                    PendingReactionDecision::Skip(PendingReactionSkipReason::Refused);
+                None
+            };
+            match repair {
+                Some(PendingReactionRepair {
+                    emoji,
+                    delivered: true,
+                }) => {
+                    outcome.pending_reaction = PendingReactionDecision::Apply(emoji);
+                    outcome
+                        .committed_steps
+                        .push(IntakeQueueCommittedStep::PendingReactionApplied);
+                }
+                Some(PendingReactionRepair {
+                    delivered: false, ..
+                }) => {
+                    outcome.pending_reaction =
+                        PendingReactionDecision::Skip(PendingReactionSkipReason::Failed);
+                    effects
+                        .notify_pending_reaction_failure(channel_id, message_id)
+                        .await;
+                }
+                None => {
+                    outcome.pending_reaction =
+                        PendingReactionDecision::Skip(PendingReactionSkipReason::Refused);
+                }
             }
         }
         IntakeQueueCommitStatus::Failed { .. } => {
@@ -551,6 +581,8 @@ mod tests {
         reactions: Vec<(serenity::ChannelId, serenity::MessageId, char)>,
         reaction_delivery: bool,
         repair_reaction: Option<char>,
+        repair_delivery: bool,
+        fallback_notices: Vec<(serenity::ChannelId, serenity::MessageId)>,
         checkpoints: Vec<(serenity::ChannelId, serenity::MessageId)>,
         idle_kickoffs: usize,
     }
@@ -563,6 +595,8 @@ mod tests {
                 reactions: Vec::new(),
                 reaction_delivery: true,
                 repair_reaction: None,
+                repair_delivery: true,
+                fallback_notices: Vec::new(),
                 checkpoints: Vec::new(),
                 idle_kickoffs: 0,
             }
@@ -594,13 +628,24 @@ mod tests {
             channel_id: serenity::ChannelId,
             message_id: serenity::MessageId,
             policy: IntakeQueuePendingReactionPolicy,
-        ) -> Option<char> {
+        ) -> Option<PendingReactionRepair> {
             let emoji = match policy {
                 IntakeQueuePendingReactionPolicy::QueueState => self.repair_reaction?,
                 IntakeQueuePendingReactionPolicy::Static(emoji) => emoji,
             };
             self.reactions.push((channel_id, message_id, emoji));
-            Some(emoji)
+            Some(PendingReactionRepair {
+                emoji,
+                delivered: self.repair_delivery,
+            })
+        }
+
+        async fn notify_pending_reaction_failure(
+            &mut self,
+            channel_id: serenity::ChannelId,
+            message_id: serenity::MessageId,
+        ) {
+            self.fallback_notices.push((channel_id, message_id));
         }
 
         fn advance_checkpoint(
@@ -827,6 +872,41 @@ mod tests {
         assert_eq!(
             outcome.committed_steps,
             vec![IntakeQueueCommittedStep::PendingReactionApplied]
+        );
+    }
+
+    #[tokio::test]
+    async fn source_id_duplicate_repair_failure_is_not_committed_as_applied() {
+        let mut effects = FakeEffects {
+            enqueue_outcome: MailboxEnqueueOutcome {
+                enqueued: false,
+                merged: false,
+                refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+                persistence_error: None,
+            },
+            repair_reaction: Some('📬'),
+            repair_delivery: false,
+            ..FakeEffects::default()
+        };
+
+        let outcome =
+            commit_soft_intervention_transaction(&mut effects, request(Default::default())).await;
+
+        assert_eq!(
+            outcome.pending_reaction,
+            PendingReactionDecision::Skip(PendingReactionSkipReason::Failed),
+            "failed duplicate repair must stay observable as a reaction delivery failure"
+        );
+        assert!(
+            !outcome
+                .committed_steps
+                .contains(&IntakeQueueCommittedStep::PendingReactionApplied),
+            "failed duplicate repair must never be recorded as PendingReactionApplied"
+        );
+        assert_eq!(
+            effects.fallback_notices,
+            vec![(serenity::ChannelId::new(42), serenity::MessageId::new(100))],
+            "failed duplicate repair must emit exactly one referenced fallback notice"
         );
     }
 

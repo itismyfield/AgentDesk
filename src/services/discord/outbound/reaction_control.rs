@@ -27,10 +27,22 @@ pub(in crate::services::discord) async fn send_reaction_control_reply(
     reason: ReactionControlReplyReason,
     content: &str,
 ) {
+    send_reaction_control_reply_http(&ctx.http, channel_id, shared, message_id, reason, content)
+        .await;
+}
+
+pub(in crate::services::discord) async fn send_reaction_control_reply_http(
+    http: &Arc<serenity::http::Http>,
+    channel_id: serenity::ChannelId,
+    shared: &Arc<SharedData>,
+    message_id: serenity::MessageId,
+    reason: ReactionControlReplyReason,
+    content: &str,
+) {
     let (correlation_id, semantic_event_id) =
         reaction_control_reply_delivery_ids(channel_id, message_id, reason);
     if let Err(error) = super::serenity_reference::send_referenced_lifecycle_notice(
-        ctx.http.clone(),
+        http.clone(),
         shared.clone(),
         channel_id,
         message_id,
