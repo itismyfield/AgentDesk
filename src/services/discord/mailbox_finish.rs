@@ -109,12 +109,13 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     result
 }
 
-pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_started_before(
+async fn mailbox_finish_turn_if_matches_started_before_inner(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     expected_user_message_id: serenity::model::id::MessageId,
     active_started_before: std::time::Instant,
+    publish_completion: bool,
 ) -> FinishTurnResult {
     let result = shared
         .mailbox(channel_id)
@@ -128,6 +129,46 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_started
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
-    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    if publish_completion {
+        turn_completion_events::publish_mailbox_release_completion_event(
+            shared, channel_id, &result,
+        );
+    }
     result
+}
+
+pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_started_before(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+    active_started_before: std::time::Instant,
+) -> FinishTurnResult {
+    mailbox_finish_turn_if_matches_started_before_inner(
+        shared,
+        provider,
+        channel_id,
+        expected_user_message_id,
+        active_started_before,
+        true,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_started_before_without_completion(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+    active_started_before: std::time::Instant,
+) -> FinishTurnResult {
+    mailbox_finish_turn_if_matches_started_before_inner(
+        shared,
+        provider,
+        channel_id,
+        expected_user_message_id,
+        active_started_before,
+        false,
+    )
+    .await
 }

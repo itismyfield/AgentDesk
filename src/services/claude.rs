@@ -20,6 +20,9 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
+    cancel_token_claude_interrupt::{
+        observe_claude_wrapper_followup, submit_claude_wrapper_followup,
+    },
     fold_read_output_result, register_child_pid, spawn_cancel_watchdog,
 };
 use crate::services::provider_hosting::ProviderSessionDriver;
@@ -1883,6 +1886,9 @@ fn execute_streaming_local_tui_tmux(
     // required. If a proxy dies after launch, its env cannot be scrubbed from
     // the live process; this guard intentionally protects fresh launches only.
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    if let Some(ref token) = cancel_token {
+        token.bind_claude_tmux_session(tmux_session_name);
+    }
     let owner_path = prepare_and_create_claude_tui_session(
         tmux_session_name,
         working_dir,
@@ -1904,11 +1910,6 @@ fn execute_streaming_local_tui_tmux(
         debug_log(&format!(
             "failed to write spawn nonce for {tmux_session_name} (claude-tui): {e}"
         ));
-    }
-
-    if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
     }
 
     let _ = sender.send(StreamMessage::Init {
@@ -2825,6 +2826,10 @@ fn execute_streaming_local_tmux(
     // === Create new tmux session ===
     debug_log("No existing tmux session — creating new one");
 
+    if let Some(ref token) = cancel_token {
+        token.bind_claude_tmux_session(tmux_session_name);
+    }
+
     // Clean up any leftover files in both persistent and legacy locations.
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
 
@@ -2945,14 +2950,6 @@ fn execute_streaming_local_tmux(
         ));
     }
 
-    debug_log("tmux session created, storing in cancel token...");
-
-    // Store tmux session name in cancel token
-    if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
-    }
-
     emit_fresh_session_watcher_handoff(&sender, output_path, input_fifo_path, tmux_session_name);
     log_producer_exit(
         "fresh_session_watcher_owned_handoff",
@@ -3002,17 +2999,20 @@ fn send_followup_to_tmux(
         }
     });
 
-    // Write to input FIFO — if the pipe is broken or missing, request recreation
-    let write_result = std::fs::OpenOptions::new()
-        .write(true)
-        .open(input_fifo_path)
-        .map_err(|e| format!("Failed to open input FIFO: {}", e))
-        .and_then(|mut fifo| {
-            writeln!(fifo, "{}", msg)
-                .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
-            fifo.flush()
-                .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
-            Ok(())
+    // Publish before the prompt is reachable; mark only after a successful flush.
+    let write_result =
+        submit_claude_wrapper_followup(cancel_token.as_deref(), tmux_session_name, || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(input_fifo_path)
+                .map_err(|e| format!("Failed to open input FIFO: {}", e))
+                .and_then(|mut fifo| {
+                    writeln!(fifo, "{}", msg)
+                        .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
+                    fifo.flush()
+                        .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
+                    Ok(())
+                })
         });
 
     if let Err(e) = write_result {
@@ -3025,20 +3025,16 @@ fn send_followup_to_tmux(
 
     debug_log("Follow-up message sent to input FIFO");
 
-    // Store tmux session name in cancel token
-    if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
-    }
-
     // Read output file from the offset
-    let read_result = read_output_file_until_result(
-        output_path,
-        start_offset,
-        sender.clone(),
-        cancel_token,
-        SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Claude),
-    )?;
+    let read_result = observe_claude_wrapper_followup(cancel_token.as_deref(), || {
+        read_output_file_until_result(
+            output_path,
+            start_offset,
+            sender.clone(),
+            cancel_token.clone(),
+            SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Claude),
+        )
+    })?;
 
     let outcome = classify_followup_result(
         read_result,

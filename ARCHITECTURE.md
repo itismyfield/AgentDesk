@@ -570,6 +570,8 @@ src/
 │   │   │   ├── tests.rs
 │   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
+│   │   ├── placeholder_sweeper/
+│   │   │   └── abandon_guard.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
@@ -810,6 +812,7 @@ src/
 │   │   │   │   ├── queue_retry_silence.rs
 │   │   │   │   └── recovery_retry.rs
 │   │   │   ├── tmux_runtime/
+│   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
@@ -1070,6 +1073,7 @@ src/
 │   │   ├── shell.rs
 │   │   └── tmux.rs
 │   ├── provider/
+│   │   ├── cancel_token_claude_interrupt.rs
 │   │   └── provider_conformance_invariant_tests.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
