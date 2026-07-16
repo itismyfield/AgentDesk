@@ -1780,7 +1780,7 @@ if password
   end
 end
 RUBY
-        return
+        return $?
     fi
     [ -r "$config_path" ] || return 1
     ruby -ryaml - "$config_path" "$local_port" "$output_dir" "$password_output" \

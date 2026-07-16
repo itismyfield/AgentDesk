@@ -584,6 +584,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         self.assertIn('psql_env+=("PGPASSFILE=$password_file")', block)
         self.assertIn('psql_env+=("PGPASSFILE=/dev/null")', block)
         self.assertIn("YAML.safe_load(File.read(config_path), aliases: true)", block)
+        self.assertIn("RUBY\n        return $?\n    fi", block)
         self.assertNotIn("YAML.safe_load_file", block)
         self.assertNotIn('PGDATABASE="$(<', block)
 
