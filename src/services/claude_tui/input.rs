@@ -1347,8 +1347,7 @@ fn wait_for_prompt_ready_polling(
         // Code v2.1.209 may retain this warning after a successful warm turn, so
         // Followup readiness proceeds to the real composer/busy classification.
         if matches!(readiness, PromptReadinessKind::FreshTurn) {
-            if let Some(confirmed) =
-                confirm_mcp_auth_block(session_name, cancel_token, &snapshot)?
+            if let Some(confirmed) = confirm_mcp_auth_block(session_name, cancel_token, &snapshot)?
             {
                 log_prompt_ready_mcp_auth_block(session_name, readiness, &confirmed);
                 return Err(mcp_auth_required_error_message(session_name));
@@ -1565,9 +1564,7 @@ fn snapshot_allows_prompt_readiness(
     snapshot: &PromptReadinessSnapshot,
 ) -> bool {
     if snapshot.capture_available
-        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(
-            &snapshot.pane_tail,
-        )
+        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&snapshot.pane_tail)
     {
         return false;
     }
@@ -1593,14 +1590,8 @@ fn snapshot_indicates_mcp_auth_block(snapshot: &PromptReadinessSnapshot) -> bool
 /// the confirm boundary. Followup ignores only the auth warning; the captured
 /// pane's positive busy signals still block readiness. A blind capture cannot
 /// assert either a busy frame or a FreshTurn auth block.
-fn pane_allows_prompt_readiness(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-) -> bool {
-    snapshot_allows_prompt_readiness(
-        readiness,
-        &prompt_readiness_snapshot(session_name),
-    )
+fn pane_allows_prompt_readiness(session_name: &str, readiness: PromptReadinessKind) -> bool {
+    snapshot_allows_prompt_readiness(readiness, &prompt_readiness_snapshot(session_name))
 }
 
 /// Actionable, NON-timeout error for a cold-boot stranded on the
@@ -2519,9 +2510,7 @@ mod tests {
         };
 
         assert!(snapshot_indicates_mcp_auth_block(&busy));
-        assert!(
-            crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(busy_pane)
-        );
+        assert!(crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(busy_pane));
         assert!(
             !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &busy),
             "positive generating chrome must remain not-ready despite the ignored warning"
@@ -2863,8 +2852,7 @@ line 13";
         };
         // Precondition: the transcript-idle predicate alone accepts the
         // composer-chrome welcome pane (this is exactly why the gate is needed).
-        let transcript_idle =
-            transcript_idle_confirms_prompt_ready(&blocked, Some(file.path()));
+        let transcript_idle = transcript_idle_confirms_prompt_ready(&blocked, Some(file.path()));
         assert!(transcript_idle);
         assert!(snapshot_indicates_mcp_auth_block(&blocked));
         assert!(
