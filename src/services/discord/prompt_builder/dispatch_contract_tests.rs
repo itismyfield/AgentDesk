@@ -912,6 +912,10 @@ fn parent_plan_is_truncated_when_oversized() {
 fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
     use super::super::settings::RoleBinding;
 
+    // Keep this Full-only section-size contract independent from the ambient
+    // file-backed shared prompt; profile routing has its own fixture matrix.
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     let binding = RoleBinding {
         role_id: "project-agentdesk".to_string(),
         prompt_file: "/nonexistent".to_string(),
