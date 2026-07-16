@@ -2160,7 +2160,7 @@ esc to interrupt)
 ❯
 ────────────────────────────────────────────────────
   🤖 Opus(H) │ 7% │ MCP: 2";
-        assert!(tmux_capture_indicates_claude_tui_ready_for_input(
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(
             wrapped_spinner_pane
         ));
         assert!(tmux_capture_indicates_claude_tui_busy(wrapped_spinner_pane));
