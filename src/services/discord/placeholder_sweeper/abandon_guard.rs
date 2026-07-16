@@ -194,6 +194,24 @@ pub(super) struct AbandonedTmuxCleanupOutcome {
     state_delete_authorized: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevivedVisibleRepair {
+    None,
+    InvalidateRenderCache,
+}
+
+fn revived_visible_repair(
+    repair_enabled: bool,
+    same_turn: bool,
+    decision: AbandonedTmuxCleanupDecision,
+) -> RevivedVisibleRepair {
+    if repair_enabled && same_turn && decision == AbandonedTmuxCleanupDecision::PreserveRetry {
+        RevivedVisibleRepair::InvalidateRenderCache
+    } else {
+        RevivedVisibleRepair::None
+    }
+}
+
 impl AbandonedTmuxCleanupOutcome {
     fn from_plan(plan: AbandonedCleanupPlan) -> Self {
         Self {
@@ -311,24 +329,39 @@ pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
     provider: &ProviderKind,
     state: &InflightTurnState,
     age_secs: u64,
+    repair_visible_on_revival: bool,
 ) -> bool {
-    finalize_cleanup_if_same_turn(
+    if !super::inflight_state_still_same_turn(provider, state, age_secs) {
+        return false;
+    }
+    let cleanup = finalize_abandoned_mailbox(
         shared,
         provider,
         state,
-        age_secs,
         AbandonedCleanupEvidence::OwnerDeath,
     )
-    .await
+    .await;
+    let same_turn = super::inflight_state_still_same_turn(provider, state, age_secs);
+    if revived_visible_repair(repair_visible_on_revival, same_turn, cleanup.decision)
+        == RevivedVisibleRepair::InvalidateRenderCache
+    {
+        super::invalidate_abandoned_placeholder_render_cache(shared, state).await;
+        return false;
+    }
+    let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
+    if super::should_detach_after_cleanup(same_turn, deleted) {
+        super::detach_abandoned_placeholder_controller(shared, state);
+    }
+    deleted
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RuntimeActivityEvidence,
-        abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
+        AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RevivedVisibleRepair,
+        RuntimeActivityEvidence, abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
         abandoned_mailbox_finish_actions, abandoned_tmux_cleanup_decision,
-        abandoned_tmux_cleanup_decision_for, run_blocking_cleanup_probe,
+        abandoned_tmux_cleanup_decision_for, revived_visible_repair, run_blocking_cleanup_probe,
         runtime_activity_evidence_from,
     };
     use crate::services::discord::inflight::InflightTurnState;
@@ -547,6 +580,29 @@ mod tests {
         assert!(!tokenless_pending.cancel_removed_token);
         assert!(tokenless_pending.schedule_queue_kickoff);
         assert!(!tokenless_idle.schedule_queue_kickoff);
+    }
+
+    #[test]
+    fn revived_after_abandoned_edit_preserves_row_and_requires_visible_repair() {
+        let revived = abandoned_cleanup_plan(
+            &sweep_state(),
+            AbandonedCleanupEvidence::OwnerDeath,
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+
+        assert!(!revived.allows_state_delete);
+        assert_eq!(
+            revived_visible_repair(true, true, revived.decision),
+            RevivedVisibleRepair::InvalidateRenderCache
+        );
+        assert_eq!(
+            revived_visible_repair(true, true, AbandonedTmuxCleanupDecision::Kill),
+            RevivedVisibleRepair::None
+        );
+        assert_eq!(
+            revived_visible_repair(true, false, revived.decision),
+            RevivedVisibleRepair::None
+        );
     }
 
     #[test]

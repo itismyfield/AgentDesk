@@ -633,8 +633,10 @@ async fn run_placeholder_sweep_pass(
                 // TODO(#4573 slice B): add a persisted turn generation so reuse of
                 // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited
-                    && finalize_owner_dead_cleanup_if_same_turn(shared, provider, &state, age_secs)
-                        .await
+                    && finalize_owner_dead_cleanup_if_same_turn(
+                        shared, provider, &state, age_secs, true,
+                    )
+                    .await
                 {
                     report.abandoned += 1;
                 }
@@ -702,19 +704,35 @@ impl StalledEditTracker {
     }
 }
 
+fn abandoned_placeholder_key(
+    state: &InflightTurnState,
+) -> Option<super::placeholder_controller::PlaceholderKey> {
+    let provider = ProviderKind::from_str(&state.provider)?;
+    (state.current_msg_id != 0).then(|| super::placeholder_controller::PlaceholderKey {
+        provider,
+        channel_id: serenity::ChannelId::new(state.channel_id),
+        message_id: serenity::MessageId::new(state.current_msg_id),
+    })
+}
+
 fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &InflightTurnState) {
-    if let (Some(provider_kind), msg_id) = (
-        ProviderKind::from_str(&state.provider),
-        state.current_msg_id,
-    ) && msg_id != 0
-    {
-        let key = super::placeholder_controller::PlaceholderKey {
-            provider: provider_kind,
-            channel_id: serenity::ChannelId::new(state.channel_id),
-            message_id: serenity::MessageId::new(msg_id),
-        };
+    if let Some(key) = abandoned_placeholder_key(state) {
         shared.ui.placeholder_controller.detach(&key);
     }
+}
+
+async fn invalidate_abandoned_placeholder_render_cache(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+) -> bool {
+    let Some(key) = abandoned_placeholder_key(state) else {
+        return false;
+    };
+    shared
+        .ui
+        .placeholder_controller
+        .invalidate_render_cache(&key)
+        .await
 }
 
 /// True when the inflight state on disk still names the same turn and its
@@ -867,7 +885,7 @@ async fn sweep_orphan_status_panel(
         // (deleted, or — on transient failure — enqueued to the durable store) the
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
-        finalize_owner_dead_cleanup_if_same_turn(shared, provider, state, age_secs).await;
+        finalize_owner_dead_cleanup_if_same_turn(shared, provider, state, age_secs, false).await;
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
         && let Some(panel_msg_id) = state.status_message_id
     {
