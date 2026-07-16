@@ -142,7 +142,10 @@ fn cleanup_policy_for_terminal_evidence(
     }
 }
 
-fn should_finish_mailbox(state: &InflightTurnState, decision: AbandonedTmuxCleanupDecision) -> bool {
+fn should_finish_mailbox(
+    state: &InflightTurnState,
+    decision: AbandonedTmuxCleanupDecision,
+) -> bool {
     state.user_msg_id != 0 && decision == AbandonedTmuxCleanupDecision::Kill
 }
 
