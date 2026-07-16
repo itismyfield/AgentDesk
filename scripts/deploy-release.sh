@@ -871,18 +871,31 @@ _pg_wait_canonical_listener_absent() {
     return 1
 }
 
+_pg_report_rollback_recovery() {
+    local backup=${1:-unknown}
+    echo "⚠ PG tunnel rollback incomplete; recovery material retained at $backup" >&2
+    echo "  Manual recovery: clear the canonical :15432 listener, inspect state, then restore" >&2
+    echo "  the saved wrapper/plist and restart the prior launchd or manual tunnel." >&2
+}
+
 _rollback_pg_tunnel_migration() {
     local domain="${PG_TUNNEL_LAUNCHD_DOMAIN:-}" bin="${PG_TUNNEL_BIN:-}"
     local plist="${PG_TUNNEL_PLIST_PATH:-}" backup="${PG_TUNNEL_ROLLBACK_DIR:-}"
     local restore_ok=1 readiness_ok=0
     [ "${PG_TUNNEL_ROLLBACK_ARMED:-0}" = 1 ] || return 0
     if [ -z "$domain" ] || [ -z "$bin" ] || [ -z "$plist" ] || [ -z "$backup" ]; then
-        echo "✗ PG tunnel rollback state is incomplete; recovery material retained at ${backup:-unknown}" >&2
+        echo "✗ PG tunnel rollback state is incomplete" >&2
+        _pg_report_rollback_recovery "${backup:-unknown}"
         return 1
     fi
 
     echo "↩ Restoring previous PG tunnel state..." >&2
     launchctl bootout "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null || true
+    if ! _pg_wait_canonical_listener_absent; then
+        echo "✗ New PG tunnel listener survived rollback bootout; refusing restore bind race" >&2
+        _pg_report_rollback_recovery "$backup"
+        return 1
+    fi
     if [ -e "$backup/wrapper" ]; then
         if ! install -m 0755 "$backup/wrapper" "$bin" 2>/dev/null; then
             echo "✗ Failed to restore PG tunnel wrapper" >&2
@@ -922,8 +935,14 @@ _rollback_pg_tunnel_migration() {
     fi
 
     if [ "$restore_ok" = 1 ]; then
-        if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ] \
-          || [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ]; then
+        if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ]; then
+            if _pg_sql_probe 15432 12; then
+                readiness_ok=1
+            else
+                echo "✗ Restored PG tunnel did not become SQL-ready on :15432 after launchd throttle window" >&2
+            fi
+            _cleanup_owned_pg_tunnel_preflight
+        elif [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ]; then
             if _pg_sql_probe 15432; then
                 readiness_ok=1
             else
@@ -944,7 +963,7 @@ _rollback_pg_tunnel_migration() {
         fi
         echo "✗ Previous PG tunnel state is verified but rollback backup cleanup failed" >&2
     fi
-    echo "⚠ PG tunnel rollback incomplete; recovery material retained at $backup" >&2
+    _pg_report_rollback_recovery "$backup"
     return 1
 }
 
@@ -1797,7 +1816,8 @@ RUBY
 }
 
 _pg_sql_probe() {
-    local local_port=$1 conninfo_dir password_file attempt=0 name value
+    local local_port=$1 minimum_wait_secs=${2:-5} conninfo_dir password_file
+    local attempt=0 max_attempts name value connect_timeout_seen=0
     local -a psql_env=(env -u DATABASE_URL)
     local -a clear_names=(
         PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE
@@ -1835,14 +1855,20 @@ _pg_sql_probe() {
         if [ -f "$conninfo_dir/$name" ]; then
             value=$(<"$conninfo_dir/$name")
             psql_env+=("$name=$value")
+            [ "$name" != PGCONNECT_TIMEOUT ] || connect_timeout_seen=1
         fi
     done
+    if [ "$connect_timeout_seen" = 0 ]; then
+        psql_env+=("PGCONNECT_TIMEOUT=5")
+    fi
     if [ -s "$password_file" ]; then
         psql_env+=("PGPASSFILE=$password_file")
     else
         psql_env+=("PGPASSFILE=/dev/null")
     fi
-    while [ "$attempt" -lt 20 ]; do
+    max_attempts=$((minimum_wait_secs * 4))
+    [ "$max_attempts" -ge 20 ] || max_attempts=20
+    while [ "$attempt" -lt "$max_attempts" ]; do
         if "${psql_env[@]}" psql --no-psqlrc \
           -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' >/dev/null 2>&1; then
             rm -rf "$conninfo_dir"
@@ -1936,6 +1962,7 @@ _migrate_pg_tunnel_before_release_stop() {
         esac
     fi
     PG_TUNNEL_ROLLBACK_ARMED=1
+    echo "▸ PG tunnel rollback armed; recovery material: $PG_TUNNEL_ROLLBACK_DIR"
 
     install -m 0755 "$wrapper_source" "$PG_TUNNEL_BIN" || return 1
     _install_pg_tunnel_plist || return 1

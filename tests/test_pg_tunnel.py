@@ -74,6 +74,24 @@ class WrapperSafetyTests(unittest.TestCase):
             '[ "$#" -eq 1 ] || die "usage: $0 --take-over-canonical"', text
         )
 
+    def test_production_takeover_owns_term_kill_and_final_refusal(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        start = text.index("take_over_manual_tunnel() {")
+        end = text.index("validate_ssh_args() {", start)
+        helper = text[start:end]
+        self.assertLess(
+            helper.index('still_matching_manual_tunnel "$pid" || continue'),
+            helper.index('/bin/kill -TERM "$pid"'),
+        )
+        self.assertLess(
+            helper.index('/bin/kill -TERM "$pid"'),
+            helper.index('/bin/kill -KILL "$pid"'),
+        )
+        self.assertLess(
+            helper.index('/bin/kill -KILL "$pid"'),
+            helper.index('die "residual manual tunnel pid=$pid did not exit'),
+        )
+
     def test_machine_config_requires_safe_ssh_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             good = Path(tmp) / "good.env"
@@ -238,6 +256,8 @@ class DeploymentWiringTests(unittest.TestCase):
         fail_restore_bootstrap: bool = False,
         fail_manual_restore: bool = False,
         fail_listener_absence: bool = False,
+        rollback_listener_checks: int = 0,
+        rollback_ready_attempt: int = 1,
         job_loaded: bool = False,
         old_wrapper: str | None = None,
         old_plist: str | None = None,
@@ -254,6 +274,10 @@ printf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"
 if [ "$1" = print ]; then
   if [ "${JOB_LOADED:-0}" = 1 ]; then exit 0; else exit 1; fi
 fi
+if [ "$1" = bootout ]; then
+  bootout_count=$(grep -c '^bootout ' "$LAUNCHCTL_LOG" || true)
+  [ "$bootout_count" -lt 2 ] || : > "$ROLLBACK_BOOTOUT"
+fi
 if [ "$1" = bootstrap ] && [ "${FAIL_RESTORE_BOOTSTRAP:-0}" = 1 ]; then
   bootstrap_count=$(grep -c '^bootstrap ' "$LAUNCHCTL_LOG" || true)
   [ "$bootstrap_count" -lt 2 ] || exit 1
@@ -263,15 +287,23 @@ exit 0
             "xattr": "#!/bin/sh\nexit 0\n",
             "lsof": """#!/bin/sh
 printf 'lsof %s\\n' "$*" >> "$EVENT_LOG"
-[ "${FAIL_LISTENER_ABSENCE:-0}" = 1 ]
+if [ "${FAIL_LISTENER_ABSENCE:-0}" = 1 ]; then exit 0; fi
+if [ -f "$ROLLBACK_BOOTOUT" ] && [ "${ROLLBACK_LISTENER_CHECKS:-0}" -gt 0 ]; then
+  current=0
+  [ ! -f "$ROLLBACK_LISTENER_COUNT" ] || current=$(cat "$ROLLBACK_LISTENER_COUNT")
+  current=$((current + 1))
+  printf '%s\\n' "$current" > "$ROLLBACK_LISTENER_COUNT"
+  [ "$current" -gt "$ROLLBACK_LISTENER_CHECKS" ] || exit 0
+fi
+exit 1
 """,
             "sleep": "#!/bin/sh\nexec /bin/sleep 0.01\n",
             "psql": """#!/bin/sh
 while [ ! -f "$PROBE_READY" ]; do /bin/sleep 0.01; done
-printf 'psql host=%s hostaddr=%s port=%s user=%s db=%s sslmode=%s passfile=%s\\n' \
+printf 'psql host=%s hostaddr=%s port=%s user=%s db=%s sslmode=%s timeout=%s passfile=%s\\n' \
   "${PGHOST:-missing}" "${PGHOSTADDR:-missing}" "${PGPORT:-missing}" \
   "${PGUSER:-missing}" "${PGDATABASE:-missing}" "${PGSSLMODE:-missing}" \
-  "${PGPASSFILE:+set}" >> "$EVENT_LOG"
+  "${PGCONNECT_TIMEOUT:-missing}" "${PGPASSFILE:+set}" >> "$EVENT_LOG"
 [ "${PGHOST:-}" = db.internal ] || exit 81
 [ "${PGHOSTADDR:-}" = 127.0.0.1 ] || exit 87
 [ "${PGUSER:-}" = agentdesk ] || exit 82
@@ -288,7 +320,14 @@ case "${PGPORT:-}" in
       [ "$bootstrap_count" -lt 2 ] || rollback_active=1
     fi
     if [ "$rollback_active" -eq 0 ] && [ "${FAIL_CANONICAL:-0}" = 1 ]; then exit 1; fi
-    if [ "$rollback_active" -eq 1 ] && [ "${FAIL_ROLLBACK_READINESS:-0}" = 1 ]; then exit 1; fi
+    if [ "$rollback_active" -eq 1 ]; then
+      if [ "${FAIL_ROLLBACK_READINESS:-0}" = 1 ]; then exit 1; fi
+      rollback_attempt=0
+      [ ! -f "$ROLLBACK_PSQL_COUNT" ] || rollback_attempt=$(cat "$ROLLBACK_PSQL_COUNT")
+      rollback_attempt=$((rollback_attempt + 1))
+      printf '%s\n' "$rollback_attempt" > "$ROLLBACK_PSQL_COUNT"
+      [ "$rollback_attempt" -ge "${ROLLBACK_READY_ATTEMPT:-1}" ] || exit 1
+    fi
     ;;
   "") exit 86 ;;
   *) [ "${FAIL_PROBE:-0}" != 1 ] ;;
@@ -370,12 +409,17 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             f"FAIL_RESTORE_BOOTSTRAP={int(fail_restore_bootstrap)}\n"
             f"FAIL_MANUAL_RESTORE={int(fail_manual_restore)}\n"
             f"FAIL_LISTENER_ABSENCE={int(fail_listener_absence)}\n"
+            f"ROLLBACK_LISTENER_CHECKS={rollback_listener_checks}\n"
+            f"ROLLBACK_READY_ATTEMPT={rollback_ready_attempt}\n"
             f"JOB_LOADED={int(job_loaded)}\n"
             f"MANUAL_KIND={shlex.quote(manual_kind)}\n"
             f"PROBE_READY={shlex.quote(str(home / 'probe.ready'))}\n"
             f"ROLLBACK_STATE={shlex.quote(str(rollback_state))}\n"
+            f"ROLLBACK_BOOTOUT={shlex.quote(str(home / 'rollback.bootout'))}\n"
+            f"ROLLBACK_LISTENER_COUNT={shlex.quote(str(home / 'rollback-listener.count'))}\n"
+            f"ROLLBACK_PSQL_COUNT={shlex.quote(str(home / 'rollback-psql.count'))}\n"
             "DATABASE_URL=postgresql://agentdesk:s3cr3t@db.internal:5432/agentdesk?sslmode=require\n"
-            "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL FAIL_ROLLBACK_READINESS FAIL_BACKUP_COPY FAIL_KIND_SNAPSHOT FAIL_RESTORE_BOOTSTRAP FAIL_MANUAL_RESTORE FAIL_LISTENER_ABSENCE JOB_LOADED MANUAL_KIND PROBE_READY DATABASE_URL\n"
+            "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL FAIL_ROLLBACK_READINESS FAIL_BACKUP_COPY FAIL_KIND_SNAPSHOT FAIL_RESTORE_BOOTSTRAP FAIL_MANUAL_RESTORE FAIL_LISTENER_ABSENCE ROLLBACK_LISTENER_CHECKS ROLLBACK_READY_ATTEMPT JOB_LOADED MANUAL_KIND PROBE_READY ROLLBACK_BOOTOUT ROLLBACK_LISTENER_COUNT ROLLBACK_PSQL_COUNT DATABASE_URL\n"
             f"FAKE_BIN={shlex.quote(str(fake_bin))}\n"
             f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin:/usr/sbin:/sbin\n"
             "export PATH\n"
@@ -482,11 +526,62 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         self.assertIn("local -a psql_env=(env -u DATABASE_URL)", block)
         self.assertIn('psql_env+=(-u "$name")', block)
         self.assertIn('psql_env+=("$name=$value")', block)
+        self.assertIn('psql_env+=("PGCONNECT_TIMEOUT=5")', block)
         self.assertIn('psql_env+=("PGPASSFILE=$password_file")', block)
         self.assertIn('psql_env+=("PGPASSFILE=/dev/null")', block)
         self.assertIn("YAML.safe_load(File.read(config_path), aliases: true)", block)
         self.assertNotIn("YAML.safe_load_file", block)
         self.assertNotIn('PGDATABASE="$(<', block)
+
+    def _run_production_probe(self, database_url: str) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            event_log = root / "events.log"
+            psql = fake_bin / "psql"
+            psql.write_text(
+                "#!/bin/sh\n"
+                "printf 'timeout=%s\\n' \"${PGCONNECT_TIMEOUT:-missing}\" >> \"$EVENT_LOG\"\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            psql.chmod(0o755)
+            deploy = DEPLOY.read_text(encoding="utf-8")
+            start = deploy.index("_pg_write_probe_conninfo() {")
+            end = deploy.index("_migrate_pg_tunnel_before_release_stop() {", start)
+            helper = deploy[start:end]
+            script = (
+                "set -euo pipefail\n"
+                f"ADK_REL={shlex.quote(str(root))}\n"
+                f"DATABASE_URL={shlex.quote(database_url)}\n"
+                f"EVENT_LOG={shlex.quote(str(event_log))}\n"
+                f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin:/usr/sbin:/sbin\n"
+                "PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=\"\"\n"
+                "PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=\"\"\n"
+                "export DATABASE_URL EVENT_LOG PATH\n"
+                + helper
+                + "\n_pg_sql_probe 25432\n"
+            )
+            p = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=10
+            )
+            events = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
+            return p.returncode, events
+
+    def test_probe_defaults_connect_timeout_when_dsn_omits_it(self):
+        status, events = self._run_production_probe(
+            "postgresql://agentdesk@db.internal/agentdesk"
+        )
+        self.assertEqual(status, 0, events)
+        self.assertEqual(events, "timeout=5\n")
+
+    def test_probe_preserves_explicit_connect_timeout(self):
+        status, events = self._run_production_probe(
+            "postgresql://agentdesk@db.internal/agentdesk?connect_timeout=17"
+        )
+        self.assertEqual(status, 0, events)
+        self.assertEqual(events, "timeout=17\n")
 
     def test_production_ruby_parses_ipv6_escaped_uri_and_pgpass(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -727,6 +822,57 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "armed=0 backup=\n",
             )
 
+    def test_rollback_waits_for_listener_absence_before_manual_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config/pg-tunnel.env").write_text(
+                "PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            home.mkdir()
+            p, _, event_log = self._run_block(
+                adk,
+                home,
+                fail_canonical=True,
+                rollback_listener_checks=2,
+                old_wrapper="#!/bin/sh\nexit 99\n",
+                manual_kind="tcp",
+            )
+            events = event_log.read_text(encoding="utf-8")
+            self.assertNotEqual(p.returncode, 0)
+            rollback_bootout = events.rindex("launchctl bootout")
+            second_listener = events.index("lsof ", events.index("lsof ", rollback_bootout) + 1)
+            restore = events.index("restore tcp", second_listener)
+            self.assertLess(rollback_bootout, second_listener)
+            self.assertLess(second_listener, restore)
+
+    def test_rollback_refuses_restore_while_new_listener_survives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config/pg-tunnel.env").write_text(
+                "PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            home.mkdir()
+            p, _, event_log = self._run_block(
+                adk,
+                home,
+                fail_canonical=True,
+                fail_listener_absence=True,
+                old_wrapper="#!/bin/sh\nexit 99\n",
+                manual_kind="tcp",
+            )
+            events = event_log.read_text(encoding="utf-8")
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("refusing restore bind race", p.stderr)
+            self.assertNotIn("restore tcp", events)
+            self.assertIn("Manual recovery", p.stderr)
+            self._assert_rollback_material_retained(home)
+
     def test_snapshot_failure_does_not_touch_live_tunnel(self):
         with tempfile.TemporaryDirectory() as tmp:
             adk = Path(tmp) / "adk"
@@ -874,7 +1020,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 adk, home, fail_canonical=True, fail_listener_absence=True
             )
             self.assertNotEqual(p.returncode, 0)
-            self.assertIn("still has a listener", p.stderr)
+            self.assertIn("listener survived rollback bootout", p.stderr)
             self._assert_rollback_material_retained(home)
 
     def test_rollback_readiness_failure_retains_recovery_material(self):
@@ -898,6 +1044,36 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("did not become SQL-ready", p.stderr)
             self._assert_rollback_material_retained(home)
+
+    def test_launchd_rollback_readiness_covers_throttle_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk = Path(tmp) / "adk"
+            for sub in ("bin", "config", "logs"):
+                (adk / sub).mkdir(parents=True)
+            (adk / "config/pg-tunnel.env").write_text(
+                "PG_TUNNEL_SSH_TARGET=mac-mini\n", encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            home.mkdir()
+            p, _, event_log = self._run_block(
+                adk,
+                home,
+                fail_canonical=True,
+                rollback_ready_attempt=45,
+                job_loaded=True,
+                old_wrapper="old-wrapper\n",
+                old_plist="old-plist\n",
+            )
+            events = event_log.read_text(encoding="utf-8")
+            self.assertNotEqual(p.returncode, 0)
+            rollback_attempts = int(
+                (home / "rollback-psql.count").read_text(encoding="utf-8")
+            )
+            self.assertEqual(rollback_attempts, 45, events)
+            self.assertEqual(
+                (home / "rollback-state.txt").read_text(encoding="utf-8"),
+                "armed=0 backup=\n",
+            )
 
     @staticmethod
     def _assert_rollback_material_retained(home: Path) -> None:
@@ -926,7 +1102,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr + events)
             self.assertIn(
                 "psql host=db.internal hostaddr=127.0.0.1 port=15432 "
-                "user=agentdesk db=agentdesk sslmode=require passfile=set",
+                "user=agentdesk db=agentdesk sslmode=require timeout=5 passfile=set",
                 events,
                 p.stdout + p.stderr + events,
             )
