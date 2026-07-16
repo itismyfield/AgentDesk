@@ -548,7 +548,11 @@ async fn run_placeholder_sweep_pass(
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             let cleanup =
                                 finalize_abandoned_mailbox(shared, provider, &state, true).await;
-                            if cleanup.delete_state_if_allowed(provider, &state) {
+                            let same_turn =
+                                inflight_state_still_same_turn(provider, &state, age_secs);
+                            let deleted = same_turn
+                                && cleanup.delete_state_if_allowed(provider, &state);
+                            if should_detach_after_cleanup(same_turn, deleted) {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }
                         }
@@ -567,8 +571,14 @@ async fn run_placeholder_sweep_pass(
                         // owner-death evidence before destructive cleanup.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             let cleanup =
-                                finalize_abandoned_mailbox(shared, provider, &state, false).await;
-                            cleanup.delete_state_if_allowed(provider, &state);
+                                finalize_abandoned_mailbox(shared, provider, &state, true).await;
+                            let same_turn =
+                                inflight_state_still_same_turn(provider, &state, age_secs);
+                            let deleted = same_turn
+                                && cleanup.delete_state_if_allowed(provider, &state);
+                            if should_detach_after_cleanup(same_turn, deleted) {
+                                detach_abandoned_placeholder_controller(shared, &state);
+                            }
                         }
                         continue;
                     }
@@ -637,14 +647,13 @@ async fn run_placeholder_sweep_pass(
                 // TODO(#4573 slice B): add a persisted turn generation so reuse of
                 // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    let cleanup = finalize_abandoned_mailbox(shared, provider, &state, false).await;
-                    if cleanup.delete_state_if_allowed(provider, &state) {
+                    let cleanup = finalize_abandoned_mailbox(shared, provider, &state, true).await;
+                    let same_turn = inflight_state_still_same_turn(provider, &state, age_secs);
+                    let deleted = same_turn && cleanup.delete_state_if_allowed(provider, &state);
+                    if should_detach_after_cleanup(same_turn, deleted) {
                         report.abandoned += 1;
-                    }
-                    // codex round-10 P3 on PR #1308: detach the controller's
-                    // Active row that was tracking this card so the
-                    // cap-bounded map does not retain a non-evictable entry.
-                    if cleanup.cleanup_killed {
+                        // Detach whenever the identity-guarded state deletion commits,
+                        // including zero-id marker-only rows with no mailbox token.
                         detach_abandoned_placeholder_controller(shared, &state);
                     }
                 }
@@ -760,6 +769,10 @@ fn observed_age_still_stale(
     slack_secs: u64,
 ) -> bool {
     current_age_secs + slack_secs >= snapshot_age_secs
+}
+
+fn should_detach_after_cleanup(same_turn: bool, state_deleted: bool) -> bool {
+    same_turn && state_deleted
 }
 
 /// #3003 durable safety net: reclaim an orphaned status-panel-v2 message left on
@@ -1219,6 +1232,7 @@ mod safety_net_threshold_tests {
     use super::{
         ABANDON_THRESHOLD_SECS, AbandonedTmuxCleanupDecision, INITIAL_DELAY_SECS,
         STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS, panel_reclaim_target,
+        should_detach_after_cleanup,
     };
     use crate::services::provider::ProviderKind;
 
@@ -1310,6 +1324,13 @@ mod safety_net_threshold_tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn controller_detach_is_gated_by_identity_and_committed_state_delete() {
+        assert!(should_detach_after_cleanup(true, true));
+        assert!(!should_detach_after_cleanup(false, true));
+        assert!(!should_detach_after_cleanup(true, false));
     }
 
     #[test]

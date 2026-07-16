@@ -4,7 +4,8 @@ use poise::serenity_prelude as serenity;
 
 use super::super::SharedData;
 use super::super::inflight::{
-    DEAD_WATCHER_PROVEN_DEAD_SECS, InflightTurnState, delete_inflight_state_file,
+    DEAD_WATCHER_PROVEN_DEAD_SECS, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
+    clear_inflight_state_if_matches_identity_turn_nonce,
 };
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
@@ -111,12 +112,12 @@ pub(super) async fn abandoned_tmux_cleanup_decision_for(
 pub(super) struct AbandonedTmuxCleanupOutcome {
     pub(super) decision: AbandonedTmuxCleanupDecision,
     pub(super) cleanup_killed: bool,
-    terminal_delivered: bool,
+    cleanup_committed: bool,
 }
 
 impl AbandonedTmuxCleanupOutcome {
     fn allows_state_delete(self) -> bool {
-        self.terminal_delivered
+        self.cleanup_committed
             || self.decision == AbandonedTmuxCleanupDecision::TerminalMarkerOnly
             || (self.decision == AbandonedTmuxCleanupDecision::Kill && self.cleanup_killed)
     }
@@ -126,7 +127,13 @@ impl AbandonedTmuxCleanupOutcome {
         provider: &ProviderKind,
         state: &InflightTurnState,
     ) -> bool {
-        self.allows_state_delete() && delete_inflight_state_file(provider, state.channel_id)
+        self.allows_state_delete()
+            && clear_inflight_state_if_matches_identity_turn_nonce(
+                provider,
+                state.channel_id,
+                &InflightTurnIdentity::from_state(state),
+                state.turn_nonce.as_deref(),
+            ) == GuardedClearOutcome::Cleared
     }
 }
 
@@ -150,15 +157,42 @@ fn should_finish_mailbox(
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CleanupWiring {
+    pub cleanup_committed: bool,
+    pub finish_mailbox: bool,
+    pub allows_state_delete: bool,
+}
+
+#[cfg(test)]
+pub(super) fn cleanup_wiring(
+    state: &InflightTurnState,
+    decision: AbandonedTmuxCleanupDecision,
+    cleanup_committed: bool,
+    cleanup_killed: bool,
+) -> CleanupWiring {
+    let outcome = AbandonedTmuxCleanupOutcome {
+        decision,
+        cleanup_killed,
+        cleanup_committed,
+    };
+    CleanupWiring {
+        cleanup_committed,
+        finish_mailbox: should_finish_mailbox(state, decision),
+        allows_state_delete: outcome.allows_state_delete(),
+    }
+}
+
+#[cfg(test)]
 pub(super) fn cleanup_decision_allows_state_delete(
     decision: AbandonedTmuxCleanupDecision,
     cleanup_killed: bool,
-    terminal_delivered: bool,
+    cleanup_committed: bool,
 ) -> bool {
     AbandonedTmuxCleanupOutcome {
         decision,
         cleanup_killed,
-        terminal_delivered,
+        cleanup_committed,
     }
     .allows_state_delete()
 }
@@ -170,9 +204,9 @@ pub(super) async fn finalize_abandoned_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &InflightTurnState,
-    terminal_delivered: bool,
+    cleanup_committed: bool,
 ) -> AbandonedTmuxCleanupOutcome {
-    let decision = if terminal_delivered {
+    let decision = if cleanup_committed {
         AbandonedTmuxCleanupDecision::Kill
     } else {
         abandoned_tmux_cleanup_decision_for(state).await
@@ -181,7 +215,7 @@ pub(super) async fn finalize_abandoned_mailbox(
         return AbandonedTmuxCleanupOutcome {
             decision,
             cleanup_killed: false,
-            terminal_delivered,
+            cleanup_committed,
         };
     }
 
@@ -196,7 +230,7 @@ pub(super) async fn finalize_abandoned_mailbox(
     if let Some(removed_token) = finish.removed_token {
         super::super::turn_bridge::cancel_active_token(
             &removed_token,
-            cleanup_policy_for_terminal_evidence(terminal_delivered),
+            cleanup_policy_for_terminal_evidence(cleanup_committed),
             "placeholder_sweeper abandoned",
         );
         super::super::saturating_decrement_global_active(shared);
@@ -211,13 +245,13 @@ pub(super) async fn finalize_abandoned_mailbox(
         AbandonedTmuxCleanupOutcome {
             decision,
             cleanup_killed: true,
-            terminal_delivered,
+            cleanup_committed,
         }
     } else {
         AbandonedTmuxCleanupOutcome {
             decision,
             cleanup_killed: false,
-            terminal_delivered,
+            cleanup_committed,
         }
     }
 }
@@ -227,7 +261,7 @@ mod tests {
     use super::{
         AbandonedTmuxCleanupDecision, RuntimeActivityEvidence, abandoned_tmux_cleanup_decision,
         abandoned_tmux_cleanup_decision_for, cleanup_decision_allows_state_delete,
-        cleanup_policy_for_terminal_evidence, run_blocking_cleanup_probe,
+        cleanup_policy_for_terminal_evidence, cleanup_wiring, run_blocking_cleanup_probe,
         runtime_activity_evidence_from, should_finish_mailbox,
     };
     use crate::services::discord::inflight::InflightTurnState;
@@ -364,6 +398,33 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    #[test]
+    fn committed_edit_wires_zero_id_to_delete_without_mailbox_finish() {
+        let mut state = sweep_state();
+        state.user_msg_id = 0;
+        let wiring = cleanup_wiring(
+            &state,
+            AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
+            true,
+            false,
+        );
+        assert!(wiring.cleanup_committed);
+        assert!(!wiring.finish_mailbox);
+        assert!(wiring.allows_state_delete);
+    }
+
+    #[test]
+    fn committed_edit_wires_tokenless_kill_to_state_delete() {
+        let wiring = cleanup_wiring(
+            &sweep_state(),
+            AbandonedTmuxCleanupDecision::Kill,
+            true,
+            false,
+        );
+        assert!(wiring.finish_mailbox);
+        assert!(wiring.allows_state_delete);
     }
 
     #[test]
