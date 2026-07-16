@@ -86,7 +86,7 @@ fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) ->
     let busy = lines.iter().any(|line| {
         let trimmed = trim_prompt_line(line);
         let lower = trimmed.to_ascii_lowercase();
-        lower.contains("esc to interrupt")
+        line_has_claude_tui_interrupt_chrome(trimmed)
             || lower.contains("processing")
             || lower.contains("thinking")
             || lower.contains("running")
@@ -400,12 +400,22 @@ fn line_has_claude_tui_interrupt_chrome(line: &str) -> bool {
     let Some(interrupt_start) = lower.find("esc to interrupt") else {
         return false;
     };
+    let after_interrupt = &line[interrupt_start + "esc to interrupt".len()..];
+    // Complete footer chrome ends at its closing parenthesis. Any trailing
+    // non-whitespace turns the line into assistant prose quoting the footer.
+    if after_interrupt.trim() != ")" {
+        return false;
+    }
     let before_interrupt = &line[..interrupt_start];
     let has_status_group = before_interrupt.starts_with('(')
         && !before_interrupt[1..].contains(')')
-        && before_interrupt[1..].contains('·');
+        && before_interrupt[1..].contains('·')
+        && after_interrupt.trim() == ")";
     let spinner_prefix = line.chars().next().is_some_and(is_claude_tui_spinner_glyph);
-    has_status_group || (spinner_prefix && lower[..interrupt_start].contains('…'))
+    has_status_group
+        || (spinner_prefix
+            && lower[..interrupt_start].contains('…')
+            && after_interrupt.trim() == ")")
 }
 
 fn line_is_claude_tui_wrapped_interrupt_tail(line: &str) -> bool {
@@ -413,7 +423,7 @@ fn line_is_claude_tui_wrapped_interrupt_tail(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower
         .strip_prefix("esc to interrupt")
-        .is_some_and(|suffix| suffix.trim().starts_with(')'))
+        .is_some_and(|suffix| suffix.trim() == ")")
 }
 
 fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
@@ -530,14 +540,23 @@ fn line_has_claude_tui_spinner_status_fragment(line: &str) -> bool {
     let Some(open) = line.find('(') else {
         return false;
     };
-    let group = line[open + 1..].split(')').next().unwrap_or_default();
+    let after_open = &line[open + 1..];
+    let (group, closed) = if let Some(close) = after_open.find(')') {
+        if !after_open[close + 1..].trim().is_empty() {
+            return false;
+        }
+        (&after_open[..close], true)
+    } else {
+        (after_open, false)
+    };
     let lower = group.to_ascii_lowercase();
-    lower.contains("esc to interrupt")
+    let has_status = lower.contains("esc to interrupt")
         || lower.contains("tokens")
         || group.contains('·')
         || group
             .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(is_claude_tui_duration_token)
+            .any(is_claude_tui_duration_token);
+    has_status && (closed || !group.trim().is_empty())
 }
 
 fn is_claude_tui_duration_token(token: &str) -> bool {
@@ -563,6 +582,9 @@ fn line_has_claude_tui_spinner_status_group(line: &str) -> bool {
     let Some(close_rel) = after_open.find(')') else {
         return false;
     };
+    if !after_open[close_rel + 1..].trim().is_empty() {
+        return false;
+    }
     let group = &after_open[..close_rel];
     let lower = group.to_ascii_lowercase();
     if lower.contains("esc to interrupt") || lower.contains("tokens") || group.contains('·') {
@@ -2087,17 +2109,27 @@ some earlier assistant prose still on screen
         assert!(!tmux_capture_indicates_claude_tui_busy(capture));
         assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
 
-        let parenthesized_prose = "\
+        for parenthesized_prose in [
+            "\
 ⏺ The footer shows (12s · esc to interrupt) while the turn is running.
 ✻ Baked for 2s
 ────────────────────────────────────────────────────
 ❯
 ────────────────────────────────────────────────────
-  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done";
-        assert!(!tmux_capture_indicates_claude_tui_busy(parenthesized_prose));
-        assert!(tmux_capture_indicates_claude_tui_ready_for_input(
-            parenthesized_prose
-        ));
+  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done",
+            "\
+(12s · esc to interrupt) is the footer example
+✻ Baked for 2s
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done",
+        ] {
+            assert!(!tmux_capture_indicates_claude_tui_busy(parenthesized_prose));
+            assert!(tmux_capture_indicates_claude_tui_ready_for_input(
+                parenthesized_prose
+            ));
+        }
     }
 
     // #3107 codex re-review (F2 PARTIAL close): a spinner-progress line keyed on
@@ -2223,6 +2255,12 @@ esc to interrupt)
         ));
         assert!(!tmux_line_is_claude_tui_structured_spinner(
             "✳ Architecting… (a fresh idea)"
+        ));
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting… (12s) is displayed here"
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_busy(
+            "✳ Architecting… (12s) is displayed here\n────────────────────────\n❯"
         ));
         assert!(!tmux_line_is_claude_tui_structured_spinner(
             "Architecting… (12s)"
