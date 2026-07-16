@@ -97,34 +97,49 @@ impl Default for PlaceholderEntry {
 #[derive(Debug, Default)]
 struct PlaceholderEntrySlot {
     detached: AtomicBool,
-    active_edits: AtomicUsize,
+    in_flight_edits: AtomicUsize,
     inner: Mutex<PlaceholderEntry>,
 }
 
+struct PlaceholderEditLease<'a> {
+    in_flight_edits: &'a AtomicUsize,
+}
+
+impl Drop for PlaceholderEditLease<'_> {
+    fn drop(&mut self) {
+        self.in_flight_edits.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl PlaceholderEntrySlot {
-    fn begin_active_edit(&self) -> bool {
-        if self.detached.load(Ordering::Acquire) {
-            return false;
+    fn detached() -> Self {
+        Self {
+            detached: AtomicBool::new(true),
+            ..Self::default()
         }
-        self.active_edits.fetch_add(1, Ordering::AcqRel);
-        if self.detached.load(Ordering::Acquire) {
-            self.active_edits.fetch_sub(1, Ordering::AcqRel);
-            return false;
-        }
-        true
     }
 
-    fn finish_active_edit(&self) {
-        self.active_edits.fetch_sub(1, Ordering::AcqRel);
+    fn begin_edit(&self) -> Option<PlaceholderEditLease<'_>> {
+        if self.detached.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.in_flight_edits.fetch_add(1, Ordering::SeqCst);
+        if self.detached.load(Ordering::SeqCst) {
+            self.in_flight_edits.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(PlaceholderEditLease {
+            in_flight_edits: &self.in_flight_edits,
+        })
     }
 
     fn detach(&self) {
-        self.detached.store(true, Ordering::Release);
+        self.detached.store(true, Ordering::SeqCst);
     }
 
-    async fn wait_for_active_edits(&self) {
+    async fn wait_for_edits(&self) {
         let mut backoff = Duration::from_millis(1);
-        while self.active_edits.load(Ordering::Acquire) != 0 {
+        while self.in_flight_edits.load(Ordering::SeqCst) != 0 {
             tokio::time::sleep(backoff).await;
             backoff = backoff.saturating_mul(2).min(Duration::from_millis(50));
         }
@@ -302,10 +317,9 @@ impl PlaceholderController {
     /// left in place — they own a live Discord card. Uses `try_lock` to avoid
     /// blocking on entries the caller is mid-edit on.
     fn evict_terminal_entries(&self) {
-        let mut to_remove: Vec<PlaceholderKey> = Vec::new();
+        let mut to_remove: Vec<(PlaceholderKey, Arc<PlaceholderEntrySlot>)> = Vec::new();
         for kv in self.entries.iter() {
             if kv.value().detached.load(Ordering::Acquire) {
-                to_remove.push(kv.key().clone());
                 continue;
             }
             if let Ok(guard) = kv.value().inner.try_lock()
@@ -317,11 +331,12 @@ impl PlaceholderController {
                         | PlaceholderLifecycle::Aborted
                 )
             {
-                to_remove.push(kv.key().clone());
+                to_remove.push((kv.key().clone(), kv.value().clone()));
             }
         }
-        for key in to_remove {
-            self.entries.remove(&key);
+        for (key, entry) in to_remove {
+            self.entries
+                .remove_if(&key, |_, current| Arc::ptr_eq(current, &entry));
         }
     }
 
@@ -407,12 +422,12 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Coalesced;
         }
 
-        if !entry.begin_active_edit() {
+        let Some(edit_lease) = entry.begin_edit() else {
             return PlaceholderControllerOutcome::Rejected;
-        }
+        };
         let edit_result =
             edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
-        entry.finish_active_edit();
+        drop(edit_lease);
 
         if entry.detached.load(Ordering::Acquire) {
             return PlaceholderControllerOutcome::Rejected;
@@ -494,11 +509,12 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Coalesced;
         }
 
-        if entry.detached.load(Ordering::Acquire) {
+        let Some(edit_lease) = entry.begin_edit() else {
             return PlaceholderControllerOutcome::Rejected;
-        }
+        };
         let edit_result =
             edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
+        drop(edit_lease);
 
         if entry.detached.load(Ordering::Acquire) {
             return PlaceholderControllerOutcome::Rejected;
@@ -632,11 +648,13 @@ impl PlaceholderController {
     /// addressable until the caller has performed the external overwrite or
     /// delete and then invokes [`Self::finish_detach`].
     pub(super) async fn begin_detach(&self, key: &PlaceholderKey) {
-        let Some(entry) = self.entries.get(key).map(|entry| entry.clone()) else {
-            return;
-        };
+        let entry = self
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(PlaceholderEntrySlot::detached()))
+            .clone();
         entry.detach();
-        entry.wait_for_active_edits().await;
+        entry.wait_for_edits().await;
     }
 
     /// Remove the exact tombstoned incarnation installed for `key`.
@@ -855,7 +873,6 @@ mod detach_incarnation_tests {
     async fn detach_first_rejects_active_without_patch() {
         let gateway = BlockingGateway::new();
         let controller = PlaceholderController::default();
-        let _slot = controller.entry(&key());
 
         controller.begin_detach(&key()).await;
         let outcome = controller
