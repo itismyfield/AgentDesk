@@ -1226,11 +1226,11 @@ mod safety_net_threshold_tests {
     //! placeholder sweeper is now the LAST cleanup layer — every
     //! explicit-signal wire (D / A / B / C) must have time to fire
     //! before the sweeper does anything destructive.
+    use super::abandon_guard::cleanup_decision_allows_state_delete;
     use super::{
         ABANDON_THRESHOLD_SECS, AbandonedTmuxCleanupDecision, INITIAL_DELAY_SECS,
         STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS, panel_reclaim_target,
     };
-    use super::abandon_guard::cleanup_decision_allows_state_delete;
     use crate::services::provider::ProviderKind;
 
     fn sweep_state_with_panel(status_message_id: Option<u64>) -> super::InflightTurnState {
