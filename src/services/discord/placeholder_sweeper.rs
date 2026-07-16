@@ -612,6 +612,12 @@ async fn run_placeholder_sweep_pass(
                 {
                     continue;
                 }
+                let key = super::placeholder_controller::PlaceholderKey {
+                    provider: provider.clone(),
+                    channel_id: serenity::ChannelId::new(state.channel_id),
+                    message_id: serenity::MessageId::new(state.current_msg_id),
+                };
+                shared.ui.placeholder_controller.begin_detach(&key).await;
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
@@ -647,6 +653,8 @@ async fn run_placeholder_sweep_pass(
                     .await
                 {
                     report.abandoned += 1;
+                } else {
+                    shared.ui.placeholder_controller.finish_detach(&key);
                 }
             }
         }

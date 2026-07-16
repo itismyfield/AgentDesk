@@ -21,6 +21,7 @@
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -89,6 +90,41 @@ impl Default for PlaceholderEntry {
             active_snapshot: None,
             last_live_events_block: None,
             last_live_events_edit_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PlaceholderEntrySlot {
+    detached: AtomicBool,
+    active_edits: AtomicUsize,
+    inner: Mutex<PlaceholderEntry>,
+}
+
+impl PlaceholderEntrySlot {
+    fn begin_active_edit(&self) -> bool {
+        if self.detached.load(Ordering::Acquire) {
+            return false;
+        }
+        self.active_edits.fetch_add(1, Ordering::AcqRel);
+        if self.detached.load(Ordering::Acquire) {
+            self.active_edits.fetch_sub(1, Ordering::AcqRel);
+            return false;
+        }
+        true
+    }
+
+    fn finish_active_edit(&self) {
+        self.active_edits.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    fn detach(&self) {
+        self.detached.store(true, Ordering::Release);
+    }
+
+    async fn wait_for_active_edits(&self) {
+        while self.active_edits.load(Ordering::Acquire) != 0 {
+            tokio::task::yield_now().await;
         }
     }
 }
@@ -225,7 +261,7 @@ async fn edit_message_with_retry<G: TurnGateway + ?Sized>(
 
 #[derive(Debug, Default)]
 pub(super) struct PlaceholderController {
-    entries: dashmap::DashMap<PlaceholderKey, Arc<Mutex<PlaceholderEntry>>>,
+    entries: dashmap::DashMap<PlaceholderKey, Arc<PlaceholderEntrySlot>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,7 +281,7 @@ pub(super) enum PlaceholderControllerOutcome {
 }
 
 impl PlaceholderController {
-    fn entry(&self, key: &PlaceholderKey) -> Arc<Mutex<PlaceholderEntry>> {
+    fn entry(&self, key: &PlaceholderKey) -> Arc<PlaceholderEntrySlot> {
         if let Some(existing) = self.entries.get(key) {
             return existing.clone();
         }
@@ -254,7 +290,7 @@ impl PlaceholderController {
         }
         self.entries
             .entry(key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(PlaceholderEntry::default())))
+            .or_insert_with(|| Arc::new(PlaceholderEntrySlot::default()))
             .clone()
     }
 
@@ -266,16 +302,20 @@ impl PlaceholderController {
     fn evict_terminal_entries(&self) {
         let mut to_remove: Vec<PlaceholderKey> = Vec::new();
         for kv in self.entries.iter() {
-            if let Ok(guard) = kv.value().try_lock() {
-                if matches!(
+            if kv.value().detached.load(Ordering::Acquire) {
+                to_remove.push(kv.key().clone());
+                continue;
+            }
+            if let Ok(guard) = kv.value().inner.try_lock()
+                && matches!(
                     guard.state,
                     PlaceholderLifecycle::NotCreated
                         | PlaceholderLifecycle::Completed
                         | PlaceholderLifecycle::TimedOut
                         | PlaceholderLifecycle::Aborted
-                ) {
-                    to_remove.push(kv.key().clone());
-                }
+                )
+            {
+                to_remove.push(kv.key().clone());
             }
         }
         for key in to_remove {
@@ -315,17 +355,19 @@ impl PlaceholderController {
         live_events_block: Option<String>,
     ) -> PlaceholderControllerOutcome {
         let entry = self.entry(&key);
-        let mut guarded = entry.lock().await;
+        let mut guarded = entry.inner.lock().await;
 
         // Forbid re-activating after a terminal transition — placeholder_sweeper
         // owns stale-Active recovery and we never want to drag a closed card
         // back into the Active state.
-        if matches!(
-            guarded.state,
-            PlaceholderLifecycle::Completed
-                | PlaceholderLifecycle::TimedOut
-                | PlaceholderLifecycle::Aborted
-        ) {
+        if entry.detached.load(Ordering::Acquire)
+            || matches!(
+                guarded.state,
+                PlaceholderLifecycle::Completed
+                    | PlaceholderLifecycle::TimedOut
+                    | PlaceholderLifecycle::Aborted
+            )
+        {
             return PlaceholderControllerOutcome::Rejected;
         }
 
@@ -363,8 +405,16 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Coalesced;
         }
 
+        if !entry.begin_active_edit() {
+            return PlaceholderControllerOutcome::Rejected;
+        }
         let edit_result =
             edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
+        entry.finish_active_edit();
+
+        if entry.detached.load(Ordering::Acquire) {
+            return PlaceholderControllerOutcome::Rejected;
+        }
 
         match edit_result {
             Ok(_) => {
@@ -410,15 +460,17 @@ impl PlaceholderController {
         input: PlaceholderActiveInput,
     ) -> PlaceholderControllerOutcome {
         let entry = self.entry(&key);
-        let mut guarded = entry.lock().await;
+        let mut guarded = entry.inner.lock().await;
 
-        if matches!(
-            guarded.state,
-            PlaceholderLifecycle::Active
-                | PlaceholderLifecycle::Completed
-                | PlaceholderLifecycle::TimedOut
-                | PlaceholderLifecycle::Aborted
-        ) {
+        if entry.detached.load(Ordering::Acquire)
+            || matches!(
+                guarded.state,
+                PlaceholderLifecycle::Active
+                    | PlaceholderLifecycle::Completed
+                    | PlaceholderLifecycle::TimedOut
+                    | PlaceholderLifecycle::Aborted
+            )
+        {
             return PlaceholderControllerOutcome::Rejected;
         }
 
@@ -440,8 +492,15 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Coalesced;
         }
 
+        if entry.detached.load(Ordering::Acquire) {
+            return PlaceholderControllerOutcome::Rejected;
+        }
         let edit_result =
             edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
+
+        if entry.detached.load(Ordering::Acquire) {
+            return PlaceholderControllerOutcome::Rejected;
+        }
 
         match edit_result {
             Ok(_) => {
@@ -484,8 +543,11 @@ impl PlaceholderController {
             target
         );
         let entry = self.entry(&key);
-        let mut guarded = entry.lock().await;
+        let mut guarded = entry.inner.lock().await;
 
+        if entry.detached.load(Ordering::Acquire) {
+            return PlaceholderControllerOutcome::AlreadyTerminal;
+        }
         if matches!(
             guarded.state,
             PlaceholderLifecycle::Completed
@@ -554,33 +616,64 @@ impl PlaceholderController {
         let Some(entry) = self.entries.get(key).map(|entry| entry.clone()) else {
             return false;
         };
-        let mut guarded = entry.lock().await;
+        let mut guarded = entry.inner.lock().await;
+        if entry.detached.load(Ordering::Acquire) {
+            return false;
+        }
         guarded.last_rendered = None;
         guarded.last_live_events_block = None;
         guarded.last_live_events_edit_at = None;
         true
     }
 
-    /// Drop a key from the controller without emitting any Discord PATCH.
-    /// Used by the rollover retarget path on `turn_bridge`: when the old
-    /// `current_msg_id` is overwritten with a frozen response chunk, the
-    /// controller's old entry is no longer referenced and must not survive as
-    /// a non-evictable `Active` row in the cap-bounded map (codex round-4
-    /// #1308 P2).
-    pub(super) fn detach(&self, key: &PlaceholderKey) {
-        self.entries.remove(key);
+    /// Tombstone a key without emitting any Discord PATCH. The tombstone stays
+    /// addressable until the caller has performed the external overwrite or
+    /// delete and then invokes [`Self::finish_detach`].
+    pub(super) async fn begin_detach(&self, key: &PlaceholderKey) {
+        let Some(entry) = self.entries.get(key).map(|entry| entry.clone()) else {
+            return;
+        };
+        entry.detach();
+        entry.wait_for_active_edits().await;
     }
 
-    /// #1332: drop every entry whose `(channel_id, message_id)` matches the
-    /// argument, regardless of provider. Used by the queue-exit feedback path
-    /// where the provider scope was discarded with the queued-placeholder
-    /// mapping; without provider-agnostic detach a cancelled queued
-    /// intervention would leave a stale `Queued` row in the cap-bounded
-    /// `entries` map (`Queued` is excluded from the regular eviction sweep
-    /// because in-flight queued placeholders must survive until dispatch).
+    /// Remove the exact tombstoned incarnation installed for `key`.
+    pub(super) fn finish_detach(&self, key: &PlaceholderKey) {
+        let Some(entry) = self.entries.get(key).map(|entry| entry.clone()) else {
+            return;
+        };
+        if !entry.detached.load(Ordering::Acquire) {
+            return;
+        }
+        self.entries.remove_if(key, |_, current| Arc::ptr_eq(current, &entry));
+    }
+
+    /// Drop a key from the controller without emitting any Discord PATCH.
+    /// Used by rollover paths whose external overwrite already committed.
+    pub(super) fn detach(&self, key: &PlaceholderKey) {
+        if let Some(entry) = self.entries.get(key).map(|entry| entry.clone()) {
+            entry.detach();
+            self.entries
+                .remove_if(key, |_, current| Arc::ptr_eq(current, &entry));
+        }
+    }
+
+    /// Tombstone every incarnation whose `(channel_id, message_id)` matches,
+    /// regardless of provider, then remove those exact slots.
     pub(super) fn detach_by_message(&self, channel_id: ChannelId, message_id: MessageId) {
-        self.entries
-            .retain(|key, _| !(key.channel_id == channel_id && key.message_id == message_id));
+        let matches: Vec<(PlaceholderKey, Arc<PlaceholderEntrySlot>)> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.key().channel_id == channel_id && entry.key().message_id == message_id
+            })
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        for (key, entry) in matches {
+            entry.detach();
+            self.entries
+                .remove_if(&key, |_, current| Arc::ptr_eq(current, &entry));
+        }
     }
 }
 

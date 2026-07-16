@@ -325,7 +325,7 @@ fn abandoned_placeholder_key(
 
 fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &InflightTurnState) {
     if let Some(key) = abandoned_placeholder_key(state) {
-        shared.ui.placeholder_controller.detach(&key);
+        shared.ui.placeholder_controller.finish_detach(&key);
     }
 }
 
