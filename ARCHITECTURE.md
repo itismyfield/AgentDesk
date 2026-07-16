@@ -810,6 +810,7 @@ src/
 │   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   └── recovery_retry.rs
 │   │   │   ├── tmux_runtime/
+│   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
@@ -1069,6 +1070,7 @@ src/
 │   │   ├── shell.rs
 │   │   └── tmux.rs
 │   ├── provider/
+│   │   ├── cancel_token_claude_interrupt.rs
 │   │   └── provider_conformance_invariant_tests.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs

@@ -10,20 +10,19 @@ use std::time::Duration;
 // OS-level PID-exit observation moved verbatim into sibling leaf modules; the
 // async orchestration + session-teardown logic stays here and reaches the
 // moved items by their original bare names via these glob/explicit re-imports.
+mod claude_stop_delivery;
 mod interrupt_policy;
 mod pid_exit;
 mod process_backend_cancel;
 mod process_table;
 
+use claude_stop_delivery::interrupt_claude_turn_session_preserving;
 use interrupt_policy::*;
 use pid_exit::wait_for_pid_exit;
 use process_backend_cancel::{
     hard_stop_unresponsive_process_backend_turn, interrupt_process_backend_turn,
 };
-use process_table::{
-    pane_foreground_is_provider_wrapper, provider_cli_pid_in_tmux, send_sigint,
-    write_line_to_wrapper_fifo,
-};
+use process_table::{provider_cli_pid_in_tmux, send_sigint};
 
 // #3169: `mod.rs`'s cancel epilogue records this sentinel via the
 // `tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON` path, so re-export it
@@ -164,7 +163,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     // the turn and the next message warm-resumes instead of cold-starting.
     if matches!(provider, ProviderKind::Claude) {
         let _ = plan; // claude takes the dedicated session-preserving path below
-        return interrupt_claude_turn_session_preserving(tmux_session, reason).await;
+        return interrupt_claude_turn_session_preserving(token, tmux_session, reason).await;
     }
 
     // #1260: an empty key list means "no keys to send; go straight to the
@@ -436,110 +435,6 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     }
 }
 
-/// #3207 (part 1): cancel claude's active TURN while keeping the tmux session
-/// alive. Never sends SIGINT (that exits the CLI and collapses the session);
-/// teardown for `CleanupSession` stays in `cancel_active_token`. Delivery is
-/// chosen per host (`claude_turn_interrupt_delivery`): ESC for the interactive
-/// TUI, or a stream-json `control_request{interrupt}` for the wrapper FIFO.
-async fn interrupt_claude_turn_session_preserving(
-    tmux_session: Option<String>,
-    reason: &str,
-) -> ProviderTurnInterruptOutcome {
-    // #3169: an anonymous internal PreserveSession teardown
-    // (`turn_bridge_cancelled`, no user `cancel_source`) must NOT cancel the
-    // live claude turn — leave it running for the watcher to reconcile, exactly
-    // as the prior SIGINT-suppression did, just without the session-kill risk.
-    if reason == ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON {
-        return ProviderTurnInterruptOutcome {
-            tmux_session,
-            sent_keys: false,
-            fallback_sigint_pid: None,
-            missing_tmux_session: false,
-            sigint_target_missing: false,
-        };
-    }
-
-    let Some(session_name) = tmux_session.clone() else {
-        return ProviderTurnInterruptOutcome {
-            tmux_session,
-            sent_keys: false,
-            fallback_sigint_pid: None,
-            missing_tmux_session: true,
-            sigint_target_missing: false,
-        };
-    };
-
-    let session_for_task = session_name.clone();
-    let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
-    let delivery_result = tokio::task::spawn_blocking(move || {
-        let is_wrapper = pane_foreground_is_provider_wrapper(&session_for_task);
-        let delivery = claude_turn_interrupt_delivery(is_wrapper);
-        let outcome = match delivery {
-            ClaudeTurnInterruptDelivery::TuiEscape => {
-                match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
-                    Ok(output) if output.status.success() => Ok(()),
-                    Ok(output) => Err(format!(
-                        "tmux send-keys Escape failed: status={}",
-                        output.status
-                    )),
-                    Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
-                }
-            }
-            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
-                let (_jsonl, input_fifo) = tmux_runtime_paths(&session_for_task);
-                let line = build_claude_interrupt_control_line(&request_id);
-                write_line_to_wrapper_fifo(&input_fifo, &line)
-            }
-        };
-        (delivery, outcome)
-    })
-    .await;
-
-    let (delivery, delivered) = match delivery_result {
-        Ok((delivery, Ok(()))) => {
-            tracing::info!(
-                "claude turn interrupt delivered (session preserved): session={} reason={} mechanism={:?}",
-                session_name,
-                reason,
-                delivery
-            );
-            (Some(delivery), true)
-        }
-        Ok((delivery, Err(error))) => {
-            // Deliberately NO SIGINT fallback: a failed turn-cancel must not
-            // escalate to a session-kill. The cooperative cancel flag still
-            // flips in `cancel_active_token`, and the watcher reconciles the
-            // turn on its next pass.
-            tracing::warn!(
-                "claude turn interrupt delivery failed (session left intact, no SIGINT escalation): session={} reason={} mechanism={:?} error={}",
-                session_name,
-                reason,
-                delivery,
-                error
-            );
-            (Some(delivery), false)
-        }
-        Err(error) => {
-            tracing::warn!(
-                "claude turn interrupt join error: session={} reason={} error={}",
-                session_name,
-                reason,
-                error
-            );
-            (None, false)
-        }
-    };
-    let _ = delivery;
-
-    ProviderTurnInterruptOutcome {
-        tmux_session,
-        sent_keys: delivered,
-        fallback_sigint_pid: None,
-        missing_tmux_session: false,
-        sigint_target_missing: false,
-    }
-}
-
 pub(in crate::services::discord) fn cancel_token_has_tmux_session(token: &CancelToken) -> bool {
     token
         .tmux_session
@@ -555,7 +450,9 @@ pub(in crate::services::discord) fn bind_cancel_token_tmux_runtime(
     tmux_session_name: &str,
     reason: &str,
 ) -> Option<u32> {
-    if let Ok(mut guard) = token.tmux_session.lock() {
+    if matches!(provider, ProviderKind::Claude) {
+        token.bind_claude_tmux_session(tmux_session_name);
+    } else if let Ok(mut guard) = token.tmux_session.lock() {
         if guard.as_deref() != Some(tmux_session_name) {
             *guard = Some(tmux_session_name.to_string());
         }
