@@ -3388,13 +3388,17 @@ fn synthetic_lifecycle_anchor_uses_posted_placeholder() {
     let notification_anchor = MessageId::new(940_000_000_004_180);
     let placeholder_anchor = MessageId::new(940_000_000_004_181);
 
+    let anchor = synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
+        notification_anchor,
+        &Ok(placeholder_anchor),
+    );
     assert_eq!(
-        synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
-            notification_anchor,
-            &Ok(placeholder_anchor),
-        ),
-        placeholder_anchor,
+        anchor.message_id, placeholder_anchor,
         "successful synthetic placeholder delivery must replace the notification anchor"
+    );
+    assert!(
+        anchor.owned_placeholder,
+        "a posted placeholder must remain cleanup-owned until the synthetic claim succeeds"
     );
 }
 
@@ -3402,13 +3406,33 @@ fn synthetic_lifecycle_anchor_uses_posted_placeholder() {
 fn synthetic_lifecycle_anchor_falls_back_after_placeholder_failure() {
     let notification_anchor = MessageId::new(940_000_000_004_280);
 
-    assert_eq!(
-        synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
-            notification_anchor,
-            &Err("delivery failed".to_string()),
-        ),
+    let anchor = synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
         notification_anchor,
+        &Err("delivery failed".to_string()),
+    );
+    assert_eq!(
+        anchor.message_id, notification_anchor,
         "failed synthetic placeholder delivery must preserve the notification anchor"
+    );
+    assert!(
+        !anchor.owned_placeholder,
+        "the fallback notification anchor must never be selected for placeholder cleanup"
+    );
+}
+
+#[test]
+fn failed_synthetic_claim_cleans_only_owned_placeholder() {
+    let anchor = MessageId::new(940_000_000_004_380);
+
+    assert_eq!(
+        synthetic_start_wiring::failed_synthetic_placeholder_cleanup_target(anchor, true),
+        Some(anchor),
+        "a freshly posted synthetic placeholder must be selected for cleanup after claim failure"
+    );
+    assert_eq!(
+        synthetic_start_wiring::failed_synthetic_placeholder_cleanup_target(anchor, false),
+        None,
+        "a fallback notification/task-card anchor must never be deleted after claim failure"
     );
 }
 
@@ -3447,6 +3471,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
         channel_id,
         &prompt,
         anchor_id,
+        false,
         &decision,
         &mut lease,
     )
@@ -3523,10 +3548,12 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         },
     );
 
-    let anchor_id = synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
-        notification_anchor_id,
-        &Ok(placeholder_anchor_id),
-    );
+    let synthetic_anchor =
+        synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
+            notification_anchor_id,
+            &Ok(placeholder_anchor_id),
+        );
+    let anchor_id = synthetic_anchor.message_id;
     let mut lease = external_turn_test_lease(channel_id, tmux);
     let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
         &shared,
@@ -3534,6 +3561,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         channel_id,
         &prompt,
         anchor_id,
+        synthetic_anchor.owned_placeholder,
         &decision,
         &mut lease,
     )

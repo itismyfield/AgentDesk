@@ -136,13 +136,10 @@ pub(super) async fn run_bot_framework_setup(
         provider_for_setup.clone(),
     );
 
-    // #3412 startup reclaim sweep: a restart drops the in-memory single-message
-    // panel registry, orphaning any panel the previous generation was still
-    // animating (frozen Tasks/footer spinner). This one-shot per-channel sweep
-    // finds those prior-generation messages (inflight anchor ids + a bounded
-    // recent-message read) and applies a single finalize edit that strips the
-    // animated footer and appends `⏹ (재시작으로 중단됨)`. Current-generation live
-    // panels carry a post-boot timestamp and are never touched.
+    // #3412/#4342 startup reclaim: independent bounded passes finalize prior-
+    // generation frozen panels after the boot settle window and later delete
+    // current-bot `...` placeholders left unlinked by a POST-before-persist
+    // crash. Both passes reload durable protections and fail closed on identity.
     super::startup_reclaim::spawn_startup_reclaim_sweep(
         ctx.http.clone(),
         shared_clone.clone(),

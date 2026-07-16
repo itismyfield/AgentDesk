@@ -2847,17 +2847,20 @@ mod recovery_context_take_order_tests {
             .find("TurnBridgeContext {")
             .expect("Discord intake builds a turn-bridge context");
         let bridge_context = &module_src[bridge_context_pos..];
+        let user_message_field = format!("{}{}", "user_msg_id: Some(", "user_msg_id),");
+        let placeholder_field = format!("{}{}", "current_msg_id: Some(", "placeholder_msg_id),");
+        let synthetic_flag = format!("{}{}", "is_external_input_tui_", "direct: false");
 
         assert!(
-            bridge_context.contains("user_msg_id: Some(user_msg_id),"),
+            bridge_context.contains(&user_message_field),
             "Discord-origin user turns must retain the real user message as their request identity"
         );
         assert!(
-            bridge_context.contains("current_msg_id: Some(placeholder_msg_id),"),
+            bridge_context.contains(&placeholder_field),
             "Discord-origin user turns must keep the posted intake placeholder as their streaming edit target"
         );
         assert!(
-            bridge_context.contains("is_external_input_tui_direct: false"),
+            bridge_context.contains(&synthetic_flag),
             "Discord-origin user turns must remain outside the synthetic TUI-direct path"
         );
     }

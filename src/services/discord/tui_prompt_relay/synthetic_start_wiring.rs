@@ -17,14 +17,66 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SyntheticLifecycleAnchor {
+    pub(super) message_id: MessageId,
+    pub(super) owned_placeholder: bool,
+}
+
 pub(super) fn synthetic_lifecycle_anchor_from_placeholder_result(
     notification_anchor_message_id: MessageId,
     placeholder_result: &Result<MessageId, String>,
-) -> MessageId {
-    placeholder_result
-        .as_ref()
-        .copied()
-        .unwrap_or(notification_anchor_message_id)
+) -> SyntheticLifecycleAnchor {
+    match placeholder_result {
+        Ok(message_id) => SyntheticLifecycleAnchor {
+            message_id: *message_id,
+            owned_placeholder: true,
+        },
+        Err(_) => SyntheticLifecycleAnchor {
+            message_id: notification_anchor_message_id,
+            owned_placeholder: false,
+        },
+    }
+}
+
+pub(super) fn failed_synthetic_placeholder_cleanup_target(
+    anchor_message_id: MessageId,
+    anchor_is_owned_placeholder: bool,
+) -> Option<MessageId> {
+    anchor_is_owned_placeholder.then_some(anchor_message_id)
+}
+
+pub(super) async fn delete_failed_synthetic_owned_placeholder(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    anchor_message_id: MessageId,
+    anchor_is_owned_placeholder: bool,
+) {
+    let Some(anchor_message_id) = failed_synthetic_placeholder_cleanup_target(
+        anchor_message_id,
+        anchor_is_owned_placeholder,
+    ) else {
+        return;
+    };
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            anchor_message_id = anchor_message_id.get(),
+            "failed to delete rejected synthetic placeholder; provider serenity HTTP unavailable"
+        );
+        return;
+    };
+    if let Err(error) = channel_id.delete_message(&http, anchor_message_id).await {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            anchor_message_id = anchor_message_id.get(),
+            error = %error,
+            "failed to delete rejected synthetic placeholder"
+        );
+    }
 }
 
 /// Post the command-bot-owned streaming placeholder before synthetic lifecycle
@@ -37,12 +89,16 @@ pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
     prompt: &ObservedTuiPrompt,
     notification_anchor_message_id: MessageId,
     relay_prompt_decision: &RelayObservedPromptInjectionDecision,
-) -> MessageId {
+) -> SyntheticLifecycleAnchor {
     if !relay_prompt_decision.starts_external_turn_lifecycle() {
-        return notification_anchor_message_id;
+        return SyntheticLifecycleAnchor {
+            message_id: notification_anchor_message_id,
+            owned_placeholder: false,
+        };
     }
 
     let Some(http) = command_http else {
+        let error = "command-bot HTTP unavailable";
         tracing::warn!(
             provider = %prompt.provider,
             channel_id = channel_id.get(),
@@ -50,7 +106,18 @@ pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
             notification_anchor_message_id = notification_anchor_message_id.get(),
             "command-bot HTTP unavailable; using the existing notification anchor for the synthetic lifecycle"
         );
-        return notification_anchor_message_id;
+        crate::services::observability::emit_intake_placeholder_post_failed(
+            &prompt.provider,
+            channel_id.get(),
+            None,
+            "synthetic_anchor_before_lifecycle",
+            "notification_anchor_fallback",
+            error,
+        );
+        return SyntheticLifecycleAnchor {
+            message_id: notification_anchor_message_id,
+            owned_placeholder: false,
+        };
     };
 
     let placeholder_result = super::super::gateway::send_intake_placeholder(
@@ -61,7 +128,7 @@ pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
         false,
     )
     .await;
-    let anchor_message_id = synthetic_lifecycle_anchor_from_placeholder_result(
+    let anchor = synthetic_lifecycle_anchor_from_placeholder_result(
         notification_anchor_message_id,
         &placeholder_result,
     );
@@ -74,16 +141,26 @@ pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
             placeholder_message_id = placeholder_message_id.get(),
             "posted command-bot-owned placeholder for the synthetic lifecycle anchor"
         ),
-        Err(error) => tracing::warn!(
-            provider = %prompt.provider,
-            channel_id = channel_id.get(),
-            tmux_session_name = %prompt.tmux_session_name,
-            notification_anchor_message_id = notification_anchor_message_id.get(),
-            error = %error,
-            "failed to post command-bot-owned synthetic placeholder; using the existing notification anchor"
-        ),
+        Err(error) => {
+            tracing::warn!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                notification_anchor_message_id = notification_anchor_message_id.get(),
+                error = %error,
+                "failed to post command-bot-owned synthetic placeholder; using the existing notification anchor"
+            );
+            crate::services::observability::emit_intake_placeholder_post_failed(
+                &prompt.provider,
+                channel_id.get(),
+                None,
+                "synthetic_anchor_before_lifecycle",
+                "notification_anchor_fallback",
+                &error,
+            );
+        }
     }
-    anchor_message_id
+    anchor
 }
 
 /// Run the shared synthetic-start wiring for a TUI-direct turn. It:
@@ -109,6 +186,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
     channel_id: ChannelId,
     prompt: &ObservedTuiPrompt,
     anchor_message_id: MessageId,
+    anchor_is_owned_placeholder: bool,
     relay_prompt_decision: &RelayObservedPromptInjectionDecision,
     lease: &mut ExternalInputRelayLease,
 ) -> bool {
@@ -177,6 +255,16 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 &*lease,
             )
             .await;
+            if !claim.claimed {
+                delete_failed_synthetic_owned_placeholder(
+                    shared,
+                    &provider,
+                    channel_id,
+                    anchor_message_id,
+                    anchor_is_owned_placeholder,
+                )
+                .await;
+            }
             if claim_should_adopt_relay_owner(claim.claimed, lease.relay_owner, claim.relay_owner) {
                 lease.relay_owner = claim.relay_owner;
                 // Re-record overwrites the lease with a FRESH generation; adopt it

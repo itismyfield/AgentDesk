@@ -577,7 +577,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 }
             }
         };
-        let anchor_message_id =
+        let synthetic_anchor =
             synthetic_start_wiring::resolve_tui_direct_synthetic_lifecycle_anchor(
                 shared,
                 command_http.clone(),
@@ -587,6 +587,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 &relay_prompt_decision,
             )
             .await;
+        let anchor_message_id = synthetic_anchor.message_id;
         // #3176: pin this turn's anchor id — it becomes the synthetic inflight's
         // `user_msg_id` below, so the idle-tail drain-wait can recognise our own row.
         current_turn_anchor_id = Some(anchor_message_id.get());
@@ -670,6 +671,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             channel_id,
             &prompt,
             anchor_message_id,
+            synthetic_anchor.owned_placeholder,
             &relay_prompt_decision,
             &mut lease,
         )
