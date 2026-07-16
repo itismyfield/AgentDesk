@@ -399,31 +399,29 @@ pub fn is_prompt_ready_cancelled_error(error: &str) -> bool {
 /// is visible. Returned regardless of timing so callers can log the
 /// state at decision points.
 pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot {
+    let pane = crate::services::platform::tmux::capture_pane(
+        session_name,
+        PROMPT_READY_CAPTURE_SCROLLBACK,
+    );
     // Preserve ANSI attributes for Codex compact-mode prompts. Codex renders
     // canned prompt suggestions in dim text, while user drafts are normal
-    // text. Derive every plain-text signal from this same captured frame so a
-    // redraw cannot mix an old draft with a newer ANSI-ready composer.
+    // text. Plain capture loses that distinction and can make an idle compact
+    // prompt look like a still-running turn.
     let pane_with_escapes = crate::services::platform::tmux::capture_pane_with_escapes(
         session_name,
         PROMPT_READY_CAPTURE_SCROLLBACK,
     );
-    prompt_readiness_snapshot_from_ansi_capture(
-        pane_with_escapes.as_deref(),
-        crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name),
-    )
-}
-
-fn prompt_readiness_snapshot_from_ansi_capture(
-    pane_with_escapes: Option<&str>,
-    tmux_pane_alive: bool,
-) -> PromptReadinessSnapshot {
-    let pane = pane_with_escapes.map(strip_ansi_escape_sequences);
     let composer_marker_detected = pane_with_escapes
-        .is_some_and(pane_looks_ready_for_codex_prompt_with_ansi);
+        .as_deref()
+        .is_some_and(pane_looks_ready_for_codex_prompt_with_ansi)
+        || pane
+            .as_deref()
+            .is_some_and(pane_looks_ready_for_codex_prompt);
     let dim_placeholder_detected = pane_with_escapes
+        .as_deref()
         .is_some_and(pane_has_dim_legacy_codex_prompt_in_pane);
-    let prompt_draft_detected = !dim_placeholder_detected
-        && pane.as_deref().is_some_and(pane_has_codex_prompt_draft);
+    let prompt_draft_detected =
+        !dim_placeholder_detected && pane.as_deref().is_some_and(pane_has_codex_prompt_draft);
     let pane_tail = pane
         .as_deref()
         .map(prompt_ready_debug_tail)
@@ -431,8 +429,10 @@ fn prompt_readiness_snapshot_from_ansi_capture(
     PromptReadinessSnapshot {
         composer_marker_detected,
         prompt_draft_detected,
-        tmux_pane_alive,
-        capture_available: pane_with_escapes.is_some(),
+        tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
+            session_name,
+        ),
+        capture_available: pane.is_some(),
         pane_tail,
     }
 }
@@ -2262,35 +2262,6 @@ The documentation example ends with:
             " · \x1b[0m\x1b[38;2;171;223;167m~/.adk/release/workspaces/baby\n",
         );
         assert!(pane_looks_ready_for_codex_prompt_with_ansi(pane));
-        let snapshot = prompt_readiness_snapshot_from_ansi_capture(Some(pane), true);
-        assert!(snapshot.composer_marker_detected);
-        assert!(!snapshot.prompt_draft_detected);
-        assert_eq!(
-            snapshot.pane_tail,
-            prompt_ready_debug_tail(&strip_ansi_escape_sequences(pane))
-        );
-    }
-
-    #[test]
-    fn readiness_snapshot_derives_marker_draft_and_tail_from_one_ansi_frame() {
-        let pane = concat!(
-            "old output\n",
-            "\x1b[0;1m›\x1b[0m run the pending draft\n",
-            "\n",
-            "\x1b[0m  \x1b[38;2;246;226;183mgpt-5.5 xhigh\x1b[2m\x1b[39m",
-            " · \x1b[0m\x1b[38;2;171;223;167m~/.adk/release/workspaces/baby\n",
-        );
-
-        let snapshot = prompt_readiness_snapshot_from_ansi_capture(Some(pane), true);
-
-        assert!(!snapshot.composer_marker_detected);
-        assert!(snapshot.prompt_draft_detected);
-        assert!(snapshot.capture_available);
-        assert!(snapshot.tmux_pane_alive);
-        assert_eq!(
-            snapshot.pane_tail,
-            prompt_ready_debug_tail(&strip_ansi_escape_sequences(pane))
-        );
     }
 
     #[test]
