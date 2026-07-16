@@ -1,5 +1,23 @@
 use super::*;
 
+pub(super) async fn clear_rejected_attempt_pending(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+) {
+    crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_current_if_attempt_matches(
+        shared,
+        http,
+        channel_id,
+        user_msg_id,
+        turn_start_attempt,
+        "race_loss_enqueue_rejected",
+    )
+    .await;
+}
+
 pub(super) async fn note_queue_pending(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
@@ -24,7 +42,7 @@ pub(super) async fn note_queue_pending(
     // refused after a newer start attempt. The mailbox enqueue is authoritative,
     // so always publish the desired queue marker through the reconciler. When the
     // rollback already installed 📬 this coalesces without a second HTTP add.
-    crate::services::discord::queue_marker::note_added_current(
+    let delivered = crate::services::discord::queue_marker::note_added_current(
         shared,
         http,
         channel_id,
@@ -33,4 +51,15 @@ pub(super) async fn note_queue_pending(
         "race_loss_message_queued",
     )
     .await;
+    if !delivered {
+        crate::services::discord::outbound::reaction_control::send_reaction_control_reply_http(
+            http,
+            channel_id,
+            shared,
+            user_msg_id,
+            crate::services::discord::outbound::reaction_control::ReactionControlReplyReason::QueueReactionFailed,
+            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
+        )
+        .await;
+    }
 }

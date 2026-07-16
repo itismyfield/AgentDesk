@@ -147,15 +147,15 @@ pub(super) async fn handle_race_loss_enqueue(
     // for the dispatch path to pick up. Skip the placeholder POST + the
     // mapping insert entirely — POSTing a fresh card here would orphan
     // it. `📬` reaction is also skipped (the prior live enqueue already
-    // owns the card and emoji). Just clean up `⏳` and return.
+    // owns the card and emoji). Only the matching start attempt may clear
+    // its own `⏳`; a delayed attempt must not erase a newer attempt's state.
     if !enqueue_outcome.enqueued {
-        crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+        mailbox_reaction::clear_rejected_attempt_pending(
             shared,
             http,
             channel_id,
             user_msg_id,
-            shared.restart.current_generation,
-            "race_loss_enqueue_rejected",
+            turn_start_attempt,
         )
         .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -171,6 +171,9 @@ pub(super) async fn handle_race_loss_enqueue(
         );
         return Ok(());
     }
+
+    let want_queued_card = want_queued_card
+        && super::super::super::queue_status_presentation::queue_status_card_enabled();
 
     // codex review round-5 P2 (finding 2 — re-queue reuse): if a queued
     // placeholder mapping already exists for `(channel_id, user_msg_id)`

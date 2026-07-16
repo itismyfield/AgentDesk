@@ -9,9 +9,6 @@ const CLAUDE_TUI_STRANDED_DRAFT_CLEAR_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE: &str = "⚠ Claude TUI가 아직 이전 터미널 턴을 처리 중이라 이 메시지를 주입하지 않았습니다. 현재 응답이 끝난 뒤 다시 보내 주세요.";
 #[cfg(unix)]
-const CLAUDE_TUI_BUSY_FOLLOWUP_REQUEUE_NOTICE: &str = "📬 Claude TUI가 아직 이전 터미널 턴을 처리 중이라 이 메시지를 바로 주입하지 못했습니다. 현재 응답이 끝나면 자동으로 다시 제출되도록 재시도 큐에 넣습니다.";
-
-#[cfg(unix)]
 pub(crate) fn emit_claude_tui_zero_harvest(
     kind: &str,
     report_channel_id: Option<u64>,
@@ -70,20 +67,16 @@ pub(super) fn emit_claude_tui_busy_followup_notice(
         snapshot.capture_available,
         snapshot.pane_tail
     ));
-    let notice = if requeue_for_retry {
-        CLAUDE_TUI_BUSY_FOLLOWUP_REQUEUE_NOTICE
-    } else {
-        CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE
-    };
-    let _ = sender.send(StreamMessage::Text {
-        content: notice.to_string(),
-    });
-    if !requeue_for_retry {
-        let _ = sender.send(StreamMessage::Done {
-            result: String::new(),
-            session_id: None,
-        });
+    if requeue_for_retry {
+        return;
     }
+    let _ = sender.send(StreamMessage::Text {
+        content: CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE.to_string(),
+    });
+    let _ = sender.send(StreamMessage::Done {
+        result: String::new(),
+        session_id: None,
+    });
 }
 
 #[cfg(all(test, unix))]
@@ -100,7 +93,7 @@ mod busy_followup_notice_tests {
         }
     }
 
-    fn emitted_text(requeue_for_retry: bool) -> String {
+    fn emitted_text(requeue_for_retry: bool) -> Option<String> {
         let (tx, rx) = std::sync::mpsc::channel();
         emit_claude_tui_busy_followup_notice(
             &tx,
@@ -108,36 +101,38 @@ mod busy_followup_notice_tests {
             &busy_snapshot(),
             requeue_for_retry,
         );
-        match rx.recv().expect("notice text") {
-            StreamMessage::Text { content } => content,
-            other => panic!("expected text notice, got {other:?}"),
+        match rx.try_recv() {
+            Ok(StreamMessage::Text { content }) => Some(content),
+            Ok(other) => panic!("expected text notice, got {other:?}"),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("notice channel disconnected")
+            }
         }
     }
 
     #[test]
-    fn busy_followup_notice_reports_automatic_retry_when_requeue_is_enabled() {
-        let text = emitted_text(true);
-        assert!(text.contains("자동으로 다시 제출"));
-        assert!(text.contains("재시도 큐"));
+    fn busy_followup_retry_is_silent() {
+        assert_eq!(
+            emitted_text(true),
+            None,
+            "automatic retry state is represented by the source-message reaction, not a card"
+        );
     }
 
     #[test]
     fn busy_followup_notice_reports_manual_resend_when_requeue_is_disabled() {
-        let text = emitted_text(false);
+        let text = emitted_text(false).expect("manual resend notice");
         assert!(text.contains("다시 보내 주세요"));
     }
 
     #[test]
-    fn busy_followup_notice_leaves_terminal_frame_to_retry_error_when_requeue_is_enabled() {
+    fn busy_followup_retry_emits_no_stream_frames() {
         let (tx, rx) = std::sync::mpsc::channel();
         emit_claude_tui_busy_followup_notice(&tx, "AgentDesk-claude-test", &busy_snapshot(), true);
-        assert!(matches!(
-            rx.recv().expect("notice text"),
-            StreamMessage::Text { .. }
-        ));
         assert!(
             rx.try_recv().is_err(),
-            "automatic-retry path must not emit Done before the retryable Error reaches the bridge"
+            "automatic-retry path must emit neither a retry card nor Done before the retryable Error"
         );
     }
 

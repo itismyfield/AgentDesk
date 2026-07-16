@@ -657,6 +657,7 @@ src/
 │   │   │   ├── intake_queue_transaction.rs
 │   │   │   ├── message_handler.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
@@ -808,6 +809,7 @@ src/
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
+│   │   │   │   ├── queue_retry_silence.rs
 │   │   │   │   └── recovery_retry.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
@@ -870,6 +872,7 @@ src/
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── orphan_sweep.rs
 │   │   │   ├── queue_repair.rs
+│   │   │   ├── reaction_set.rs
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/

@@ -4,6 +4,7 @@ mod intake_dispatch;
 mod intake_gate;
 mod intake_queue_transaction;
 mod message_handler;
+mod queue_status_presentation;
 mod response_format;
 mod thread_binding;
 mod turn_start;
@@ -22,6 +23,7 @@ pub(super) use message_handler::{
     start_reserved_headless_turn,
 };
 pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
+pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,

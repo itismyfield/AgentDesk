@@ -24,6 +24,12 @@
 > `AlreadyStopping` reaction-control reply reason. The live
 > `QueuedCardPostFailed` referenced lifecycle notice, its outbound-v3 delivery
 > path, dedup identity, and every remaining callsite are unchanged.)
+>
+> Last refreshed: 2026-07-16 (#4248/#4329 review follow-up —
+> `router/intake_gate/queue_effects.rs` adds `QueueReactionFailed` as a second
+> `send_reaction_control_reply` reason when the reaction-only queue marker cannot
+> be delivered. It reuses the existing referenced outbound-v3 lifecycle notice
+> path and stable per-message correlation id; no new direct Serenity send exists.)
 
 > Last refreshed: 2026-07-11 (#4438 — the test-only default-OFF long-chunk
 > delivery-record check now holds the shared test-environment lock and resolves

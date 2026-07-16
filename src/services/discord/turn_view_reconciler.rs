@@ -21,11 +21,13 @@ use super::{SharedData, queue_reactions};
 mod orphan_sweep;
 // #4554: mailbox-truth repair is isolated to keep this giant module net-zero.
 mod queue_repair;
+mod reaction_set;
 pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
 
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 const PERSISTED_STATE_VERSION: u32 = 1;
+const QUEUED_HOURGLASS_STATE_VERSION: u32 = 2;
 const RECENTLY_FINALIZED_TARGET_MAX: usize = 1024;
 const RECENTLY_FINALIZED_TARGET_TTL: time::Duration = time::Duration::from_secs(10 * 60);
 
@@ -95,19 +97,6 @@ impl TurnViewState {
             "stopped" => Some(Self::Stopped),
             "none" => Some(Self::None),
             _ => None,
-        }
-    }
-
-    fn emoji(self) -> Option<char> {
-        match self {
-            Self::Queued => Some('📬'),
-            Self::QueuedMerged => Some('➕'),
-            Self::QueuedReconcile => Some('🔄'),
-            Self::Pending => Some('⏳'),
-            Self::Completed => Some('✅'),
-            Self::Failed => Some('⚠'),
-            Self::Stopped => Some('🛑'),
-            Self::None => None,
         }
     }
 
@@ -274,6 +263,7 @@ struct AppliedTarget {
     applied: TurnViewState,
     identity: ResolvedIdentity,
     start_attempt: Option<TurnStartAttempt>,
+    legacy_queue_marker: Option<char>,
 }
 
 #[derive(Clone, Copy)]
@@ -420,6 +410,7 @@ impl TurnViewReconciler {
             start_attempt: (applied == TurnViewState::Pending)
                 .then_some(start_attempt)
                 .flatten(),
+            legacy_queue_marker: None,
         }
     }
 
@@ -438,6 +429,7 @@ impl TurnViewReconciler {
             applied: TurnViewState::Pending,
             identity: current.identity.clone(),
             start_attempt: Some(start_attempt),
+            legacy_queue_marker: current.legacy_queue_marker,
         };
         self.targets.insert(target, updated.clone());
         self.persist_target(target, &updated, shared, source);
@@ -864,6 +856,18 @@ impl TurnViewReconciler {
             .or_else(|| self.load_persisted_target(target, shared, source));
         if let Some(current) = current.as_ref() {
             if desired == TurnViewState::None
+                && clear_start_attempt.is_none()
+                && let Some(emoji) = current.legacy_queue_marker
+            {
+                let delivery = self
+                    .apply_reaction(shared, target, emoji, false, &current.identity, source)
+                    .await;
+                if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
+                    self.discard_target_locked(target, source, &target_lock);
+                }
+                return (delivery, None);
+            }
+            if desired == TurnViewState::None
                 && let Some(clear_start_attempt) = clear_start_attempt
                 && (current.owner != owner
                     || current.applied != TurnViewState::Pending
@@ -1017,6 +1021,7 @@ impl TurnViewReconciler {
                 applied,
                 desired,
                 current.is_none(),
+                current.as_ref().and_then(|entry| entry.legacy_queue_marker),
                 &resolved_identity,
                 source,
             )
@@ -1105,6 +1110,15 @@ impl TurnViewReconciler {
         };
 
         if current.applied != expected_state {
+            if current.owner == owner && current.legacy_queue_marker == Some(emoji) {
+                let delivery = self
+                    .apply_reaction(shared, target, emoji, false, &current.identity, source)
+                    .await;
+                if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
+                    self.discard_target_locked(target, source, &target_lock);
+                }
+                return delivery;
+            }
             tracing::debug!(
                 channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
@@ -1140,7 +1154,14 @@ impl TurnViewReconciler {
 
         let resolved_identity = current.identity.clone();
         let delivery = self
-            .apply_reaction(shared, target, emoji, false, &resolved_identity, source)
+            .apply_diff(
+                shared,
+                target,
+                current.applied,
+                TurnViewState::None,
+                &resolved_identity,
+                source,
+            )
             .await;
         if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
             self.discard_target_locked(target, source, &target_lock);
@@ -1393,8 +1414,10 @@ impl TurnViewReconciler {
                 return None;
             }
         };
-        if record.version != PERSISTED_STATE_VERSION
-            || record.provider != shared.provider.as_str()
+        if !matches!(
+            record.version,
+            PERSISTED_STATE_VERSION | QUEUED_HOURGLASS_STATE_VERSION
+        ) || record.provider != shared.provider.as_str()
             || TurnViewTargetKind::from_str(&record.kind) != Some(target.kind)
             || record.channel_id != target.channel_id.get()
             || record.message_id != target.message_id.get()
@@ -1412,7 +1435,7 @@ impl TurnViewReconciler {
             let _ = fs::remove_file(&path);
             return None;
         }
-        let Some(applied) = TurnViewState::from_str(&record.applied) else {
+        let Some(recorded_applied) = TurnViewState::from_str(&record.applied) else {
             tracing::warn!(
                 path = %path.display(),
                 applied = %record.applied,
@@ -1422,17 +1445,27 @@ impl TurnViewReconciler {
             let _ = fs::remove_file(&path);
             return None;
         };
-        if applied == TurnViewState::None {
+        if recorded_applied == TurnViewState::None {
             let _ = fs::remove_file(&path);
             return None;
         }
         let identity = self.resolve_persisted_identity(&record, shared, source)?;
-        Some(Self::applied_target(
+        let legacy_queue_marker = (record.version == PERSISTED_STATE_VERSION
+            && recorded_applied.is_queue_marker())
+        .then(|| reaction_set::for_state(recorded_applied)[0]);
+        let applied = if legacy_queue_marker.is_some() {
+            TurnViewState::None
+        } else {
+            recorded_applied
+        };
+        let mut target = Self::applied_target(
             TurnViewOwner::new(record.owner_generation, record.owner_turn_id),
             applied,
             identity,
             record.start_attempt_id.map(TurnStartAttempt),
-        ))
+        );
+        target.legacy_queue_marker = legacy_queue_marker;
+        Some(target)
     }
 
     fn persist_target(
@@ -1442,22 +1475,30 @@ impl TurnViewReconciler {
         shared: &SharedData,
         source: &'static str,
     ) {
-        if applied.applied == TurnViewState::None {
+        if applied.applied == TurnViewState::None && applied.legacy_queue_marker.is_none() {
             self.delete_persisted_target(target, source);
             return;
         }
         let Some(path) = Self::persisted_target_path(target) else {
             return;
         };
+        let applied_state = applied
+            .legacy_queue_marker
+            .and_then(TurnViewState::from_queue_marker_emoji)
+            .unwrap_or(applied.applied);
         let record = PersistedTargetState {
-            version: PERSISTED_STATE_VERSION,
+            version: if applied.applied.is_queue_marker() || applied.legacy_queue_marker.is_some() {
+                QUEUED_HOURGLASS_STATE_VERSION
+            } else {
+                PERSISTED_STATE_VERSION
+            },
             provider: shared.provider.as_str().to_string(),
             kind: target.kind.as_str().to_string(),
             channel_id: target.channel_id.get(),
             message_id: target.message_id.get(),
             owner_generation: applied.owner.generation,
             owner_turn_id: applied.owner.turn_id.clone(),
-            applied: applied.applied.as_str().to_string(),
+            applied: applied_state.as_str().to_string(),
             identity_label: applied.identity.label.clone(),
             token_hash: applied.identity.token_hash.clone(),
             start_attempt_id: applied.start_attempt.map(TurnStartAttempt::get),
@@ -1498,6 +1539,7 @@ impl TurnViewReconciler {
         applied: TurnViewState,
         desired: TurnViewState,
         cold: bool,
+        legacy_queue_marker: Option<char>,
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
@@ -1521,6 +1563,14 @@ impl TurnViewReconciler {
             return delivery;
         }
 
+        if let Some(emoji) = legacy_queue_marker {
+            let delivery = self
+                .apply_reaction(shared, target, emoji, false, identity, source)
+                .await;
+            if !delivery.delivered() {
+                return delivery;
+            }
+        }
         self.apply_diff(shared, target, applied, desired, identity, source)
             .await
     }
@@ -1534,25 +1584,62 @@ impl TurnViewReconciler {
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
-        let mut delivery = TurnViewDelivery::Delivered;
-        let desired_emoji = desired.emoji();
-        if let Some(applied_emoji) = applied.emoji()
-            && Some(applied_emoji) != desired_emoji
-        {
-            delivery = delivery.merge(
-                self.apply_reaction(shared, target, applied_emoji, false, identity, source)
-                    .await,
-            );
+        let applied_reactions = reaction_set::for_state(applied);
+        let desired_reactions = reaction_set::for_state(desired);
+        let mut applied_ops = Vec::new();
+        for emoji in applied_reactions {
+            if desired_reactions.contains(emoji) {
+                continue;
+            }
+            let delivery = self
+                .apply_reaction(shared, target, *emoji, false, identity, source)
+                .await;
+            if !delivery.delivered() {
+                self.compensate_reaction_ops(shared, target, identity, source, &applied_ops)
+                    .await;
+                return delivery;
+            }
+            applied_ops.push((*emoji, false));
         }
-        if let Some(desired_emoji) = desired_emoji
-            && applied.emoji() != Some(desired_emoji)
-        {
-            delivery = delivery.merge(
-                self.apply_reaction(shared, target, desired_emoji, true, identity, source)
-                    .await,
-            );
+        for emoji in desired_reactions {
+            if applied_reactions.contains(emoji) {
+                continue;
+            }
+            let delivery = self
+                .apply_reaction(shared, target, *emoji, true, identity, source)
+                .await;
+            if !delivery.delivered() {
+                self.compensate_reaction_ops(shared, target, identity, source, &applied_ops)
+                    .await;
+                return delivery;
+            }
+            applied_ops.push((*emoji, true));
         }
-        delivery
+        TurnViewDelivery::Delivered
+    }
+
+    async fn compensate_reaction_ops(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        identity: &ResolvedIdentity,
+        source: &'static str,
+        applied_ops: &[(char, bool)],
+    ) {
+        for (emoji, add) in applied_ops.iter().rev() {
+            let compensation = self
+                .apply_reaction(shared, target, *emoji, !*add, identity, source)
+                .await;
+            if !compensation.delivered() {
+                tracing::warn!(
+                    channel_id = target.channel_id.get(),
+                    message = target.message_id.get(),
+                    emoji = %emoji,
+                    source,
+                    "turn view reaction compensation failed"
+                );
+            }
+        }
     }
 
     async fn apply_unknown_clear(

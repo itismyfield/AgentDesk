@@ -437,6 +437,11 @@
 
 ### Audited touches
 
+- #4248/#4329 (queue reaction/card UX): keeps ownership **node-local to the
+  Discord gateway/runtime**. Queue acceptance and retry requeue states are
+  rendered only by the existing persisted `turn_view_reconciler` identity;
+  removing queue-status cards introduces no worker, lease, durable queue, or
+  cross-node side effect.
 - #4263 (daily log-digest routine): adds a **LEADER-ONLY/SINGLETON** scheduled
   monitoring routine. `server::worker_registry` already runs
   `routine_runtime_loop` through `register_leader_tokio`, and the existing

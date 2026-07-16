@@ -146,7 +146,7 @@ pub(in crate::services::discord) fn bridge_pre_submission_tui_prompt_error(
     }
 }
 
-pub(in crate::services::discord) const CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE: &str = "📬 Claude TUI가 아직 이전 터미널 턴을 처리 중이라 이 메시지를 바로 주입하지 못했습니다. 현재 응답이 끝나면 자동으로 다시 제출되도록 재시도 큐에 넣습니다.";
+pub(in crate::services::discord) const CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE: &str = "";
 
 pub(in crate::services::discord) fn bridge_claude_tui_followup_requeue_prompt_error(
     provider: &ProviderKind,
@@ -486,7 +486,6 @@ mod pre_submission_tui_prompt_error_tests {
             followup,
             TuiErrorClassification::default(),
         ));
-        assert!(CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.contains("재시도 큐"));
     }
 
     #[test]
