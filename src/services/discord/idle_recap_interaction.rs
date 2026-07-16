@@ -1122,7 +1122,13 @@ mod tests {
         };
         let (first, second) = tokio::join!(claim(), claim());
 
-        assert_eq!([first, second].into_iter().filter(|claimed| *claimed).count(), 1);
+        assert_eq!(
+            [first, second]
+                .into_iter()
+                .filter(|claimed| *claimed)
+                .count(),
+            1
+        );
         let pointer = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
             "SELECT idle_recap_message_id, idle_recap_channel_id
              FROM sessions
