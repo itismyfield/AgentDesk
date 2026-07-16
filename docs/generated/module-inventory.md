@@ -556,7 +556,7 @@
 | `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1178 | 582 | 596 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 471 | 447 | 24 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 124 | 124 | 0 |  |
-| `services::discord::outbound::reaction_control` | `src/services/discord/outbound/reaction_control.rs` | 116 | 84 | 32 |  |
+| `services::discord::outbound::reaction_control` | `src/services/discord/outbound/reaction_control.rs` | 136 | 104 | 32 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 161 | 161 | 0 |  |
 | `services::discord::outbound::send_api` | `src/services/discord/outbound/send_api.rs` | 591 | 295 | 296 |  |
 | `services::discord::outbound::send_gate` | `src/services/discord/outbound/send_gate.rs` | 555 | 349 | 206 |  |
@@ -889,7 +889,7 @@
 | `services::discord::turn_finalizer::finalize_context` | `src/services/discord/turn_finalizer/finalize_context.rs` | 179 | 148 | 31 |  |
 | `services::discord::turn_finalizer::reconcile` | `src/services/discord/turn_finalizer/reconcile.rs` | 221 | 221 | 0 |  |
 | `services::discord::turn_finalizer::watcher_backstop` | `src/services/discord/turn_finalizer/watcher_backstop.rs` | 273 | 210 | 63 |  |
-| `services::discord::turn_view_reconciler` | `src/services/discord/turn_view_reconciler.rs` | 2280 | 2280 | 0 | giant-file |
+| `services::discord::turn_view_reconciler` | `src/services/discord/turn_view_reconciler.rs` | 2301 | 2301 | 0 | giant-file |
 | `services::discord::turn_view_reconciler::orphan_sweep` | `src/services/discord/turn_view_reconciler/orphan_sweep.rs` | 611 | 321 | 290 |  |
 | `services::discord::turn_view_reconciler::queue_repair` | `src/services/discord/turn_view_reconciler/queue_repair.rs` | 31 | 31 | 0 |  |
 | `services::discord::turn_view_reconciler::reaction_set` | `src/services/discord/turn_view_reconciler/reaction_set.rs` | 23 | 23 | 0 |  |
