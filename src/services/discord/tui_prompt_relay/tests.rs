@@ -3436,6 +3436,28 @@ fn failed_synthetic_claim_cleans_only_owned_placeholder() {
     );
 }
 
+#[test]
+fn failed_synthetic_placeholder_delete_is_terminal_cleanup_guarded() {
+    let helper_src = include_str!("synthetic_start_wiring.rs");
+    let guard_needle = ["terminal_cleanup_", "protects_delete("].concat();
+    let delete_needle = [".delete_", "message(&http, anchor_message_id)"].concat();
+    let result_needle = ["emit_relay_delete_", "result("].concat();
+    let guard = helper_src
+        .find(&guard_needle)
+        .expect("rejected synthetic cleanup must consult terminal cleanup protection");
+    let delete = helper_src
+        .find(&delete_needle)
+        .expect("rejected synthetic cleanup must retain its owned-placeholder delete");
+    let result = helper_src
+        .find(&result_needle)
+        .expect("rejected synthetic cleanup delete result must be durably observed");
+
+    assert!(
+        guard < delete && delete < result,
+        "committed and retry-pending terminal placeholders must be skipped before delete"
+    );
+}
+
 #[tokio::test]
 async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free() {
     let temp = tempfile::tempdir().expect("temp runtime root");

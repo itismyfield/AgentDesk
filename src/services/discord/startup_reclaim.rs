@@ -280,6 +280,7 @@ async fn reclaim_frozen_panels(
 
 async fn reclaim_orphan_placeholders(
     http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: u64,
     bot_user_id: u64,
@@ -307,8 +308,38 @@ async fn reclaim_orphan_placeholders(
         ) {
             continue;
         }
+        let operation_kind =
+            super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteNonterminal.as_str();
+        if let Some(protection) = super::placeholder_cleanup::terminal_cleanup_protects_delete(
+            &shared.ui.placeholder_cleanup,
+            provider,
+            channel,
+            msg.id,
+        ) {
+            crate::services::observability::emit_relay_delete(
+                provider.as_str(),
+                channel_id,
+                msg.id.get(),
+                None,
+                None,
+                "startup_reclaim_orphan_synthetic_placeholder",
+                operation_kind,
+                protection.relay_delete_outcome(),
+                None,
+            );
+            continue;
+        }
         attempted += 1;
-        match channel.delete_message(http, msg.id).await {
+        let result = channel.delete_message(http, msg.id).await;
+        crate::services::observability::emit_relay_delete_result(
+            provider.as_str(),
+            channel_id,
+            msg.id.get(),
+            "startup_reclaim_orphan_synthetic_placeholder",
+            operation_kind,
+            &result,
+        );
+        match result {
             Ok(()) => {
                 deleted += 1;
                 tracing::info!(
@@ -382,6 +413,7 @@ async fn run_startup_reclaim_sweep(
             ReclaimPass::OrphanPlaceholders => {
                 report.orphan_placeholders_deleted += reclaim_orphan_placeholders(
                     http,
+                    shared,
                     provider,
                     channel_id,
                     bot_user_id,
@@ -706,6 +738,32 @@ mod tests {
                 author, 7, content, message_id, changed, now, &protected,
             ));
         }
+    }
+
+    #[test]
+    fn orphan_placeholder_delete_is_terminal_cleanup_guarded() {
+        let module_src = include_str!("startup_reclaim.rs");
+        let guard_needle = ["terminal_cleanup_", "protects_delete("].concat();
+        let attempt_needle = ["attempted ", "+= 1;"].concat();
+        let delete_needle = [".delete_", "message(http, msg.id)"].concat();
+        let result_needle = ["emit_relay_delete_", "result("].concat();
+        let guard = module_src
+            .find(&guard_needle)
+            .expect("orphan reclaim must consult terminal cleanup protection");
+        let attempt = module_src
+            .find(&attempt_needle)
+            .expect("orphan reclaim must count destructive attempts");
+        let delete = module_src
+            .find(&delete_needle)
+            .expect("orphan reclaim must retain its bounded delete");
+        let result = module_src
+            .find(&result_needle)
+            .expect("orphan reclaim delete result must be durably observed");
+
+        assert!(
+            guard < attempt && attempt < delete && delete < result,
+            "committed and retry-pending terminal placeholders must be skipped before a delete attempt"
+        );
     }
 
     #[test]

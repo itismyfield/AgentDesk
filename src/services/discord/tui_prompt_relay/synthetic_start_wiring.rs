@@ -58,6 +58,27 @@ pub(super) async fn delete_failed_synthetic_owned_placeholder(
     else {
         return;
     };
+    let operation_kind =
+        super::super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteNonterminal.as_str();
+    if let Some(protection) = super::super::placeholder_cleanup::terminal_cleanup_protects_delete(
+        &shared.ui.placeholder_cleanup,
+        provider,
+        channel_id,
+        anchor_message_id,
+    ) {
+        crate::services::observability::emit_relay_delete(
+            provider.as_str(),
+            channel_id.get(),
+            anchor_message_id.get(),
+            None,
+            None,
+            "tui_direct_rejected_synthetic_placeholder_cleanup",
+            operation_kind,
+            protection.relay_delete_outcome(),
+            None,
+        );
+        return;
+    }
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::warn!(
             provider = %provider.as_str(),
@@ -67,7 +88,16 @@ pub(super) async fn delete_failed_synthetic_owned_placeholder(
         );
         return;
     };
-    if let Err(error) = channel_id.delete_message(&http, anchor_message_id).await {
+    let result = channel_id.delete_message(&http, anchor_message_id).await;
+    crate::services::observability::emit_relay_delete_result(
+        provider.as_str(),
+        channel_id.get(),
+        anchor_message_id.get(),
+        "tui_direct_rejected_synthetic_placeholder_cleanup",
+        operation_kind,
+        &result,
+    );
+    if let Err(error) = result {
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
