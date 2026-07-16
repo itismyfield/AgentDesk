@@ -35,6 +35,7 @@ mod cancel_prompt_replace;
 mod delivery_epilogue;
 mod empty_response_recovery;
 mod prompt_too_long_guidance;
+mod queue_retry_silence;
 mod recovery_retry;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
@@ -340,13 +341,9 @@ pub(super) async fn run_terminal_outcome_delivery(
             ),
         }
     } else {
-        if claude_tui_followup_pre_submit_requeue_candidate
-            && !super::super::router::queue_status_card_enabled()
-        {
-            full_response.clear();
-            inflight_state.full_response.clear();
-            inflight_state.silent_turn = true;
-        }
+        queue_retry_silence::apply(
+            claude_tui_followup_pre_submit_requeue_candidate, &mut full_response, &mut inflight_state,
+        );
         // Check for stale resume failure BEFORE any other response handling.
         // This path is driven by explicit error/result events, not assistant text.
         let empty_response_recovery_message = if resume_failure_detected {

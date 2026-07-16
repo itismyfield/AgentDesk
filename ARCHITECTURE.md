@@ -807,6 +807,7 @@ src/
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
+│   │   │   │   ├── queue_retry_silence.rs
 │   │   │   │   └── recovery_retry.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── interrupt_policy.rs

@@ -171,8 +171,8 @@ mod tests {
             .set("Bot test-token".to_string())
             .expect("test bot token");
         let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(4_248_000_001);
-        let message_id = MessageId::new(4_248_000_002);
+        let channel_id = ChannelId::new(100_000_004_248_001);
+        let message_id = MessageId::new(100_000_004_248_002);
         let inflight = inflight(channel_id, message_id);
 
         requeue_claude_tui_followup_pre_submit_timeout(
@@ -187,9 +187,10 @@ mod tests {
         .await;
 
         let ops = shared.turn_view_reconciler.ops();
-        assert!(ops.iter().any(|op| {
-            op.target.message_id == message_id && op.add && op.emoji == '⏳'
-        }));
+        assert!(
+            ops.iter()
+                .any(|op| { op.target.message_id == message_id && op.add && op.emoji == '⏳' })
+        );
         assert!(ops.iter().any(|op| {
             op.target.message_id == message_id
                 && op.add

@@ -667,7 +667,7 @@
 | `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 87 | 87 | 0 |  |
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 313 | 222 | 91 |  |
 | `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1734 | 1381 | 353 | giant-file |
-| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3192 | 2838 | 354 | giant-file |
+| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3191 | 2837 | 354 | giant-file |
 | `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 699 | 604 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction` | `src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs` | 36 | 36 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 256 | 256 | 0 |  |
@@ -830,7 +830,7 @@
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 169 | 100 | 69 |  |
 | `services::discord::turn_bridge::early_tui_completion` | `src/services/discord/turn_bridge/early_tui_completion.rs` | 62 | 62 | 0 |  |
 | `services::discord::turn_bridge::finalize_epilogue` | `src/services/discord/turn_bridge/finalize_epilogue.rs` | 306 | 156 | 150 |  |
-| `services::discord::turn_bridge::followup_requeue` | `src/services/discord/turn_bridge/followup_requeue.rs` | 212 | 113 | 99 |  |
+| `services::discord::turn_bridge::followup_requeue` | `src/services/discord/turn_bridge/followup_requeue.rs` | 213 | 113 | 100 |  |
 | `services::discord::turn_bridge::guards` | `src/services/discord/turn_bridge/guards.rs` | 76 | 76 | 0 |  |
 | `services::discord::turn_bridge::headless_delivery` | `src/services/discord/turn_bridge/headless_delivery.rs` | 518 | 442 | 76 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 411 | 303 | 108 |  |
@@ -858,12 +858,13 @@
 | `services::discord::turn_bridge::task_notification_lifecycle` | `src/services/discord/turn_bridge/task_notification_lifecycle.rs` | 221 | 104 | 117 |  |
 | `services::discord::turn_bridge::terminal_controller_cutover` | `src/services/discord/turn_bridge/terminal_controller_cutover.rs` | 1838 | 960 | 878 |  |
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 2002 | 738 | 1264 |  |
-| `services::discord::turn_bridge::terminal_outcome_delivery` | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 885 | 885 | 0 |  |
+| `services::discord::turn_bridge::terminal_outcome_delivery` | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 882 | 882 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::cancel_prompt_replace` | `src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs` | 445 | 445 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue` | `src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` | 427 | 427 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery.rs` | 418 | 418 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery/guidance.rs` | 34 | 8 | 26 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/prompt_too_long_guidance.rs` | 187 | 9 | 178 |  |
+| `services::discord::turn_bridge::terminal_outcome_delivery::queue_retry_silence` | `src/services/discord/turn_bridge/terminal_outcome_delivery/queue_retry_silence.rs` | 13 | 13 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry` | `src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs` | 103 | 103 | 0 |  |
 | `services::discord::turn_bridge::thinking` | `src/services/discord/turn_bridge/thinking.rs` | 87 | 21 | 66 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1277 | 993 | 284 |  |

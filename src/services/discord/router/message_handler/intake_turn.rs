@@ -2229,8 +2229,7 @@ pub(super) async fn handle_text_message(
                 .intervention_queue
                 .len();
         let want_queued_card = super::super::queue_status_presentation::queue_status_card_enabled()
-            && !turn_kind.is_background_trigger()
-            && channel_id == original_channel_id;
+            && !turn_kind.is_background_trigger() && channel_id == original_channel_id;
         let mut queued_card_rendered = false;
         if enqueue_outcome.enqueued && want_queued_card {
             let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
