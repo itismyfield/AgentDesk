@@ -23,6 +23,22 @@ struct RecapClearTarget {
     recap_current: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecapPromptRoute {
+    NativeSlashCompact,
+    InternalFollowup,
+}
+
+fn recap_prompt_route(custom_id: &str) -> Option<RecapPromptRoute> {
+    if custom_id.starts_with(IDLE_RECAP_COMPACT_BUTTON_PREFIX) {
+        Some(RecapPromptRoute::NativeSlashCompact)
+    } else if custom_id.starts_with(IDLE_RECAP_SUGGEST_BUTTON_PREFIX) {
+        Some(RecapPromptRoute::InternalFollowup)
+    } else {
+        None
+    }
+}
+
 /// True if `custom_id` belongs to the idle-recap clear button.
 pub(super) fn is_idle_recap_clear_custom_id(custom_id: &str) -> bool {
     custom_id.starts_with(IDLE_RECAP_CLEAR_BUTTON_PREFIX)
@@ -47,11 +63,14 @@ pub(super) async fn handle_idle_recap_interaction(
     if custom_id.starts_with(IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX) {
         return handle_idle_recap_relay_diag_interaction(ctx, component, data).await;
     }
-    if custom_id.starts_with(IDLE_RECAP_COMPACT_BUTTON_PREFIX) {
-        return handle_idle_recap_compact_interaction(ctx, component, data).await;
-    }
-    if custom_id.starts_with(IDLE_RECAP_SUGGEST_BUTTON_PREFIX) {
-        return handle_idle_recap_suggest_interaction(ctx, component, data).await;
+    match recap_prompt_route(custom_id) {
+        Some(RecapPromptRoute::NativeSlashCompact) => {
+            return handle_idle_recap_compact_interaction(ctx, component, data).await;
+        }
+        Some(RecapPromptRoute::InternalFollowup) => {
+            return handle_idle_recap_suggest_interaction(ctx, component, data).await;
+        }
+        None => {}
     }
     let _ = component
         .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
@@ -292,24 +311,126 @@ async fn handle_idle_recap_compact_interaction(
         return Ok(());
     };
 
-    let prompt = "/compact";
-    let enqueued = crate::services::discord::enqueue_internal_followup(
-        &data.shared,
-        &data.provider,
-        component.channel_id,
-        serenity::MessageId::new(message_id),
-        prompt,
-        "idle recap context compact",
-    )
-    .await;
-    if !enqueued {
-        send_ephemeral(ctx, component, "맥락 압축 요청을 큐에 넣지 못했습니다.").await;
+    if let Err(error) = component.defer_ephemeral(ctx).await {
+        tracing::warn!(
+            error = %error,
+            message_id,
+            "idle_recap compact: failed to defer interaction response"
+        );
         return Ok(());
     }
 
-    send_ephemeral(ctx, component, &prompt_sent_ephemeral(prompt)).await;
-    let _ = clear_recap_pointer(&pool, &target.session_key, message_id).await;
-    delete_previous_card(&ctx.http, component.channel_id.get(), message_id).await;
+    let channel_name = {
+        let core = data.shared.core.lock().await;
+        core.sessions
+            .get(&component.channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let effective_provider = crate::services::discord::commands::effective_provider_for_channel(
+        &data.shared,
+        component.channel_id,
+        &data.provider,
+        channel_name.as_deref(),
+    )
+    .await;
+    let tmux_session_name = if !matches!(&effective_provider, ProviderKind::Claude) {
+        edit_deferred_ephemeral(
+            ctx,
+            component,
+            message_id,
+            "맥락 압축 요청은 Claude 세션에서만 사용할 수 있습니다.",
+        )
+        .await;
+        return Ok(());
+    } else if let Some(channel_name) = channel_name.filter(|name| !name.trim().is_empty()) {
+        effective_provider.build_tmux_session_name(&channel_name)
+    } else {
+        edit_deferred_ephemeral(
+            ctx,
+            component,
+            message_id,
+            "맥락 압축 요청 실패: 실행 중인 Claude 세션을 찾을 수 없습니다.",
+        )
+        .await;
+        return Ok(());
+    };
+    if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
+        edit_deferred_ephemeral(
+            ctx,
+            component,
+            message_id,
+            "맥락 압축 요청 실패: 실행 중인 Claude 세션을 찾을 수 없습니다.",
+        )
+        .await;
+        return Ok(());
+    }
+
+    let tmux_session_name_for_inject = tmux_session_name.clone();
+    let injection_result = tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
+        {
+            crate::services::claude::with_claude_tui_session_turn_lock(
+                &tmux_session_name_for_inject,
+                || {
+                    crate::services::claude_tui::input::send_followup_prompt(
+                        &tmux_session_name_for_inject,
+                        "/compact",
+                        None,
+                    )
+                },
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            crate::services::claude_tui::input::send_followup_prompt(
+                &tmux_session_name_for_inject,
+                "/compact",
+                None,
+            )
+        }
+    })
+    .await;
+    let injection_succeeded = matches!(&injection_result, Ok(Ok(())));
+    let response = match injection_result {
+        Ok(Ok(())) => "Claude 맥락 압축을 시작했습니다.",
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %error,
+                message_id,
+                tmux_session_name = %tmux_session_name,
+                "idle_recap compact: native /compact injection failed"
+            );
+            "맥락 압축 요청을 전송하지 못했습니다. 잠시 후 다시 시도하세요."
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                message_id,
+                tmux_session_name = %tmux_session_name,
+                "idle_recap compact: native /compact injection task failed"
+            );
+            "맥락 압축 요청을 전송하지 못했습니다. 잠시 후 다시 시도하세요."
+        }
+    };
+    edit_deferred_ephemeral(ctx, component, message_id, response).await;
+    if !injection_succeeded {
+        return Ok(());
+    }
+
+    match clear_recap_pointer(&pool, &target.session_key, message_id).await {
+        Ok(true) => delete_previous_card(&ctx.http, component.channel_id.get(), message_id).await,
+        Ok(false) => tracing::warn!(
+            message_id,
+            session_key = %target.session_key,
+            "idle_recap compact: native /compact succeeded but recap pointer was no longer current"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            message_id,
+            session_key = %target.session_key,
+            "idle_recap compact: native /compact succeeded but recap cleanup failed"
+        ),
+    }
     Ok(())
 }
 
@@ -420,7 +541,28 @@ async fn send_ephemeral(
         .await;
 }
 
-fn truncate_interaction_body(body: &str) -> String {
+async fn edit_deferred_ephemeral(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    message_id: u64,
+    content: &str,
+) {
+    if let Err(error) = component
+        .edit_response(
+            ctx,
+            serenity::EditInteractionResponse::new().content(content),
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %error,
+            message_id,
+            "idle_recap compact: failed to edit deferred interaction response"
+        );
+    }
+}
+
+fn truncate_interaction_body(body: &str) {
     const LIMIT: usize = 1800;
     let mut out = String::new();
     let mut chars = body.chars();
@@ -503,6 +645,28 @@ mod tests {
         assert!(is_idle_recap_custom_id("idle_recap:compact:1"));
         assert!(is_idle_recap_custom_id("idle_recap:suggest:1"));
         assert!(!is_idle_recap_custom_id("steer:cancel:1"));
+    }
+
+    #[test]
+    fn recap_prompt_route_sends_compact_to_native_claude_slash_handler() {
+        assert_eq!(
+            recap_prompt_route("idle_recap:compact:42"),
+            Some(RecapPromptRoute::NativeSlashCompact)
+        );
+    }
+
+    #[test]
+    fn recap_prompt_route_sends_suggest_to_internal_followup_handler() {
+        assert_eq!(
+            recap_prompt_route("idle_recap:suggest:42"),
+            Some(RecapPromptRoute::InternalFollowup)
+        );
+    }
+
+    #[test]
+    fn recap_prompt_route_rejects_unrelated_custom_ids() {
+        assert_eq!(recap_prompt_route("idle_recap:clear:42"), None);
+        assert_eq!(recap_prompt_route("steer:cancel:42"), None);
     }
 
     #[test]
