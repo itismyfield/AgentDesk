@@ -3019,8 +3019,8 @@ fn send_followup_to_tmux(
 
     debug_log("Follow-up message sent to input FIFO");
 
-    // Store tmux session name in cancel token
     if let Some(ref token) = cancel_token {
+        token.mark_claude_interrupt_submit_pending();
         token.bind_claude_tmux_session(tmux_session_name);
     }
 

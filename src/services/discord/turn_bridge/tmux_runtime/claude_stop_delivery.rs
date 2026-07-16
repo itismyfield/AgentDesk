@@ -107,6 +107,37 @@ fn transcript_identity_allows_delivery(identity: Option<&ClaudeStopTurnIdentity>
     identity.is_none_or(ClaudeStopTurnIdentity::still_current)
 }
 
+fn stream_json_interrupt_phase(
+    structured_state: Option<TuiTurnState>,
+    submit_pending: bool,
+) -> ClaudeTuiInterruptPhase {
+    match structured_state {
+        Some(TuiTurnState::Idle) if submit_pending => ClaudeTuiInterruptPhase::UserSubmitted,
+        Some(TuiTurnState::Idle) => ClaudeTuiInterruptPhase::PromptReady,
+        Some(TuiTurnState::UserSubmitted) => ClaudeTuiInterruptPhase::UserSubmitted,
+        Some(TuiTurnState::Streaming) => ClaudeTuiInterruptPhase::ActiveGeneration,
+        Some(TuiTurnState::Unknown) | None => ClaudeTuiInterruptPhase::Ambiguous,
+    }
+}
+
+fn deliver_claimed_claude_stop<R, Write>(
+    token: &CancelToken,
+    tmux_session_name: &str,
+    transcript_identity: Option<&ClaudeStopTurnIdentity>,
+    write: Write,
+) -> Result<R, String>
+where
+    Write: FnOnce() -> Result<R, String>,
+{
+    let Some(delivery_guard) = token.lock_current_claude_interrupt_session(tmux_session_name) else {
+        return Err("stale Claude stop session generation before provider write".to_string());
+    };
+    if !transcript_identity_allows_delivery(transcript_identity) {
+        return Err("stale Claude stop transcript identity before provider write".to_string());
+    }
+    delivery_guard.commit_success(write())
+}
+
 struct ClaudeStopDeliveryReservation<'a> {
     token: &'a CancelToken,
 }
@@ -260,6 +291,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
     };
 
     let session_for_probe = session_name.clone();
+    let token_for_probe = Arc::clone(token);
     let probe_result = tokio::task::spawn_blocking(move || {
         let is_wrapper = pane_foreground_is_provider_wrapper(&session_for_probe);
         let delivery = claude_turn_interrupt_delivery(is_wrapper);
@@ -325,12 +357,10 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 pane_ready || pane_has_draft,
                 pane_active,
             ),
-            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => match structured_state {
-                Some(TuiTurnState::Idle) => ClaudeTuiInterruptPhase::PromptReady,
-                Some(TuiTurnState::UserSubmitted) => ClaudeTuiInterruptPhase::UserSubmitted,
-                Some(TuiTurnState::Streaming) => ClaudeTuiInterruptPhase::ActiveGeneration,
-                Some(TuiTurnState::Unknown) | None => ClaudeTuiInterruptPhase::Ambiguous,
-            },
+            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => stream_json_interrupt_phase(
+                structured_state,
+                token_for_probe.claude_interrupt_submit_pending(),
+            ),
         };
         (
             delivery,
@@ -415,36 +445,35 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
     let token_for_task = Arc::clone(token);
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
     let delivery_result = tokio::task::spawn_blocking(move || {
-        let Some(delivery_guard) = token_for_task
-            .lock_current_claude_interrupt_session(&session_for_task)
-        else {
-            return Err(format!(
-                "stale Claude stop session generation before provider write: expected_generation={expected_generation}"
-            ));
-        };
-        if !transcript_identity_allows_delivery(turn_identity.as_ref()) {
-            return Err(format!(
-                "stale Claude stop transcript identity before provider write: generation={expected_generation}"
-            ));
-        }
-        delivery_guard.commit_success(match delivery {
-            ClaudeTurnInterruptDelivery::TuiEscape => {
-                match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
-                    Ok(output) if output.status.success() => Ok(()),
-                    Ok(output) => Err(format!(
-                        "tmux send-keys Escape failed: status={}",
-                        output.status
-                    )),
-                    Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+        deliver_claimed_claude_stop(
+            token_for_task.as_ref(),
+            &session_for_task,
+            turn_identity.as_ref(),
+            || match delivery {
+                ClaudeTurnInterruptDelivery::TuiEscape => {
+                    match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"])
+                    {
+                        Ok(output) if output.status.success() => Ok(()),
+                        Ok(output) => Err(format!(
+                            "tmux send-keys Escape failed: status={}",
+                            output.status
+                        )),
+                        Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+                    }
                 }
-            }
-            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
-                let Some(input_fifo) = wrapper_input_fifo_path else {
-                    return Err("claude wrapper input FIFO unavailable after probe".to_string());
-                };
-                let line = build_claude_interrupt_control_line(&request_id);
-                write_line_to_wrapper_fifo(&input_fifo, &line)
-            }
+                ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
+                    let Some(input_fifo) = wrapper_input_fifo_path else {
+                        return Err(
+                            "claude wrapper input FIFO unavailable after probe".to_string()
+                        );
+                    };
+                    let line = build_claude_interrupt_control_line(&request_id);
+                    write_line_to_wrapper_fifo(&input_fifo, &line)
+                }
+            },
+        )
+        .map_err(|error| {
+            format!("{error}: expected_generation={expected_generation}")
         })
     })
     .await;
@@ -608,14 +637,11 @@ mod tests {
                     ClaudeTuiInterruptPhase::ActiveGeneration,
                 );
                 if matches!(decision, ClaudeStopDeliveryDecision::Deliver(_)) {
-                    let guard = token
-                        .lock_current_claude_interrupt_session(&session)
-                        .ok_or_else(|| "active generation guard missing".to_string())?;
-                    guard.commit_success((|| {
+                    deliver_claimed_claude_stop(token.as_ref(), &session, None, || {
                         writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         release_winner.wait();
                         Ok::<(), String>(())
-                    })())?;
+                    })?;
                 }
                 drop(reservation);
                 Ok(decision)
@@ -688,6 +714,82 @@ mod tests {
                 "an ambiguous skip must roll back so a confirmed retry can deliver"
             );
         }
+    }
+
+    #[test]
+    fn wrapper_submit_pending_overrides_prior_idle_state() {
+        let token = CancelToken::new();
+        assert_eq!(
+            decide_claimed_claude_stop_delivery(
+                ClaudeTurnInterruptDelivery::StreamJsonControlRequest,
+                ClaudeTuiInterruptPhase::PromptReady,
+            ),
+            ClaudeStopDeliveryDecision::SkipPreGeneration
+        );
+
+        token.mark_claude_interrupt_submit_pending();
+        let phase = stream_json_interrupt_phase(
+            Some(TuiTurnState::Idle),
+            token.claude_interrupt_submit_pending(),
+        );
+        assert_eq!(
+            decide_claimed_claude_stop_delivery(
+                ClaudeTurnInterruptDelivery::StreamJsonControlRequest,
+                phase,
+            ),
+            ClaudeStopDeliveryDecision::Deliver(
+                ClaudeTurnInterruptDelivery::StreamJsonControlRequest
+            )
+        );
+    }
+
+    #[test]
+    fn production_delivery_boundary_holds_generation_lock_through_write() {
+        let session = "claude-stop-production-boundary";
+        let stale = Arc::new(CancelToken::new());
+        let current = Arc::new(CancelToken::new());
+        stale.bind_claude_tmux_session(session);
+        assert!(stale.claim_claude_interrupt());
+
+        let entered_write = Arc::new(Barrier::new(2));
+        let release_write = Arc::new(Barrier::new(2));
+        let stale_for_write = Arc::clone(&stale);
+        let entered_for_write = Arc::clone(&entered_write);
+        let release_for_write = Arc::clone(&release_write);
+        let writer = thread::spawn(move || {
+            deliver_claimed_claude_stop(stale_for_write.as_ref(), session, None, || {
+                entered_for_write.wait();
+                release_for_write.wait();
+                Ok::<(), String>(())
+            })
+        });
+        entered_write.wait();
+
+        let (bind_started_tx, bind_started_rx) = std::sync::mpsc::channel();
+        let (bind_finished_tx, bind_finished_rx) = std::sync::mpsc::channel();
+        let current_for_bind = Arc::clone(&current);
+        let binder = thread::spawn(move || {
+            bind_started_tx.send(()).unwrap();
+            current_for_bind.bind_claude_tmux_session(session);
+            bind_finished_tx.send(()).unwrap();
+        });
+        bind_started_rx.recv().unwrap();
+        assert!(
+            bind_finished_rx
+                .recv_timeout(std::time::Duration::from_millis(20))
+                .is_err(),
+            "generation publish must wait for provider write"
+        );
+
+        release_write.wait();
+        bind_finished_rx.recv().unwrap();
+        writer.join().expect("writer must not panic").unwrap();
+        binder.join().expect("binder must not panic");
+        assert!(
+            stale
+                .lock_current_claude_interrupt_session(session)
+                .is_none()
+        );
     }
 
     #[test]

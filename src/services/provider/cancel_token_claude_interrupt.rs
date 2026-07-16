@@ -72,6 +72,16 @@ impl CancelToken {
         })
     }
 
+    /// Record that a wrapper accepted this turn before JSONL confirms it.
+    pub(crate) fn mark_claude_interrupt_submit_pending(&self) {
+        self.claude_interrupt_submit_pending
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn claude_interrupt_submit_pending(&self) -> bool {
+        self.claude_interrupt_submit_pending.load(Ordering::Acquire)
+    }
+
     /// Reserve the Claude interrupt-delivery right for this turn.
     pub(crate) fn claim_claude_interrupt(&self) -> bool {
         self.claude_interrupt_claim

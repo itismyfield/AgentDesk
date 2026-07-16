@@ -1003,6 +1003,9 @@ pub struct CancelToken {
     claude_interrupt_claim: AtomicU8,
     /// Monotonic Claude turn identity used for diagnostics and fence observability.
     claude_interrupt_generation: u64,
+    /// Wrapper prompt handoff completed before its JSONL user envelope appeared.
+    /// The stop path must treat this window as submitted, not as prior-turn idle.
+    claude_interrupt_submit_pending: AtomicBool,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
 }
@@ -1025,6 +1028,7 @@ impl CancelToken {
             claude_interrupt_claim: AtomicU8::new(0),
             claude_interrupt_generation: NEXT_CLAUDE_INTERRUPT_GENERATION
                 .fetch_add(1, Ordering::Relaxed),
+            claude_interrupt_submit_pending: AtomicBool::new(false),
             restart_mode: AtomicU8::new(0),
         }
     }
