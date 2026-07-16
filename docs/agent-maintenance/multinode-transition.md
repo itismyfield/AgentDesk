@@ -1442,3 +1442,10 @@
   write. Per-turn prompt assembly joins the shared boundary while reading
   `session_transcripts`, so restart or worker reassignment cannot cross a clear.
   This adds no leader lease, singleton, or routing decision.
+- #4551 fresh routine context severance and verified start evidence — **Existing
+  leader-owned routine state, worker-local provider launch**: the routine
+  executor records turn-matched start evidence in the shared `routine_runs` row,
+  and terminal close serializes on that same row so neither interleaving loses
+  the verified flag. Fresh provider continuity is cleared only after the shared
+  transcript boundary succeeds. No new worker, queue, lease, singleton, routing
+  decision, or node-local authority is introduced.

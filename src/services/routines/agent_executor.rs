@@ -591,25 +591,13 @@ impl RoutineAgentExecutor {
                 retry_count_after_increment: retry_count,
                 next_retry_at,
             } => {
-                let mut retry_result = result_json.unwrap_or_else(|| {
-                    merge_pending_result(&run, "retry_scheduled", Some(message), None)
-                });
-                if let Some(object) = retry_result.as_object_mut() {
-                    object.insert(
-                        "status".to_string(),
-                        Value::String("retry_scheduled".to_string()),
-                    );
-                    object.insert(
-                        "retry_count".to_string(),
-                        Value::Number(serde_json::Number::from(retry_count)),
-                    );
-                    object.insert(
-                        "next_retry_at".to_string(),
-                        Value::String(next_retry_at.to_rfc3339()),
-                    );
-                }
-                preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
-                let result_json = Some(retry_result);
+                let result_json = Some(retry_scheduled_result(
+                    &run,
+                    result_json,
+                    message,
+                    retry_count,
+                    next_retry_at,
+                ));
                 let scheduled = store
                     .schedule_agent_retry(
                         &run.run_id,
@@ -628,7 +616,7 @@ impl RoutineAgentExecutor {
                     status: "running".to_string(),
                     result_json,
                     error: Some(message.to_string()),
-                    fresh_context_guaranteed,
+                    fresh_context_guaranteed: false,
                 }));
             }
             AgentFailureRecoveryPlan::Fallback {
@@ -1145,7 +1133,7 @@ impl RoutineAgentExecutor {
         let durable_confirmation_persisted = if provider_fresh_context {
             let confirmed_result = result_with_fresh_context_guarantee(result_json.clone(), true);
             match store
-                .confirm_agent_turn_started(&claimed.run_id, &turn_id, confirmed_result.clone())
+                .confirm_agent_turn_started(&claimed.run_id, &turn_id)
                 .await
             {
                 Ok(true) => {
@@ -1157,7 +1145,7 @@ impl RoutineAgentExecutor {
                         routine_id = %claimed.routine_id,
                         run_id = %claimed.run_id,
                         turn_id = %turn_id,
-                        "routine run closed before fresh provider start could be confirmed"
+                        "fresh provider start confirmation found no matching routine agent turn"
                     );
                     false
                 }
@@ -1744,6 +1732,34 @@ fn pending_result_without_fresh_context_guarantee(
     error: Option<&str>,
 ) -> Value {
     result_with_fresh_context_guarantee(merge_pending_result(run, status, error, None), false)
+}
+
+fn retry_scheduled_result(
+    run: &RunningAgentRoutineRun,
+    result_json: Option<Value>,
+    message: &str,
+    retry_count: i32,
+    next_retry_at: DateTime<Utc>,
+) -> Value {
+    let mut retry_result = result_json.unwrap_or_else(|| {
+        merge_pending_result(run, "retry_scheduled", Some(message), None)
+    });
+    if let Some(object) = retry_result.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            Value::String("retry_scheduled".to_string()),
+        );
+        object.insert(
+            "retry_count".to_string(),
+            Value::Number(serde_json::Number::from(retry_count)),
+        );
+        object.insert(
+            "next_retry_at".to_string(),
+            Value::String(next_retry_at.to_rfc3339()),
+        );
+    }
+    preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
+    result_with_fresh_context_guarantee(retry_result, false)
 }
 
 fn merge_pending_result(
@@ -2492,6 +2508,30 @@ mod tests {
         );
 
         assert_eq!(result.get("fresh_context_guaranteed"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn retry_scheduled_clears_prior_attempt_fresh_context_guarantee() {
+        let run = RunningAgentRoutineRun {
+            max_retries: 1,
+            result_json: Some(json!({
+                "prompt": "retry me",
+                "fresh_context_guaranteed": true
+            })),
+            ..running_run(None)
+        };
+
+        let result = retry_scheduled_result(
+            &run,
+            Some(json!({"fresh_context_guaranteed": true})),
+            "attempt failed",
+            1,
+            Utc::now(),
+        );
+
+        assert_eq!(result.get("status"), Some(&json!("retry_scheduled")));
+        assert_eq!(result.get("fresh_context_guaranteed"), Some(&json!(false)));
+        assert_eq!(result.get("prompt"), Some(&json!("retry me")));
     }
 
     #[test]

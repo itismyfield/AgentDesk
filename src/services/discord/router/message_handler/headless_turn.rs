@@ -32,6 +32,27 @@ fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         != Some("persistent")
 }
 
+async fn persist_boundary_before_provider_clear<B, BFut, C, CFut, E>(
+    persist_boundary: bool,
+    clear_provider: bool,
+    boundary: B,
+    clear: C,
+) -> Result<(), E>
+where
+    B: FnOnce() -> BFut,
+    BFut: std::future::Future<Output = Result<(), E>>,
+    C: FnOnce() -> CFut,
+    CFut: std::future::Future<Output = ()>,
+{
+    if persist_boundary {
+        boundary().await?;
+    }
+    if clear_provider {
+        clear().await;
+    }
+    Ok(())
+}
+
 pub(in crate::services::discord) async fn start_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -611,29 +632,35 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // Routine metadata reasserts the fresh boundary on every routine run, while
     // later user-authored turns carry no routine marker. Persist both deliberate
     // severances so no later turn can re-inject transcript pairs from before one.
-    if (goal_fresh || fresh_routine)
-        && let Err(error) = record_fresh_session_context_boundary(shared, channel_id).await
-    {
+    let fresh_context_severance = goal_fresh || fresh_routine;
+    // Fresh routines use the same provider-severance machinery as `/goal fresh`:
+    // clear in-memory, DB, stale IDs, and live-TUI bindings; skip restoration;
+    // and force a cold provider launch. Prompt rewriting remains goal-only.
+    let force_fresh_provider_session =
+        fresh_context_severance || routine_agent_identity_changed;
+    let severance = persist_boundary_before_provider_clear(
+        fresh_context_severance,
+        force_fresh_provider_session,
+        || record_fresh_session_context_boundary(shared, channel_id),
+        || {
+            clear_codex_goal_start_provider_session(
+                shared,
+                channel_id,
+                adk_session_key.as_deref(),
+                &mut session_id,
+                &mut memento_context_loaded,
+                &mut session_strategy_reason,
+            )
+        },
+    )
+    .await;
+    if let Err(error) = severance {
         let _ = release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
         return Err(HeadlessTurnStartError::Internal(format!(
             "failed to persist fresh-session context boundary: {error}"
         )));
     }
-    // Fresh routines use the same provider-severance machinery as `/goal fresh`:
-    // clear in-memory, DB, stale IDs, and live-TUI bindings; skip restoration;
-    // and force a cold provider launch. Prompt rewriting remains goal-only.
-    let force_fresh_provider_session =
-        goal_fresh || fresh_routine || routine_agent_identity_changed;
     if force_fresh_provider_session {
-        clear_codex_goal_start_provider_session(
-            shared,
-            channel_id,
-            adk_session_key.as_deref(),
-            &mut session_id,
-            &mut memento_context_loaded,
-            &mut session_strategy_reason,
-        )
-        .await;
         session_strategy_reason = if goal_fresh {
             "goal_fresh_provider_session"
         } else if routine_agent_identity_changed {
@@ -1605,9 +1632,13 @@ mod headless_hard_ceiling_tests {
 
 #[cfg(test)]
 mod fresh_routine_tests {
-    use super::{fresh_routine_turn, routine_metadata_agent_id, routine_metadata_role_binding};
+    use super::{
+        fresh_routine_turn, persist_boundary_before_provider_clear, routine_metadata_agent_id,
+        routine_metadata_role_binding,
+    };
     use crate::services::provider::ProviderKind;
     use serde_json::json;
+    use std::cell::RefCell;
 
     #[test]
     fn legacy_routine_without_strategy_is_fresh() {
@@ -1660,35 +1691,45 @@ mod fresh_routine_tests {
         assert!(!fresh_routine_turn(None));
     }
 
-    #[test]
-    fn fresh_routine_path_records_durable_boundary_before_provider_clear() {
-        let module_src = include_str!("headless_turn.rs");
-        let policy = module_src
-            .find("let fresh_routine = fresh_routine_turn(metadata.as_ref());")
-            .expect("fresh routine policy is computed at turn start");
-        let branch = module_src[policy..]
-            .find("if (goal_fresh || fresh_routine)")
-            .map(|offset| policy + offset)
-            .expect("fresh routine/goal durable-boundary branch exists");
-        let before_boundary = &module_src[policy..branch];
-        assert!(
-            !before_boundary.contains("if fresh_routine")
-                || !before_boundary.contains("clear_provider_session()"),
-            "fresh routine state must not be cleared before its durable boundary"
-        );
+    #[tokio::test]
+    async fn fresh_routine_path_records_durable_boundary_before_provider_clear() {
+        let events = RefCell::new(Vec::new());
 
-        let branch_body = &module_src[branch..];
-        let boundary_call = format!("{}{}", "record_fresh_session_", "context_boundary(");
-        let boundary = branch_body
-            .find(&boundary_call)
-            .expect("fresh routine path records a durable transcript boundary");
-        let provider_clear = branch_body
-            .find("clear_codex_goal_start_provider_session(")
-            .expect("fresh routine path clears provider state");
+        let result = persist_boundary_before_provider_clear(
+            true,
+            true,
+            || async {
+                events.borrow_mut().push("boundary");
+                Ok::<_, &'static str>(())
+            },
+            || async {
+                events.borrow_mut().push("clear");
+            },
+        )
+        .await;
 
-        assert!(
-            boundary < provider_clear,
-            "fresh routine boundary must be recorded before provider state is cleared"
-        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(events.into_inner(), vec!["boundary", "clear"]);
+    }
+
+    #[tokio::test]
+    async fn fresh_routine_path_does_not_clear_provider_when_boundary_fails() {
+        let events = RefCell::new(Vec::new());
+
+        let result = persist_boundary_before_provider_clear(
+            true,
+            true,
+            || async {
+                events.borrow_mut().push("boundary");
+                Err::<(), _>("persistence failed")
+            },
+            || async {
+                events.borrow_mut().push("clear");
+            },
+        )
+        .await;
+
+        assert_eq!(result, Err("persistence failed"));
+        assert_eq!(events.into_inner(), vec!["boundary"]);
     }
 }
