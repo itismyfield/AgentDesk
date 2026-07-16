@@ -936,6 +936,35 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
 mod busy_requeue_reaction_tests {
     use super::*;
 
+    struct ScopedRuntimeRoot {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for ScopedRuntimeRoot {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn scoped_runtime_root() -> ScopedRuntimeRoot {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        ScopedRuntimeRoot {
+            _lock: lock,
+            _temp: temp,
+            previous,
+        }
+    }
+
     fn compact(source: &str) -> String {
         source.split_whitespace().collect()
     }
@@ -974,6 +1003,7 @@ mod busy_requeue_reaction_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn accepted_busy_requeue_keeps_hourglass_and_adds_queue_marker() {
+        let _root = scoped_runtime_root();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = Arc::new(serenity::Http::new("Bot test-token"));
         let channel_id = serenity::ChannelId::new(100_000_004_248_301);

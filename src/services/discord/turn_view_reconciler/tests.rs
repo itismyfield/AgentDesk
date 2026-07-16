@@ -1575,11 +1575,7 @@ async fn dispatch_parent_retry_transient_keeps_persisted_pending_and_retries() {
     let combined_delivery = TurnViewDelivery::from_reaction_error_status(combined_status);
     assert_ne!(combined_delivery, TurnViewDelivery::FailedPermanent);
 
-    let retrying = TurnViewReconciler::with_test_deliveries(vec![
-        combined_delivery,
-        TurnViewDelivery::Delivered,
-        TurnViewDelivery::Delivered,
-    ]);
+    let retrying = TurnViewReconciler::with_test_deliveries(vec![combined_delivery]);
     let delivery = retrying
         .note_state_delivery(
             &shared,
@@ -1623,7 +1619,8 @@ async fn dispatch_parent_retry_transient_keeps_persisted_pending_and_retries() {
             .iter()
             .filter(|op| op.add && op.emoji == '✅')
             .count(),
-        2
+        1,
+        "the transient failure occurs before the terminal add; retry adds completion once"
     );
 }
 
