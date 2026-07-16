@@ -17,7 +17,8 @@ pub(super) enum RuntimeActivityEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AbandonedTmuxCleanupDecision {
     Kill,
-    NoKillMarkerOnly,
+    PreserveRetry,
+    TerminalMarkerOnly,
 }
 
 pub(super) fn abandoned_tmux_cleanup_decision(
@@ -25,62 +26,97 @@ pub(super) fn abandoned_tmux_cleanup_decision(
     pane: PaneLiveness,
     activity: RuntimeActivityEvidence,
 ) -> AbandonedTmuxCleanupDecision {
-    if has_usable_session_name
-        && pane == PaneLiveness::DeadOrAbsent
-        && activity == RuntimeActivityEvidence::Inactive
-    {
+    if !has_usable_session_name {
+        return AbandonedTmuxCleanupDecision::TerminalMarkerOnly;
+    }
+    if pane == PaneLiveness::DeadOrAbsent && activity == RuntimeActivityEvidence::Inactive {
         AbandonedTmuxCleanupDecision::Kill
     } else {
-        AbandonedTmuxCleanupDecision::NoKillMarkerOnly
+        AbandonedTmuxCleanupDecision::PreserveRetry
     }
 }
 
-fn runtime_activity_evidence(session_name: &str) -> RuntimeActivityEvidence {
-    let latest_nanos =
-        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(session_name);
+fn runtime_activity_evidence_from(
+    latest_nanos: i64,
+    now_secs: i64,
+) -> RuntimeActivityEvidence {
     if latest_nanos <= 0 {
         return RuntimeActivityEvidence::Unknown;
     }
     let latest_secs = latest_nanos / 1_000_000_000;
-    let now_secs = chrono::Utc::now().timestamp();
     let age_secs = now_secs.saturating_sub(latest_secs).max(0) as u64;
-    if age_secs < DEAD_WATCHER_PROVEN_DEAD_SECS {
+    if age_secs <= DEAD_WATCHER_PROVEN_DEAD_SECS {
         RuntimeActivityEvidence::Recent
     } else {
         RuntimeActivityEvidence::Inactive
     }
 }
 
-pub(super) fn abandoned_tmux_cleanup_decision_for(
+fn runtime_activity_evidence(session_name: &str) -> RuntimeActivityEvidence {
+    let latest_nanos =
+        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(session_name);
+    runtime_activity_evidence_from(latest_nanos, chrono::Utc::now().timestamp())
+}
+
+async fn run_blocking_cleanup_probe<F>(probe: F) -> AbandonedTmuxCleanupDecision
+where
+    F: FnOnce() -> AbandonedTmuxCleanupDecision + Send + 'static,
+{
+    match tokio::task::spawn_blocking(probe).await {
+        Ok(decision) => decision,
+        Err(err) => {
+            tracing::warn!(
+                "[placeholder_sweeper] abandoned tmux evidence probe failed to join; preserving state for retry: {err}"
+            );
+            AbandonedTmuxCleanupDecision::PreserveRetry
+        }
+    }
+}
+
+pub(super) async fn abandoned_tmux_cleanup_decision_for(
     state: &InflightTurnState,
 ) -> AbandonedTmuxCleanupDecision {
     if state.user_msg_id == 0 {
-        return AbandonedTmuxCleanupDecision::NoKillMarkerOnly;
+        return AbandonedTmuxCleanupDecision::TerminalMarkerOnly;
     }
     let Some(session_name) = state.tmux_session_name.as_deref() else {
-        return AbandonedTmuxCleanupDecision::NoKillMarkerOnly;
+        return AbandonedTmuxCleanupDecision::TerminalMarkerOnly;
     };
     let session_name = session_name.trim();
     if session_name.is_empty() {
-        return AbandonedTmuxCleanupDecision::NoKillMarkerOnly;
+        return AbandonedTmuxCleanupDecision::TerminalMarkerOnly;
     }
-    abandoned_tmux_cleanup_decision(
-        true,
-        crate::services::tmux_diagnostics::tmux_session_pane_liveness(session_name),
-        runtime_activity_evidence(session_name),
-    )
+    let session_name = session_name.to_string();
+    run_blocking_cleanup_probe(move || {
+        abandoned_tmux_cleanup_decision(
+            true,
+            crate::services::tmux_diagnostics::tmux_session_pane_liveness(&session_name),
+            runtime_activity_evidence(&session_name),
+        )
+    })
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AbandonedTmuxCleanupOutcome {
+    pub(super) decision: AbandonedTmuxCleanupDecision,
+    pub(super) cleanup_killed: bool,
 }
 
 /// Finalize and cancel an abandoned turn only after independent tmux and
-/// runtime-activity evidence proves its owner is gone. Every other outcome is
-/// marker-only so a live or indeterminate session remains untouched.
+/// runtime-activity evidence proves its owner is gone. Live, recent, and
+/// indeterminate evidence preserves the row for a later retry.
 pub(super) async fn finalize_abandoned_mailbox_if_proven_dead(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &InflightTurnState,
-) -> bool {
-    if abandoned_tmux_cleanup_decision_for(state) != AbandonedTmuxCleanupDecision::Kill {
-        return false;
+) -> AbandonedTmuxCleanupOutcome {
+    let decision = abandoned_tmux_cleanup_decision_for(state).await;
+    if decision != AbandonedTmuxCleanupDecision::Kill {
+        return AbandonedTmuxCleanupOutcome {
+            decision,
+            cleanup_killed: false,
+        };
     }
 
     let channel = serenity::ChannelId::new(state.channel_id);
@@ -108,9 +144,15 @@ pub(super) async fn finalize_abandoned_mailbox_if_proven_dead(
                 "placeholder_sweeper_abandon",
             );
         }
-        true
+        AbandonedTmuxCleanupOutcome {
+            decision,
+            cleanup_killed: true,
+        }
     } else {
-        false
+        AbandonedTmuxCleanupOutcome {
+            decision,
+            cleanup_killed: false,
+        }
     }
 }
 
@@ -118,7 +160,8 @@ pub(super) async fn finalize_abandoned_mailbox_if_proven_dead(
 mod tests {
     use super::{
         AbandonedTmuxCleanupDecision, RuntimeActivityEvidence, abandoned_tmux_cleanup_decision,
-        abandoned_tmux_cleanup_decision_for,
+        abandoned_tmux_cleanup_decision_for, run_blocking_cleanup_probe,
+        runtime_activity_evidence_from,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::platform::tmux::PaneLiveness;
@@ -142,37 +185,37 @@ mod tests {
     }
 
     #[test]
-    fn no_death_evidence_keeps_the_tmux_session() {
+    fn no_death_evidence_preserves_the_tmux_session_for_retry() {
         assert_eq!(
             abandoned_tmux_cleanup_decision(
                 true,
                 PaneLiveness::DeadOrAbsent,
                 RuntimeActivityEvidence::Unknown,
             ),
-            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+            AbandonedTmuxCleanupDecision::PreserveRetry,
         );
     }
 
     #[test]
-    fn missing_or_blank_tmux_name_is_marker_only_without_a_probe() {
+    fn missing_or_blank_tmux_name_is_terminal_marker_only_without_a_probe() {
         assert_eq!(
             abandoned_tmux_cleanup_decision(
                 false,
                 PaneLiveness::DeadOrAbsent,
                 RuntimeActivityEvidence::Inactive,
             ),
-            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+            AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
         );
     }
 
-    #[test]
-    fn panel_only_state_is_marker_only() {
+    #[tokio::test]
+    async fn panel_only_state_is_terminal_marker_only() {
         let mut state = sweep_state();
         state.user_msg_id = 0;
 
         assert_eq!(
-            abandoned_tmux_cleanup_decision_for(&state),
-            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+            abandoned_tmux_cleanup_decision_for(&state).await,
+            AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
         );
     }
 
@@ -189,19 +232,19 @@ mod tests {
     }
 
     #[test]
-    fn live_pane_keeps_the_tmux_session_even_when_activity_is_not_recent() {
+    fn live_pane_preserves_the_tmux_session_even_when_activity_is_not_recent() {
         assert_eq!(
             abandoned_tmux_cleanup_decision(
                 true,
                 PaneLiveness::Live,
                 RuntimeActivityEvidence::Inactive,
             ),
-            AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+            AbandonedTmuxCleanupDecision::PreserveRetry,
         );
     }
 
     #[test]
-    fn ambiguous_pane_and_activity_evidence_is_marker_only() {
+    fn uncertain_or_recent_evidence_preserves_retry() {
         for (pane, activity) in [
             (PaneLiveness::ProbeError, RuntimeActivityEvidence::Inactive),
             (PaneLiveness::DeadOrAbsent, RuntimeActivityEvidence::Recent),
@@ -209,8 +252,40 @@ mod tests {
         ] {
             assert_eq!(
                 abandoned_tmux_cleanup_decision(true, pane, activity),
-                AbandonedTmuxCleanupDecision::NoKillMarkerOnly,
+                AbandonedTmuxCleanupDecision::PreserveRetry,
             );
         }
+    }
+
+    #[test]
+    fn runtime_activity_zero_and_negative_are_unknown() {
+        assert_eq!(
+            runtime_activity_evidence_from(0, 10_000),
+            RuntimeActivityEvidence::Unknown,
+        );
+        assert_eq!(
+            runtime_activity_evidence_from(-1, 10_000),
+            RuntimeActivityEvidence::Unknown,
+        );
+    }
+
+    #[test]
+    fn runtime_activity_exact_boundary_is_recent_and_next_second_is_inactive() {
+        let now_secs = 10_000;
+        let boundary_secs = now_secs - super::DEAD_WATCHER_PROVEN_DEAD_SECS as i64;
+        assert_eq!(
+            runtime_activity_evidence_from(boundary_secs * 1_000_000_000, now_secs),
+            RuntimeActivityEvidence::Recent,
+        );
+        assert_eq!(
+            runtime_activity_evidence_from((boundary_secs - 1) * 1_000_000_000, now_secs),
+            RuntimeActivityEvidence::Inactive,
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_probe_join_failure_preserves_retry() {
+        let decision = run_blocking_cleanup_probe(|| panic!("synthetic probe panic")).await;
+        assert_eq!(decision, AbandonedTmuxCleanupDecision::PreserveRetry);
     }
 }

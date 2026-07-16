@@ -7,9 +7,9 @@
 //! killed without emitting a terminal event. The sweeper periodically scans
 //! every persisted inflight state per provider; for placeholders whose
 //! `updated_at` has not advanced in a configurable window, it edits the
-//! Discord message into a "stalled" or "abandoned" state and (when
-//! abandoning) clears the inflight state file so the message is not
-//! re-processed by the regular cleanup race.
+//! Discord message into a "stalled" or "abandoned" state and clears the
+//! inflight state only after terminal-safe or completed cleanup. Uncertain
+//! owner evidence preserves the row for a later retry.
 //!
 //! Scope notes for the initial landing:
 //! - AgentDesk-tracked inflight states only. Operator-level Claude Code
@@ -56,8 +56,8 @@ use abandon_guard::{
 pub(crate) const STALL_THRESHOLD_SECS: u64 = 300;
 
 /// Age at which the placeholder is treated as abandoned. The sweeper edits
-/// the message to its terminal "abandoned" form and clears the inflight
-/// state file.
+/// the message to its terminal "abandoned" form and clears inflight state only
+/// when tmux cleanup is terminal-safe or actually completes.
 ///
 /// #2438 (#2427 final): bumped 300 → 1800 (30 min). At this point the
 /// sweeper is the **last** layer: every explicit signal that should
@@ -105,6 +105,14 @@ fn classify_age(age_secs: u64) -> SweepDecision {
     } else {
         SweepDecision::Active
     }
+}
+
+fn cleanup_decision_allows_state_delete(
+    decision: AbandonedTmuxCleanupDecision,
+    cleanup_killed: bool,
+) -> bool {
+    decision == AbandonedTmuxCleanupDecision::TerminalMarkerOnly
+        || (decision == AbandonedTmuxCleanupDecision::Kill && cleanup_killed)
 }
 
 fn build_stalled_placeholder(state: &InflightTurnState) -> String {
@@ -543,22 +551,26 @@ async fn run_placeholder_sweep_pass(
             SweepDecision::Abandoned => {
                 match probe {
                     PlaceholderProbe::AlreadyDelivered => {
-                        // Response already on screen. Do NOT overwrite —
-                        // just evict the stale inflight row so the sweeper
-                        // does not retry every pass for the rest of the
-                        // process lifetime.
+                        // Response already on screen. Do NOT overwrite.
+                        // Evict only after terminal-safe or completed cleanup;
+                        // uncertain owner evidence remains retryable.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            let cleanup_killed =
+                            let cleanup =
                                 finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
                                     .await;
-                            let _ = delete_inflight_state_file(provider, state.channel_id);
-                            if cleanup_killed {
+                            if cleanup_decision_allows_state_delete(
+                                cleanup.decision,
+                                cleanup.cleanup_killed,
+                            ) {
+                                let _ = delete_inflight_state_file(provider, state.channel_id);
+                            }
+                            if cleanup.cleanup_killed {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }
                         }
                         tracing::info!(
                             "[placeholder_sweeper] skipped abandon overwrite for {}/{} — \
-                             content already delivered, state evicted (#2415)",
+                             content already delivered; cleanup policy applied (#2415)",
                             state.channel_id,
                             state.current_msg_id
                         );
@@ -566,13 +578,18 @@ async fn run_placeholder_sweep_pass(
                     }
                     PlaceholderProbe::MessageGone => {
                         // The Discord message is permanently unreachable
-                        // (404 / 403 / 410). An edit attempt would fail
-                        // anyway; drop the inflight row.
+                        // (404 / 403 / 410). An edit attempt would fail,
+                        // but uncertain owner evidence still preserves the row.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            let _ =
+                            let cleanup =
                                 finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
                                     .await;
-                            let _ = delete_inflight_state_file(provider, state.channel_id);
+                            if cleanup_decision_allows_state_delete(
+                                cleanup.decision,
+                                cleanup.cleanup_killed,
+                            ) {
+                                let _ = delete_inflight_state_file(provider, state.channel_id);
+                            }
                         }
                         continue;
                     }
@@ -602,13 +619,17 @@ async fn run_placeholder_sweep_pass(
                     channel_id = state.channel_id,
                     msg_id = state.current_msg_id,
                 );
-                let cleanup_decision = abandoned_tmux_cleanup_decision_for(&state);
-                if cleanup_decision == AbandonedTmuxCleanupDecision::NoKillMarkerOnly {
-                    if inflight_state_still_same_turn(provider, &state, age_secs) {
-                        let _ = delete_inflight_state_file(provider, state.channel_id);
-                        report.abandoned += 1;
+                let cleanup_decision = abandoned_tmux_cleanup_decision_for(&state).await;
+                match cleanup_decision {
+                    AbandonedTmuxCleanupDecision::PreserveRetry => continue,
+                    AbandonedTmuxCleanupDecision::TerminalMarkerOnly => {
+                        if inflight_state_still_same_turn(provider, &state, age_secs) {
+                            let _ = delete_inflight_state_file(provider, state.channel_id);
+                            report.abandoned += 1;
+                        }
+                        continue;
                     }
-                    continue;
+                    AbandonedTmuxCleanupDecision::Kill => {}
                 }
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
@@ -630,17 +651,25 @@ async fn run_placeholder_sweep_pass(
                 //      calling mailbox_finish_turn again would no-op or
                 //      corrupt a freshly started follow-up turn.
                 // `inflight_state_still_same_turn` covers (2) and (3); edit
-                // success covers (1).
+                // success covers (1). Cleanup probes again after the edit because
+                // a session may revive during the await. A false cleanup result
+                // must preserve the inflight row.
+                // TODO(#4573 slice B): add a persisted turn generation so reuse of
+                // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    let cleanup_killed =
+                    let cleanup =
                         finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state).await;
-                    if delete_inflight_state_file(provider, state.channel_id) {
+                    if cleanup_decision_allows_state_delete(
+                        cleanup.decision,
+                        cleanup.cleanup_killed,
+                    ) && delete_inflight_state_file(provider, state.channel_id)
+                    {
                         report.abandoned += 1;
                     }
                     // codex round-10 P3 on PR #1308: detach the controller's
                     // Active row that was tracking this card so the
                     // cap-bounded map does not retain a non-evictable entry.
-                    if cleanup_killed {
+                    if cleanup.cleanup_killed {
                         detach_abandoned_placeholder_controller(shared, &state);
                     }
                 }
@@ -804,17 +833,20 @@ async fn sweep_orphan_status_panel(
     let Some(panel_msg) = panel_reclaim_target(state, age_secs) else {
         return;
     };
-    // The abandoned-state policy is fail-closed: without independent evidence
-    // that the tmux owner is dead and inactive, retain the Discord panel and
-    // remove only our stale marker. This also covers panel-only/TUI-direct
-    // rows, which have no real user-message identity to finalize safely.
-    if abandoned_tmux_cleanup_decision_for(state) == AbandonedTmuxCleanupDecision::NoKillMarkerOnly
-    {
-        if inflight_state_still_same_turn(provider, state, age_secs) {
-            let _ = delete_inflight_state_file(provider, state.channel_id);
-            report.abandoned += 1;
+    // The abandoned-state policy is fail-closed: live, recent, or uncertain
+    // evidence keeps the Discord panel and inflight row for a later retry.
+    // Panel-only/TUI-direct rows have no real user-message identity to finalize,
+    // so only those terminal-marker rows can discard their stale marker.
+    match abandoned_tmux_cleanup_decision_for(state).await {
+        AbandonedTmuxCleanupDecision::PreserveRetry => return,
+        AbandonedTmuxCleanupDecision::TerminalMarkerOnly => {
+            if inflight_state_still_same_turn(provider, state, age_secs) {
+                let _ = delete_inflight_state_file(provider, state.channel_id);
+                report.abandoned += 1;
+            }
+            return;
         }
-        return;
+        AbandonedTmuxCleanupDecision::Kill => {}
     }
     // Do not delete a panel a replacement turn now owns, or one whose turn has
     // already completed (state file gone).
@@ -875,9 +907,9 @@ async fn sweep_orphan_status_panel(
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
         if inflight_state_still_same_turn(provider, state, age_secs) {
-            let cleanup_killed =
+            let cleanup =
                 finalize_abandoned_mailbox_if_proven_dead(shared, provider, state).await;
-            if cleanup_killed {
+            if cleanup_decision_allows_state_delete(cleanup.decision, cleanup.cleanup_killed) {
                 let _ = delete_inflight_state_file(provider, state.channel_id);
             }
         }
@@ -1220,7 +1252,8 @@ mod safety_net_threshold_tests {
     //! explicit-signal wire (D / A / B / C) must have time to fire
     //! before the sweeper does anything destructive.
     use super::{
-        ABANDON_THRESHOLD_SECS, INITIAL_DELAY_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
+        ABANDON_THRESHOLD_SECS, AbandonedTmuxCleanupDecision, INITIAL_DELAY_SECS,
+        STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS, cleanup_decision_allows_state_delete,
         panel_reclaim_target,
     };
     use crate::services::provider::ProviderKind;
@@ -1281,6 +1314,34 @@ mod safety_net_threshold_tests {
         // than one minute. 30s is the current cadence; pin the
         // upper bound.
         assert!(SWEEP_INTERVAL_SECS <= 60);
+    }
+
+    #[test]
+    fn uncertain_cleanup_preserves_row_and_retry_evidence() {
+        assert!(!cleanup_decision_allows_state_delete(
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+            false,
+        ));
+    }
+
+    #[test]
+    fn failed_or_revived_cleanup_does_not_delete_inflight_state() {
+        assert!(!cleanup_decision_allows_state_delete(
+            AbandonedTmuxCleanupDecision::Kill,
+            false,
+        ));
+        assert!(cleanup_decision_allows_state_delete(
+            AbandonedTmuxCleanupDecision::Kill,
+            true,
+        ));
+    }
+
+    #[test]
+    fn terminal_marker_only_can_remove_marker_without_tmux_cleanup() {
+        assert!(cleanup_decision_allows_state_delete(
+            AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
+            false,
+        ));
     }
 
     #[test]
