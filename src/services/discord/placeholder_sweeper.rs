@@ -38,8 +38,8 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 use abandon_guard::{
-    AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for, finalize_owner_dead_mailbox,
-    finalize_terminal_delivered_mailbox,
+    AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, abandoned_cleanup_evidence_for_probe,
+    abandoned_tmux_cleanup_decision_for, finalize_abandoned_mailbox,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -547,8 +547,11 @@ async fn run_placeholder_sweep_pass(
                         // Release the matching mailbox/inflight even if its reusable
                         // tmux pane remains live; preserve that session itself.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
+                            let evidence = abandoned_cleanup_evidence_for_probe(probe)
+                                .expect("delivered probe has cleanup evidence");
                             let cleanup =
-                                finalize_terminal_delivered_mailbox(shared, provider, &state).await;
+                                finalize_abandoned_mailbox(shared, provider, &state, evidence)
+                                    .await;
                             let same_turn =
                                 inflight_state_still_same_turn(provider, &state, age_secs);
                             let deleted =
@@ -570,13 +573,15 @@ async fn run_placeholder_sweep_pass(
                         // is not terminal-delivery evidence. Re-probe owner death
                         // after the awaited GET before touching mailbox/state.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
+                            let evidence = abandoned_cleanup_evidence_for_probe(probe)
+                                .expect("gone probe has cleanup evidence");
                             let cleanup =
-                                finalize_owner_dead_mailbox(shared, provider, &state, true).await;
+                                finalize_abandoned_mailbox(shared, provider, &state, evidence)
+                                    .await;
                             let same_turn =
                                 inflight_state_still_same_turn(provider, &state, age_secs);
-                            let deleted = same_turn
-                                && cleanup.decision == AbandonedTmuxCleanupDecision::Kill
-                                && cleanup.delete_state_if_allowed(provider, &state);
+                            let deleted =
+                                same_turn && cleanup.delete_state_if_allowed(provider, &state);
                             if should_detach_after_cleanup(same_turn, deleted) {
                                 detach_abandoned_placeholder_controller(shared, &state);
                             }
@@ -631,7 +636,7 @@ async fn run_placeholder_sweep_pass(
                     &text,
                 )
                 .await;
-                // Recheck after the awaited edit covers three concerns:
+                // Recheck after the awaited edit covers four concerns:
                 //   1. Edit failure (rate limit / 5xx): leave state for the
                 //      next pass to retry.
                 //   2. New turn raced in during the await (different
@@ -641,14 +646,20 @@ async fn run_placeholder_sweep_pass(
                 //      gone): turn_bridge already finalized its mailbox —
                 //      calling mailbox_finish_turn again would no-op or
                 //      corrupt a freshly started follow-up turn.
+                //   4. The tmux pane revived during the edit: owner-death planning
+                //      returns PreserveRetry, which keeps both mailbox and row.
                 // `inflight_state_still_same_turn` covers (2) and (3); edit
-                // success covers (1). Cleanup probes again after the edit because
-                // a session may revive during the await. A false cleanup result
-                // must preserve the inflight row.
+                // success covers (1), and the production cleanup plan covers (4).
                 // TODO(#4573 slice B): add a persisted turn generation so reuse of
                 // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    let cleanup = finalize_owner_dead_mailbox(shared, provider, &state, true).await;
+                    let cleanup = finalize_abandoned_mailbox(
+                        shared,
+                        provider,
+                        &state,
+                        AbandonedCleanupEvidence::OwnerDeath,
+                    )
+                    .await;
                     let same_turn = inflight_state_still_same_turn(provider, &state, age_secs);
                     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, &state);
                     if should_detach_after_cleanup(same_turn, deleted) {
@@ -888,7 +899,13 @@ async fn sweep_orphan_status_panel(
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
         if inflight_state_still_same_turn(provider, state, age_secs) {
-            let cleanup = finalize_owner_dead_mailbox(shared, provider, state, false).await;
+            let cleanup = finalize_abandoned_mailbox(
+                shared,
+                provider,
+                state,
+                AbandonedCleanupEvidence::OwnerDeath,
+            )
+            .await;
             cleanup.delete_state_if_allowed(provider, state);
         }
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
@@ -1229,11 +1246,9 @@ mod safety_net_threshold_tests {
     //! placeholder sweeper is now the LAST cleanup layer — every
     //! explicit-signal wire (D / A / B / C) must have time to fire
     //! before the sweeper does anything destructive.
-    use super::abandon_guard::cleanup_decision_allows_state_delete;
     use super::{
-        ABANDON_THRESHOLD_SECS, AbandonedTmuxCleanupDecision, INITIAL_DELAY_SECS,
-        STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS, panel_reclaim_target,
-        should_detach_after_cleanup,
+        ABANDON_THRESHOLD_SECS, INITIAL_DELAY_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
+        panel_reclaim_target, should_detach_after_cleanup,
     };
     use crate::services::provider::ProviderKind;
 
@@ -1293,38 +1308,6 @@ mod safety_net_threshold_tests {
         // than one minute. 30s is the current cadence; pin the
         // upper bound.
         assert!(SWEEP_INTERVAL_SECS <= 60);
-    }
-
-    #[test]
-    fn uncertain_cleanup_preserves_row_and_retry_evidence() {
-        assert!(!cleanup_decision_allows_state_delete(
-            AbandonedTmuxCleanupDecision::PreserveRetry,
-            false,
-            false,
-        ));
-    }
-
-    #[test]
-    fn failed_or_revived_cleanup_does_not_delete_inflight_state() {
-        assert!(!cleanup_decision_allows_state_delete(
-            AbandonedTmuxCleanupDecision::Kill,
-            false,
-            false,
-        ));
-        assert!(cleanup_decision_allows_state_delete(
-            AbandonedTmuxCleanupDecision::Kill,
-            true,
-            false,
-        ));
-    }
-
-    #[test]
-    fn terminal_marker_only_can_remove_marker_without_tmux_cleanup() {
-        assert!(cleanup_decision_allows_state_delete(
-            AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
-            false,
-            false,
-        ));
     }
 
     #[test]
