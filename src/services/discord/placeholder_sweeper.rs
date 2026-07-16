@@ -39,7 +39,7 @@ use crate::services::provider::ProviderKind;
 mod abandon_guard;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
-    finalize_abandoned_mailbox_if_proven_dead,
+    finalize_abandoned_mailbox,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -543,13 +543,12 @@ async fn run_placeholder_sweep_pass(
             SweepDecision::Abandoned => {
                 match probe {
                     PlaceholderProbe::AlreadyDelivered => {
-                        // Response already on screen. Do NOT overwrite.
-                        // Evict only after terminal-safe or completed cleanup;
-                        // uncertain owner evidence remains retryable.
+                        // Response already on screen: terminal delivery is certain.
+                        // Release the matching mailbox/inflight even if its reusable
+                        // tmux pane remains live; preserve that session itself.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             let cleanup =
-                                finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
-                                    .await;
+                                finalize_abandoned_mailbox(shared, provider, &state, true).await;
                             cleanup.delete_state_if_allowed(provider, &state);
                             if cleanup.cleanup_killed {
                                 detach_abandoned_placeholder_controller(shared, &state);
@@ -565,12 +564,12 @@ async fn run_placeholder_sweep_pass(
                     }
                     PlaceholderProbe::MessageGone => {
                         // The Discord message is permanently unreachable
-                        // (404 / 403 / 410). An edit attempt would fail,
-                        // but uncertain owner evidence still preserves the row.
+                        // (404 / 403 / 410). An edit attempt would fail, but this
+                        // alone is not terminal-delivery evidence: still require
+                        // owner-death evidence before destructive cleanup.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             let cleanup =
-                                finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state)
-                                    .await;
+                                finalize_abandoned_mailbox(shared, provider, &state, false).await;
                             cleanup.delete_state_if_allowed(provider, &state);
                         }
                         continue;
@@ -601,8 +600,7 @@ async fn run_placeholder_sweep_pass(
                     channel_id = state.channel_id,
                     msg_id = state.current_msg_id,
                 );
-                let cleanup_decision = abandoned_tmux_cleanup_decision_for(&state).await;
-                match cleanup_decision {
+                match abandoned_tmux_cleanup_decision_for(&state).await {
                     AbandonedTmuxCleanupDecision::PreserveRetry => continue,
                     AbandonedTmuxCleanupDecision::TerminalMarkerOnly => {
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
@@ -612,6 +610,13 @@ async fn run_placeholder_sweep_pass(
                         continue;
                     }
                     AbandonedTmuxCleanupDecision::Kill => {}
+                }
+                // Re-probe immediately before the edit so a revived session wins.
+                if abandoned_tmux_cleanup_decision_for(&state).await
+                    != AbandonedTmuxCleanupDecision::Kill
+                    || !inflight_state_still_same_turn(provider, &state, age_secs)
+                {
+                    continue;
                 }
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
@@ -640,7 +645,7 @@ async fn run_placeholder_sweep_pass(
                 // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
                     let cleanup =
-                        finalize_abandoned_mailbox_if_proven_dead(shared, provider, &state).await;
+                        finalize_abandoned_mailbox(shared, provider, &state, false).await;
                     if cleanup.delete_state_if_allowed(provider, &state) {
                         report.abandoned += 1;
                     }
@@ -885,7 +890,7 @@ async fn sweep_orphan_status_panel(
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
         if inflight_state_still_same_turn(provider, state, age_secs) {
-            let cleanup = finalize_abandoned_mailbox_if_proven_dead(shared, provider, state).await;
+            let cleanup = finalize_abandoned_mailbox(shared, provider, state, false).await;
             cleanup.delete_state_if_allowed(provider, state);
         }
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
