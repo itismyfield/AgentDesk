@@ -1307,9 +1307,7 @@ fn pane_has_dim_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
     let prompt_idx = recent_bottom_up
         .iter()
         .take(LEGACY_PROMPT_BOTTOM_WINDOW)
-        .position(|line| {
-            line_is_codex_compact_prompt_marker(&strip_ansi_escape_sequences(line))
-        });
+        .position(|line| line_is_codex_compact_prompt_marker(&strip_ansi_escape_sequences(line)));
     let status_idx = recent_bottom_up
         .iter()
         .take(LEGACY_STATUS_BOTTOM_WINDOW)
