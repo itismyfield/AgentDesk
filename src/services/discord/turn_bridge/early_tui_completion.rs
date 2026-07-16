@@ -26,9 +26,8 @@ pub(super) async fn run_early_tui_completion_gate(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<super::super::tmux::TuiCompletionGateOutcome> {
-    let mut bridge_tui_gate_outcome_early: Option<
-        super::super::tmux::TuiCompletionGateOutcome,
-    > = None;
+    let mut bridge_tui_gate_outcome_early: Option<super::super::tmux::TuiCompletionGateOutcome> =
+        None;
     // Reproduce the same eligibility filter the late gate already
     // applies, but BEFORE the channel-mailbox release.
     let eligible_for_early_gate =
