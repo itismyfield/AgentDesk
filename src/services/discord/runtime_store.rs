@@ -214,7 +214,7 @@ pub(super) fn last_message_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("last_message"))
 }
 
-struct LastMessageIdFileLock {
+pub(in crate::services::discord) struct LastMessageIdFileLock {
     _file: fs::File,
 }
 
@@ -232,7 +232,9 @@ fn last_message_id_lock_path(path: &Path) -> PathBuf {
     path.with_extension("txt.lock")
 }
 
-fn lock_last_message_id_path(path: &Path) -> Result<LastMessageIdFileLock, String> {
+pub(in crate::services::discord) fn lock_last_message_id_path(
+    path: &Path,
+) -> Result<LastMessageIdFileLock, String> {
     let lock_path = last_message_id_lock_path(path);
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
