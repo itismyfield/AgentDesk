@@ -865,8 +865,8 @@
 | `services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/prompt_too_long_guidance.rs` | 187 | 9 | 178 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry` | `src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs` | 103 | 103 | 0 |  |
 | `services::discord::turn_bridge::thinking` | `src/services/discord/turn_bridge/thinking.rs` | 87 | 21 | 66 |  |
-| `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1174 | 890 | 284 |  |
-| `services::discord::turn_bridge::tmux_runtime::claude_stop_delivery` | `src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs` | 529 | 367 | 162 |  |
+| `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1172 | 888 | 284 |  |
+| `services::discord::turn_bridge::tmux_runtime::claude_stop_delivery` | `src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs` | 815 | 546 | 269 |  |
 | `services::discord::turn_bridge::tmux_runtime::interrupt_policy` | `src/services/discord/turn_bridge/tmux_runtime/interrupt_policy.rs` | 374 | 225 | 149 |  |
 | `services::discord::turn_bridge::tmux_runtime::pid_exit` | `src/services/discord/turn_bridge/tmux_runtime/pid_exit.rs` | 282 | 176 | 106 |  |
 | `services::discord::turn_bridge::tmux_runtime::process_backend_cancel` | `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs` | 156 | 156 | 0 |  |
@@ -996,7 +996,7 @@
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1229 | 759 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2437 | 1823 | 614 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2444 | 1830 | 614 | giant-file |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
