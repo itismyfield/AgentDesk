@@ -96,6 +96,30 @@ impl DispatchProfile {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SharedPromptProfile {
+    Full,
+    ReviewLite,
+    Headless,
+}
+
+impl SharedPromptProfile {
+    pub(super) const fn for_dispatch(profile: DispatchProfile) -> Self {
+        match profile {
+            DispatchProfile::ReviewLite => Self::ReviewLite,
+            DispatchProfile::Full | DispatchProfile::Lite => Self::Full,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::ReviewLite => "review-lite",
+            Self::Headless => "headless",
+        }
+    }
+}
+
 // #3034: system-prompt assembly exercised by the dispatch-contract tests;
 // the prod path builds the prompt through other entry points. Test contract.
 #[allow(dead_code)]
@@ -126,6 +150,7 @@ pub(super) fn build_system_prompt(
         role_binding,
         queued_turn,
         profile,
+        SharedPromptProfile::for_dispatch(profile),
         dispatch_type,
         current_task,
         shared_knowledge,
@@ -151,6 +176,7 @@ pub(super) fn build_system_prompt_with_manifest(
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
     profile: DispatchProfile,
+    shared_prompt_profile: SharedPromptProfile,
     dispatch_type: Option<&str>,
     current_task: Option<&CurrentTaskContext<'_>>,
     shared_knowledge: Option<&str>,
@@ -293,40 +319,48 @@ pub(super) fn build_system_prompt_with_manifest(
                 PromptContentVisibility::AdkProvided,
                 lite_rules,
             ));
-        } else if let Some(shared_prompt) = load_shared_prompt_for_profile("full") {
-            let shared_rules = format!("\n\n[Shared Agent Rules]\n{shared_prompt}");
-            tracing::warn!(
-                "  [role-map] Injected full shared agent rules ({} chars) for channel {}",
-                shared_rules.len(),
-                channel_id.get()
-            );
-            system_prompt_owned.push_str(&shared_rules);
-            prompt_manifest_layers.push(prompt_manifest_layer(
-                "shared_agent_rules",
-                "settings.load_shared_prompt_for_profile",
-                Some("profile=full".to_string()),
-                PromptContentVisibility::AdkProvided,
-                &shared_rules,
-            ));
-        } else {
-            // #4314: the shared-rules index now depends on the agent's cwd —
-            // repo-relative `docs/*` references are injected only when the
-            // workspace actually is an AgentDesk checkout. Compute once and
-            // reuse for both the log and the append.
-            let shared_rules = shared_agent_rules_lookup(current_path);
-            tracing::warn!(
-                "  [role-map] Injected compact shared rule index ({} chars) for channel {}",
-                shared_rules.len(),
-                channel_id.get()
-            );
-            system_prompt_owned.push_str(&shared_rules);
-            prompt_manifest_layers.push(prompt_manifest_layer(
-                "shared_agent_rules",
-                "prompt_builder.shared_agent_rules_lookup",
-                Some(format!("workspace={current_path}")),
-                PromptContentVisibility::AdkProvided,
-                &shared_rules,
-            ));
+        }
+
+        if profile != DispatchProfile::Lite {
+            let shared_profile = shared_prompt_profile.as_str();
+            if let Some(shared_prompt) = load_shared_prompt_for_profile(shared_profile) {
+                let shared_rules = format!("\n\n[Shared Agent Rules]\n{shared_prompt}");
+                if dedupe_tracker.record("shared_agent_rules", &shared_rules) {
+                    tracing::warn!(
+                        "  [role-map] Injected {} shared agent rules ({} chars) for channel {}",
+                        shared_profile,
+                        shared_rules.len(),
+                        channel_id.get()
+                    );
+                    system_prompt_owned.push_str(&shared_rules);
+                    prompt_manifest_layers.push(prompt_manifest_layer(
+                        "shared_agent_rules",
+                        "settings.load_shared_prompt_for_profile",
+                        Some(format!("profile={shared_profile}")),
+                        PromptContentVisibility::AdkProvided,
+                        &shared_rules,
+                    ));
+                }
+            } else {
+                // #4314: the shared-rules index now depends on the agent's cwd —
+                // repo-relative `docs/*` references are injected only when the
+                // workspace actually is an AgentDesk checkout. Compute once and
+                // reuse for both the log and the append.
+                let shared_rules = shared_agent_rules_lookup(current_path);
+                tracing::warn!(
+                    "  [role-map] Injected compact shared rule index ({} chars) for channel {}",
+                    shared_rules.len(),
+                    channel_id.get()
+                );
+                system_prompt_owned.push_str(&shared_rules);
+                prompt_manifest_layers.push(prompt_manifest_layer(
+                    "shared_agent_rules",
+                    "prompt_builder.shared_agent_rules_lookup",
+                    Some(format!("workspace={current_path}")),
+                    PromptContentVisibility::AdkProvided,
+                    &shared_rules,
+                ));
+            }
         }
 
         if profile != DispatchProfile::Lite {

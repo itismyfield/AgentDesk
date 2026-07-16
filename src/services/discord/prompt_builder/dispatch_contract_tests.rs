@@ -31,6 +31,7 @@ fn build_prompt_with_optional_manifest_for(
         None,
         false,
         DispatchProfile::Full,
+        SharedPromptProfile::Full,
         dispatch_type,
         current_task,
         None,
@@ -58,6 +59,7 @@ fn build_prompt_with_channel_recent_context(
         None,
         false,
         DispatchProfile::Full,
+        SharedPromptProfile::Full,
         None,
         None,
         None,
@@ -318,6 +320,7 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
         Some(&binding),
         false,
         DispatchProfile::Full,
+        SharedPromptProfile::Full,
         None,
         None,
         Some("[Shared Agent Knowledge]\nimportant invariant"),
@@ -583,6 +586,7 @@ fn build_prompt_manifest_includes_recovery_context_layer() {
         None,
         false,
         DispatchProfile::Full,
+        SharedPromptProfile::Full,
         None,
         None,
         None,
@@ -1081,6 +1085,7 @@ fn build_codex_memento_prompt_for_issue_4309() -> BuiltSystemPrompt {
         None,
         false,
         DispatchProfile::Full,
+        SharedPromptProfile::Full,
         None,
         None,
         None,
@@ -1194,6 +1199,38 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
     }
 }
 
+fn build_shared_prompt_profile_for_test(
+    binding: &RoleBinding,
+    profile: DispatchProfile,
+    shared_prompt_profile: SharedPromptProfile,
+    shared_knowledge: Option<&str>,
+    turn_id: &'static str,
+) -> BuiltSystemPrompt {
+    build_system_prompt_with_manifest(
+        "ctx",
+        &[],
+        "/nonexistent-shared-prompt-workspace-4560",
+        ChannelId::new(1),
+        ChannelId::new(1),
+        "tok",
+        Some(binding),
+        false,
+        profile,
+        shared_prompt_profile,
+        (profile == DispatchProfile::ReviewLite).then_some("review"),
+        None,
+        shared_knowledge,
+        None,
+        None,
+        false,
+        false,
+        None,
+        None,
+        None,
+        Some(turn_id),
+    )
+}
+
 #[test]
 fn shared_prompt_gate_off_preserves_compact_rules_byte_for_byte() {
     let runtime_root = tempfile::tempdir().expect("runtime root");
@@ -1211,6 +1248,7 @@ fn shared_prompt_gate_off_preserves_compact_rules_byte_for_byte() {
         Some(&binding),
         false,
         DispatchProfile::Full,
+        SharedPromptProfile::Full,
         Some("implementation"),
         None,
         None,
@@ -1246,7 +1284,7 @@ fn shared_prompt_gate_off_preserves_compact_rules_byte_for_byte() {
 }
 
 #[test]
-fn shared_prompt_gate_on_injects_full_profile_file_content() {
+fn shared_prompt_gate_on_selects_full_review_lite_and_headless_profiles() {
     let runtime_root = tempfile::tempdir().expect("runtime root");
     let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     let shared_prompt_path = crate::runtime_layout::shared_prompt_path(runtime_root.path());
@@ -1262,32 +1300,105 @@ fn shared_prompt_gate_on_injects_full_profile_file_content() {
     std::fs::write(&shared_prompt_path, raw).expect("write shared prompt");
     let binding = test_role_binding("shared-prompt-gate-on-4560");
 
-    let built = build_system_prompt_with_manifest(
-        "ctx",
-        &[],
-        "/nonexistent-shared-prompt-workspace-4560",
-        ChannelId::new(1),
-        ChannelId::new(1),
-        "tok",
-        Some(&binding),
-        false,
-        DispatchProfile::Full,
-        Some("implementation"),
-        None,
-        None,
-        None,
-        None,
-        false,
-        false,
-        None,
-        None,
-        None,
-        Some("turn-shared-prompt-gate-on-4560"),
-    );
+    for (dispatch_profile, shared_profile, included, excluded) in [
+        (
+            DispatchProfile::Full,
+            SharedPromptProfile::Full,
+            "FULL PROFILE SENTINEL 4560",
+            [
+                "REVIEW PROFILE SENTINEL 4560",
+                "HEADLESS PROFILE SENTINEL 4560",
+            ],
+        ),
+        (
+            DispatchProfile::ReviewLite,
+            SharedPromptProfile::ReviewLite,
+            "REVIEW PROFILE SENTINEL 4560",
+            [
+                "FULL PROFILE SENTINEL 4560",
+                "HEADLESS PROFILE SENTINEL 4560",
+            ],
+        ),
+        (
+            DispatchProfile::Full,
+            SharedPromptProfile::Headless,
+            "HEADLESS PROFILE SENTINEL 4560",
+            [
+                "FULL PROFILE SENTINEL 4560",
+                "REVIEW PROFILE SENTINEL 4560",
+            ],
+        ),
+    ] {
+        let built = build_shared_prompt_profile_for_test(
+            &binding,
+            dispatch_profile,
+            shared_profile,
+            None,
+            "turn-shared-prompt-gate-on-4560",
+        );
+        let expected_reason = format!("profile={}", shared_profile.as_str());
+        let manifest = built.manifest.as_ref().expect("prompt manifest");
+        let layer = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.layer_name == "shared_agent_rules")
+            .expect("shared agent rules layer");
 
-    let expected = format!(
-        "\n\n[Shared Agent Rules]\nALL PROFILE SENTINEL 4560\n{full_padding}\nFULL PROFILE SENTINEL 4560"
+        assert_eq!(
+            layer.source.as_deref(),
+            Some("settings.load_shared_prompt_for_profile")
+        );
+        assert_eq!(layer.reason.as_deref(), Some(expected_reason.as_str()));
+        assert!(built.system_prompt.contains("ALL PROFILE SENTINEL 4560"));
+        assert!(built.system_prompt.contains(included));
+        for sentinel in excluded {
+            assert!(
+                !built.system_prompt.contains(sentinel),
+                "{shared_profile:?} leaked {sentinel}: {}",
+                built.system_prompt
+            );
+        }
+        assert_eq!(built.system_prompt.matches(included).count(), 1);
+        assert_eq!(
+            built.system_prompt.matches("[Shared Agent Rules]\n").count(),
+            1
+        );
+        assert_eq!(
+            manifest
+                .layers
+                .iter()
+                .filter(|layer| layer.layer_name == "shared_agent_rules")
+                .count(),
+            1
+        );
+        assert!(!built.system_prompt.contains("<!-- profile:"));
+        assert!(!built.system_prompt.contains("[Shared Agent Rules Index]"));
+    }
+}
+
+#[test]
+fn empty_filtered_shared_prompt_restores_compact_fallback_exactly() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let shared_prompt_path = crate::runtime_layout::shared_prompt_path(runtime_root.path());
+    std::fs::create_dir_all(shared_prompt_path.parent().expect("shared prompt parent"))
+        .expect("create shared prompt parent");
+    std::fs::write(
+        shared_prompt_path,
+        "<!-- profile: review-lite -->\nREVIEW ONLY 4560\n<!-- /profile -->\n",
+    )
+    .expect("write shared prompt");
+    let workspace = "/nonexistent-shared-prompt-workspace-4560";
+    let binding = test_role_binding("shared-prompt-empty-filter-4560");
+
+    let built = build_shared_prompt_profile_for_test(
+        &binding,
+        DispatchProfile::Full,
+        SharedPromptProfile::Headless,
+        None,
+        "turn-shared-prompt-empty-filter-4560",
     );
+    let expected = shared_agent_rules_lookup(workspace);
     let manifest = built.manifest.expect("prompt manifest");
     let layer = manifest
         .layers
@@ -1295,21 +1406,54 @@ fn shared_prompt_gate_on_injects_full_profile_file_content() {
         .find(|layer| layer.layer_name == "shared_agent_rules")
         .expect("shared agent rules layer");
 
+    assert_eq!(built.system_prompt.matches(expected.as_str()).count(), 1);
+    assert!(!built.system_prompt.contains("[Shared Agent Rules]\n"));
+    assert!(!built.system_prompt.contains("REVIEW ONLY 4560"));
     assert_eq!(
         layer.source.as_deref(),
-        Some("settings.load_shared_prompt_for_profile")
+        Some("prompt_builder.shared_agent_rules_lookup")
     );
-    assert_eq!(layer.reason.as_deref(), Some("profile=full"));
     assert_eq!(layer.full_content.as_deref(), Some(expected.as_str()));
-    assert_eq!(built.system_prompt.matches(expected.as_str()).count(), 1);
-    assert!(!built.system_prompt.contains("REVIEW PROFILE SENTINEL 4560"));
-    assert!(
-        !built
-            .system_prompt
-            .contains("HEADLESS PROFILE SENTINEL 4560")
+}
+
+#[test]
+fn file_backed_shared_rules_obey_prompt_section_dedupe() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let shared_prompt_path = crate::runtime_layout::shared_prompt_path(runtime_root.path());
+    std::fs::create_dir_all(shared_prompt_path.parent().expect("shared prompt parent"))
+        .expect("create shared prompt parent");
+    let shared_rules = "\n\n[Shared Agent Rules]\nDEDUPED FILE RULES 4560";
+    std::fs::write(&shared_prompt_path, "DEDUPED FILE RULES 4560\n")
+        .expect("write shared prompt");
+    let binding = test_role_binding("shared-prompt-dedupe-4560");
+
+    let built = build_shared_prompt_profile_for_test(
+        &binding,
+        DispatchProfile::Full,
+        SharedPromptProfile::Full,
+        Some(shared_rules),
+        "turn-shared-prompt-dedupe-4560",
     );
-    assert!(!built.system_prompt.contains("<!-- profile:"));
-    assert!(!built.system_prompt.contains("[Shared Agent Rules Index]"));
+    let manifest = built.manifest.expect("prompt manifest");
+
+    assert_eq!(built.system_prompt.matches(shared_rules).count(), 1);
+    assert_eq!(
+        manifest
+            .layers
+            .iter()
+            .filter(|layer| layer.layer_name == "shared_agent_rules")
+            .count(),
+        1
+    );
+    assert_eq!(
+        manifest
+            .layers
+            .iter()
+            .filter(|layer| layer.layer_name == "shared_knowledge")
+            .count(),
+        0
+    );
 }
 
 #[test]

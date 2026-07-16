@@ -1832,6 +1832,7 @@ pub(super) async fn handle_text_message(
         role_binding.as_ref(),
         reply_to_user_message,
         dispatch_profile,
+        super::super::super::prompt_builder::SharedPromptProfile::for_dispatch(dispatch_profile),
         dispatch_type_str.as_deref(),
         current_task_context.as_ref(),
         sak_for_system,

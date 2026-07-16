@@ -656,6 +656,7 @@ mod thread_role_inheritance_tests {
             Some(binding),
             false,
             DispatchProfile::Full,
+            super::super::super::super::prompt_builder::SharedPromptProfile::Full,
             None,
             None,
             None,
