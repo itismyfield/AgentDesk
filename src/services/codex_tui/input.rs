@@ -1316,7 +1316,14 @@ fn pane_has_dim_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
         return false;
     };
 
-    status_idx < prompt_idx && line_is_dim_legacy_codex_prompt(recent_bottom_up[prompt_idx])
+    status_idx < prompt_idx
+        && !recent_bottom_up[status_idx + 1..prompt_idx]
+            .iter()
+            .any(|line| {
+                line_is_codex_status_with_ansi(line)
+                    || line_is_codex_compact_prompt_marker(&strip_ansi_escape_sequences(line))
+            })
+        && line_is_dim_legacy_codex_prompt(recent_bottom_up[prompt_idx])
 }
 
 fn line_is_legacy_codex_prompt(line: &str) -> bool {
@@ -2310,6 +2317,19 @@ The documentation example ends with:
 
         assert!(!marker);
         assert!(draft);
+    }
+
+    #[test]
+    fn compact_codex_interleaved_status_rejects_stale_dim_placeholder() {
+        let pane = concat!(
+            "\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n",
+            "  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby\n",
+            "  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left",
+        );
+        let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
+
+        assert!(!marker);
+        assert!(!draft);
     }
 
     #[test]
