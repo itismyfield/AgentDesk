@@ -82,10 +82,6 @@ impl CancelToken {
             .is_ok()
     }
 
-    pub(crate) fn claude_interrupt_claim_was_delivered(&self) -> bool {
-        self.claude_interrupt_claim.load(Ordering::Acquire) == 2
-    }
-
     pub(crate) fn claude_interrupt_generation(&self) -> u64 {
         self.claude_interrupt_generation
     }

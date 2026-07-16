@@ -113,15 +113,17 @@ struct ClaudeStopDeliveryReservation<'a> {
 
 impl<'a> ClaudeStopDeliveryReservation<'a> {
     fn claim(token: &'a CancelToken) -> Option<Self> {
-        token.claim_claude_interrupt().then_some(Self { token })
+        if token.claim_claude_interrupt() {
+            Some(Self { token })
+        } else {
+            None
+        }
     }
 }
 
 impl Drop for ClaudeStopDeliveryReservation<'_> {
     fn drop(&mut self) {
-        if !self.token.claude_interrupt_claim_was_delivered() {
-            let _ = self.token.release_claude_interrupt_claim();
-        }
+        let _ = self.token.release_claude_interrupt_claim();
     }
 }
 
