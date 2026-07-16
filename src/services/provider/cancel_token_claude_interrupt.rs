@@ -22,6 +22,7 @@ impl ClaudeInterruptDeliveryGuard<'_> {
             self.token
                 .claude_interrupt_claim
                 .store(2, Ordering::Release);
+            self.token.clear_claude_interrupt_submit_pending();
         }
         outcome
     }
@@ -80,6 +81,12 @@ impl CancelToken {
 
     pub(crate) fn claude_interrupt_submit_pending(&self) -> bool {
         self.claude_interrupt_submit_pending.load(Ordering::Acquire)
+    }
+
+    /// Clear the handoff window once delivery commits or turn observation ends.
+    pub(crate) fn clear_claude_interrupt_submit_pending(&self) {
+        self.claude_interrupt_submit_pending
+            .store(false, Ordering::Release);
     }
 
     /// Reserve the Claude interrupt-delivery right for this turn.
@@ -154,6 +161,47 @@ mod tests {
                 .lock_current_claude_interrupt_session(session)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn stale_pending_stop_is_rejected_after_next_generation_publishes() {
+        let session = "claude-session-pending-generation-advance";
+        let stale = CancelToken::new();
+        let current = CancelToken::new();
+        stale.bind_claude_tmux_session(session);
+        stale.mark_claude_interrupt_submit_pending();
+
+        current.bind_claude_tmux_session(session);
+
+        assert!(stale.claude_interrupt_submit_pending());
+        assert!(
+            stale
+                .lock_current_claude_interrupt_session(session)
+                .is_none(),
+            "pending state must never bypass a newer generation publication"
+        );
+        assert!(
+            current
+                .lock_current_claude_interrupt_session(session)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn submitted_window_clears_when_delivery_commits() {
+        let session = "claude-session-pending-commit";
+        let token = CancelToken::new();
+        token.bind_claude_tmux_session(session);
+        token.mark_claude_interrupt_submit_pending();
+        assert!(token.claim_claude_interrupt());
+
+        token
+            .lock_current_claude_interrupt_session(session)
+            .unwrap()
+            .commit_success(Ok::<(), ()>(()))
+            .unwrap();
+
+        assert!(!token.claude_interrupt_submit_pending());
     }
 
     #[test]

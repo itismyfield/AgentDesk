@@ -2967,6 +2967,25 @@ fn execute_streaming_local_tmux(
 /// then dies, the caller is asked to finalize the turn with an explicit notice
 /// instead of replaying the prompt from scratch.
 #[cfg(unix)]
+fn submit_wrapper_followup<Write>(
+    token: Option<&CancelToken>,
+    tmux_session_name: &str,
+    write: Write,
+) -> Result<(), String>
+where
+    Write: FnOnce() -> Result<(), String>,
+{
+    if let Some(token) = token {
+        token.bind_claude_tmux_session(tmux_session_name);
+    }
+    write()?;
+    if let Some(token) = token {
+        token.mark_claude_interrupt_submit_pending();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn send_followup_to_tmux(
     prompt: &str,
     output_path: &str,
@@ -2996,18 +3015,26 @@ fn send_followup_to_tmux(
         }
     });
 
-    // Write to input FIFO — if the pipe is broken or missing, request recreation
-    let write_result = std::fs::OpenOptions::new()
-        .write(true)
-        .open(input_fifo_path)
-        .map_err(|e| format!("Failed to open input FIFO: {}", e))
-        .and_then(|mut fifo| {
-            writeln!(fifo, "{}", msg)
-                .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
-            fifo.flush()
-                .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
-            Ok(())
-        });
+    // Publish the new generation before the prompt becomes reachable. Marking
+    // submission still waits for a successful flush so a pre-write stop cannot
+    // consume this turn's interrupt claim.
+    let write_result = submit_wrapper_followup(
+        cancel_token.as_deref(),
+        tmux_session_name,
+        || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(input_fifo_path)
+                .map_err(|e| format!("Failed to open input FIFO: {}", e))
+                .and_then(|mut fifo| {
+                    writeln!(fifo, "{}", msg)
+                        .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
+                    fifo.flush()
+                        .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
+                    Ok(())
+                })
+        },
+    );
 
     if let Err(e) = write_result {
         if should_recreate_session_after_followup_fifo_error(&e) {
@@ -3019,19 +3046,18 @@ fn send_followup_to_tmux(
 
     debug_log("Follow-up message sent to input FIFO");
 
-    if let Some(ref token) = cancel_token {
-        token.mark_claude_interrupt_submit_pending();
-        token.bind_claude_tmux_session(tmux_session_name);
-    }
-
     // Read output file from the offset
     let read_result = read_output_file_until_result(
         output_path,
         start_offset,
         sender.clone(),
-        cancel_token,
+        cancel_token.clone(),
         SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Claude),
-    )?;
+    );
+    if let Some(ref token) = cancel_token {
+        token.clear_claude_interrupt_submit_pending();
+    }
+    let read_result = read_result?;
 
     let outcome = classify_followup_result(
         read_result,
@@ -3316,6 +3342,44 @@ fn execute_streaming_remote_tmux(
 #[cfg(all(test, unix))]
 mod local_tmux_lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn wrapper_followup_publishes_then_writes_then_marks_pending() {
+        let session = "claude-wrapper-followup-submit-order";
+        let stale = CancelToken::new();
+        let current = CancelToken::new();
+        stale.bind_claude_tmux_session(session);
+        let write_observed = std::sync::atomic::AtomicBool::new(false);
+
+        submit_wrapper_followup(Some(&current), session, || {
+            assert!(
+                stale
+                    .lock_current_claude_interrupt_session(session)
+                    .is_none(),
+                "current generation must publish before FIFO write"
+            );
+            assert!(
+                !current.claude_interrupt_submit_pending(),
+                "submit-pending must remain false until FIFO flush succeeds"
+            );
+            write_observed.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(write_observed.load(std::sync::atomic::Ordering::Acquire));
+        assert!(current.claude_interrupt_submit_pending());
+    }
+
+    #[test]
+    fn wrapper_followup_write_failure_does_not_mark_submit_pending() {
+        let token = CancelToken::new();
+        assert!(submit_wrapper_followup(Some(&token), "claude-wrapper-write-failure", || {
+            Err("write failed".to_string())
+        })
+        .is_err());
+        assert!(!token.claude_interrupt_submit_pending());
+    }
 
     #[test]
     fn local_tmux_plan_uses_warm_followup_only_with_live_pane_and_runtime_paths() {
