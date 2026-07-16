@@ -38,6 +38,8 @@ enum RecapCompactOutcome {
     Started(NativeCompactRequest),
     AlreadyClaimed,
     ClaimFailed(String),
+    PostClaimOwnerChanged,
+    PostClaimFenceFailed(String),
     InvalidTarget,
     RoutingUnavailable {
         owner_instance_id: Option<String>,
@@ -54,7 +56,10 @@ impl RecapCompactOutcome {
     fn preserves_recap_card(&self) -> bool {
         matches!(
             self,
-            Self::ClaimFailed(_) | Self::InvalidTarget | Self::RoutingUnavailable { .. }
+            Self::AlreadyClaimed
+                | Self::ClaimFailed(_)
+                | Self::InvalidTarget
+                | Self::RoutingUnavailable { .. }
         )
     }
 }
@@ -369,15 +374,22 @@ async fn handle_idle_recap_compact_interaction(
     }
 
     let target_for_claim = target.clone();
+    let target_for_pre_inject_fence = target.clone();
     let target_session_key_for_log = target.session_key.clone();
     let channel_id = component.channel_id.get();
     let pool_for_claim = pool.clone();
+    let pool_for_pre_inject_fence = pool.clone();
     let outcome = run_native_compact_once(
         target,
         &crate::services::platform::hostname_short(),
         &crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
         move || async move {
             claim_recap_compact_pointer(&pool_for_claim, &target_for_claim, message_id, channel_id)
+                .await
+                .map_err(|error| error.to_string())
+        },
+        move || async move {
+            recap_compact_owner_unchanged(&pool_for_pre_inject_fence, &target_for_pre_inject_fence)
                 .await
                 .map_err(|error| error.to_string())
         },
@@ -403,6 +415,23 @@ async fn handle_idle_recap_compact_interaction(
                 "idle_recap compact: atomic claim failed"
             );
             "맥락 압축 요청 실패: 세션 선점 오류. /compact를 직접 실행하세요."
+        }
+        RecapCompactOutcome::PostClaimOwnerChanged => {
+            tracing::warn!(
+                message_id,
+                session_key = %target_session_key_for_log,
+                "idle_recap compact: owner changed after atomic claim"
+            );
+            "맥락 압축 요청 실패: 세션이 다른 노드로 이동했습니다. 원래 세션 노드에서 /compact를 실행하세요."
+        }
+        RecapCompactOutcome::PostClaimFenceFailed(error) => {
+            tracing::warn!(
+                error = %error,
+                message_id,
+                session_key = %target_session_key_for_log,
+                "idle_recap compact: post-claim owner fence failed"
+            );
+            "맥락 압축 요청 실패: 세션 소유권을 재확인할 수 없습니다. /compact를 직접 실행하세요."
         }
         RecapCompactOutcome::InvalidTarget => {
             "맥락 압축 요청 실패: recap 세션 대상을 확인할 수 없습니다."
@@ -445,17 +474,29 @@ async fn handle_idle_recap_compact_interaction(
     Ok(())
 }
 
-async fn run_native_compact_once<Claim, ClaimFut, IsLive, IsLiveFut, Inject, InjectFut>(
+async fn run_native_compact_once<
+    Claim,
+    ClaimFut,
+    PreInjectFence,
+    PreInjectFenceFut,
+    IsLive,
+    IsLiveFut,
+    Inject,
+    InjectFut,
+>(
     target: RecapClearTarget,
     local_hostname: &str,
     local_instance_id: &str,
     claim: Claim,
+    pre_inject_fence: PreInjectFence,
     is_live: IsLive,
     inject: Inject,
 ) -> RecapCompactOutcome
 where
     Claim: FnOnce() -> ClaimFut,
     ClaimFut: std::future::Future<Output = Result<bool, String>>,
+    PreInjectFence: FnOnce() -> PreInjectFenceFut,
+    PreInjectFenceFut: std::future::Future<Output = Result<bool, String>>,
     IsLive: FnOnce(&str) -> IsLiveFut,
     IsLiveFut: std::future::Future<Output = bool>,
     Inject: FnOnce(NativeCompactRequest) -> InjectFut,
@@ -497,6 +538,11 @@ where
     };
     if !is_live(&request.tmux_session_name).await {
         return RecapCompactOutcome::TargetNotLive(request);
+    }
+    match pre_inject_fence().await {
+        Ok(true) => {}
+        Ok(false) => return RecapCompactOutcome::PostClaimOwnerChanged,
+        Err(error) => return RecapCompactOutcome::PostClaimFenceFailed(error),
     }
 
     match inject(request.clone()).await {
@@ -560,6 +606,24 @@ async fn claim_recap_compact_pointer(
     .execute(pool)
     .await
     .map(|result| result.rows_affected() == 1)
+}
+
+async fn recap_compact_owner_unchanged(
+    pool: &PgPool,
+    target: &RecapClearTarget,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM sessions
+             WHERE session_key = $1
+               AND instance_id IS NOT DISTINCT FROM $2
+         )",
+    )
+    .bind(&target.session_key)
+    .bind(target.owner_instance_id.as_deref())
+    .fetch_one(pool)
+    .await
 }
 
 async fn handle_idle_recap_suggest_interaction(
@@ -810,6 +874,7 @@ mod tests {
             "mac-mini",
             "mac-mini-release",
             || async { Ok(true) },
+            || async { Ok(true) },
             |target| std::future::ready(target == "old-bound-session"),
             move |request| {
                 observed.lock().unwrap().push(request.clone());
@@ -834,6 +899,7 @@ mod tests {
             recap_target("claude/token/mac-mini:old-bound-session"),
             "mac-mini",
             "mac-mini-release",
+            || async { Ok(true) },
             || async { Ok(true) },
             |target| std::future::ready(target == "new-current-session"),
             move |_| {
@@ -882,6 +948,7 @@ mod tests {
                     claims_in_flight.fetch_sub(1, Ordering::SeqCst);
                     Ok(won)
                 },
+                || async { Ok(true) },
                 |_| async { true },
                 move |_| async move {
                     injections.fetch_add(1, Ordering::SeqCst);
@@ -931,6 +998,7 @@ mod tests {
                     Ok(true)
                 }
             },
+            || async { Ok(true) },
             {
                 let live_checks = live_checks.clone();
                 move |_| {
@@ -979,6 +1047,7 @@ mod tests {
                     observed_claims.fetch_add(1, Ordering::SeqCst);
                     async { Ok(true) }
                 },
+                || async { Ok(true) },
                 |_| async { true },
                 |_| async { Ok(()) },
             )
@@ -1007,6 +1076,7 @@ mod tests {
                 observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async { Ok(true) }
             },
+            || async { Ok(true) },
             |_| async { true },
             |_| async { Err("submit failed".to_string()) },
         )
@@ -1018,6 +1088,7 @@ mod tests {
             "mac-mini",
             "mac-mini-release",
             || async { Ok(false) },
+            || async { Ok(true) },
             |_| async { true },
             move |_| {
                 observed_retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1048,6 +1119,7 @@ mod tests {
             "mac-mini",
             "mac-mini-release",
             || async { Err("database unavailable".to_string()) },
+            || async { Ok(true) },
             |_| async { true },
             move |_| {
                 observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1061,6 +1133,41 @@ mod tests {
             RecapCompactOutcome::ClaimFailed("database unavailable".to_string())
         );
         assert_eq!(injection_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn owner_handoff_after_claim_is_fenced_immediately_before_injection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let live_checks = std::sync::Arc::new(AtomicUsize::new(0));
+        let injections = std::sync::Arc::new(AtomicUsize::new(0));
+        let outcome = run_native_compact_once(
+            recap_target("mac-mini:claimed-session"),
+            "mac-mini",
+            "mac-mini-release",
+            || async { Ok(true) },
+            || async { Ok(false) },
+            {
+                let live_checks = live_checks.clone();
+                move |_| async move {
+                    live_checks.fetch_add(1, Ordering::SeqCst);
+                    true
+                }
+            },
+            {
+                let injections = injections.clone();
+                move |_| async move {
+                    injections.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, RecapCompactOutcome::PostClaimOwnerChanged);
+        assert!(!outcome.preserves_recap_card());
+        assert_eq!(live_checks.load(Ordering::SeqCst), 1);
+        assert_eq!(injections.load(Ordering::SeqCst), 0);
     }
 
     async fn seed_recap_compact_session_pg(
@@ -1165,10 +1272,36 @@ mod tests {
             .await
             .expect("handoff recap compact owner");
 
-        assert!(
-            !claim_recap_compact_pointer(&pool, &target, message_id, channel_id)
-                .await
-                .expect("owner-fenced recap compact claim")
+        let injections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let outcome = run_native_compact_once(
+            target.clone(),
+            "mac-mini",
+            "mac-mini-release",
+            {
+                let pool = pool.clone();
+                let target = target.clone();
+                move || async move {
+                    claim_recap_compact_pointer(&pool, &target, message_id, channel_id)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+            },
+            || async { Ok(true) },
+            |_| async { true },
+            {
+                let injections = injections.clone();
+                move |_| async move {
+                    injections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert_eq!(outcome, RecapCompactOutcome::AlreadyClaimed);
+        assert!(outcome.preserves_recap_card());
+        assert_eq!(
+            injections.load(std::sync::atomic::Ordering::SeqCst),
+            0
         );
         let pointer = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<String>)>(
             "SELECT idle_recap_message_id, idle_recap_channel_id, instance_id
