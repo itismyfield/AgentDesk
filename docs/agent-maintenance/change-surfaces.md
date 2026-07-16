@@ -1906,7 +1906,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   non-bugfix behavior beyond the readiness/cancel contract. #4411 promotes the
   existing action planner to production, consumes composer-ready signals once,
   and requires two live draft snapshots before a warm submit may be replayed.
-- `src/services/claude_tui/input.rs` (1957) — Claude TUI input readiness
+- `src/services/claude_tui/input.rs` (1961) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract. (+191 from the #685/#720 reliability fixes:

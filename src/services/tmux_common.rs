@@ -297,9 +297,7 @@ pub(crate) fn tmux_capture_indicates_claude_tui_structured_spinner(capture: &str
     for (index, line) in lines.iter().enumerate() {
         if let Some(marker) = claude_tui_markdown_fence_marker(line) {
             match open_fence {
-                Some((open_char, open_len))
-                    if marker.0 == open_char && marker.1 >= open_len =>
-                {
+                Some((open_char, open_len)) if marker.0 == open_char && marker.1 >= open_len => {
                     open_fence = None;
                 }
                 None => open_fence = Some(marker),
@@ -417,7 +415,10 @@ fn claude_tui_markdown_fence_marker(line: &str) -> Option<(char, usize)> {
     if !matches!(marker, '`' | '~') {
         return None;
     }
-    let length = trimmed.chars().take_while(|character| *character == marker).count();
+    let length = trimmed
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
     (length >= 3).then_some((marker, length))
 }
 
