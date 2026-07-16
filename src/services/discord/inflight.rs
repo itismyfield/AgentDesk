@@ -612,6 +612,7 @@ mod stall_recovery_tests {
         WatcherStreamProgressPatch, WatcherTerminalCommitOutcome, WatcherTerminalCommitPatch,
         bind_status_panel_in_root, clear_current_msg_if_matches_in_root,
         clear_inflight_state_if_matches_identity_after_delivery_in_root,
+        clear_inflight_state_if_matches_identity_generation_in_root,
         clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
         clear_inflight_state_if_matches_tmux_response_in_root,
         clear_inflight_state_if_matches_zero_owned_in_root,
@@ -3644,6 +3645,39 @@ mod stall_recovery_tests {
         let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
         assert_eq!(still_there.len(), 1);
         assert_eq!(still_there[0].user_msg_id, 4242);
+    }
+
+    #[test]
+    fn generation_guarded_sweeper_clear_preserves_row_that_progressed_after_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let snapshot = build_inflight_for_guard_tests(ProviderKind::Claude, 10, 4242);
+        save_inflight_state_in_root(temp.path(), &snapshot).unwrap();
+        let observed = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude)
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let mut progressed = observed.clone();
+        progressed.current_msg_id = progressed.current_msg_id.saturating_add(1);
+        progressed.updated_at = "2099-01-01 00:00:01".to_string();
+        progressed.save_generation = observed.save_generation.saturating_add(1);
+        force_write_state(temp.path(), &progressed);
+
+        let outcome = clear_inflight_state_if_matches_identity_generation_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            observed.channel_id,
+            &InflightTurnIdentity::from_state(&observed),
+            observed.effective_finalizer_turn_id(),
+            &observed.updated_at,
+            observed.save_generation,
+        );
+
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        let surviving = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(surviving.len(), 1);
+        assert_eq!(surviving[0].save_generation, progressed.save_generation);
+        assert_eq!(surviving[0].current_msg_id, progressed.current_msg_id);
     }
 
     /// No on-disk row → `Missing`. Idempotency safety net.

@@ -5,7 +5,7 @@ use poise::serenity_prelude as serenity;
 use super::super::SharedData;
 use super::super::inflight::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
-    clear_inflight_state_if_matches_identity_turn_nonce,
+    clear_inflight_state_if_matches_identity_generation,
 };
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
@@ -230,11 +230,13 @@ impl AbandonedTmuxCleanupOutcome {
         state: &InflightTurnState,
     ) -> bool {
         self.allows_state_delete()
-            && clear_inflight_state_if_matches_identity_turn_nonce(
+            && clear_inflight_state_if_matches_identity_generation(
                 provider,
                 state.channel_id,
                 &InflightTurnIdentity::from_state(state),
-                state.turn_nonce.as_deref(),
+                state.effective_finalizer_turn_id(),
+                &state.updated_at,
+                state.save_generation,
             ) == GuardedClearOutcome::Cleared
     }
 }
