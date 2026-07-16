@@ -1442,6 +1442,13 @@ fn recent_has_codex_compact_composer(recent: &[&str]) -> bool {
 
 fn pane_has_codex_prompt_draft(pane: &str) -> bool {
     active_composer_visible_prompt_draft_in_pane(pane).is_some()
+        || pane
+            .lines()
+            .rev()
+            .map(str::trim_end)
+            .find(|line| !line.trim().is_empty())
+            .and_then(codex_visible_prompt_draft_text)
+            .is_some()
 }
 
 #[allow(dead_code)] // #3034: test-only (draft-clear path retired).
