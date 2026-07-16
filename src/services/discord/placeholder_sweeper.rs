@@ -704,37 +704,6 @@ impl StalledEditTracker {
     }
 }
 
-fn abandoned_placeholder_key(
-    state: &InflightTurnState,
-) -> Option<super::placeholder_controller::PlaceholderKey> {
-    let provider = ProviderKind::from_str(&state.provider)?;
-    (state.current_msg_id != 0).then(|| super::placeholder_controller::PlaceholderKey {
-        provider,
-        channel_id: serenity::ChannelId::new(state.channel_id),
-        message_id: serenity::MessageId::new(state.current_msg_id),
-    })
-}
-
-fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &InflightTurnState) {
-    if let Some(key) = abandoned_placeholder_key(state) {
-        shared.ui.placeholder_controller.detach(&key);
-    }
-}
-
-async fn invalidate_abandoned_placeholder_render_cache(
-    shared: &Arc<SharedData>,
-    state: &InflightTurnState,
-) -> bool {
-    let Some(key) = abandoned_placeholder_key(state) else {
-        return false;
-    };
-    shared
-        .ui
-        .placeholder_controller
-        .invalidate_render_cache(&key)
-        .await
-}
-
 /// True when the inflight state on disk still names the same turn and its
 /// mtime is not significantly fresher than the sweep snapshot.
 fn inflight_state_still_same_turn(
@@ -768,10 +737,6 @@ fn observed_age_still_stale(
     slack_secs: u64,
 ) -> bool {
     current_age_secs + slack_secs >= snapshot_age_secs
-}
-
-fn should_detach_after_cleanup(same_turn: bool, state_deleted: bool) -> bool {
-    same_turn && state_deleted
 }
 
 /// #3003 durable safety net: reclaim an orphaned status-panel-v2 message left on
@@ -1226,7 +1191,7 @@ mod safety_net_threshold_tests {
     //! before the sweeper does anything destructive.
     use super::{
         ABANDON_THRESHOLD_SECS, INITIAL_DELAY_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
-        panel_reclaim_target, should_detach_after_cleanup,
+        panel_reclaim_target,
     };
     use crate::services::provider::ProviderKind;
 
@@ -1286,13 +1251,6 @@ mod safety_net_threshold_tests {
         // than one minute. 30s is the current cadence; pin the
         // upper bound.
         assert!(SWEEP_INTERVAL_SECS <= 60);
-    }
-
-    #[test]
-    fn controller_detach_is_gated_by_identity_and_committed_state_delete() {
-        assert!(should_detach_after_cleanup(true, true));
-        assert!(!should_detach_after_cleanup(false, true));
-        assert!(!should_detach_after_cleanup(true, false));
     }
 
     #[test]

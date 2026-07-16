@@ -292,6 +292,41 @@ pub(super) async fn finalize_abandoned_mailbox(
     AbandonedTmuxCleanupOutcome::from_plan(plan)
 }
 
+fn abandoned_placeholder_key(
+    state: &InflightTurnState,
+) -> Option<super::super::placeholder_controller::PlaceholderKey> {
+    let provider = ProviderKind::from_str(&state.provider)?;
+    (state.current_msg_id != 0).then(|| super::super::placeholder_controller::PlaceholderKey {
+        provider,
+        channel_id: serenity::ChannelId::new(state.channel_id),
+        message_id: serenity::MessageId::new(state.current_msg_id),
+    })
+}
+
+fn detach_abandoned_placeholder_controller(shared: &Arc<SharedData>, state: &InflightTurnState) {
+    if let Some(key) = abandoned_placeholder_key(state) {
+        shared.ui.placeholder_controller.detach(&key);
+    }
+}
+
+async fn invalidate_abandoned_placeholder_render_cache(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+) -> bool {
+    let Some(key) = abandoned_placeholder_key(state) else {
+        return false;
+    };
+    shared
+        .ui
+        .placeholder_controller
+        .invalidate_render_cache(&key)
+        .await
+}
+
+fn should_detach_after_cleanup(same_turn: bool, state_deleted: bool) -> bool {
+    same_turn && state_deleted
+}
+
 async fn finalize_cleanup_if_same_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -305,8 +340,8 @@ async fn finalize_cleanup_if_same_turn(
     let cleanup = finalize_abandoned_mailbox(shared, provider, state, evidence).await;
     let same_turn = super::inflight_state_still_same_turn(provider, state, age_secs);
     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
-    if super::should_detach_after_cleanup(same_turn, deleted) {
-        super::detach_abandoned_placeholder_controller(shared, state);
+    if should_detach_after_cleanup(same_turn, deleted) {
+        detach_abandoned_placeholder_controller(shared, state);
     }
     deleted
 }
@@ -345,12 +380,12 @@ pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
     if revived_visible_repair(repair_visible_on_revival, same_turn, cleanup.decision)
         == RevivedVisibleRepair::InvalidateRenderCache
     {
-        super::invalidate_abandoned_placeholder_render_cache(shared, state).await;
+        invalidate_abandoned_placeholder_render_cache(shared, state).await;
         return false;
     }
     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
-    if super::should_detach_after_cleanup(same_turn, deleted) {
-        super::detach_abandoned_placeholder_controller(shared, state);
+    if should_detach_after_cleanup(same_turn, deleted) {
+        detach_abandoned_placeholder_controller(shared, state);
     }
     deleted
 }
@@ -362,7 +397,7 @@ mod tests {
         RuntimeActivityEvidence, abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
         abandoned_mailbox_finish_actions, abandoned_tmux_cleanup_decision,
         abandoned_tmux_cleanup_decision_for, revived_visible_repair, run_blocking_cleanup_probe,
-        runtime_activity_evidence_from,
+        runtime_activity_evidence_from, should_detach_after_cleanup,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::platform::tmux::PaneLiveness;
@@ -580,6 +615,13 @@ mod tests {
         assert!(!tokenless_pending.cancel_removed_token);
         assert!(tokenless_pending.schedule_queue_kickoff);
         assert!(!tokenless_idle.schedule_queue_kickoff);
+    }
+
+    #[test]
+    fn controller_detach_is_gated_by_identity_and_committed_state_delete() {
+        assert!(should_detach_after_cleanup(true, true));
+        assert!(!should_detach_after_cleanup(false, true));
+        assert!(!should_detach_after_cleanup(true, false));
     }
 
     #[test]
