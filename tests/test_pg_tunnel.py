@@ -268,6 +268,22 @@ class DeploymentWiringTests(unittest.TestCase):
         event_log = home / "events.log"
         launchctl_log = home / "launchctl.log"
         for name, body in {
+            "probe": """#!/usr/bin/env python3
+import os
+import signal
+
+
+def stop(_signum, _frame):
+    with open(os.environ["EVENT_LOG"], "a", encoding="utf-8") as handle:
+        handle.write("probe-term\\n")
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, stop)
+open(os.environ["PROBE_READY"], "a", encoding="utf-8").close()
+while True:
+    signal.pause()
+""",
             "launchctl": """#!/bin/sh
 printf 'launchctl %s\\n' "$*" >> "$EVENT_LOG"
 printf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"
@@ -285,18 +301,6 @@ fi
 exit 0
 """,
             "xattr": "#!/bin/sh\nexit 0\n",
-            "lsof": """#!/bin/sh
-printf 'lsof %s\\n' "$*" >> "$EVENT_LOG"
-if [ "${FAIL_LISTENER_ABSENCE:-0}" = 1 ]; then exit 0; fi
-if [ -f "$ROLLBACK_BOOTOUT" ] && [ "${ROLLBACK_LISTENER_CHECKS:-0}" -gt 0 ]; then
-  current=0
-  [ ! -f "$ROLLBACK_LISTENER_COUNT" ] || current=$(cat "$ROLLBACK_LISTENER_COUNT")
-  current=$((current + 1))
-  printf '%s\\n' "$current" > "$ROLLBACK_LISTENER_COUNT"
-  [ "$current" -gt "$ROLLBACK_LISTENER_CHECKS" ] || exit 0
-fi
-exit 1
-""",
             "sleep": "#!/bin/sh\nexec /bin/sleep 0.01\n",
             "psql": """#!/bin/sh
 while [ ! -f "$PROBE_READY" ]; do /bin/sleep 0.01; done
@@ -365,7 +369,7 @@ exec /bin/cp "$@"
 printf 'wrapper %s\\n' "$*" >> "$EVENT_LOG"
 case "$1" in
   --check-config) grep -q '^PG_TUNNEL_SSH_TARGET=[A-Za-z0-9_.:@][A-Za-z0-9_.:@-]*$' "$2" ;;
-  --probe-remote) trap 'printf "probe-term\\n" >> "$EVENT_LOG"; exit 0' TERM; : > "$PROBE_READY"; while :; do /bin/sleep 1; done ;;
+  --probe-remote) exec "$FAKE_BIN/probe" ;;
   --canonical-kind) [ "${FAIL_KIND_SNAPSHOT:-0}" != 1 ] || exit 1; printf '%s\\n' "${MANUAL_KIND:-none}" ;;
   --take-over-canonical) printf 'takeover\\n' >> "$EVENT_LOG" ;;
   --restore-canonical) printf 'restore %s\\n' "$3" >> "$EVENT_LOG"; [ "${FAIL_MANUAL_RESTORE:-0}" != 1 ] ;;
@@ -422,12 +426,23 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             "export EVENT_LOG LAUNCHCTL_LOG FAIL_PROBE FAIL_CANONICAL FAIL_ROLLBACK_READINESS FAIL_BACKUP_COPY FAIL_KIND_SNAPSHOT FAIL_RESTORE_BOOTSTRAP FAIL_MANUAL_RESTORE FAIL_LISTENER_ABSENCE ROLLBACK_LISTENER_CHECKS ROLLBACK_READY_ATTEMPT JOB_LOADED MANUAL_KIND PROBE_READY ROLLBACK_BOOTOUT ROLLBACK_LISTENER_COUNT ROLLBACK_PSQL_COUNT DATABASE_URL\n"
             f"FAKE_BIN={shlex.quote(str(fake_bin))}\n"
             f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin:/usr/sbin:/sbin\n"
-            "export PATH\n"
+            "export FAKE_BIN PATH\n"
             "ruby() { \"$FAKE_BIN/ruby\" \"$@\"; }\n"
             "psql() { \"$FAKE_BIN/psql\" \"$@\"; }\n"
             "launchctl() { \"$FAKE_BIN/launchctl\" \"$@\"; }\n"
             "xattr() { \"$FAKE_BIN/xattr\" \"$@\"; }\n"
-            "lsof() { \"$FAKE_BIN/lsof\" \"$@\"; }\n"
+            "lsof() {\n"
+            "  printf 'lsof %s\\n' \"$*\" >> \"$EVENT_LOG\"\n"
+            "  [ \"${FAIL_LISTENER_ABSENCE:-0}\" != 1 ] || return 0\n"
+            "  if [ -f \"$ROLLBACK_BOOTOUT\" ] && [ \"${ROLLBACK_LISTENER_CHECKS:-0}\" -gt 0 ]; then\n"
+            "    local current=0\n"
+            "    [ ! -f \"$ROLLBACK_LISTENER_COUNT\" ] || current=$(<\"$ROLLBACK_LISTENER_COUNT\")\n"
+            "    current=$((current + 1))\n"
+            "    printf '%s\\n' \"$current\" > \"$ROLLBACK_LISTENER_COUNT\"\n"
+            "    [ \"$current\" -gt \"$ROLLBACK_LISTENER_CHECKS\" ] || return 0\n"
+            "  fi\n"
+            "  return 1\n"
+            "}\n"
             "cp() { \"$FAKE_BIN/cp\" \"$@\"; }\n"
             "command -v psql >/dev/null || exit 97\n"
             "command -v ruby >/dev/null || exit 98\n"
@@ -462,12 +477,23 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "#!/bin/sh\nexec /bin/sleep 0.01\n", encoding="utf-8"
             )
             (fake_bin / "sleep").chmod(0o755)
-            probe = root / "probe.sh"
+            probe = root / "probe.py"
             probe.write_text(
-                "#!/bin/sh\n"
-                "trap 'kill -TERM \"$PARENT_PID\"; printf \"probe-term\\n\" >> \"$EVENT_LOG\"; exit 0' TERM\n"
-                "printf 'probe-ready\\n' >> \"$EVENT_LOG\"\n"
-                "while :; do /bin/sleep 1; done\n",
+                "#!/usr/bin/env python3\n"
+                "import os\n"
+                "import signal\n"
+                "\n"
+                "def stop(_signum, _frame):\n"
+                "    os.kill(int(os.environ['PARENT_PID']), signal.SIGTERM)\n"
+                "    with open(os.environ['EVENT_LOG'], 'a', encoding='utf-8') as handle:\n"
+                "        handle.write('probe-term\\n')\n"
+                "    raise SystemExit(0)\n"
+                "\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "with open(os.environ['EVENT_LOG'], 'a', encoding='utf-8') as handle:\n"
+                "    handle.write('probe-ready\\n')\n"
+                "while True:\n"
+                "    signal.pause()\n",
                 encoding="utf-8",
             )
             probe.chmod(0o755)
