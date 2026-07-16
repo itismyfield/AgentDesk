@@ -53,10 +53,9 @@ pub(super) async fn delete_failed_synthetic_owned_placeholder(
     anchor_message_id: MessageId,
     anchor_is_owned_placeholder: bool,
 ) {
-    let Some(anchor_message_id) = failed_synthetic_placeholder_cleanup_target(
-        anchor_message_id,
-        anchor_is_owned_placeholder,
-    ) else {
+    let Some(anchor_message_id) =
+        failed_synthetic_placeholder_cleanup_target(anchor_message_id, anchor_is_owned_placeholder)
+    else {
         return;
     };
     let Some(http) = shared.serenity_http_or_token_fallback() else {

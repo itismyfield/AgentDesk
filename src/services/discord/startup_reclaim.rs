@@ -47,8 +47,7 @@ const RECLAIM_FETCH_LIMIT: u8 = 50;
 const ORPHAN_PLACEHOLDER_MIN_AGE_SECS: i64 = 5 * 60;
 const FROZEN_PANEL_RECLAIM_DELAY_SECS: u64 = 30;
 /// Wait one second beyond the strict age boundary before the orphan pass.
-const ORPHAN_PLACEHOLDER_RECLAIM_DELAY_SECS: u64 =
-    ORPHAN_PLACEHOLDER_MIN_AGE_SECS as u64 + 1;
+const ORPHAN_PLACEHOLDER_RECLAIM_DELAY_SECS: u64 = ORPHAN_PLACEHOLDER_MIN_AGE_SECS as u64 + 1;
 /// Bound destructive work per channel independently from the bounded read page.
 const ORPHAN_PLACEHOLDER_DELETE_LIMIT: usize = 10;
 
@@ -163,17 +162,14 @@ fn reclaim_scan_plan_from_rows(
             }
         }
         let updated = parse_updated_at_unix(&state.updated_at).unwrap_or(i64::MAX);
-        if updated < boot_unix_secs
-            && state.channel_id != 0
-            && frozen_seen.insert(state.channel_id)
+        if updated < boot_unix_secs && state.channel_id != 0 && frozen_seen.insert(state.channel_id)
         {
             plan.frozen_panel_channels.push(state.channel_id);
         }
     }
     for pending in pending_starts {
         if pending.provider == provider.as_str() && pending.anchor_message_id != 0 {
-            plan.protected_message_ids
-                .insert(pending.anchor_message_id);
+            plan.protected_message_ids.insert(pending.anchor_message_id);
         }
     }
     plan
@@ -634,13 +630,8 @@ mod tests {
             false,      // not committed → live
             false,      // real turn
         )];
-        let plan = reclaim_scan_plan_from_rows(
-            rows,
-            Vec::new(),
-            Vec::new(),
-            &ProviderKind::Claude,
-            boot,
-        );
+        let plan =
+            reclaim_scan_plan_from_rows(rows, Vec::new(), Vec::new(), &ProviderKind::Claude, boot);
         assert!(
             plan.frozen_panel_channels.contains(&555),
             "pre-boot row's channel is still a reclaim candidate"
@@ -665,13 +656,8 @@ mod tests {
             row_with(101, 8001, Some(8002), boot - 50, true, false), // committed
             row_with(102, 8101, Some(8102), boot - 50, false, true), // rebind-origin
         ];
-        let plan = reclaim_scan_plan_from_rows(
-            rows,
-            Vec::new(),
-            Vec::new(),
-            &ProviderKind::Claude,
-            boot,
-        );
+        let plan =
+            reclaim_scan_plan_from_rows(rows, Vec::new(), Vec::new(), &ProviderKind::Claude, boot);
         for id in [8001, 8002, 8101, 8102] {
             assert!(
                 !plan.live_anchor_ids.contains(&id),
@@ -687,13 +673,8 @@ mod tests {
         // a concurrent sweep of the same channel cannot clobber the live panel.
         let boot = 1_700_000_000i64;
         let rows = vec![row_with(303, 7001, Some(7002), boot + 5, false, false)];
-        let plan = reclaim_scan_plan_from_rows(
-            rows,
-            Vec::new(),
-            Vec::new(),
-            &ProviderKind::Claude,
-            boot,
-        );
+        let plan =
+            reclaim_scan_plan_from_rows(rows, Vec::new(), Vec::new(), &ProviderKind::Claude, boot);
         assert!(
             !plan.frozen_panel_channels.contains(&303),
             "post-boot row is current-gen, not a candidate"
@@ -722,13 +703,7 @@ mod tests {
             (7, "...", 9002, now - ORPHAN_PLACEHOLDER_MIN_AGE_SECS),
         ] {
             assert!(!is_orphan_placeholder_candidate(
-                author,
-                7,
-                content,
-                message_id,
-                changed,
-                now,
-                &protected,
+                author, 7, content, message_id, changed, now, &protected,
             ));
         }
     }
