@@ -20,6 +20,7 @@ use crate::services::provider::ProviderKind;
 struct RecapClearTarget {
     session_key: String,
     provider: String,
+    owner_instance_id: Option<String>,
     turn_generation: i64,
     channel_matches: bool,
     provider_matches: bool,
@@ -38,11 +39,24 @@ enum RecapCompactOutcome {
     AlreadyClaimed,
     ClaimFailed(String),
     InvalidTarget,
+    RoutingUnavailable {
+        owner_instance_id: Option<String>,
+        reason: String,
+    },
     TargetNotLive(NativeCompactRequest),
     InjectionFailed {
         request: NativeCompactRequest,
         error: String,
     },
+}
+
+impl RecapCompactOutcome {
+    fn preserves_recap_card(&self) -> bool {
+        matches!(
+            self,
+            Self::ClaimFailed(_) | Self::InvalidTarget | Self::RoutingUnavailable { .. }
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -360,6 +374,8 @@ async fn handle_idle_recap_compact_interaction(
     let pool_for_claim = pool.clone();
     let outcome = run_native_compact_once(
         target,
+        &crate::services::platform::hostname_short(),
+        &crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
         move || async move {
             claim_recap_compact_pointer(&pool_for_claim, &target_for_claim, message_id, channel_id)
                 .await
@@ -391,6 +407,18 @@ async fn handle_idle_recap_compact_interaction(
         RecapCompactOutcome::InvalidTarget => {
             "맥락 압축 요청 실패: recap 세션 대상을 확인할 수 없습니다."
         }
+        RecapCompactOutcome::RoutingUnavailable {
+            owner_instance_id,
+            reason,
+        } => {
+            tracing::warn!(
+                message_id,
+                owner_instance_id = owner_instance_id.as_deref().unwrap_or("unknown"),
+                reason,
+                "idle_recap compact: recap owner is not local"
+            );
+            "맥락 압축 요청을 현재 노드에서 처리할 수 없습니다. 원래 세션 노드에서 다시 시도하세요."
+        }
         RecapCompactOutcome::TargetNotLive(request) => {
             tracing::warn!(
                 message_id,
@@ -411,7 +439,7 @@ async fn handle_idle_recap_compact_interaction(
     };
     edit_deferred_ephemeral(ctx, component, message_id, response).await;
 
-    if !matches!(outcome, RecapCompactOutcome::ClaimFailed(_)) {
+    if !outcome.preserves_recap_card() {
         delete_previous_card(&ctx.http, channel_id, message_id).await;
     }
     Ok(())
@@ -419,6 +447,8 @@ async fn handle_idle_recap_compact_interaction(
 
 async fn run_native_compact_once<Claim, ClaimFut, IsLive, IsLiveFut, Inject, InjectFut>(
     target: RecapClearTarget,
+    local_hostname: &str,
+    local_instance_id: &str,
     claim: Claim,
     is_live: IsLive,
     inject: Inject,
@@ -431,19 +461,38 @@ where
     Inject: FnOnce(NativeCompactRequest) -> InjectFut,
     InjectFut: std::future::Future<Output = Result<(), String>>,
 {
+    let Some(identity) =
+        crate::services::discord::session_identity::SessionIdentity::parse(&target.session_key)
+    else {
+        return RecapCompactOutcome::InvalidTarget;
+    };
+    let routing = crate::services::cluster::session_routing::session_owner_routing_status(
+        target.owner_instance_id.as_deref(),
+        Some(local_instance_id),
+        &[],
+    );
+    if identity.host != local_hostname || routing["is_local"].as_bool() != Some(true) {
+        let reason = if identity.host != local_hostname {
+            "session_key_host_mismatch"
+        } else {
+            routing["reason"]
+                .as_str()
+                .unwrap_or("session_owner_not_local")
+        };
+        return RecapCompactOutcome::RoutingUnavailable {
+            owner_instance_id: target.owner_instance_id.clone(),
+            reason: reason.to_string(),
+        };
+    }
+
     match claim().await {
         Ok(true) => {}
         Ok(false) => return RecapCompactOutcome::AlreadyClaimed,
         Err(error) => return RecapCompactOutcome::ClaimFailed(error),
     }
 
-    let Some(tmux_session_name) =
-        crate::services::discord::idle_recap::tmux_session_name_from_key(&target.session_key)
-    else {
-        return RecapCompactOutcome::InvalidTarget;
-    };
     let request = NativeCompactRequest {
-        tmux_session_name,
+        tmux_session_name: identity.tmux_name,
         prompt: "/compact",
     };
     if !is_live(&request.tmux_session_name).await {
@@ -499,6 +548,7 @@ async fn claim_recap_compact_pointer(
            AND idle_recap_turn_generation = $3
            AND idle_recap_message_id = $4
            AND idle_recap_channel_id = $5
+           AND instance_id IS NOT DISTINCT FROM $6
            AND COALESCE(idle_recap_posted_at >= COALESCE(last_heartbeat, created_at), false)",
     )
     .bind(&target.session_key)
@@ -506,6 +556,7 @@ async fn claim_recap_compact_pointer(
     .bind(target.turn_generation)
     .bind(message_id as i64)
     .bind(channel_id as i64)
+    .bind(target.owner_instance_id.as_deref())
     .execute(pool)
     .await
     .map(|result| result.rows_affected() == 1)
@@ -670,9 +721,10 @@ async fn lookup_recap_clear_target(
     channel_id: u64,
     provider: &str,
 ) -> Result<Option<RecapClearTarget>, sqlx::Error> {
-    let row = sqlx::query_as::<_, (String, String, i64, bool, bool, bool)>(
+    let row = sqlx::query_as::<_, (String, String, Option<String>, i64, bool, bool, bool)>(
         "SELECT session_key,
                 provider,
+                instance_id,
                 idle_recap_turn_generation,
                 idle_recap_channel_id = $2 AS channel_matches,
                 provider = $3 AS provider_matches,
@@ -690,6 +742,7 @@ async fn lookup_recap_clear_target(
         |(
             session_key,
             provider,
+            owner_instance_id,
             turn_generation,
             channel_matches,
             provider_matches,
@@ -697,6 +750,7 @@ async fn lookup_recap_clear_target(
         )| RecapClearTarget {
             session_key,
             provider,
+            owner_instance_id,
             turn_generation,
             channel_matches,
             provider_matches,
@@ -739,6 +793,7 @@ mod tests {
         RecapClearTarget {
             session_key: session_key.to_string(),
             provider: "claude".to_string(),
+            owner_instance_id: Some("mac-mini-release".to_string()),
             turn_generation: 7,
             channel_matches: true,
             provider_matches: true,
@@ -752,6 +807,8 @@ mod tests {
         let observed = injected.clone();
         let outcome = run_native_compact_once(
             recap_target("claude/token/mac-mini:old-bound-session"),
+            "mac-mini",
+            "mac-mini-release",
             || async { Ok(true) },
             |target| std::future::ready(target == "old-bound-session"),
             move |request| {
@@ -775,6 +832,8 @@ mod tests {
         let observed = injection_calls.clone();
         let outcome = run_native_compact_once(
             recap_target("claude/token/mac-mini:old-bound-session"),
+            "mac-mini",
+            "mac-mini-release",
             || async { Ok(true) },
             |target| std::future::ready(target == "new-current-session"),
             move |_| {
@@ -796,35 +855,144 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_compact_claims_allow_exactly_one_injection() {
-        let claimed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let injections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let claim_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let claimed = std::sync::Arc::new(AtomicBool::new(false));
+        let claims_in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let max_claims_in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let injections = std::sync::Arc::new(AtomicUsize::new(0));
         let run = || {
+            let claim_barrier = claim_barrier.clone();
             let claimed = claimed.clone();
+            let claims_in_flight = claims_in_flight.clone();
+            let max_claims_in_flight = max_claims_in_flight.clone();
             let injections = injections.clone();
             run_native_compact_once(
                 recap_target("mac-mini:claimed-session"),
+                "mac-mini",
+                "mac-mini-release",
                 move || async move {
-                    Ok(claimed
-                        .compare_exchange(
-                            false,
-                            true,
-                            std::sync::atomic::Ordering::SeqCst,
-                            std::sync::atomic::Ordering::SeqCst,
-                        )
-                        .is_ok())
+                    let in_flight = claims_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_claims_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+                    claim_barrier.wait().await;
+                    let won = claimed
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok();
+                    claims_in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Ok(won)
                 },
                 |_| async { true },
                 move |_| async move {
-                    injections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    injections.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 },
             )
         };
 
         let (first, second) = tokio::join!(run(), run());
-        assert!(matches!(first, RecapCompactOutcome::Started(_)));
-        assert_eq!(second, RecapCompactOutcome::AlreadyClaimed);
-        assert_eq!(injections.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let outcomes = [first, second];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RecapCompactOutcome::Started(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RecapCompactOutcome::AlreadyClaimed))
+                .count(),
+            1
+        );
+        assert_eq!(max_claims_in_flight.load(Ordering::SeqCst), 2);
+        assert_eq!(injections.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn foreign_session_identity_preserves_pointer_without_claim_or_injection() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let claim_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let pointer_consumed = std::sync::Arc::new(AtomicBool::new(false));
+        let live_checks = std::sync::Arc::new(AtomicUsize::new(0));
+        let injections = std::sync::Arc::new(AtomicUsize::new(0));
+        let outcome = run_native_compact_once(
+            recap_target("claude/token/mac-book:foo"),
+            "mac-mini",
+            "mac-mini-release",
+            {
+                let claim_calls = claim_calls.clone();
+                let pointer_consumed = pointer_consumed.clone();
+                move || async move {
+                    claim_calls.fetch_add(1, Ordering::SeqCst);
+                    pointer_consumed.store(true, Ordering::SeqCst);
+                    Ok(true)
+                }
+            },
+            {
+                let live_checks = live_checks.clone();
+                move |_| {
+                    live_checks.fetch_add(1, Ordering::SeqCst);
+                    async { true }
+                }
+            },
+            {
+                let injections = injections.clone();
+                move |_| async move {
+                    injections.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            RecapCompactOutcome::RoutingUnavailable {
+                owner_instance_id: Some("mac-mini-release".to_string()),
+                reason: "session_key_host_mismatch".to_string(),
+            }
+        );
+        assert!(outcome.preserves_recap_card());
+        assert_eq!(claim_calls.load(Ordering::SeqCst), 0);
+        assert!(!pointer_consumed.load(Ordering::SeqCst));
+        assert_eq!(live_checks.load(Ordering::SeqCst), 0);
+        assert_eq!(injections.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn foreign_or_missing_owner_never_claims_local_host_target() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for owner_instance_id in [Some("mac-book-release".to_string()), None] {
+            let mut target = recap_target("claude/token/mac-mini:foo");
+            target.owner_instance_id = owner_instance_id.clone();
+            let claim_calls = std::sync::Arc::new(AtomicUsize::new(0));
+            let observed_claims = claim_calls.clone();
+            let outcome = run_native_compact_once(
+                target,
+                "mac-mini",
+                "mac-mini-release",
+                move || {
+                    observed_claims.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(true) }
+                },
+                |_| async { true },
+                |_| async { Ok(()) },
+            )
+            .await;
+
+            assert!(matches!(
+                outcome,
+                RecapCompactOutcome::RoutingUnavailable {
+                    owner_instance_id: ref observed_owner,
+                    ..
+                } if observed_owner == &owner_instance_id
+            ));
+            assert_eq!(claim_calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test]
@@ -833,6 +1001,8 @@ mod tests {
         let observed = claim_calls.clone();
         let first = run_native_compact_once(
             recap_target("mac-mini:claimed-session"),
+            "mac-mini",
+            "mac-mini-release",
             move || {
                 observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async { Ok(true) }
@@ -845,6 +1015,8 @@ mod tests {
         let observed_retries = retried_injections.clone();
         let retry = run_native_compact_once(
             recap_target("mac-mini:claimed-session"),
+            "mac-mini",
+            "mac-mini-release",
             || async { Ok(false) },
             |_| async { true },
             move |_| {
@@ -873,6 +1045,8 @@ mod tests {
         let observed = injection_calls.clone();
         let outcome = run_native_compact_once(
             recap_target("mac-mini:claimed-session"),
+            "mac-mini",
+            "mac-mini-release",
             || async { Err("database unavailable".to_string()) },
             |_| async { true },
             move |_| {
@@ -887,6 +1061,129 @@ mod tests {
             RecapCompactOutcome::ClaimFailed("database unavailable".to_string())
         );
         assert_eq!(injection_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    async fn seed_recap_compact_session_pg(
+        pool: &PgPool,
+        target: &RecapClearTarget,
+        message_id: u64,
+        channel_id: u64,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions (
+                session_key,
+                provider,
+                instance_id,
+                idle_recap_turn_generation,
+                idle_recap_message_id,
+                idle_recap_channel_id,
+                idle_recap_posted_at,
+                last_heartbeat
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind(&target.session_key)
+        .bind(&target.provider)
+        .bind(target.owner_instance_id.as_deref())
+        .bind(target.turn_generation)
+        .bind(message_id as i64)
+        .bind(channel_id as i64)
+        .execute(pool)
+        .await
+        .expect("seed recap compact session");
+    }
+
+    #[tokio::test]
+    async fn concurrent_recap_compact_claim_pg_consumes_exactly_once() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "adk_recap_claim",
+            "idle recap compact concurrent claim test",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate_with_max_connections(2).await;
+        let target = recap_target("claude/token/mac-mini:pg-claimed-session");
+        let message_id = 42;
+        let channel_id = 84;
+        seed_recap_compact_session_pg(&pool, &target, message_id, channel_id).await;
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let claim = || {
+            let pool = pool.clone();
+            let target = target.clone();
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                claim_recap_compact_pointer(&pool, &target, message_id, channel_id)
+                    .await
+                    .expect("claim recap compact pointer")
+            }
+        };
+        let (first, second) = tokio::join!(claim(), claim());
+
+        assert_eq!([first, second].into_iter().filter(|claimed| *claimed).count(), 1);
+        let pointer = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+            "SELECT idle_recap_message_id, idle_recap_channel_id
+             FROM sessions
+             WHERE session_key = $1",
+        )
+        .bind(&target.session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("load claimed recap compact pointer");
+        assert_eq!(pointer, (None, None));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "adk_recap_owner",
+            "idle recap compact owner handoff fence test",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let target = recap_target("claude/token/mac-mini:pg-owner-session");
+        let message_id = 43;
+        let channel_id = 85;
+        seed_recap_compact_session_pg(&pool, &target, message_id, channel_id).await;
+        sqlx::query("UPDATE sessions SET instance_id = 'mac-book-release' WHERE session_key = $1")
+            .bind(&target.session_key)
+            .execute(&pool)
+            .await
+            .expect("handoff recap compact owner");
+
+        assert!(
+            !claim_recap_compact_pointer(&pool, &target, message_id, channel_id)
+                .await
+                .expect("owner-fenced recap compact claim")
+        );
+        let pointer = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<String>)>(
+            "SELECT idle_recap_message_id, idle_recap_channel_id, instance_id
+             FROM sessions
+             WHERE session_key = $1",
+        )
+        .bind(&target.session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("load owner-fenced recap compact pointer");
+        assert_eq!(
+            pointer,
+            (
+                Some(message_id as i64),
+                Some(channel_id as i64),
+                Some("mac-book-release".to_string())
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
