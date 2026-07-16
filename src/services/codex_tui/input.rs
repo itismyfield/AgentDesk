@@ -1390,8 +1390,7 @@ fn recent_has_codex_active_turn(recent_bottom_up: &[&str]) -> bool {
         .any(|line| {
             let trimmed = line.trim_start();
             (trimmed.starts_with('•') || trimmed.starts_with('◦'))
-                && (trimmed.contains("esc to interrupt")
-                    || trimmed.contains("Esc to interrupt"))
+                && (trimmed.contains("esc to interrupt") || trimmed.contains("Esc to interrupt"))
         })
 }
 
@@ -1504,7 +1503,8 @@ fn codex_visible_prompt_draft_text(line: &str) -> Option<&str> {
     let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
     if let Some(rest) = trimmed.strip_prefix('›') {
         let text = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
-        return (!text.is_empty()).then_some(text);
+        return (!text.is_empty() && !CODEX_COMPACT_PLACEHOLDER_PROMPTS.contains(&text))
+            .then_some(text);
     }
     codex_composer_body_draft_text(line)
 }
@@ -2308,6 +2308,7 @@ The documentation example ends with:
 \n\
   gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
         assert!(pane_looks_ready_for_codex_prompt(pane));
+        assert!(!pane_has_codex_prompt_draft(pane));
     }
 
     #[test]
@@ -2319,6 +2320,7 @@ The documentation example ends with:
 \n\
   gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
         assert!(pane_looks_ready_for_codex_prompt(pane));
+        assert!(!pane_has_codex_prompt_draft(pane));
     }
 
     #[test]
@@ -2354,6 +2356,7 @@ The documentation example ends with:
 \n\
   gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
         assert!(!pane_looks_ready_for_codex_prompt(pane));
+        assert!(pane_has_codex_prompt_draft(pane));
     }
 
     #[test]

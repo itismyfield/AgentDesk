@@ -196,10 +196,7 @@ enum WarmInputDecision {
 }
 
 fn decide_warm_input(snapshot: &PromptReadinessSnapshot) -> WarmInputDecision {
-    if snapshot.tmux_pane_alive
-        && snapshot.capture_available
-        && snapshot.composer_marker_detected
-    {
+    if snapshot.tmux_pane_alive && snapshot.capture_available && snapshot.composer_marker_detected {
         if snapshot.prompt_draft_detected {
             WarmInputDecision::Fallback(CodexWarmFallbackReason::StrandedDraft)
         } else {
@@ -609,9 +606,7 @@ mod tests {
         for mutate in [
             |snapshot: &mut PromptReadinessSnapshot| snapshot.tmux_pane_alive = false,
             |snapshot: &mut PromptReadinessSnapshot| snapshot.capture_available = false,
-            |snapshot: &mut PromptReadinessSnapshot| {
-                snapshot.composer_marker_detected = false
-            },
+            |snapshot: &mut PromptReadinessSnapshot| snapshot.composer_marker_detected = false,
         ] {
             let mut snapshot = ready.clone();
             mutate(&mut snapshot);
