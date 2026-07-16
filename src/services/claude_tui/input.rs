@@ -1556,15 +1556,23 @@ fn prompt_marker_confirms_prompt_ready(
 /// #3889/#4528: an MCP-auth warning is a terminal readiness block only for a
 /// FreshTurn cold boot. Claude Code v2.1.209 can retain the same warning in a
 /// usable warm session, so Followup ignores that warning but still rejects the
-/// narrow positive busy signals in the captured pane. The explicit busy check is
-/// also load-bearing for transcript-idle fallback paths that do not require a
-/// prompt marker.
+/// narrow positive busy signals in the captured pane. Followup additionally
+/// fails closed on a structurally valid spinner + duration footer even when its
+/// verb is newer than the shared busy classifier's allowlist. Keeping that
+/// conservative extension Followup-only avoids changing FreshTurn and existing
+/// shared-classifier semantics. The explicit busy checks are also load-bearing
+/// for transcript-idle fallback paths that do not require a prompt marker.
 fn snapshot_allows_prompt_readiness(
     readiness: PromptReadinessKind,
     snapshot: &PromptReadinessSnapshot,
 ) -> bool {
     if snapshot.capture_available
-        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&snapshot.pane_tail)
+        && (crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(
+            &snapshot.pane_tail,
+        ) || (matches!(readiness, PromptReadinessKind::Followup)
+            && crate::services::tmux_common::tmux_capture_indicates_claude_tui_structured_spinner(
+                &snapshot.pane_tail,
+            )))
     {
         return false;
     }
@@ -2514,6 +2522,43 @@ mod tests {
         assert!(
             !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &busy),
             "positive generating chrome must remain not-ready despite the ignored warning"
+        );
+    }
+
+    #[test]
+    fn mcp_auth_warning_unknown_duration_spinner_keeps_followup_not_ready() {
+        // Claude Code 2.1.209 ships spinner verbs beyond the shared busy
+        // classifier's compatibility allowlist. The stale prompt marker must not
+        // override a structurally valid duration-only spinner footer.
+        let pane = "\
+ ⚠ 1 MCP server needs authentication · run /mcp
+ ✳ Architecting… (12s)
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 7% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: pane.to_string(),
+        };
+
+        assert!(snapshot_indicates_mcp_auth_block(&snapshot));
+        assert!(
+            !crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane),
+            "mutation precondition: the shared allowlist intentionally does not know Architecting"
+        );
+        assert!(
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_structured_spinner(
+                pane,
+            ),
+            "spinner glyph + status verb + duration must identify the live footer without esc text"
+        );
+        assert!(
+            !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot),
+            "a duration-only unknown-verb spinner must veto stale Followup readiness"
         );
     }
 

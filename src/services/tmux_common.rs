@@ -277,6 +277,23 @@ pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
     }) || tmux_recent_lines_show_claude_tui_active_work(recent)
 }
 
+/// A conservative readiness-only busy signal for a Claude TUI spinner footer
+/// whose status verb is newer than the shared busy classifier's allowlist.
+/// The full structure is required: spinner glyph + one `-ing` status verb +
+/// ellipsis + a parenthesized duration. Callers can therefore fail closed on a
+/// live footer such as `✳ Architecting… (12s)` without treating ordinary prose
+/// or an idle composer as busy.
+pub(crate) fn tmux_capture_indicates_claude_tui_structured_spinner(capture: &str) -> bool {
+    let non_empty = capture
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
+    non_empty[start..].iter().any(|line| {
+        tmux_line_is_claude_tui_structured_spinner(trim_prompt_line(line))
+    })
+}
+
 /// #3521: `true` when the Claude TUI pane shows a BACKGROUND AGENT still pending — the
 /// `✻ Waiting for N background agent(s) to finish` footer, or a fresh `Backgrounded agent`
 /// spawn line. Distinct from `tmux_capture_indicates_claude_tui_busy`: a detached background
@@ -318,13 +335,12 @@ pub(crate) fn sniff_background_agent_pending(tmux_session_name: &str) -> bool {
 /// verb. Anchoring the verb to the spinner glyph is what distinguishes the TUI
 /// chrome from the same verb appearing in assistant body text.
 fn tmux_line_is_claude_tui_spinner_progress(line: &str) -> bool {
-    const SPINNER_GLYPHS: [char; 8] = ['·', '✢', '✳', '✶', '✻', '✽', '✦', '∗'];
     let line = line.trim_start();
     let mut chars = line.chars();
     let Some(first) = chars.next() else {
         return false;
     };
-    if !SPINNER_GLYPHS.contains(&first) {
+    if !is_claude_tui_spinner_glyph(first) {
         return false;
     }
     // The remainder after the glyph (and its following space) must lead with a
@@ -364,6 +380,59 @@ fn tmux_line_is_claude_tui_spinner_progress(line: &str) -> bool {
     line_has_claude_tui_spinner_status_group(line)
 }
 
+fn is_claude_tui_spinner_glyph(glyph: char) -> bool {
+    const SPINNER_GLYPHS: [char; 8] = ['·', '✢', '✳', '✶', '✻', '✽', '✦', '∗'];
+    SPINNER_GLYPHS.contains(&glyph)
+}
+
+fn tmux_line_is_claude_tui_structured_spinner(line: &str) -> bool {
+    let line = line.trim_start();
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !is_claude_tui_spinner_glyph(first) {
+        return false;
+    }
+
+    let rest = chars.as_str().trim_start();
+    let (status, suffix) = if let Some(status_end) = rest.find('…') {
+        (&rest[..status_end], &rest[status_end + '…'.len_utf8()..])
+    } else if let Some(status_end) = rest.find("...") {
+        (&rest[..status_end], &rest[status_end + 3..])
+    } else {
+        return false;
+    };
+    let status = status.trim();
+    !status.is_empty()
+        && !status.chars().any(char::is_whitespace)
+        && status.to_ascii_lowercase().ends_with("ing")
+        && suffix.trim_start().starts_with('(')
+        && line_has_claude_tui_spinner_duration_group(suffix)
+}
+
+fn line_has_claude_tui_spinner_duration_group(line: &str) -> bool {
+    let Some(open) = line.find('(') else {
+        return false;
+    };
+    let after_open = &line[open + 1..];
+    let Some(close_rel) = after_open.find(')') else {
+        return false;
+    };
+    after_open[..close_rel]
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(is_claude_tui_duration_token)
+}
+
+fn is_claude_tui_duration_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() >= 2
+        && matches!(bytes[bytes.len() - 1], b's' | b'm')
+        && bytes[..bytes.len() - 1]
+            .iter()
+            .all(|byte| byte.is_ascii_digit())
+}
+
 /// `true` when `line` contains the parenthesized status group the Claude TUI
 /// spinner footer renders next to the work verb, e.g.
 /// `(12s · ↑ 1.2k tokens · esc to interrupt)`. The group must carry at least one
@@ -386,12 +455,7 @@ fn line_has_claude_tui_spinner_status_group(line: &str) -> bool {
     // A standalone duration token such as `12s` / `4m` inside the group.
     group
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|tok| {
-            let bytes = tok.as_bytes();
-            bytes.len() >= 2
-                && matches!(bytes[bytes.len() - 1], b's' | b'm')
-                && bytes[..bytes.len() - 1].iter().all(|b| b.is_ascii_digit())
-        })
+        .any(is_claude_tui_duration_token)
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
@@ -1924,6 +1988,27 @@ another line of prior output";
         // (no `esc to interrupt`, no `tokens`) still qualifies.
         let line = "✻ Thinking… (12s)";
         assert!(tmux_line_is_claude_tui_spinner_progress(line));
+    }
+
+    #[test]
+    fn structured_spinner_accepts_unknown_duration_verb_without_interrupt_copy() {
+        let line = "✳ Architecting… (12s)";
+        assert!(!tmux_line_is_claude_tui_spinner_progress(line));
+        assert!(tmux_line_is_claude_tui_structured_spinner(line));
+        assert!(tmux_capture_indicates_claude_tui_structured_spinner(line));
+    }
+
+    #[test]
+    fn structured_spinner_rejects_prose_and_non_duration_parentheticals() {
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting the response (12s)"
+        ));
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "✳ Architecting… (a fresh idea)"
+        ));
+        assert!(!tmux_line_is_claude_tui_structured_spinner(
+            "Architecting… (12s)"
+        ));
     }
 
     #[test]
