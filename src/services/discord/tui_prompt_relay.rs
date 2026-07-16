@@ -557,7 +557,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 &prompt.prompt,
             )
         };
-        let anchor_message_id = if let Some(message_id) = task_card_anchor {
+        let notification_anchor_message_id = if let Some(message_id) = task_card_anchor {
             message_id
         } else {
             match channel_id.say(&*notify_http, content).await {
@@ -577,6 +577,16 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 }
             }
         };
+        let anchor_message_id =
+            synthetic_start_wiring::resolve_tui_direct_synthetic_lifecycle_anchor(
+                shared,
+                command_http.clone(),
+                channel_id,
+                &prompt,
+                notification_anchor_message_id,
+                &relay_prompt_decision,
+            )
+            .await;
         // #3176: pin this turn's anchor id — it becomes the synthetic inflight's
         // `user_msg_id` below, so the idle-tail drain-wait can recognise our own row.
         current_turn_anchor_id = Some(anchor_message_id.get());

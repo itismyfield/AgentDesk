@@ -3383,6 +3383,35 @@ fn external_turn_test_lease(
     }
 }
 
+#[test]
+fn synthetic_lifecycle_anchor_uses_posted_placeholder() {
+    let notification_anchor = MessageId::new(940_000_000_004_180);
+    let placeholder_anchor = MessageId::new(940_000_000_004_181);
+
+    assert_eq!(
+        synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
+            notification_anchor,
+            &Ok(placeholder_anchor),
+        ),
+        placeholder_anchor,
+        "successful synthetic placeholder delivery must replace the notification anchor"
+    );
+}
+
+#[test]
+fn synthetic_lifecycle_anchor_falls_back_after_placeholder_failure() {
+    let notification_anchor = MessageId::new(940_000_000_004_280);
+
+    assert_eq!(
+        synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
+            notification_anchor,
+            &Err("delivery failed".to_string()),
+        ),
+        notification_anchor,
+        "failed synthetic placeholder delivery must preserve the notification anchor"
+    );
+}
+
 #[tokio::test]
 async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -3464,7 +3493,8 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(940_000_000_004_083);
     let tmux = "AgentDesk-claude-4082-genuine-typed";
-    let anchor_id = MessageId::new(940_000_000_004_183);
+    let notification_anchor_id = MessageId::new(940_000_000_004_183);
+    let placeholder_anchor_id = MessageId::new(940_000_000_004_283);
     let prompt = ObservedTuiPrompt {
         provider: provider.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
@@ -3493,6 +3523,10 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         },
     );
 
+    let anchor_id = synthetic_start_wiring::synthetic_lifecycle_anchor_from_placeholder_result(
+        notification_anchor_id,
+        &Ok(placeholder_anchor_id),
+    );
     let mut lease = external_turn_test_lease(channel_id, tmux);
     let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
         &shared,
@@ -3509,14 +3543,25 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         "no prior turn exists, so the claim should be inline"
     );
 
+    assert_eq!(
+        anchor_id, placeholder_anchor_id,
+        "the synthetic claim must receive the posted placeholder identity"
+    );
+    assert_ne!(
+        anchor_id, notification_anchor_id,
+        "the notification/task-card identity must not remain the streaming anchor after placeholder success"
+    );
     let snapshot = super::super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-    assert_eq!(snapshot.active_user_message_id, Some(anchor_id));
+    assert_eq!(
+        snapshot.active_user_message_id,
+        Some(placeholder_anchor_id)
+    );
     assert!(snapshot.cancel_token.is_some());
     let state = super::super::inflight::load_inflight_state(&provider, channel_id.get())
         .expect("typed TUI prompt must create synthetic inflight");
     assert_eq!(state.turn_source, TurnSource::ExternalInput);
     assert_eq!(state.tmux_session_name.as_deref(), Some(tmux));
-    assert_eq!(state.user_msg_id, anchor_id.get());
+    assert_eq!(state.user_msg_id, placeholder_anchor_id.get());
     assert!(
         !state.relay_ownership_only,
         "human typed input must remain a full synthetic external turn"

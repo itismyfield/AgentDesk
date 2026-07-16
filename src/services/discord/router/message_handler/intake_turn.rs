@@ -2831,6 +2831,31 @@ pub(super) async fn handle_text_message(
 }
 
 #[cfg(test)]
+mod user_turn_placeholder_identity_tests {
+    #[test]
+    fn discord_user_turn_keeps_user_and_streaming_placeholder_ids_separate() {
+        let module_src = include_str!("intake_turn.rs");
+        let bridge_context_pos = module_src
+            .find("TurnBridgeContext {")
+            .expect("Discord intake builds a turn-bridge context");
+        let bridge_context = &module_src[bridge_context_pos..];
+
+        assert!(
+            bridge_context.contains("user_msg_id: Some(user_msg_id),"),
+            "Discord-origin user turns must retain the real user message as their request identity"
+        );
+        assert!(
+            bridge_context.contains("current_msg_id: Some(placeholder_msg_id),"),
+            "Discord-origin user turns must keep the posted intake placeholder as their streaming edit target"
+        );
+        assert!(
+            bridge_context.contains("is_external_input_tui_direct: false"),
+            "Discord-origin user turns must remain outside the synthetic TUI-direct path"
+        );
+    }
+}
+
+#[cfg(test)]
 mod recovery_context_take_order_tests {
     fn recovery_context_take_call() -> String {
         format!(

@@ -17,6 +17,75 @@
 
 use super::*;
 
+pub(super) fn synthetic_lifecycle_anchor_from_placeholder_result(
+    notification_anchor_message_id: MessageId,
+    placeholder_result: &Result<MessageId, String>,
+) -> MessageId {
+    placeholder_result
+        .as_ref()
+        .copied()
+        .unwrap_or(notification_anchor_message_id)
+}
+
+/// Post the command-bot-owned streaming placeholder before synthetic lifecycle
+/// state becomes visible. Delivery failures fail open to the existing
+/// notification/task-card anchor so observation still starts a relay turn.
+pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
+    shared: &Arc<SharedData>,
+    command_http: Option<Arc<serenity::Http>>,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    notification_anchor_message_id: MessageId,
+    relay_prompt_decision: &RelayObservedPromptInjectionDecision,
+) -> MessageId {
+    if !relay_prompt_decision.starts_external_turn_lifecycle() {
+        return notification_anchor_message_id;
+    }
+
+    let Some(http) = command_http else {
+        tracing::warn!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            notification_anchor_message_id = notification_anchor_message_id.get(),
+            "command-bot HTTP unavailable; using the existing notification anchor for the synthetic lifecycle"
+        );
+        return notification_anchor_message_id;
+    };
+
+    let placeholder_result = super::super::gateway::send_intake_placeholder(
+        http,
+        shared.clone(),
+        channel_id,
+        Some((channel_id, notification_anchor_message_id)),
+        false,
+    )
+    .await;
+    let anchor_message_id = synthetic_lifecycle_anchor_from_placeholder_result(
+        notification_anchor_message_id,
+        &placeholder_result,
+    );
+    match placeholder_result {
+        Ok(placeholder_message_id) => tracing::info!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            notification_anchor_message_id = notification_anchor_message_id.get(),
+            placeholder_message_id = placeholder_message_id.get(),
+            "posted command-bot-owned placeholder for the synthetic lifecycle anchor"
+        ),
+        Err(error) => tracing::warn!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            notification_anchor_message_id = notification_anchor_message_id.get(),
+            error = %error,
+            "failed to post command-bot-owned synthetic placeholder; using the existing notification anchor"
+        ),
+    }
+    anchor_message_id
+}
+
 /// Run the shared synthetic-start wiring for a TUI-direct turn. It:
 ///   0. refuses prompt classes that the shared injected-prompt decision says do
 ///      not start an external turn,
