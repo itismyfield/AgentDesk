@@ -38,8 +38,7 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 use abandon_guard::{
-    AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
-    finalize_abandoned_mailbox,
+    AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for, finalize_abandoned_mailbox,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -644,8 +643,7 @@ async fn run_placeholder_sweep_pass(
                 // TODO(#4573 slice B): add a persisted turn generation so reuse of
                 // the same `user_msg_id` cannot masquerade as the original owner.
                 if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    let cleanup =
-                        finalize_abandoned_mailbox(shared, provider, &state, false).await;
+                    let cleanup = finalize_abandoned_mailbox(shared, provider, &state, false).await;
                     if cleanup.delete_state_if_allowed(provider, &state) {
                         report.abandoned += 1;
                     }
