@@ -151,20 +151,21 @@ pub(in crate::services::discord) async fn drain_dispatched_queue_markers(
     head_message_id: MessageId,
     source_message_generations: &[SourceMessageQueuedGeneration],
 ) {
-    let head_generation = source_message_generations
+    if let Some(head_generation) = source_message_generations
         .iter()
         .find(|source| source.message_id == head_message_id)
         .map(|source| source.queued_generation)
-        .unwrap_or(shared.restart.current_generation);
-    turn_view_reconciler::note_intake_turn_started(
-        shared,
-        http,
-        channel_id,
-        head_message_id,
-        effective_queued_generation(shared, head_generation),
-        "dispatch_queued_turn_started",
-    )
-    .await;
+    {
+        turn_view_reconciler::note_intake_turn_started(
+            shared,
+            http,
+            channel_id,
+            head_message_id,
+            effective_queued_generation(shared, head_generation),
+            "dispatch_queued_turn_started",
+        )
+        .await;
+    }
     for source_generation in source_message_generations {
         if source_generation.message_id == head_message_id {
             continue;
