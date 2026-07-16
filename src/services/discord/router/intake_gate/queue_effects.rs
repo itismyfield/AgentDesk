@@ -865,6 +865,7 @@ pub(super) async fn render_visible_queued_ack(
     text: &str,
     merged: bool,
 ) -> bool {
+    debug_assert!(super::super::queue_status_presentation::queue_status_card_enabled());
     // #3009: a merged follow-up reuses the existing waiting placeholder instead
     // of stacking a duplicate card. Only fall through to a fresh POST when this
     // message is the current merged head AND no prior card exists to reuse

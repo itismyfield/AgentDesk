@@ -470,8 +470,9 @@ mod tests {
         )
         .await;
         let ops_after_queue = shared.turn_view_reconciler.ops();
-        assert_eq!(ops_after_queue.len(), 1);
+        assert_eq!(ops_after_queue.len(), 2);
         assert!(ops_after_queue[0].add && ops_after_queue[0].emoji == '📬');
+        assert!(ops_after_queue[1].add && ops_after_queue[1].emoji == '⏳');
         assert!(persisted_path(channel_id, head).exists());
 
         drain_dispatched_queue_markers(
@@ -504,8 +505,11 @@ mod tests {
         .await;
         let ops = shared.turn_view_reconciler.ops();
         assert_eq!(ops.len(), 3);
-        assert!(!ops[1].add && ops[1].emoji == '📬');
-        assert!(ops[2].add && ops[2].emoji == '⏳');
+        assert!(!ops[2].add && ops[2].emoji == '📬');
+        assert!(
+            ops.iter().filter(|op| op.add && op.emoji == '⏳').count() == 1,
+            "turn start must reuse the hourglass added at queue acceptance"
+        );
     }
 
     #[tokio::test]

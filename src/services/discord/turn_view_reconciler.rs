@@ -21,6 +21,7 @@ use super::{SharedData, queue_reactions};
 mod orphan_sweep;
 // #4554: mailbox-truth repair is isolated to keep this giant module net-zero.
 mod queue_repair;
+mod reaction_set;
 pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
 
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
@@ -95,19 +96,6 @@ impl TurnViewState {
             "stopped" => Some(Self::Stopped),
             "none" => Some(Self::None),
             _ => None,
-        }
-    }
-
-    fn emoji(self) -> Option<char> {
-        match self {
-            Self::Queued => Some('📬'),
-            Self::QueuedMerged => Some('➕'),
-            Self::QueuedReconcile => Some('🔄'),
-            Self::Pending => Some('⏳'),
-            Self::Completed => Some('✅'),
-            Self::Failed => Some('⚠'),
-            Self::Stopped => Some('🛑'),
-            Self::None => None,
         }
     }
 
@@ -1140,7 +1128,14 @@ impl TurnViewReconciler {
 
         let resolved_identity = current.identity.clone();
         let delivery = self
-            .apply_reaction(shared, target, emoji, false, &resolved_identity, source)
+            .apply_diff(
+                shared,
+                target,
+                current.applied,
+                TurnViewState::None,
+                &resolved_identity,
+                source,
+            )
             .await;
         if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
             self.discard_target_locked(target, source, &target_lock);
@@ -1535,20 +1530,23 @@ impl TurnViewReconciler {
         source: &'static str,
     ) -> TurnViewDelivery {
         let mut delivery = TurnViewDelivery::Delivered;
-        let desired_emoji = desired.emoji();
-        if let Some(applied_emoji) = applied.emoji()
-            && Some(applied_emoji) != desired_emoji
-        {
+        let applied_reactions = reaction_set::for_state(applied);
+        let desired_reactions = reaction_set::for_state(desired);
+        for emoji in applied_reactions {
+            if desired_reactions.contains(emoji) {
+                continue;
+            }
             delivery = delivery.merge(
-                self.apply_reaction(shared, target, applied_emoji, false, identity, source)
+                self.apply_reaction(shared, target, *emoji, false, identity, source)
                     .await,
             );
         }
-        if let Some(desired_emoji) = desired_emoji
-            && applied.emoji() != Some(desired_emoji)
-        {
+        for emoji in desired_reactions {
+            if applied_reactions.contains(emoji) {
+                continue;
+            }
             delivery = delivery.merge(
-                self.apply_reaction(shared, target, desired_emoji, true, identity, source)
+                self.apply_reaction(shared, target, *emoji, true, identity, source)
                     .await,
             );
         }

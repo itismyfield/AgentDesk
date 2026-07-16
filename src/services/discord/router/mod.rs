@@ -4,6 +4,7 @@ mod intake_dispatch;
 mod intake_gate;
 mod intake_queue_transaction;
 mod message_handler;
+mod queue_status_presentation;
 mod response_format;
 mod thread_binding;
 mod turn_start;
@@ -21,6 +22,7 @@ pub(super) use message_handler::{
     mailbox_try_start_turn_with_terminal_marker_cleanup, start_headless_turn,
     start_reserved_headless_turn,
 };
+pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
 pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{

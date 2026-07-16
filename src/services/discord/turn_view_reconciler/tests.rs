@@ -177,7 +177,7 @@ async fn sequence_start_complete_leaves_only_completed_reaction() {
 }
 
 #[tokio::test]
-async fn queued_then_started_swaps_mailbox_to_hourglass_without_residue() {
+async fn queued_then_started_swaps_queue_marker_to_hourglass_without_residue() {
     let _root = scoped_runtime_root();
     let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::Pending]).await;
 
@@ -188,10 +188,38 @@ async fn queued_then_started_swaps_mailbox_to_hourglass_without_residue() {
     let ops = reconciler.ops();
     assert!(ops.iter().any(|op| op.add && op.emoji == '📬'));
     assert!(ops.iter().any(|op| !op.add && op.emoji == '📬'));
+    assert!(ops.iter().any(|op| op.add && op.emoji == '⏳'));
+    assert!(
+        !ops.iter().any(|op| !op.add && op.emoji == '⏳'),
+        "processing start keeps the queue-acceptance hourglass in place"
+    );
     assert!(
         !snapshot_reactions(&reconciler, target())
             .iter()
             .any(|(emoji, _)| *emoji == '📬')
+    );
+}
+
+#[tokio::test]
+async fn queued_started_completed_uses_one_identity_and_leaves_checkmark() {
+    let _root = scoped_runtime_root();
+    let reconciler = note_sequence(&[
+        TurnViewState::Queued,
+        TurnViewState::Pending,
+        TurnViewState::Completed,
+    ])
+    .await;
+
+    assert_eq!(
+        snapshot_reactions(&reconciler, target()),
+        vec![expected('✅', "intake-a")]
+    );
+    let ops = reconciler.ops();
+    assert!(ops.iter().any(|op| !op.add && op.emoji == '⏳'));
+    assert!(ops.iter().any(|op| op.add && op.emoji == '✅'));
+    assert!(
+        ops.iter().all(|op| op.identity == "intake-a"),
+        "the queued marker adder must also own every transition removal/addition"
     );
 }
 
@@ -204,7 +232,7 @@ async fn requeue_renotification_of_queued_target_is_coalesced_noop() {
     assert_eq!(ops.iter().filter(|op| op.emoji == '📬').count(), 1);
     assert_eq!(
         snapshot_reactions(&reconciler, target()),
-        vec![expected('📬', "intake-a")]
+        vec![expected('📬', "intake-a"), expected('⏳', "intake-a")]
     );
 }
 
@@ -260,7 +288,7 @@ async fn regression_4109_pre_migration_untracked_queue_markers_still_remove_reac
 }
 
 #[tokio::test]
-async fn regression_4049_start_rollback_to_queued_swaps_hourglass_to_mailbox_and_cancel_cleans() {
+async fn regression_4248_start_rollback_to_queued_keeps_hourglass_and_cancel_cleans() {
     let _root = scoped_runtime_root();
     let reconciler = TurnViewReconciler::default();
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -296,12 +324,11 @@ async fn regression_4049_start_rollback_to_queued_swaps_hourglass_to_mailbox_and
         .await;
 
     let ops = reconciler.ops();
-    assert_eq!(ops.len(), 3);
-    assert!(ops[1].emoji == '⏳' && !ops[1].add);
-    assert!(ops[2].emoji == '📬' && ops[2].add);
+    assert_eq!(ops.len(), 2);
+    assert!(ops[1].emoji == '📬' && ops[1].add);
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")]
+        vec![expected('⏳', "intake-a"), expected('📬', "intake-a")]
     );
     assert_eq!(
         reconciler
@@ -576,7 +603,7 @@ async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() 
 
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")]
+        vec![expected('⏳', "intake-a"), expected('📬', "intake-a")]
     );
     let current = reconciler
         .targets
@@ -607,8 +634,8 @@ async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() 
     );
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")],
-        "stale attempt1 clear must not remove the newer queued marker"
+        vec![expected('⏳', "intake-a"), expected('📬', "intake-a")],
+        "stale attempt1 clear must not remove the newer queued state"
     );
     let current = reconciler
         .targets
@@ -834,7 +861,7 @@ async fn queued_cancel_ignores_nonmatching_generation() {
     assert_eq!(reconciler.ops().len(), ops_after_queue);
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")]
+        vec![expected('📬', "intake-a"), expected('⏳', "intake-a")]
     );
     assert!(persisted_exists(target));
     assert_eq!(

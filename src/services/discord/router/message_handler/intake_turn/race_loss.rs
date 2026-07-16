@@ -172,6 +172,9 @@ pub(super) async fn handle_race_loss_enqueue(
         return Ok(());
     }
 
+    let want_queued_card = want_queued_card
+        && super::super::super::queue_status_presentation::queue_status_card_enabled();
+
     // codex review round-5 P2 (finding 2 — re-queue reuse): if a queued
     // placeholder mapping already exists for `(channel_id, user_msg_id)`
     // — typically because the active turn finished and the queued
