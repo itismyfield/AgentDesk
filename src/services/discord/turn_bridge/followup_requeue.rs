@@ -1,5 +1,12 @@
 use super::*;
 
+fn should_publish_queue_marker(outcome: &crate::services::discord::MailboxEnqueueOutcome) -> bool {
+    !matches!(
+        outcome.refusal_reason,
+        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued)
+    )
+}
+
 pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     shared_owned: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -52,7 +59,9 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
             )
         );
     if retry_present_or_accepted {
-        if let Some(http) = shared_owned.serenity_http_or_token_fallback() {
+        if should_publish_queue_marker(&requeue_outcome)
+            && let Some(http) = shared_owned.serenity_http_or_token_fallback()
+        {
             let message_id = MessageId::new(inflight_state.user_msg_id);
             let queued_generation = super::super::mailbox_snapshot(shared_owned, channel_id)
                 .await
@@ -159,6 +168,21 @@ mod tests {
             None,
             0,
         )
+    }
+
+    #[test]
+    fn already_queued_refusal_preserves_existing_merged_marker() {
+        let outcome = crate::services::discord::MailboxEnqueueOutcome {
+            refusal_reason: Some(
+                crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued,
+            ),
+            ..Default::default()
+        };
+
+        assert!(
+            !should_publish_queue_marker(&outcome),
+            "duplicate refusal must not rewrite the live queue entry's merged/standalone marker"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

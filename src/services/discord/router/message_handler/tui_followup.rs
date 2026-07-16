@@ -876,6 +876,29 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     true
 }
 
+pub(super) async fn note_busy_tui_followup_queued(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: serenity::ChannelId,
+    user_msg_id: serenity::MessageId,
+    outcome: &MailboxEnqueueOutcome,
+) {
+    let emoji = if outcome.merged {
+        super::super::super::queue_reactions::QUEUE_MERGED_PENDING_REACTION
+    } else {
+        super::super::super::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
+    };
+    super::super::super::queue_marker::note_added_current(
+        shared,
+        http,
+        channel_id,
+        user_msg_id,
+        emoji,
+        "tui_busy_pre_submit_queued",
+    )
+    .await;
+}
+
 pub(super) async fn enqueue_busy_tui_followup_for_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -907,6 +930,42 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
         ),
     )
     .await
+}
+
+#[cfg(all(test, unix))]
+mod busy_requeue_reaction_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_busy_requeue_keeps_hourglass_and_adds_queue_marker() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let channel_id = serenity::ChannelId::new(100_000_004_248_301);
+        let message_id = serenity::MessageId::new(100_000_004_248_302);
+        crate::services::discord::turn_view_reconciler::note_intake_turn_started_current(
+            &shared,
+            &http,
+            channel_id,
+            message_id,
+            "test_seed_busy_pending",
+        )
+        .await;
+        let outcome = MailboxEnqueueOutcome {
+            enqueued: true,
+            merged: false,
+            ..Default::default()
+        };
+
+        note_busy_tui_followup_queued(&shared, &http, channel_id, message_id, &outcome).await;
+
+        let ops = shared.turn_view_reconciler.ops();
+        assert_eq!(
+            ops.iter().filter(|op| op.add && op.emoji == '⏳').count(),
+            1
+        );
+        assert!(ops.iter().any(|op| op.add && op.emoji == '📬'));
+        assert!(ops.iter().all(|op| !(op.emoji == '⏳' && !op.add)));
+    }
 }
 
 #[cfg(unix)]

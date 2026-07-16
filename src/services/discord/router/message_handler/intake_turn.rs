@@ -2227,118 +2227,10 @@ pub(super) async fn handle_text_message(
                 .await
                 .intervention_queue
                 .len();
-        let want_queued_card = super::super::queue_status_presentation::queue_status_card_enabled()
-            && !turn_kind.is_background_trigger()
-            && channel_id == original_channel_id;
-        let mut queued_card_rendered = false;
-        if enqueue_outcome.enqueued && want_queued_card {
-            let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
-            let persist_guard = persist_lock.lock_owned().await;
-            let snapshot = super::super::super::mailbox_snapshot(shared, channel_id).await;
-            let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
-                intervention.message_id == user_msg_id
-                    || intervention.source_message_ids.contains(&user_msg_id)
-            });
-            if !still_queued {
-                drop(persist_guard);
-                let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-                tracing::info!(
-                    channel_id = channel_id.get(),
-                    user_msg_id = user_msg_id.get(),
-                    placeholder_msg_id = placeholder_msg_id.get(),
-                    "claude_tui busy follow-up queue entry exited before queued-card render; deleted placeholder"
-                );
-            } else {
-                shared.insert_queued_placeholder_locked(
-                    channel_id,
-                    user_msg_id,
-                    placeholder_msg_id,
-                );
-                let gateway = DiscordGateway::new(
-                    http.clone(),
-                    shared.clone(),
-                    bot_owner_provider.clone(),
-                    None,
-                );
-                let key = super::super::super::placeholder_controller::PlaceholderKey {
-                    provider: bot_owner_provider.clone(),
-                    channel_id,
-                    message_id: placeholder_msg_id,
-                };
-                let queued_input =
-                    super::super::super::placeholder_controller::PlaceholderActiveInput {
-                        reason: super::super::super::formatting::MonitorHandoffReason::Queued,
-                        started_at_unix: chrono::Utc::now().timestamp(),
-                        tool_summary: None,
-                        command_summary: None,
-                        reason_detail: Some(format!("{}_tui_busy_pre_submit", provider.as_str())),
-                        context_line: None,
-                        request_line: Some(user_text.to_string()),
-                        progress_line: None,
-                    };
-                let outcome = shared
-                    .ui
-                    .placeholder_controller
-                    .ensure_queued(&gateway, key, queued_input)
-                    .await;
-                use super::super::super::placeholder_controller::PlaceholderControllerOutcome::*;
-                match outcome {
-                    Edited | Coalesced => {
-                        drop(persist_guard);
-                        queued_card_rendered = true;
-                        let emoji = if enqueue_outcome.merged {
-                            '➕'
-                        } else {
-                            '📬'
-                        };
-                        queue_marker::note_added_current(
-                            shared,
-                            http,
-                            channel_id,
-                            user_msg_id,
-                            emoji,
-                            "tui_busy_pre_submit_queued",
-                        )
-                        .await;
-                        if !shared.queued_placeholder_still_owned(
-                            channel_id,
-                            user_msg_id,
-                            placeholder_msg_id,
-                        ) {
-                            queue_marker::note_removed_current(
-                                shared,
-                                http,
-                                channel_id,
-                                user_msg_id,
-                                emoji,
-                                "tui_busy_pre_submit_queue_self_heal",
-                            )
-                            .await;
-                        }
-                    }
-                    _ => {
-                        let still_owned_under_lock = shared.queued_placeholder_still_owned(
-                            channel_id,
-                            user_msg_id,
-                            placeholder_msg_id,
-                        );
-                        if still_owned_under_lock {
-                            shared.remove_queued_placeholder_locked(channel_id, user_msg_id);
-                        }
-                        drop(persist_guard);
-                        if still_owned_under_lock {
-                            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-                        }
-                        tracing::warn!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            placeholder_msg_id = placeholder_msg_id.get(),
-                            "claude_tui busy follow-up queued but queued-card render failed; dispatch will post a fresh card"
-                        );
-                    }
-                }
-            }
-        } else if enqueue_outcome.enqueued {
+        let queued_card_rendered = false;
+        if enqueue_outcome.enqueued {
+            note_busy_tui_followup_queued(shared, http, channel_id, user_msg_id, &enqueue_outcome)
+                .await;
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
         } else {
             apply_tui_busy_enqueue_refusal(
@@ -2403,7 +2295,9 @@ pub(super) async fn handle_text_message(
             "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
-        tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
+        if !enqueue_outcome.enqueued {
+            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
+        }
         super::super::super::saturating_decrement_global_active(shared);
         shared.turn_start_times.remove(&channel_id);
         post_adk_session_status(

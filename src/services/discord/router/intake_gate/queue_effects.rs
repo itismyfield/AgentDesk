@@ -41,16 +41,29 @@ async fn add_queue_pending_reaction_self_healing(
     channel_id: serenity::ChannelId,
     user_msg_id: serenity::MessageId,
     emoji: char,
-) {
-    crate::services::discord::queue_marker::note_added_current(
-        &data.shared,
-        &ctx.http,
-        channel_id,
-        user_msg_id,
-        emoji,
-        "intake_gate_queue_pending",
-    )
-    .await;
+) -> bool {
+    let delivered =
+        crate::services::discord::turn_view_reconciler::note_intake_queue_marker_added_current(
+            &data.shared,
+            &ctx.http,
+            channel_id,
+            user_msg_id,
+            emoji,
+            "intake_gate_queue_pending",
+        )
+        .await;
+    if !delivered {
+        send_reaction_control_reply(
+            ctx,
+            &data.shared,
+            channel_id,
+            user_msg_id,
+            ReactionControlReplyReason::QueueReactionFailed,
+            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
+        )
+        .await;
+        return false;
+    }
     let still_queued = {
         let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
         snapshot.intervention_queue.iter().any(|intervention| {
@@ -75,6 +88,7 @@ async fn add_queue_pending_reaction_self_healing(
             user_msg_id
         );
     }
+    true
 }
 
 pub(super) struct IntakeGateQueueEffects<'a> {
@@ -116,9 +130,9 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
         emoji: char,
-    ) {
+    ) -> bool {
         add_queue_pending_reaction_self_healing(self.ctx, self.data, channel_id, message_id, emoji)
-            .await;
+            .await
     }
 
     async fn repair_queued_source_pending_reaction(

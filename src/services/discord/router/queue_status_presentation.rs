@@ -41,28 +41,23 @@ mod tests {
             "#,
         )));
 
-        let intake_turn = compact(include_str!("message_handler/intake_turn.rs"));
-        assert!(intake_turn.contains(&compact(
-            r#"
-                let want_queued_card =
-                    super::super::queue_status_presentation::queue_status_card_enabled()
-                        && !turn_kind.is_background_trigger()
-                        && channel_id == original_channel_id;
-            "#,
-        )));
-        assert!(intake_turn.contains(&compact(
-            r#"
-                } else if enqueue_outcome.enqueued {
-                    let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-            "#,
-        )));
-
         let queue_retry_silence = compact(include_str!(
             "../turn_bridge/terminal_outcome_delivery/queue_retry_silence.rs"
         ));
         assert!(queue_retry_silence.contains(&compact(
             r#"
                 if retry_candidate && !super::super::super::router::queue_status_card_enabled() {
+            "#,
+        )));
+        let terminal_delivery =
+            compact(include_str!("../turn_bridge/terminal_outcome_delivery.rs"));
+        assert!(terminal_delivery.contains(&compact(
+            r#"
+                queue_retry_silence::apply(
+                    claude_tui_followup_pre_submit_requeue_candidate,
+                    &mut full_response,
+                    &mut inflight_state,
+                );
             "#,
         )));
 

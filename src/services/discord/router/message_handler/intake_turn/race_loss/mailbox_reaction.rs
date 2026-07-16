@@ -1,5 +1,23 @@
 use super::*;
 
+pub(super) async fn clear_rejected_attempt_pending(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+) {
+    crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_current_if_attempt_matches(
+        shared,
+        http,
+        channel_id,
+        user_msg_id,
+        turn_start_attempt,
+        "race_loss_enqueue_rejected",
+    )
+    .await;
+}
+
 pub(super) async fn note_queue_pending(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,

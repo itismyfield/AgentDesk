@@ -27,6 +27,7 @@ pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_react
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 const PERSISTED_STATE_VERSION: u32 = 1;
+const QUEUED_HOURGLASS_STATE_VERSION: u32 = 2;
 const RECENTLY_FINALIZED_TARGET_MAX: usize = 1024;
 const RECENTLY_FINALIZED_TARGET_TTL: time::Duration = time::Duration::from_secs(10 * 60);
 
@@ -1388,7 +1389,13 @@ impl TurnViewReconciler {
                 return None;
             }
         };
-        if record.version != PERSISTED_STATE_VERSION
+        let supported_version = record.version == QUEUED_HOURGLASS_STATE_VERSION
+            || (record.version == PERSISTED_STATE_VERSION
+                && !matches!(
+                    record.applied.as_str(),
+                    "queued" | "queued_merged" | "queued_reconcile"
+                ));
+        if !supported_version
             || record.provider != shared.provider.as_str()
             || TurnViewTargetKind::from_str(&record.kind) != Some(target.kind)
             || record.channel_id != target.channel_id.get()
@@ -1445,7 +1452,7 @@ impl TurnViewReconciler {
             return;
         };
         let record = PersistedTargetState {
-            version: PERSISTED_STATE_VERSION,
+            version: QUEUED_HOURGLASS_STATE_VERSION,
             provider: shared.provider.as_str().to_string(),
             kind: target.kind.as_str().to_string(),
             channel_id: target.channel_id.get(),
@@ -1529,28 +1536,62 @@ impl TurnViewReconciler {
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
-        let mut delivery = TurnViewDelivery::Delivered;
         let applied_reactions = reaction_set::for_state(applied);
         let desired_reactions = reaction_set::for_state(desired);
+        let mut applied_ops = Vec::new();
         for emoji in applied_reactions {
             if desired_reactions.contains(emoji) {
                 continue;
             }
-            delivery = delivery.merge(
-                self.apply_reaction(shared, target, *emoji, false, identity, source)
-                    .await,
-            );
+            let delivery = self
+                .apply_reaction(shared, target, *emoji, false, identity, source)
+                .await;
+            if !delivery.delivered() {
+                self.compensate_reaction_ops(shared, target, identity, source, &applied_ops)
+                    .await;
+                return delivery;
+            }
+            applied_ops.push((*emoji, false));
         }
         for emoji in desired_reactions {
             if applied_reactions.contains(emoji) {
                 continue;
             }
-            delivery = delivery.merge(
-                self.apply_reaction(shared, target, *emoji, true, identity, source)
-                    .await,
-            );
+            let delivery = self
+                .apply_reaction(shared, target, *emoji, true, identity, source)
+                .await;
+            if !delivery.delivered() {
+                self.compensate_reaction_ops(shared, target, identity, source, &applied_ops)
+                    .await;
+                return delivery;
+            }
+            applied_ops.push((*emoji, true));
         }
-        delivery
+        TurnViewDelivery::Delivered
+    }
+
+    async fn compensate_reaction_ops(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        identity: &ResolvedIdentity,
+        source: &'static str,
+        applied_ops: &[(char, bool)],
+    ) {
+        for (emoji, add) in applied_ops.iter().rev() {
+            let compensation = self
+                .apply_reaction(shared, target, *emoji, !*add, identity, source)
+                .await;
+            if !compensation.delivered() {
+                tracing::warn!(
+                    channel_id = target.channel_id.get(),
+                    message = target.message_id.get(),
+                    emoji = %emoji,
+                    source,
+                    "turn view reaction compensation failed"
+                );
+            }
+        }
     }
 
     async fn apply_unknown_clear(

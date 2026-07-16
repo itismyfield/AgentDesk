@@ -49,8 +49,18 @@ fn persisted_record(
     provider: &str,
     applied: &str,
 ) -> PersistedTargetState {
+    persisted_record_with_version(shared, target, provider, applied, PERSISTED_STATE_VERSION)
+}
+
+fn persisted_record_with_version(
+    shared: &SharedData,
+    target: TurnViewTarget,
+    provider: &str,
+    applied: &str,
+    version: u32,
+) -> PersistedTargetState {
     PersistedTargetState {
-        version: PERSISTED_STATE_VERSION,
+        version,
         provider: provider.to_string(),
         kind: target.kind.as_str().to_string(),
         channel_id: target.channel_id.get(),
@@ -645,6 +655,38 @@ async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() 
     assert_eq!(current.start_attempt, None);
     assert_eq!(persisted_applied(target), TurnViewState::Queued);
     assert_eq!(persisted_start_attempt(target), None);
+}
+
+#[tokio::test]
+async fn persisted_v1_queued_state_is_invalidated_for_reapplication() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_155, 100_000_000_000_156);
+    clear_persisted(target);
+    let provider = shared.provider.as_str().to_string();
+    let record = persisted_record(&shared, target, &provider, "queued");
+    write_persisted(&record, target);
+
+    let reconciler = TurnViewReconciler::default();
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner(91, "persisted"),
+            TurnViewIdentity::Test("intake-a"),
+            TurnViewState::Queued,
+            "test_v1_queue_reapply",
+        )
+        .await;
+
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('📬', "intake-a"), expected('⏳', "intake-a")],
+        "v1 queued records predate the hourglass contract and must not short-circuit reapplication"
+    );
+    let text = std::fs::read_to_string(persisted_path(target)).expect("rewritten v2 state");
+    let rewritten: PersistedTargetState = serde_json::from_str(&text).expect("parse v2 state");
+    assert_eq!(rewritten.version, QUEUED_HOURGLASS_STATE_VERSION);
 }
 
 #[tokio::test]
@@ -1368,6 +1410,87 @@ async fn regression_4041_duplicate_transitions_are_coalesced() {
     assert!(!persisted_exists(target()));
     assert!(!reconciler.targets.contains_key(&target()));
     assert_eq!(reconciler.target_lock_count(target()), 0);
+}
+
+#[tokio::test]
+async fn partial_queue_apply_failure_compensates_prior_hourglass() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_591, 100_000_000_000_592);
+    clear_persisted(target);
+    let reconciler = TurnViewReconciler::with_test_deliveries(vec![
+        TurnViewDelivery::Delivered,
+        TurnViewDelivery::Failed,
+        TurnViewDelivery::Delivered,
+    ]);
+
+    let delivery = reconciler
+        .note_state_delivery(
+            &shared,
+            target,
+            owner(29, "partial-queue"),
+            TurnViewIdentity::Test("intake-a"),
+            TurnViewState::Queued,
+            "test_partial_queue_apply",
+        )
+        .await;
+
+    assert_eq!(delivery, TurnViewDelivery::Failed);
+    let ops = reconciler.ops();
+    assert_eq!(
+        ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
+        vec![('📬', true), ('⏳', true), ('📬', false)],
+        "a second reaction failure must compensate the first successful mutation"
+    );
+    assert!(snapshot_reactions(&reconciler, target).is_empty());
+    assert!(!persisted_exists(target));
+}
+
+#[tokio::test]
+async fn terminal_partial_failure_restores_removed_hourglass() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_593, 100_000_000_000_594);
+    clear_persisted(target);
+    let starter = TurnViewReconciler::default();
+    starter
+        .note_state(
+            &shared,
+            target,
+            owner(30, "partial-terminal"),
+            TurnViewIdentity::Test("intake-a"),
+            TurnViewState::Pending,
+            "test_seed_partial_terminal",
+        )
+        .await;
+    let reconciler = TurnViewReconciler::with_test_deliveries(vec![
+        TurnViewDelivery::Delivered,
+        TurnViewDelivery::Failed,
+        TurnViewDelivery::Delivered,
+    ]);
+
+    let delivery = reconciler
+        .note_state_delivery(
+            &shared,
+            target,
+            owner(30, "partial-terminal"),
+            TurnViewIdentity::Test("ignored-current-caller"),
+            TurnViewState::Completed,
+            "test_partial_terminal_apply",
+        )
+        .await;
+
+    assert_eq!(delivery, TurnViewDelivery::Failed);
+    assert_eq!(
+        reconciler
+            .ops()
+            .iter()
+            .map(|op| (op.emoji, op.add))
+            .collect::<Vec<_>>(),
+        vec![('⏳', false), ('✅', true), ('⏳', true)],
+        "failed terminal add must compensate the already-removed hourglass"
+    );
+    assert_eq!(persisted_applied(target), TurnViewState::Pending);
 }
 
 #[tokio::test]

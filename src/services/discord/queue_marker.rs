@@ -151,13 +151,25 @@ pub(in crate::services::discord) async fn drain_dispatched_queue_markers(
     head_message_id: MessageId,
     source_message_generations: &[SourceMessageQueuedGeneration],
 ) {
+    let head_generation = source_message_generations
+        .iter()
+        .find(|source| source.message_id == head_message_id)
+        .map(|source| source.queued_generation)
+        .unwrap_or(shared.restart.current_generation);
+    turn_view_reconciler::note_intake_turn_started(
+        shared,
+        http,
+        channel_id,
+        head_message_id,
+        effective_queued_generation(shared, head_generation),
+        "dispatch_queued_turn_started",
+    )
+    .await;
     for source_generation in source_message_generations {
+        if source_generation.message_id == head_message_id {
+            continue;
+        }
         for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
-            if emoji == queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
-                && source_generation.message_id == head_message_id
-            {
-                continue;
-            }
             note_removed_queued_generation(
                 shared,
                 http,
@@ -451,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn regression_4049_dispatch_drain_skips_anchor_mailbox_for_start_swap() {
+    async fn regression_4049_dispatch_drain_promotes_anchor_before_merged_marker_cleanup() {
         let _root = scoped_runtime_root();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = Arc::new(serenity::Http::new("Bot test-token"));
@@ -484,32 +496,23 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            shared.turn_view_reconciler.ops().len(),
-            ops_after_queue.len(),
-            "dispatch drain must leave the anchor mailbox for the turn-start swap"
-        );
-        assert!(
-            persisted_path(channel_id, head).exists(),
-            "anchor queued state must survive until turn-start"
-        );
-
-        turn_view_reconciler::note_intake_turn_started(
-            &shared,
-            &http,
-            channel_id,
-            head,
-            61,
-            "test_dispatch_anchor_start",
-        )
-        .await;
         let ops = shared.turn_view_reconciler.ops();
-        assert_eq!(ops.len(), 3);
-        assert!(!ops[2].add && ops[2].emoji == '📬');
+        assert_eq!(ops.len(), ops_after_queue.len() + 1);
         assert!(
-            ops.iter().filter(|op| op.add && op.emoji == '⏳').count() == 1,
-            "turn start must reuse the hourglass added at queue acceptance"
+            !ops.last().expect("promotion op").add
+                && ops.last().expect("promotion op").emoji == '📬'
         );
+        assert!(persisted_path(channel_id, head).exists());
+        assert_eq!(
+            ops.iter().filter(|op| op.add && op.emoji == '⏳').count(),
+            1,
+            "live dispatch promotion must remove only the queue marker and retain acceptance hourglass"
+        );
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(persisted_path(channel_id, head)).expect("pending state"),
+        )
+        .expect("parse pending state");
+        assert_eq!(persisted["applied"], "pending");
     }
 
     #[tokio::test]

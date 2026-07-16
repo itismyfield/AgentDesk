@@ -7,12 +7,14 @@ use crate::services::discord::SharedData;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReactionControlReplyReason {
     QueuedCardPostFailed,
+    QueueReactionFailed,
 }
 
 impl ReactionControlReplyReason {
     fn key(self) -> &'static str {
         match self {
             Self::QueuedCardPostFailed => "queued_card_post_failed",
+            Self::QueueReactionFailed => "queue_reaction_failed",
         }
     }
 }
@@ -87,6 +89,16 @@ mod tests {
         assert_eq!(
             queued.1,
             "intake-reaction-control:123:456:queued_card_post_failed"
+        );
+        let reaction = reaction_control_reply_delivery_ids(
+            channel_id,
+            message_id,
+            ReactionControlReplyReason::QueueReactionFailed,
+        );
+        assert_eq!(reaction.0, queued.0);
+        assert_eq!(
+            reaction.1,
+            "intake-reaction-control:123:456:queue_reaction_failed"
         );
     }
 }

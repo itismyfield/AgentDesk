@@ -295,7 +295,7 @@ pub(super) trait IntakeQueueCommitEffects {
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
         emoji: char,
-    );
+    ) -> bool;
 
     async fn repair_queued_source_pending_reaction(
         &mut self,
@@ -372,22 +372,32 @@ where
             match options.pending_reaction {
                 IntakeQueuePendingReactionPolicy::QueueState => {
                     let emoji = queue_pending_reaction_for(&outcome.mailbox_outcome);
-                    outcome.pending_reaction = PendingReactionDecision::Apply(emoji);
-                    effects
+                    if effects
                         .apply_pending_reaction(channel_id, message_id, emoji)
-                        .await;
-                    outcome
-                        .committed_steps
-                        .push(IntakeQueueCommittedStep::PendingReactionApplied);
+                        .await
+                    {
+                        outcome.pending_reaction = PendingReactionDecision::Apply(emoji);
+                        outcome
+                            .committed_steps
+                            .push(IntakeQueueCommittedStep::PendingReactionApplied);
+                    } else {
+                        outcome.pending_reaction =
+                            PendingReactionDecision::Skip(PendingReactionSkipReason::Failed);
+                    }
                 }
                 IntakeQueuePendingReactionPolicy::Static(emoji) => {
-                    outcome.pending_reaction = PendingReactionDecision::Apply(emoji);
-                    effects
+                    if effects
                         .apply_pending_reaction(channel_id, message_id, emoji)
-                        .await;
-                    outcome
-                        .committed_steps
-                        .push(IntakeQueueCommittedStep::PendingReactionApplied);
+                        .await
+                    {
+                        outcome.pending_reaction = PendingReactionDecision::Apply(emoji);
+                        outcome
+                            .committed_steps
+                            .push(IntakeQueueCommittedStep::PendingReactionApplied);
+                    } else {
+                        outcome.pending_reaction =
+                            PendingReactionDecision::Skip(PendingReactionSkipReason::Failed);
+                    }
                 }
             }
 
@@ -539,6 +549,7 @@ mod tests {
         enqueue_outcome: MailboxEnqueueOutcome,
         enqueued_specs: Vec<SoftInterventionSpec>,
         reactions: Vec<(serenity::ChannelId, serenity::MessageId, char)>,
+        reaction_delivery: bool,
         repair_reaction: Option<char>,
         checkpoints: Vec<(serenity::ChannelId, serenity::MessageId)>,
         idle_kickoffs: usize,
@@ -550,6 +561,7 @@ mod tests {
                 enqueue_outcome: MailboxEnqueueOutcome::default(),
                 enqueued_specs: Vec::new(),
                 reactions: Vec::new(),
+                reaction_delivery: true,
                 repair_reaction: None,
                 checkpoints: Vec::new(),
                 idle_kickoffs: 0,
@@ -572,8 +584,9 @@ mod tests {
             channel_id: serenity::ChannelId,
             message_id: serenity::MessageId,
             emoji: char,
-        ) {
+        ) -> bool {
             self.reactions.push((channel_id, message_id, emoji));
+            self.reaction_delivery
         }
 
         async fn repair_queued_source_pending_reaction(
@@ -706,6 +719,37 @@ mod tests {
                 IntakeQueueCommittedStep::PendingReactionApplied,
                 IntakeQueueCommittedStep::CheckpointAdvanced,
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_commit_records_reaction_failure_without_claiming_application() {
+        let mut effects = FakeEffects {
+            enqueue_outcome: MailboxEnqueueOutcome {
+                enqueued: true,
+                merged: false,
+                refusal_reason: None,
+                persistence_error: None,
+            },
+            reaction_delivery: false,
+            ..FakeEffects::default()
+        };
+
+        let outcome =
+            commit_soft_intervention_transaction(&mut effects, request(Default::default())).await;
+
+        assert!(outcome.accepted());
+        assert_eq!(
+            outcome.pending_reaction,
+            PendingReactionDecision::Skip(PendingReactionSkipReason::Failed)
+        );
+        assert_eq!(
+            outcome.committed_steps,
+            vec![
+                IntakeQueueCommittedStep::MailboxEnqueued,
+                IntakeQueueCommittedStep::CheckpointAdvanced,
+            ],
+            "a failed reaction must never be reported as PendingReactionApplied"
         );
     }
 
