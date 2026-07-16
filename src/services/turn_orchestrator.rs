@@ -3361,7 +3361,11 @@ mod guarded_finish_cutoff_tests {
             .finish_turn_if_matches_started_before(
                 user_msg_id,
                 sweep_started_before,
-                test_persistence(),
+                QueuePersistenceContext::new(
+                    &ProviderKind::Claude,
+                    "sweeper-start-cutoff-test",
+                    None,
+                ),
             )
             .await;
 

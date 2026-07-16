@@ -612,7 +612,6 @@ mod stall_recovery_tests {
         WatcherStreamProgressPatch, WatcherTerminalCommitOutcome, WatcherTerminalCommitPatch,
         bind_status_panel_in_root, clear_current_msg_if_matches_in_root,
         clear_inflight_state_if_matches_identity_after_delivery_in_root,
-        clear_inflight_state_if_matches_identity_generation_in_root,
         clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
         clear_inflight_state_if_matches_tmux_response_in_root,
         clear_inflight_state_if_matches_zero_owned_in_root,
@@ -3663,15 +3662,16 @@ mod stall_recovery_tests {
         progressed.save_generation = observed.save_generation.saturating_add(1);
         force_write_state(temp.path(), &progressed);
 
-        let outcome = clear_inflight_state_if_matches_identity_generation_in_root(
-            temp.path(),
-            &ProviderKind::Claude,
-            observed.channel_id,
-            &InflightTurnIdentity::from_state(&observed),
-            observed.effective_finalizer_turn_id(),
-            &observed.updated_at,
-            observed.save_generation,
-        );
+        let outcome =
+            super::clear_store::clear_inflight_state_if_matches_identity_generation_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                observed.channel_id,
+                &InflightTurnIdentity::from_state(&observed),
+                observed.effective_finalizer_turn_id(),
+                &observed.updated_at,
+                observed.save_generation,
+            );
 
         assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
         let surviving = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
