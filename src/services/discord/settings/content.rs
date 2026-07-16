@@ -447,10 +447,7 @@ mod shared_prompt_profile_tests {
     fn unclosed_nonmatching_section_preserves_its_content() {
         let raw = "before\n<!-- profile: full -->\nUNFINISHED FULL\ntail\n";
         let out = strip_non_matching_profile_sections(raw, "headless");
-        assert_eq!(
-            out,
-            "before\n<!-- profile: full -->\nUNFINISHED FULL\ntail"
-        );
+        assert_eq!(out, "before\n<!-- profile: full -->\nUNFINISHED FULL\ntail");
     }
 
     #[test]

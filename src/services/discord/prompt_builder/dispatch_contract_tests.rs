@@ -30,8 +30,7 @@ fn build_prompt_with_optional_manifest_for(
         "tok",
         None,
         false,
-        DispatchProfile::Full,
-        SharedPromptProfile::Full,
+        PromptProfiles::foreground(DispatchProfile::Full),
         dispatch_type,
         current_task,
         None,
@@ -58,8 +57,7 @@ fn build_prompt_with_channel_recent_context(
         "tok",
         None,
         false,
-        DispatchProfile::Full,
-        SharedPromptProfile::Full,
+        PromptProfiles::foreground(DispatchProfile::Full),
         None,
         None,
         None,
@@ -319,8 +317,7 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
         "tok",
         Some(&binding),
         false,
-        DispatchProfile::Full,
-        SharedPromptProfile::Full,
+        PromptProfiles::foreground(DispatchProfile::Full),
         None,
         None,
         Some("[Shared Agent Knowledge]\nimportant invariant"),
@@ -585,8 +582,7 @@ fn build_prompt_manifest_includes_recovery_context_layer() {
         "tok",
         None,
         false,
-        DispatchProfile::Full,
-        SharedPromptProfile::Full,
+        PromptProfiles::foreground(DispatchProfile::Full),
         None,
         None,
         None,
@@ -1084,8 +1080,7 @@ fn build_codex_memento_prompt_for_issue_4309() -> BuiltSystemPrompt {
         "tok",
         None,
         false,
-        DispatchProfile::Full,
-        SharedPromptProfile::Full,
+        PromptProfiles::foreground(DispatchProfile::Full),
         None,
         None,
         None,
@@ -1215,8 +1210,7 @@ fn build_shared_prompt_profile_for_test(
         "tok",
         Some(binding),
         false,
-        profile,
-        shared_prompt_profile,
+        PromptProfiles::new(profile, shared_prompt_profile),
         (profile == DispatchProfile::ReviewLite).then_some("review"),
         None,
         shared_knowledge,
@@ -1247,8 +1241,7 @@ fn shared_prompt_gate_off_preserves_compact_rules_byte_for_byte() {
         "tok",
         Some(&binding),
         false,
-        DispatchProfile::Full,
-        SharedPromptProfile::Full,
+        PromptProfiles::foreground(DispatchProfile::Full),
         Some("implementation"),
         None,
         None,
@@ -1323,10 +1316,7 @@ fn shared_prompt_gate_on_selects_full_review_lite_and_headless_profiles() {
             DispatchProfile::Full,
             SharedPromptProfile::Headless,
             "HEADLESS PROFILE SENTINEL 4560",
-            [
-                "FULL PROFILE SENTINEL 4560",
-                "REVIEW PROFILE SENTINEL 4560",
-            ],
+            ["FULL PROFILE SENTINEL 4560", "REVIEW PROFILE SENTINEL 4560"],
         ),
     ] {
         let built = build_shared_prompt_profile_for_test(
@@ -1360,7 +1350,10 @@ fn shared_prompt_gate_on_selects_full_review_lite_and_headless_profiles() {
         }
         assert_eq!(built.system_prompt.matches(included).count(), 1);
         assert_eq!(
-            built.system_prompt.matches("[Shared Agent Rules]\n").count(),
+            built
+                .system_prompt
+                .matches("[Shared Agent Rules]\n")
+                .count(),
             1
         );
         assert_eq!(
@@ -1424,8 +1417,7 @@ fn file_backed_shared_rules_obey_prompt_section_dedupe() {
     std::fs::create_dir_all(shared_prompt_path.parent().expect("shared prompt parent"))
         .expect("create shared prompt parent");
     let shared_rules = "\n\n[Shared Agent Rules]\nDEDUPED FILE RULES 4560";
-    std::fs::write(&shared_prompt_path, "DEDUPED FILE RULES 4560\n")
-        .expect("write shared prompt");
+    std::fs::write(&shared_prompt_path, "DEDUPED FILE RULES 4560\n").expect("write shared prompt");
     let binding = test_role_binding("shared-prompt-dedupe-4560");
 
     let built = build_shared_prompt_profile_for_test(

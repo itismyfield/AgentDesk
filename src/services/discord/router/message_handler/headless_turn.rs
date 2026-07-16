@@ -1,4 +1,3 @@
-use super::super::super::prompt_builder::SharedPromptProfile;
 use super::*;
 
 /// #family-profile-probe: should this headless turn start from a FRESH provider
@@ -33,10 +32,6 @@ fn dm_fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         .get("execution_strategy")
         .and_then(|value| value.as_str())
         != Some("persistent")
-}
-
-const fn headless_shared_prompt_profile() -> SharedPromptProfile {
-    SharedPromptProfile::Headless
 }
 
 pub(in crate::services::discord) async fn start_headless_turn(
@@ -945,8 +940,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         token,
         role_binding.as_ref(),
         false,
-        dispatch_profile,
-        headless_shared_prompt_profile(),
+        PromptProfiles::headless(dispatch_profile),
         None,
         None,
         sak_for_system,
@@ -1391,6 +1385,12 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
 
 #[cfg(test)]
 mod recovery_context_take_order_tests {
+    use super::super::super::super::prompt_builder::{
+        DispatchProfile, PromptProfiles, build_system_prompt_with_manifest,
+    };
+    use super::super::super::super::settings::RoleBinding;
+    use poise::serenity_prelude::ChannelId;
+
     fn recovery_context_take_call() -> String {
         format!(
             "{}{}",
@@ -1468,23 +1468,9 @@ mod recovery_context_take_order_tests {
             "headless real turn must take recovery context before prompt manifest capture"
         );
     }
-}
-
-#[cfg(test)]
-mod headless_shared_prompt_profile_tests {
-    use super::headless_shared_prompt_profile;
-    use super::super::super::super::prompt_builder::{
-        DispatchProfile, SharedPromptProfile, build_system_prompt_with_manifest,
-    };
-    use super::super::super::super::settings::RoleBinding;
 
     #[test]
     fn actual_headless_assembly_selects_only_all_and_headless_shared_sections() {
-        assert_eq!(
-            headless_shared_prompt_profile(),
-            SharedPromptProfile::Headless
-        );
-
         let module_src = include_str!("headless_turn.rs");
         let builder_pos = module_src
             .find("let built_system_prompt = build_system_prompt_with_manifest(")
@@ -1494,8 +1480,8 @@ mod headless_shared_prompt_profile_tests {
             .find("\n    );")
             .expect("headless prompt assembly call closes");
         let builder_call = &builder_call[..call_end];
-        assert!(builder_call.contains("headless_shared_prompt_profile()"));
-        assert!(!builder_call.contains("SharedPromptProfile::Full"));
+        assert!(builder_call.contains("PromptProfiles::headless(dispatch_profile)"));
+        assert!(!builder_call.contains("PromptProfiles::foreground"));
 
         let runtime_root = tempfile::tempdir().expect("runtime root");
         let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
@@ -1527,13 +1513,12 @@ mod headless_shared_prompt_profile_tests {
             "ctx",
             &[],
             "/nonexistent-headless-workspace-4560",
-            serenity::ChannelId::new(1),
-            serenity::ChannelId::new(1),
+            ChannelId::new(1),
+            ChannelId::new(1),
             "tok",
             Some(&binding),
             false,
-            DispatchProfile::Full,
-            headless_shared_prompt_profile(),
+            PromptProfiles::headless(DispatchProfile::Full),
             None,
             None,
             None,

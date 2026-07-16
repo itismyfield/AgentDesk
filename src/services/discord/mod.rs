@@ -227,7 +227,7 @@ use tmux_reaper::{cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions};
 use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
 
 pub(crate) use crate::services::turn_orchestrator::has_soft_intervention_at;
-pub(crate) use prompt_builder::DispatchProfile;
+pub(crate) use prompt_builder::{DispatchProfile, PromptProfiles};
 pub(crate) use runtime_bootstrap::RunBotContext;
 pub(crate) use runtime_bootstrap::run_bot;
 

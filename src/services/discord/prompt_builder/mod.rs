@@ -104,7 +104,7 @@ pub(super) enum SharedPromptProfile {
 }
 
 impl SharedPromptProfile {
-    pub(super) const fn for_dispatch(profile: DispatchProfile) -> Self {
+    const fn for_dispatch(profile: DispatchProfile) -> Self {
         match profile {
             DispatchProfile::ReviewLite => Self::ReviewLite,
             DispatchProfile::Full | DispatchProfile::Lite => Self::Full,
@@ -117,6 +117,26 @@ impl SharedPromptProfile {
             Self::ReviewLite => "review-lite",
             Self::Headless => "headless",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PromptProfiles {
+    dispatch: DispatchProfile,
+    shared: SharedPromptProfile,
+}
+
+impl PromptProfiles {
+    const fn new(dispatch: DispatchProfile, shared: SharedPromptProfile) -> Self {
+        Self { dispatch, shared }
+    }
+
+    pub(super) const fn foreground(dispatch: DispatchProfile) -> Self {
+        Self::new(dispatch, SharedPromptProfile::for_dispatch(dispatch))
+    }
+
+    pub(super) const fn headless(dispatch: DispatchProfile) -> Self {
+        Self::new(dispatch, SharedPromptProfile::Headless)
     }
 }
 
@@ -149,8 +169,7 @@ pub(super) fn build_system_prompt(
         token,
         role_binding,
         queued_turn,
-        profile,
-        SharedPromptProfile::for_dispatch(profile),
+        PromptProfiles::foreground(profile),
         dispatch_type,
         current_task,
         shared_knowledge,
@@ -175,8 +194,7 @@ pub(super) fn build_system_prompt_with_manifest(
     token: &str,
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
-    profile: DispatchProfile,
-    shared_prompt_profile: SharedPromptProfile,
+    profiles: PromptProfiles,
     dispatch_type: Option<&str>,
     current_task: Option<&CurrentTaskContext<'_>>,
     shared_knowledge: Option<&str>,
@@ -189,6 +207,10 @@ pub(super) fn build_system_prompt_with_manifest(
     memory_recall_manifest: Option<&MemoryRecallManifestInput<'_>>,
     turn_id: Option<&str>,
 ) -> BuiltSystemPrompt {
+    let PromptProfiles {
+        dispatch: profile,
+        shared: shared_prompt_profile,
+    } = profiles;
     let mut prompt_manifest_layers = Vec::new();
     // Issue #2659: track per-build appendages so identical large content
     // (SAK / longterm_catalog / future skill listings) is never pushed
