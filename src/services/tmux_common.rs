@@ -643,7 +643,8 @@ fn line_is_mcp_auth_required_warning(line: &str) -> bool {
 }
 
 fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
-    tmux_recent_lines_show_claude_tui_interrupt_chrome(lines)
+    let forward = lines.iter().rev().copied().collect::<Vec<_>>();
+    tmux_recent_lines_show_claude_tui_interrupt_chrome(&forward)
         || lines.iter().any(|line| {
             let line = trim_prompt_line(line);
             let lower = line.to_ascii_lowercase();
@@ -2153,20 +2154,23 @@ earlier assistant prose
                 "live early or duration spinner must be recognized: {line}"
             );
         }
-        let stale_prompt_busy_pane = "\
+        let live_early_spinner_with_stale_prompt = "\
 · Thinking…
 ────────────────────────────────────────────────────
 ❯
 ────────────────────────────────────────────────────
   🤖 Opus(H) │ 7% │ MCP: 2";
         assert!(tmux_capture_indicates_claude_tui_ready_for_input(
-            stale_prompt_busy_pane
+            live_early_spinner_with_stale_prompt
         ));
         assert!(tmux_capture_indicates_claude_tui_busy(
-            stale_prompt_busy_pane
+            live_early_spinner_with_stale_prompt
         ));
+    }
 
-        let wrapped_spinner_pane = "\
+    #[test]
+    fn wrapped_interrupt_tail_requires_adjacent_open_spinner_head() {
+        let live_wrapped_spinner = "\
 ✳ Beboppin'… (12s · ↓ 1.2k tokens ·
 esc to interrupt)
 ────────────────────────────────────────────────────
@@ -2174,11 +2178,11 @@ esc to interrupt)
 ────────────────────────────────────────────────────
   🤖 Opus(H) │ 7% │ MCP: 2";
         assert!(!tmux_capture_indicates_claude_tui_ready_for_input(
-            wrapped_spinner_pane
+            live_wrapped_spinner
         ));
-        assert!(tmux_capture_indicates_claude_tui_busy(wrapped_spinner_pane));
+        assert!(tmux_capture_indicates_claude_tui_busy(live_wrapped_spinner));
 
-        let stale_wrapped_tail = "\
+        let stale_isolated_wrapped_tail = "\
 ⏺ completed response
 ✻ Baked for 2s
 esc to interrupt)
@@ -2187,9 +2191,11 @@ esc to interrupt)
 ────────────────────────────────────────────────────
   🤖 Opus(H) │ 7% │ MCP: 2 │ Tools: 1 done";
         assert!(tmux_capture_indicates_claude_tui_ready_for_input(
-            stale_wrapped_tail
+            stale_isolated_wrapped_tail
         ));
-        assert!(!tmux_capture_indicates_claude_tui_busy(stale_wrapped_tail));
+        assert!(!tmux_capture_indicates_claude_tui_busy(
+            stale_isolated_wrapped_tail
+        ));
     }
 
     #[test]
