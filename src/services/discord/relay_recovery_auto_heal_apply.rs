@@ -655,26 +655,32 @@ mod tests {
             let channel = ChannelId::new(4_423_301);
 
             start_turn(&shared, channel, 4_423_311).await;
-            let first = auto_apply_relay_recovery_for_shared(
+            let after_admission_grace_ms = chrono::Utc::now().timestamp_millis()
+                + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64;
+            let first = auto_apply_relay_recovery_for_shared_at(
                 &registry,
                 shared.clone(),
                 &provider,
                 channel.get(),
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
                 RelayRecoveryApplySource::ProbeAutoHeal,
+                after_admission_grace_ms,
             )
             .await
             .expect("first probe apply");
             assert!(first.applied);
 
             start_turn(&shared, channel, 4_423_312).await;
-            let blocked_probe = auto_apply_relay_recovery_for_shared(
+            let after_admission_grace_ms = chrono::Utc::now().timestamp_millis()
+                + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64;
+            let blocked_probe = auto_apply_relay_recovery_for_shared_at(
                 &registry,
                 shared.clone(),
                 &provider,
                 channel.get(),
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
                 RelayRecoveryApplySource::ProbeAutoHeal,
+                after_admission_grace_ms,
             )
             .await
             .expect("exhausted probe apply");
@@ -684,13 +690,14 @@ mod tests {
                 Some("auto_heal_rate_limited")
             );
 
-            let manual = auto_apply_relay_recovery_for_shared(
+            let manual = auto_apply_relay_recovery_for_shared_at(
                 &registry,
                 shared,
                 &provider,
                 channel.get(),
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
                 RelayRecoveryApplySource::Manual,
+                after_admission_grace_ms,
             )
             .await
             .expect("manual apply after probe exhaustion");
