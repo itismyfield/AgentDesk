@@ -7,7 +7,6 @@ use std::{collections::HashSet, path::PathBuf};
 use super::action::RoutineAction;
 use super::agent_executor::RoutineAgentExecutor;
 use super::discord_log::RoutineDiscordLogger;
-use super::fresh_context_guaranteed;
 use super::loader::{
     MAX_AUTOMATION_INVENTORY_ITEMS, MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES,
     MAX_OBSERVATION_PAYLOAD_BYTES, MAX_OBSERVATIONS_PER_TICK, ObservationLimits,
@@ -157,7 +156,7 @@ pub async fn execute_claimed_script_run(
     claimed: ClaimedRoutineRun,
     pause_on_terminal_failure: bool,
 ) -> Result<Option<RoutineRunOutcome>> {
-    let fresh_context_guaranteed = fresh_context_guaranteed(&claimed.execution_strategy);
+    let fresh_context_guaranteed = pre_provider_fresh_context_guaranteed();
     let agent = load_tick_agent_context(store, claimed.agent_id.as_deref()).await?;
     let observations = match store
         .fetch_recent_run_observations(
@@ -282,7 +281,7 @@ pub async fn execute_claimed_script_run(
                 status: "failed".to_string(),
                 result_json,
                 error: Some(message),
-                fresh_context_guaranteed,
+                fresh_context_guaranteed: pre_provider_fresh_context_guaranteed(),
             }));
         }
     };
@@ -304,7 +303,6 @@ pub async fn execute_claimed_script_run(
         agent_executor,
         claimed,
         action,
-        fresh_context_guaranteed,
         pause_on_terminal_failure,
     )
     .await
@@ -624,12 +622,15 @@ async fn load_tick_agent_context(
     }))
 }
 
+fn pre_provider_fresh_context_guaranteed() -> bool {
+    false
+}
+
 async fn close_action(
     store: &RoutineStore,
     agent_executor: Option<&RoutineAgentExecutor>,
     claimed: ClaimedRoutineRun,
     action: RoutineAction,
-    fresh_context_guaranteed: bool,
     pause_on_terminal_failure: bool,
 ) -> Result<Option<RoutineRunOutcome>> {
     let action_name = action.action_name().to_string();
@@ -667,7 +668,7 @@ async fn close_action(
                 status: "succeeded".to_string(),
                 result_json,
                 error: None,
-                fresh_context_guaranteed,
+                fresh_context_guaranteed: pre_provider_fresh_context_guaranteed(),
             }))
         }
         RoutineAction::Skip {
@@ -706,7 +707,7 @@ async fn close_action(
                 status: "skipped".to_string(),
                 result_json,
                 error: None,
-                fresh_context_guaranteed,
+                fresh_context_guaranteed: pre_provider_fresh_context_guaranteed(),
             }))
         }
         RoutineAction::Pause {
@@ -743,7 +744,7 @@ async fn close_action(
                 status: "paused".to_string(),
                 result_json,
                 error: None,
-                fresh_context_guaranteed,
+                fresh_context_guaranteed: pre_provider_fresh_context_guaranteed(),
             }))
         }
         RoutineAction::Agent {
@@ -757,7 +758,7 @@ async fn close_action(
                 let message = "RoutineAction.agent requires RoutineAgentExecutor";
                 let result_json = Some(json!({
                     "error": message,
-                    "fresh_context_guaranteed": fresh_context_guaranteed,
+                    "fresh_context_guaranteed": pre_provider_fresh_context_guaranteed(),
                 }));
                 let closed = store
                     .fail_agent_run(&claimed.run_id, message, result_json.clone(), None)
@@ -773,7 +774,7 @@ async fn close_action(
                     status: "failed".to_string(),
                     result_json,
                     error: Some(message.to_string()),
-                    fresh_context_guaranteed,
+                    fresh_context_guaranteed: pre_provider_fresh_context_guaranteed(),
                 }));
             };
             agent_executor
@@ -876,9 +877,14 @@ mod tests {
 
     use super::{
         action_detail, merge_loaded_script_automation_inventory,
-        validate_claimed_migrated_launchd_run,
+        pre_provider_fresh_context_guaranteed, validate_claimed_migrated_launchd_run,
     };
     use crate::services::routines::{RoutineAction, RoutineScriptLoader, store::ClaimedRoutineRun};
+
+    #[test]
+    fn pre_provider_paths_cannot_claim_fresh_context() {
+        assert!(!pre_provider_fresh_context_guaranteed());
+    }
 
     #[test]
     fn loaded_script_refs_extend_automation_inventory_as_implemented_prefixes() {

@@ -2386,6 +2386,32 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn confirm_agent_turn_started(
+        &self,
+        run_id: &str,
+        turn_id: &str,
+        result_json: Value,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE routine_runs
+            SET result_json = $3,
+                updated_at = NOW()
+            WHERE id = $1
+              AND turn_id = $2
+              AND status = 'running'
+            "#,
+        )
+        .bind(run_id)
+        .bind(turn_id)
+        .bind(result_json)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("confirm routine agent turn started {run_id}: {e}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn schedule_agent_retry(
         &self,
         run_id: &str,

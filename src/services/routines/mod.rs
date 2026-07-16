@@ -32,8 +32,11 @@ pub use store::{
     is_resume_routine_requires_next_due_at, validate_routine_schedule,
 };
 
-pub(crate) fn fresh_context_guaranteed(execution_strategy: &str) -> bool {
-    execution_strategy == "fresh"
+pub(crate) fn fresh_context_guaranteed(
+    execution_strategy: &str,
+    provider_turn_started: bool,
+) -> bool {
+    provider_turn_started && execution_strategy == "fresh"
 }
 
 #[cfg(test)]
@@ -41,8 +44,9 @@ mod tests {
     use super::fresh_context_guaranteed;
 
     #[test]
-    fn fresh_context_guarantee_follows_execution_strategy() {
-        assert!(fresh_context_guaranteed("fresh"));
-        assert!(!fresh_context_guaranteed("persistent"));
+    fn fresh_context_guarantee_requires_verified_provider_start() {
+        assert!(!fresh_context_guaranteed("fresh", false));
+        assert!(fresh_context_guaranteed("fresh", true));
+        assert!(!fresh_context_guaranteed("persistent", true));
     }
 }

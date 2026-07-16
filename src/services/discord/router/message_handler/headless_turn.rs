@@ -1,22 +1,33 @@
 use super::*;
 
+fn valid_routine_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<&serde_json::Value> {
+    let metadata = metadata?;
+    metadata
+        .get("routine_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(metadata)
+}
+
+fn routine_metadata_agent_id(metadata: Option<&serde_json::Value>) -> Option<&str> {
+    valid_routine_metadata(metadata)?
+        .get("agent_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Whether an explicit routine turn must sever provider and transcript continuity.
 /// Only `persistent` routines retain continuity; absent strategy preserves the
 /// legacy routine default of `fresh`. Non-routine metadata must never reset a
 /// provider session.
 fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
-    let Some(metadata) = metadata else {
+    let Some(metadata) = valid_routine_metadata(metadata) else {
         return false;
     };
-    if metadata
-        .get("routine_id")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        return false;
-    }
     metadata
         .get("execution_strategy")
         .and_then(|value| value.as_str())
@@ -90,13 +101,8 @@ fn routine_metadata_role_binding(
     metadata: Option<&serde_json::Value>,
     provider: &ProviderKind,
 ) -> Option<settings::RoleBinding> {
-    let metadata = metadata?;
-    metadata.get("routine_id")?;
-    let agent_id = metadata
-        .get("agent_id")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+    let metadata = valid_routine_metadata(metadata)?;
+    let agent_id = routine_metadata_agent_id(Some(metadata))?;
     // Resolve the agent's configured prompt path instead of hardcoding
     // IDENTITY.md under config/agents: `default_prompt_path` reads the managed
     // agents root and falls back to the legacy `<id>.prompt.md` layout, so
@@ -283,13 +289,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     let fresh_routine = fresh_routine_turn(metadata.as_ref());
     let (mut session_id, mut memento_context_loaded, mut current_path) = {
         let mut data = shared.core.lock().await;
-        // Defense: pre-clear the in-memory per-channel session before load so no
-        // stale resume id flows through the load bookkeeping. The authoritative
-        // clear (in-memory + DB + stale id) is `clear_codex_goal_start_provider_
-        // session` further down, gated on the same `fresh_routine`.
-        if fresh_routine && let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.clear_provider_session();
-        }
         if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
             // Existing sessions retain their child-channel runtime identity.
             if let Some(channel_name) = resolved_channel_name_for_session.as_ref()
@@ -417,23 +416,14 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         .as_ref()
         .and_then(|binding| binding.provider.clone())
         .unwrap_or(settings_provider);
-    let routine_metadata_agent_id = metadata
-        .as_ref()
-        .and_then(|value| value.get("agent_id"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let routine_targets_resolved_role = metadata
-        .as_ref()
-        .and_then(|value| value.get("routine_id"))
-        .is_some()
-        && routine_metadata_agent_id
-            .zip(
-                role_binding
-                    .as_ref()
-                    .map(|binding| binding.role_id.as_str()),
-            )
-            .is_some_and(|(metadata_agent_id, role_id)| metadata_agent_id == role_id);
+    let routine_metadata_agent_id = routine_metadata_agent_id(metadata.as_ref());
+    let routine_targets_resolved_role = routine_metadata_agent_id
+        .zip(
+            role_binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
+        )
+        .is_some_and(|(metadata_agent_id, role_id)| metadata_agent_id == role_id);
     let routine_agent_identity_changed = if routine_targets_resolved_role {
         if let Some(channel_name_hint) = channel_name_hint
             .as_ref()
@@ -556,10 +546,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         (channel_name, tmux_session_name, category_name)
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
-    if metadata
-        .as_ref()
-        .and_then(|value| value.get("routine_id"))
-        .is_some()
+    if valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
             shared.pg_pool.as_ref(),
             role_binding.as_ref(),
@@ -1620,7 +1607,8 @@ mod headless_hard_ceiling_tests {
 
 #[cfg(test)]
 mod fresh_routine_tests {
-    use super::fresh_routine_turn;
+    use super::{fresh_routine_turn, routine_metadata_agent_id, routine_metadata_role_binding};
+    use crate::services::provider::ProviderKind;
     use serde_json::json;
 
     #[test]
@@ -1658,24 +1646,39 @@ mod fresh_routine_tests {
     }
 
     #[test]
-    fn non_routine_metadata_never_resets_provider_session() {
-        assert!(!fresh_routine_turn(Some(&json!({
-            "is_dm": true,
-            "execution_strategy": "fresh"
-        }))));
-        assert!(!fresh_routine_turn(Some(&json!({
-            "routine_id": " ",
-            "execution_strategy": "fresh"
-        }))));
+    fn malformed_routine_metadata_cannot_enter_routine_paths() {
+        for metadata in [
+            json!({ "agent_id": "other-agent", "execution_strategy": "fresh" }),
+            json!({ "routine_id": null, "agent_id": "other-agent" }),
+            json!({ "routine_id": 7, "agent_id": "other-agent" }),
+            json!({ "routine_id": " ", "agent_id": "other-agent" }),
+        ] {
+            assert!(!fresh_routine_turn(Some(&metadata)));
+            assert!(routine_metadata_agent_id(Some(&metadata)).is_none());
+            assert!(
+                routine_metadata_role_binding(Some(&metadata), &ProviderKind::Claude).is_none()
+            );
+        }
         assert!(!fresh_routine_turn(None));
     }
 
     #[test]
     fn fresh_routine_path_records_durable_boundary_before_provider_clear() {
         let module_src = include_str!("headless_turn.rs");
-        let branch = module_src
+        let policy = module_src
+            .find("let fresh_routine = fresh_routine_turn(metadata.as_ref());")
+            .expect("fresh routine policy is computed at turn start");
+        let branch = module_src[policy..]
             .find("if (goal_fresh || fresh_routine)")
+            .map(|offset| policy + offset)
             .expect("fresh routine/goal durable-boundary branch exists");
+        let before_boundary = &module_src[policy..branch];
+        assert!(
+            !before_boundary.contains("if fresh_routine")
+                || !before_boundary.contains("clear_provider_session()"),
+            "fresh routine state must not be cleared before its durable boundary"
+        );
+
         let branch_body = &module_src[branch..];
         let boundary_call = format!("{}{}", "record_fresh_session_", "context_boundary(");
         let boundary = branch_body
