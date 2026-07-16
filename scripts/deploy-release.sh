@@ -116,7 +116,7 @@ POLICIES_STAGED=""
 LAUNCHD_MIGRATED_STAGED=""
 RELEASE_ROOT_SCRIPTS_STAGED=""
 PG_TUNNEL_PREFLIGHT_PID=""
-PG_TUNNEL_PREFLIGHT_DSN_FILE=""
+PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=""
 PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
 PG_TUNNEL_ROLLBACK_ARMED=0
 PG_TUNNEL_ROLLBACK_DIR=""
@@ -841,52 +841,93 @@ _cleanup_owned_pg_tunnel_preflight() {
         wait "$pid" 2>/dev/null || true
     fi
     PG_TUNNEL_PREFLIGHT_PID=""
-    [ -z "${PG_TUNNEL_PREFLIGHT_DSN_FILE:-}" ] || rm -f "$PG_TUNNEL_PREFLIGHT_DSN_FILE" 2>/dev/null || true
+    [ -z "${PG_TUNNEL_PREFLIGHT_CONNINFO_DIR:-}" ] || rm -rf "$PG_TUNNEL_PREFLIGHT_CONNINFO_DIR" 2>/dev/null || true
     [ -z "${PG_TUNNEL_PREFLIGHT_PASSWORD_FILE:-}" ] || rm -f "$PG_TUNNEL_PREFLIGHT_PASSWORD_FILE" 2>/dev/null || true
-    PG_TUNNEL_PREFLIGHT_DSN_FILE=""
+    PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=""
     PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
+}
+
+_reset_pg_tunnel_rollback_state() {
+    PG_TUNNEL_ROLLBACK_ARMED=0
+    PG_TUNNEL_ROLLBACK_DIR=""
+    PG_TUNNEL_ROLLBACK_JOB_LOADED=0
+    PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
+    PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
+    PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
 }
 
 _rollback_pg_tunnel_migration() {
     local domain="${PG_TUNNEL_LAUNCHD_DOMAIN:-}" bin="${PG_TUNNEL_BIN:-}"
     local plist="${PG_TUNNEL_PLIST_PATH:-}" backup="${PG_TUNNEL_ROLLBACK_DIR:-}"
+    local restore_ok=1
     [ "${PG_TUNNEL_ROLLBACK_ARMED:-0}" = 1 ] || return 0
-    [ -n "$domain" ] && [ -n "$bin" ] && [ -n "$plist" ] && [ -n "$backup" ] || return 0
+    if [ -z "$domain" ] || [ -z "$bin" ] || [ -z "$plist" ] || [ -z "$backup" ]; then
+        echo "✗ PG tunnel rollback state is incomplete; recovery material retained at ${backup:-unknown}" >&2
+        return 1
+    fi
 
     echo "↩ Restoring previous PG tunnel state..." >&2
     launchctl bootout "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null || true
     if [ -e "$backup/wrapper" ]; then
-        install -m 0755 "$backup/wrapper" "$bin" 2>/dev/null || true
-    else
-        rm -f "$bin" 2>/dev/null || true
+        if ! install -m 0755 "$backup/wrapper" "$bin" 2>/dev/null; then
+            echo "✗ Failed to restore PG tunnel wrapper" >&2
+            restore_ok=0
+        fi
+    elif ! rm -f "$bin" 2>/dev/null; then
+        echo "✗ Failed to remove newly installed PG tunnel wrapper" >&2
+        restore_ok=0
     fi
     if [ -e "$backup/plist" ]; then
-        cp -p "$backup/plist" "$plist.tmp" 2>/dev/null \
-            && mv -f "$plist.tmp" "$plist" 2>/dev/null || true
-    else
-        rm -f "$plist" "$plist.tmp" 2>/dev/null || true
+        if ! cp -p "$backup/plist" "$plist.tmp" 2>/dev/null \
+          || ! mv -f "$plist.tmp" "$plist" 2>/dev/null; then
+            echo "✗ Failed to restore PG tunnel launchd plist" >&2
+            restore_ok=0
+        fi
+    elif ! rm -f "$plist" "$plist.tmp" 2>/dev/null; then
+        echo "✗ Failed to remove newly installed PG tunnel launchd plist" >&2
+        restore_ok=0
     fi
-    if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ] && [ -f "$plist" ]; then
-        launchctl bootstrap "$domain" "$plist" 2>/dev/null || true
-    elif [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ] \
-      && [ -x "${PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE:-}" ] \
-      && [ -r "${PG_TUNNEL_ROLLBACK_MANUAL_CONFIG:-}" ]; then
-        "$PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE" --restore-canonical \
-            "$PG_TUNNEL_ROLLBACK_MANUAL_CONFIG" \
-            "$PG_TUNNEL_ROLLBACK_MANUAL_KIND" >/dev/null 2>&1 || true
+
+    if [ "$restore_ok" = 1 ]; then
+        if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ]; then
+            if [ ! -f "$plist" ] || ! launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+                echo "✗ Failed to restart previous PG tunnel launchd job" >&2
+                restore_ok=0
+            fi
+        elif [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ]; then
+            if [ ! -x "${PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE:-}" ] \
+              || [ ! -r "${PG_TUNNEL_ROLLBACK_MANUAL_CONFIG:-}" ] \
+              || ! "$PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE" --restore-canonical \
+                    "$PG_TUNNEL_ROLLBACK_MANUAL_CONFIG" \
+                    "$PG_TUNNEL_ROLLBACK_MANUAL_KIND" >/dev/null 2>&1; then
+                echo "✗ Failed to restart previous manual PG tunnel" >&2
+                restore_ok=0
+            fi
+        fi
     fi
-    PG_TUNNEL_ROLLBACK_ARMED=0
-    rm -rf "$backup" 2>/dev/null || true
-    PG_TUNNEL_ROLLBACK_DIR=""
-    PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
-    PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
+
+    if [ "$restore_ok" = 1 ]; then
+        if _pg_sql_probe 15432; then
+            if rm -rf "$backup" 2>/dev/null; then
+                _reset_pg_tunnel_rollback_state
+                echo "✓ Previous PG tunnel state restored and SQL-ready" >&2
+                return 0
+            fi
+            echo "✗ Previous PG tunnel is SQL-ready but rollback backup cleanup failed" >&2
+        else
+            echo "✗ Restored PG tunnel did not become SQL-ready on :15432" >&2
+        fi
+    fi
+    echo "⚠ PG tunnel rollback incomplete; recovery material retained at $backup" >&2
+    return 1
 }
 
 _cleanup_on_exit() {
-    local status=$?
+    local status=${1:-$?}
+    trap - EXIT INT TERM
     _cleanup_owned_pg_tunnel_preflight
     if [ "$status" -ne 0 ]; then
-        _rollback_pg_tunnel_migration
+        _rollback_pg_tunnel_migration || true
     fi
     # #3858: if the binary was promoted (ROLLBACK_ARMED) but the deploy never
     # reached DEPLOY_OK, restore the last-known-good binary and restart BEFORE the
@@ -914,7 +955,15 @@ _cleanup_on_exit() {
     _finalize_detached_helper "$status"
 }
 
+_handle_cleanup_signal() {
+    local status=$1
+    _cleanup_on_exit "$status"
+    exit "$status"
+}
+
 trap _cleanup_on_exit EXIT
+trap '_handle_cleanup_signal 130' INT
+trap '_handle_cleanup_signal 143' TERM
 
 _self_hosted_release_session() {
     [ "$DEPLOY_DETACHED_CHILD" != "1" ] || return 1
@@ -1610,86 +1659,159 @@ PLIST_EOF
 }
 
 _pg_write_probe_conninfo() {
-    local local_port=$1 output=$2 password_output=$3
+    local local_port=$1 output_dir=$2 password_output=$3
     local config_path="$ADK_REL/config/agentdesk.yaml"
     command -v ruby >/dev/null 2>&1 || return 1
     if [ -n "${DATABASE_URL:-}" ]; then
-        DATABASE_URL="$DATABASE_URL" ruby -ruri - "$local_port" "$output" "$password_output" \
+        DATABASE_URL="$DATABASE_URL" ruby -ruri - "$local_port" "$output_dir" "$password_output" \
             2>/dev/null <<'RUBY'
-port, output, password_output = ARGV
+port, output_dir, password_output = ARGV
 uri = URI.parse(ENV.fetch("DATABASE_URL"))
 raise "unsupported database URL scheme" unless %w[postgres postgresql].include?(uri.scheme)
-password = URI::DEFAULT_PARSER.unescape(uri.password) if uri.password
-uri.password = nil if password
-if uri.query
-  query = URI.decode_www_form(uri.query)
-  query.reject! do |key, value|
-    case key
-    when "password"
-      password = value
-      true
-    when "host", "hostaddr", "port"
-      true
-    else
-      false
-    end
+decode = ->(value) { URI::DEFAULT_PARSER.unescape(value.to_s) }
+user = decode.call(uri.user)
+name = decode.call(uri.path.to_s.sub(%r{\A/}, ""))
+password = decode.call(uri.password) if uri.password
+option_env = {
+  "application_name" => "PGAPPNAME",
+  "channel_binding" => "PGCHANNELBINDING",
+  "client_encoding" => "PGCLIENTENCODING",
+  "connect_timeout" => "PGCONNECT_TIMEOUT",
+  "fallback_application_name" => "PGAPPNAME",
+  "gssencmode" => "PGGSSENCMODE",
+  "keepalives" => "PGKEEPALIVES",
+  "keepalives_count" => "PGKEEPALIVESCOUNT",
+  "keepalives_idle" => "PGKEEPALIVESIDLE",
+  "keepalives_interval" => "PGKEEPALIVESINTERVAL",
+  "krbsrvname" => "PGKRBSRVNAME",
+  "options" => "PGOPTIONS",
+  "require_auth" => "PGREQUIREAUTH",
+  "sslcert" => "PGSSLCERT",
+  "sslcrl" => "PGSSLCRL",
+  "sslcrldir" => "PGSSLCRLDIR",
+  "sslkey" => "PGSSLKEY",
+  "sslmode" => "PGSSLMODE",
+  "sslrootcert" => "PGSSLROOTCERT",
+  "ssl_max_protocol_version" => "PGSSLMAXPROTOCOLVERSION",
+  "ssl_min_protocol_version" => "PGSSLMINPROTOCOLVERSION",
+  "target_session_attrs" => "PGTARGETSESSIONATTRS",
+  "tcp_user_timeout" => "PGTCPUSER_TIMEOUT"
+}
+fields = {}
+URI.decode_www_form(uri.query.to_s).each do |key, value|
+  case key
+  when "password"
+    password = value
+  when "user"
+    user = value
+  when "dbname"
+    name = value
+  when "host", "hostaddr", "port"
+    next
+  else
+    env_name = option_env[key]
+    fields[env_name] = value if env_name
   end
-  uri.query = query.empty? ? nil : URI.encode_www_form(query)
 end
-uri.host = "127.0.0.1"
-uri.port = Integer(port, 10)
-File.open(output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(uri.to_s) }
+raise "database user or name missing" if user.empty? || name.empty?
+fields.merge!("PGHOST" => "127.0.0.1", "PGPORT" => Integer(port, 10).to_s,
+              "PGUSER" => user, "PGDATABASE" => name)
+raise "NUL is not allowed in PostgreSQL settings" if fields.values.any? { |value| value.include?("\0") }
+fields.each do |env_name, value|
+  File.open(File.join(output_dir, env_name), File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+    file.write(value)
+  end
+end
 if password
-  escaped = password.gsub("\\", "\\\\").gsub(":", "\\:")
+  raise "NUL is not allowed in PostgreSQL password" if password.include?("\0")
+  escape = ->(value) { value.to_s.gsub("\\", "\\\\").gsub(":", "\\:") }
   File.open(password_output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
-    file.write("127.0.0.1:#{port}:*:*:#{escaped}\n")
+    file.write(["127.0.0.1", port, name, user, password].map { |value| escape.call(value) }.join(":") + "\n")
   end
 end
 RUBY
         return
     fi
     [ -r "$config_path" ] || return 1
-    ruby -ryaml -ruri - "$config_path" "$local_port" "$output" "$password_output" \
+    ruby -ryaml - "$config_path" "$local_port" "$output_dir" "$password_output" \
         2>/dev/null <<'RUBY'
-config_path, port, output, password_output = ARGV
-config = YAML.safe_load_file(config_path, aliases: true) || {}
+config_path, port, output_dir, password_output = ARGV
+config = YAML.safe_load(File.read(config_path), aliases: true) || {}
 db = config.fetch("database", {})
 raise "database disabled" unless db["enabled"] == true
 user = db.fetch("user").to_s
 name = db.fetch("dbname").to_s
 raise "database user or name missing" if user.empty? || name.empty?
-uri = URI::Generic.build(
-  scheme: "postgresql", userinfo: URI.encode_www_form_component(user),
-  host: "127.0.0.1", port: Integer(port, 10), path: "/#{URI.encode_www_form_component(name)}"
-)
-File.open(output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(uri.to_s) }
+fields = { "PGHOST" => "127.0.0.1", "PGPORT" => Integer(port, 10).to_s,
+           "PGUSER" => user, "PGDATABASE" => name }
+raise "NUL is not allowed in PostgreSQL settings" if fields.values.any? { |value| value.include?("\0") }
+fields.each do |env_name, value|
+  File.open(File.join(output_dir, env_name), File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+    file.write(value)
+  end
+end
 if db.key?("password") && !db["password"].nil?
-  escaped = db["password"].to_s.gsub("\\", "\\\\").gsub(":", "\\:")
+  password = db["password"].to_s
+  raise "NUL is not allowed in PostgreSQL password" if password.include?("\0")
+  escape = ->(value) { value.to_s.gsub("\\", "\\\\").gsub(":", "\\:") }
   File.open(password_output, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
-    file.write("127.0.0.1:#{port}:*:*:#{escaped}\n")
+    file.write(["127.0.0.1", port, name, user, password].map { |value| escape.call(value) }.join(":") + "\n")
   end
 end
 RUBY
 }
 
 _pg_sql_probe() {
-    local local_port=$1 conninfo_file password_file attempt=0
-    local -a psql_env=(env)
+    local local_port=$1 conninfo_dir password_file attempt=0 name value
+    local -a psql_env=(env -u DATABASE_URL)
+    local -a clear_names=(
+        PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE
+        PGGSSENCMODE PGHOST PGHOSTADDR PGKEEPALIVES PGKEEPALIVESCOUNT
+        PGKEEPALIVESIDLE PGKEEPALIVESINTERVAL PGKRBSRVNAME PGLOADBALANCEHOSTS
+        PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH PGSERVICE
+        PGSERVICEFILE PGSSLCERT PGSSLCRL PGSSLCRLDIR PGSSLKEY
+        PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE
+        PGSSLNEGOTIATION PGSSLROOTCERT PGTARGETSESSIONATTRS PGTCPUSER_TIMEOUT
+        PGUSER
+    )
+    local -a conninfo_names=(
+        PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT
+        PGGSSENCMODE PGHOST PGKEEPALIVES PGKEEPALIVESCOUNT PGKEEPALIVESIDLE
+        PGKEEPALIVESINTERVAL PGKRBSRVNAME PGOPTIONS PGPORT PGREQUIREAUTH
+        PGSSLCERT PGSSLCRL PGSSLCRLDIR PGSSLKEY PGSSLMAXPROTOCOLVERSION
+        PGSSLMINPROTOCOLVERSION PGSSLMODE PGSSLROOTCERT PGTARGETSESSIONATTRS
+        PGTCPUSER_TIMEOUT PGUSER PGDATABASE
+    )
     command -v psql >/dev/null 2>&1 || return 1
-    conninfo_file=$(mktemp "${TMPDIR:-/tmp}/agentdesk-pg-probe.XXXXXX") || return 1
-    password_file=$(mktemp "${TMPDIR:-/tmp}/agentdesk-pgpass.XXXXXX") || return 1
-    PG_TUNNEL_PREFLIGHT_DSN_FILE="$conninfo_file"
+    for name in "${clear_names[@]}"; do
+        psql_env+=(-u "$name")
+    done
+    conninfo_dir=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-pg-probe.XXXXXX") || return 1
+    PG_TUNNEL_PREFLIGHT_CONNINFO_DIR="$conninfo_dir"
+    if ! password_file=$(mktemp "${TMPDIR:-/tmp}/agentdesk-pgpass.XXXXXX"); then
+        rm -rf "$conninfo_dir" 2>/dev/null || true
+        PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=""
+        return 1
+    fi
     PG_TUNNEL_PREFLIGHT_PASSWORD_FILE="$password_file"
-    chmod 600 "$conninfo_file" "$password_file" || return 1
-    _pg_write_probe_conninfo "$local_port" "$conninfo_file" "$password_file" || return 1
+    chmod 700 "$conninfo_dir" || return 1
+    chmod 600 "$password_file" || return 1
+    _pg_write_probe_conninfo "$local_port" "$conninfo_dir" "$password_file" || return 1
+    for name in "${conninfo_names[@]}"; do
+        if [ -f "$conninfo_dir/$name" ]; then
+            value=$(<"$conninfo_dir/$name")
+            psql_env+=("$name=$value")
+        fi
+    done
     if [ -s "$password_file" ]; then
-        psql_env=(env PGPASSFILE="$password_file")
+        psql_env+=("PGPASSFILE=$password_file")
     fi
     while [ "$attempt" -lt 20 ]; do
-        if PGDATABASE="$(<"$conninfo_file")" "${psql_env[@]}" psql --no-psqlrc \
+        if "${psql_env[@]}" psql --no-psqlrc \
           -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' >/dev/null 2>&1; then
-            rm -f "$conninfo_file" "$password_file"
-            PG_TUNNEL_PREFLIGHT_DSN_FILE=""
+            rm -rf "$conninfo_dir"
+            rm -f "$password_file"
+            PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=""
             PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
             return 0
         fi
@@ -1725,19 +1847,52 @@ _migrate_pg_tunnel_before_release_stop() {
     _cleanup_owned_pg_tunnel_preflight
 
     PG_TUNNEL_ROLLBACK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-pg-rollback.XXXXXX") || return 1
-    PG_TUNNEL_ROLLBACK_ARMED=1
+    if [ -e "$PG_TUNNEL_BIN" ] \
+      && ! cp -p "$PG_TUNNEL_BIN" "$PG_TUNNEL_ROLLBACK_DIR/wrapper"; then
+        echo "✗ Failed to snapshot existing PG tunnel wrapper"
+        rm -rf "$PG_TUNNEL_ROLLBACK_DIR" 2>/dev/null || true
+        _reset_pg_tunnel_rollback_state
+        return 1
+    fi
+    if [ -e "$PG_TUNNEL_PLIST_PATH" ] \
+      && ! cp -p "$PG_TUNNEL_PLIST_PATH" "$PG_TUNNEL_ROLLBACK_DIR/plist"; then
+        echo "✗ Failed to snapshot existing PG tunnel launchd plist"
+        rm -rf "$PG_TUNNEL_ROLLBACK_DIR" 2>/dev/null || true
+        _reset_pg_tunnel_rollback_state
+        return 1
+    fi
+    if ! cp -p "$PG_TUNNEL_CONFIG" "$PG_TUNNEL_ROLLBACK_DIR/config"; then
+        echo "✗ Failed to snapshot PG tunnel machine config"
+        rm -rf "$PG_TUNNEL_ROLLBACK_DIR" 2>/dev/null || true
+        _reset_pg_tunnel_rollback_state
+        return 1
+    fi
     PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE="$wrapper_source"
-    [ ! -e "$PG_TUNNEL_BIN" ] || cp -p "$PG_TUNNEL_BIN" "$PG_TUNNEL_ROLLBACK_DIR/wrapper" || return 1
-    [ ! -e "$PG_TUNNEL_PLIST_PATH" ] || cp -p "$PG_TUNNEL_PLIST_PATH" "$PG_TUNNEL_ROLLBACK_DIR/plist" || return 1
-    cp -p "$PG_TUNNEL_CONFIG" "$PG_TUNNEL_ROLLBACK_DIR/config" || return 1
     PG_TUNNEL_ROLLBACK_MANUAL_CONFIG="$PG_TUNNEL_ROLLBACK_DIR/config"
+    PG_TUNNEL_ROLLBACK_JOB_LOADED=0
+    PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
     if launchctl print "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" >/dev/null 2>&1; then
         PG_TUNNEL_ROLLBACK_JOB_LOADED=1
     else
-        PG_TUNNEL_ROLLBACK_MANUAL_KIND=$(
-            "$wrapper_source" --canonical-kind 2>/dev/null || printf '%s\n' none
-        )
+        if ! PG_TUNNEL_ROLLBACK_MANUAL_KIND=$(
+            "$wrapper_source" --canonical-kind 2>/dev/null
+        ); then
+            echo "✗ Failed to snapshot existing manual PG tunnel state"
+            rm -rf "$PG_TUNNEL_ROLLBACK_DIR" 2>/dev/null || true
+            _reset_pg_tunnel_rollback_state
+            return 1
+        fi
+        case "$PG_TUNNEL_ROLLBACK_MANUAL_KIND" in
+            none|tcp|unix) ;;
+            *)
+                echo "✗ Refusing unknown PG tunnel rollback kind"
+                rm -rf "$PG_TUNNEL_ROLLBACK_DIR" 2>/dev/null || true
+                _reset_pg_tunnel_rollback_state
+                return 1
+                ;;
+        esac
     fi
+    PG_TUNNEL_ROLLBACK_ARMED=1
 
     install -m 0755 "$wrapper_source" "$PG_TUNNEL_BIN" || return 1
     _install_pg_tunnel_plist || return 1
@@ -1754,10 +1909,7 @@ _migrate_pg_tunnel_before_release_stop() {
     fi
 
     rm -rf "$PG_TUNNEL_ROLLBACK_DIR" || return 1
-    PG_TUNNEL_ROLLBACK_DIR=""
-    PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
-    PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
-    PG_TUNNEL_ROLLBACK_ARMED=0
+    _reset_pg_tunnel_rollback_state
     echo "✓ PG tunnel migrated and SQL-ready before release stop"
 }
 
