@@ -856,6 +856,18 @@ impl TurnViewReconciler {
             .or_else(|| self.load_persisted_target(target, shared, source));
         if let Some(current) = current.as_ref() {
             if desired == TurnViewState::None
+                && clear_start_attempt.is_none()
+                && let Some(emoji) = current.legacy_queue_marker
+            {
+                let delivery = self
+                    .apply_reaction(shared, target, emoji, false, &current.identity, source)
+                    .await;
+                if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
+                    self.discard_target_locked(target, source, &target_lock);
+                }
+                return (delivery, None);
+            }
+            if desired == TurnViewState::None
                 && let Some(clear_start_attempt) = clear_start_attempt
                 && (current.owner != owner
                     || current.applied != TurnViewState::Pending
@@ -1098,6 +1110,15 @@ impl TurnViewReconciler {
         };
 
         if current.applied != expected_state {
+            if current.owner == owner && current.legacy_queue_marker == Some(emoji) {
+                let delivery = self
+                    .apply_reaction(shared, target, emoji, false, &current.identity, source)
+                    .await;
+                if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
+                    self.discard_target_locked(target, source, &target_lock);
+                }
+                return delivery;
+            }
             tracing::debug!(
                 channel_id = target.channel_id.get(),
                 message = target.message_id.get(),

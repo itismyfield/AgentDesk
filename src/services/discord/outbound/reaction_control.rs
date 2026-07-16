@@ -4,6 +4,12 @@ use poise::serenity_prelude as serenity;
 
 use crate::services::discord::SharedData;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_REPLY_DELIVERIES: std::cell::RefCell<Vec<ReactionControlReplyReason>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReactionControlReplyReason {
     QueuedCardPostFailed,
@@ -39,8 +45,16 @@ pub(in crate::services::discord) async fn send_reaction_control_reply_http(
     reason: ReactionControlReplyReason,
     content: &str,
 ) {
+    #[cfg(test)]
+    {
+        let _ = (http, channel_id, shared, message_id, content);
+        TEST_REPLY_DELIVERIES.with(|deliveries| deliveries.borrow_mut().push(reason));
+        return;
+    }
+    #[cfg(not(test))]
     let (correlation_id, semantic_event_id) =
         reaction_control_reply_delivery_ids(channel_id, message_id, reason);
+    #[cfg(not(test))]
     if let Err(error) = super::serenity_reference::send_referenced_lifecycle_notice(
         http.clone(),
         shared.clone(),
@@ -60,6 +74,12 @@ pub(in crate::services::discord) async fn send_reaction_control_reply_http(
             "[discord] reaction-control lifecycle notice delivery failed"
         )
     }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn take_test_reply_deliveries() -> Vec<ReactionControlReplyReason>
+{
+    TEST_REPLY_DELIVERIES.with(|deliveries| std::mem::take(&mut *deliveries.borrow_mut()))
 }
 
 fn reaction_control_reply_delivery_ids(

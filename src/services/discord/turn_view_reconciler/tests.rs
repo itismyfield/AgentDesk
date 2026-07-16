@@ -737,6 +737,75 @@ async fn persisted_v1_queued_promotion_clears_legacy_marker_before_pending() {
 }
 
 #[tokio::test]
+async fn persisted_v1_queued_cancel_clears_legacy_marker_before_promotion() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_167, 100_000_000_000_168);
+    clear_persisted(target);
+    let provider = shared.provider.as_str().to_string();
+    let record = persisted_queue_record(&shared, target, &provider, "queued", "intake-a");
+    write_persisted(&record, target);
+
+    let reconciler = TurnViewReconciler::default();
+    reconciler
+        .note_queue_marker_removed(
+            &shared,
+            target,
+            owner(91, "persisted"),
+            TurnViewIdentity::Test("ignored-current-identity"),
+            '📬',
+            "test_v1_queue_cancel",
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops(),
+        vec![TestReactionOp {
+            target,
+            emoji: '📬',
+            add: false,
+            identity: "intake-a".to_string(),
+        }],
+        "v1 cancellation before promotion must remove the legacy marker once with its persisted identity"
+    );
+    assert!(!persisted_exists(target));
+}
+
+#[tokio::test]
+async fn persisted_v1_queued_generic_clear_removes_legacy_marker() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_169, 100_000_000_000_170);
+    clear_persisted(target);
+    let provider = shared.provider.as_str().to_string();
+    let record = persisted_queue_record(&shared, target, &provider, "queued", "intake-a");
+    write_persisted(&record, target);
+
+    let reconciler = TurnViewReconciler::default();
+    reconciler
+        .note_turn_cleared(
+            &shared,
+            target,
+            owner(91, "persisted"),
+            TurnViewIdentity::Test("ignored-current-identity"),
+            "test_v1_queue_generic_clear",
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops(),
+        vec![TestReactionOp {
+            target,
+            emoji: '📬',
+            add: false,
+            identity: "intake-a".to_string(),
+        }],
+        "v1 generic clear before promotion must remove the legacy marker once"
+    );
+    assert!(!persisted_exists(target));
+}
+
+#[tokio::test]
 async fn regression_4049_attempt_scoped_clear_preserves_pending_without_start_attempt() {
     let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
