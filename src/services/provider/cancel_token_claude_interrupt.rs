@@ -15,18 +15,13 @@ pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
 
 impl ClaudeInterruptDeliveryGuard<'_> {
     pub(crate) fn commit_success<R, E>(self, outcome: Result<R, E>) -> Result<R, E> {
-        if outcome.is_ok()
-            && self
-                .token
+        if outcome.is_ok() {
+            // The claim owner is the only caller that can hold this generation
+            // guard. Commit with a plain store while the session lock is still
+            // held, so no rollback/reclaim can interleave after provider I/O.
+            self.token
                 .claude_interrupt_claim
-                .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            tracing::error!(
-                generation = self.token.claude_interrupt_generation,
-                claim_state = self.token.claude_interrupt_claim.load(Ordering::Acquire),
-                "Claude stop write succeeded but claim commit lost ownership"
-            );
+                .store(2, Ordering::Release);
         }
         outcome
     }
@@ -85,6 +80,10 @@ impl CancelToken {
         self.claude_interrupt_claim
             .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    pub(crate) fn claude_interrupt_claim_was_delivered(&self) -> bool {
+        self.claude_interrupt_claim.load(Ordering::Acquire) == 2
     }
 
     pub(crate) fn claude_interrupt_generation(&self) -> u64 {

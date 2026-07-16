@@ -119,7 +119,9 @@ impl<'a> ClaudeStopDeliveryReservation<'a> {
 
 impl Drop for ClaudeStopDeliveryReservation<'_> {
     fn drop(&mut self) {
-        let _ = self.token.release_claude_interrupt_claim();
+        if !self.token.claude_interrupt_claim_was_delivered() {
+            let _ = self.token.release_claude_interrupt_claim();
+        }
     }
 }
 
@@ -578,6 +580,11 @@ mod tests {
         const RACERS: usize = 8;
 
         let token = Arc::new(CancelToken::new());
+        let session = format!(
+            "claude-stop-race-test-{}",
+            token.claude_interrupt_generation()
+        );
+        token.bind_claude_tmux_session(&session);
         let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let barrier = Arc::new(Barrier::new(RACERS + 1));
         let release_winner = Arc::new(Barrier::new(2));
@@ -585,6 +592,7 @@ mod tests {
 
         for _ in 0..RACERS {
             let token = Arc::clone(&token);
+            let session = session.clone();
             let writes = Arc::clone(&writes);
             let barrier = Arc::clone(&barrier);
             let release_winner = Arc::clone(&release_winner);
@@ -598,8 +606,14 @@ mod tests {
                     ClaudeTuiInterruptPhase::ActiveGeneration,
                 );
                 if matches!(decision, ClaudeStopDeliveryDecision::Deliver(_)) {
-                    writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    release_winner.wait();
+                    let guard = token
+                        .lock_current_claude_interrupt_session(&session)
+                        .ok_or_else(|| "active generation guard missing".to_string())?;
+                    guard.commit_success((|| {
+                        writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        release_winner.wait();
+                        Ok::<(), String>(())
+                    })())?;
                 }
                 drop(reservation);
                 Ok(decision)
