@@ -38,8 +38,8 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 use abandon_guard::{
-    AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, abandoned_cleanup_evidence_for_probe,
-    abandoned_tmux_cleanup_decision_for, finalize_abandoned_mailbox,
+    AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
+    finalize_owner_dead_cleanup_if_same_turn, finalize_probe_cleanup_if_same_turn,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -546,20 +546,10 @@ async fn run_placeholder_sweep_pass(
                         // Response already on screen: terminal delivery is certain.
                         // Release the matching mailbox/inflight even if its reusable
                         // tmux pane remains live; preserve that session itself.
-                        if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            let evidence = abandoned_cleanup_evidence_for_probe(probe)
-                                .expect("delivered probe has cleanup evidence");
-                            let cleanup =
-                                finalize_abandoned_mailbox(shared, provider, &state, evidence)
-                                    .await;
-                            let same_turn =
-                                inflight_state_still_same_turn(provider, &state, age_secs);
-                            let deleted =
-                                same_turn && cleanup.delete_state_if_allowed(provider, &state);
-                            if should_detach_after_cleanup(same_turn, deleted) {
-                                detach_abandoned_placeholder_controller(shared, &state);
-                            }
-                        }
+                        finalize_probe_cleanup_if_same_turn(
+                            shared, provider, &state, age_secs, probe,
+                        )
+                        .await;
                         tracing::info!(
                             "[placeholder_sweeper] skipped abandon overwrite for {}/{} — \
                              content already delivered; cleanup policy applied (#2415)",
@@ -572,20 +562,10 @@ async fn run_placeholder_sweep_pass(
                         // The Discord message is permanently unreachable, but that
                         // is not terminal-delivery evidence. Re-probe owner death
                         // after the awaited GET before touching mailbox/state.
-                        if inflight_state_still_same_turn(provider, &state, age_secs) {
-                            let evidence = abandoned_cleanup_evidence_for_probe(probe)
-                                .expect("gone probe has cleanup evidence");
-                            let cleanup =
-                                finalize_abandoned_mailbox(shared, provider, &state, evidence)
-                                    .await;
-                            let same_turn =
-                                inflight_state_still_same_turn(provider, &state, age_secs);
-                            let deleted =
-                                same_turn && cleanup.delete_state_if_allowed(provider, &state);
-                            if should_detach_after_cleanup(same_turn, deleted) {
-                                detach_abandoned_placeholder_controller(shared, &state);
-                            }
-                        }
+                        finalize_probe_cleanup_if_same_turn(
+                            shared, provider, &state, age_secs, probe,
+                        )
+                        .await;
                         continue;
                     }
                     PlaceholderProbe::ProbeFailed => {
@@ -652,22 +632,11 @@ async fn run_placeholder_sweep_pass(
                 // success covers (1), and the production cleanup plan covers (4).
                 // TODO(#4573 slice B): add a persisted turn generation so reuse of
                 // the same `user_msg_id` cannot masquerade as the original owner.
-                if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
-                    let cleanup = finalize_abandoned_mailbox(
-                        shared,
-                        provider,
-                        &state,
-                        AbandonedCleanupEvidence::OwnerDeath,
-                    )
-                    .await;
-                    let same_turn = inflight_state_still_same_turn(provider, &state, age_secs);
-                    let deleted = same_turn && cleanup.delete_state_if_allowed(provider, &state);
-                    if should_detach_after_cleanup(same_turn, deleted) {
-                        report.abandoned += 1;
-                        // Detach whenever the identity-guarded state deletion commits,
-                        // including zero-id marker-only rows with no mailbox token.
-                        detach_abandoned_placeholder_controller(shared, &state);
-                    }
+                if edited
+                    && finalize_owner_dead_cleanup_if_same_turn(shared, provider, &state, age_secs)
+                        .await
+                {
+                    report.abandoned += 1;
                 }
             }
         }
@@ -898,16 +867,7 @@ async fn sweep_orphan_status_panel(
         // (deleted, or — on transient failure — enqueued to the durable store) the
         // row has nothing left, so evict it instead of only clearing the panel id
         // (codex P2 r23) — otherwise it lingers and keeps the channel busy.
-        if inflight_state_still_same_turn(provider, state, age_secs) {
-            let cleanup = finalize_abandoned_mailbox(
-                shared,
-                provider,
-                state,
-                AbandonedCleanupEvidence::OwnerDeath,
-            )
-            .await;
-            cleanup.delete_state_if_allowed(provider, state);
-        }
+        finalize_owner_dead_cleanup_if_same_turn(shared, provider, state, age_secs).await;
     } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
         && let Some(panel_msg_id) = state.status_message_id
     {

@@ -251,6 +251,54 @@ pub(super) async fn finalize_abandoned_mailbox(
     AbandonedTmuxCleanupOutcome::from_plan(plan)
 }
 
+async fn finalize_cleanup_if_same_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    age_secs: u64,
+    evidence: AbandonedCleanupEvidence,
+) -> bool {
+    if !super::inflight_state_still_same_turn(provider, state, age_secs) {
+        return false;
+    }
+    let cleanup = finalize_abandoned_mailbox(shared, provider, state, evidence).await;
+    let same_turn = super::inflight_state_still_same_turn(provider, state, age_secs);
+    let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
+    if super::should_detach_after_cleanup(same_turn, deleted) {
+        super::detach_abandoned_placeholder_controller(shared, state);
+    }
+    deleted
+}
+
+pub(super) async fn finalize_probe_cleanup_if_same_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    age_secs: u64,
+    probe: super::PlaceholderProbe,
+) -> bool {
+    let Some(evidence) = abandoned_cleanup_evidence_for_probe(probe) else {
+        return false;
+    };
+    finalize_cleanup_if_same_turn(shared, provider, state, age_secs, evidence).await
+}
+
+pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    age_secs: u64,
+) -> bool {
+    finalize_cleanup_if_same_turn(
+        shared,
+        provider,
+        state,
+        age_secs,
+        AbandonedCleanupEvidence::OwnerDeath,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
