@@ -346,10 +346,12 @@ fn orphan_pending_token_within_admission_grace(
     snapshot: &RelayHealthSnapshot,
     now_ms: i64,
 ) -> bool {
-    snapshot.mailbox_turn_started_at_ms.is_some_and(|started_at_ms| {
-        now_ms.saturating_sub(started_at_ms)
-            < ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64
-    })
+    snapshot
+        .mailbox_turn_started_at_ms
+        .is_some_and(|started_at_ms| {
+            now_ms.saturating_sub(started_at_ms)
+                < ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64
+        })
 }
 
 fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot, now_ms: i64) -> bool {
@@ -3033,7 +3035,13 @@ mod tests {
             Some("orphan_token_within_admission_grace")
         );
         assert_eq!(response.decision.evidence.tmux_alive, None);
-        assert!(response.decision.evidence.mailbox_turn_started_at_ms.is_some());
+        assert!(
+            response
+                .decision
+                .evidence
+                .mailbox_turn_started_at_ms
+                .is_some()
+        );
         assert!(
             super::super::mailbox_snapshot(&shared, channel)
                 .await

@@ -496,15 +496,15 @@
 | `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 515 | 174 | 341 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
-| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1734 | 666 | 1068 |  |
-| `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 270 | 101 | 169 |  |
+| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1735 | 666 | 1069 |  |
+| `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 271 | 101 | 170 |  |
 | `services::discord::health::relay_progress` | `src/services/discord/health/relay_progress.rs` | 108 | 66 | 42 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 264 | 242 | 22 |  |
-| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1240 | 972 | 268 |  |
-| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2385 | 989 | 1396 |  |
-| `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1338 | 425 | 913 |  |
-| `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1384 | 627 | 757 |  |
+| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1248 | 980 | 268 |  |
+| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2386 | 989 | 1397 |  |
+| `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1339 | 425 | 914 |  |
+| `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1385 | 627 | 758 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 360 | 266 | 94 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2587 | 1375 | 1212 | giant-file |
@@ -633,14 +633,14 @@
 | `services::discord::recovery_paths::controller_cutover` | `src/services/discord/recovery_paths/controller_cutover.rs` | 649 | 278 | 371 |  |
 | `services::discord::recovery_paths::restart` | `src/services/discord/recovery_paths/restart.rs` | 1352 | 868 | 484 |  |
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 569 | 253 | 316 |  |
-| `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 305 | 185 | 120 |  |
+| `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 308 | 187 | 121 |  |
 | `services::discord::relay_owner_observability` | `src/services/discord/relay_owner_observability.rs` | 458 | 343 | 115 |  |
-| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 3311 | 1444 | 1867 | giant-file |
-| `services::discord::relay_recovery::tests::circuit_breaker_apply` | `src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs` | 322 | 0 | 322 |  |
-| `services::discord::relay_recovery_auto_heal_apply` | `src/services/discord/relay_recovery_auto_heal_apply.rs` | 702 | 294 | 408 |  |
+| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 3424 | 1490 | 1934 | giant-file |
+| `services::discord::relay_recovery::tests::circuit_breaker_apply` | `src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs` | 324 | 0 | 324 |  |
+| `services::discord::relay_recovery_auto_heal_apply` | `src/services/discord/relay_recovery_auto_heal_apply.rs` | 703 | 294 | 409 |  |
 | `services::discord::relay_recovery_auto_heal_attempts` | `src/services/discord/relay_recovery_auto_heal_attempts.rs` | 374 | 220 | 154 |  |
 | `services::discord::relay_recovery_auto_heal_confirm` | `src/services/discord/relay_recovery_auto_heal_confirm.rs` | 312 | 167 | 145 |  |
-| `services::discord::relay_recovery_circuit_breaker` | `src/services/discord/relay_recovery_circuit_breaker.rs` | 1680 | 716 | 964 |  |
+| `services::discord::relay_recovery_circuit_breaker` | `src/services/discord/relay_recovery_circuit_breaker.rs` | 1681 | 716 | 965 |  |
 | `services::discord::relay_recovery_completion_footer` | `src/services/discord/relay_recovery_completion_footer.rs` | 9 | 9 | 0 |  |
 | `services::discord::relay_recovery_reattach_apply` | `src/services/discord/relay_recovery_reattach_apply.rs` | 66 | 66 | 0 |  |
 | `services::discord::replace_outcome_policy` | `src/services/discord/replace_outcome_policy.rs` | 691 | 371 | 320 |  |
@@ -661,7 +661,7 @@
 | `services::discord::router::intake_gate::component_events` | `src/services/discord/router/intake_gate/component_events.rs` | 41 | 41 | 0 |  |
 | `services::discord::router::intake_gate::gate` | `src/services/discord/router/intake_gate/gate.rs` | 155 | 102 | 53 |  |
 | `services::discord::router::intake_gate::queue_effects` | `src/services/discord/router/intake_gate/queue_effects.rs` | 1318 | 871 | 447 |  |
-| `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 632 | 283 | 349 |  |
+| `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 633 | 283 | 350 |  |
 | `services::discord::router::intake_queue_transaction` | `src/services/discord/router/intake_queue_transaction.rs` | 1104 | 544 | 560 |  |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 206 | 206 | 0 |  |
 | `services::discord::router::message_handler::attachments` | `src/services/discord/router/message_handler/attachments.rs` | 142 | 114 | 28 |  |
