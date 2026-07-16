@@ -529,7 +529,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "PUT",
             "/api/settings/runtime-config",
             "settings",
-            "Replace runtime-config; known keys are explicit overrides when reserved metadata is omitted",
+            "Update runtime-config: metadata-less PUT preserves omitted explicit overrides and promotes submitted known keys; reserved metadata is an exact replacement",
         )
         .with_example(
             json!({
