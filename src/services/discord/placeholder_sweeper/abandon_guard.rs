@@ -156,6 +156,7 @@ struct AbandonedCleanupPlan {
 struct AbandonedMailboxFinishActions {
     cancel_removed_token: bool,
     schedule_queue_kickoff: bool,
+    publish_completion_after_cleanup: bool,
 }
 
 fn abandoned_mailbox_finish_actions(
@@ -165,6 +166,7 @@ fn abandoned_mailbox_finish_actions(
     AbandonedMailboxFinishActions {
         cancel_removed_token: removed_token_present,
         schedule_queue_kickoff: has_pending,
+        publish_completion_after_cleanup: removed_token_present,
     }
 }
 
@@ -271,7 +273,7 @@ pub(super) async fn finalize_abandoned_mailbox(
     }
 
     let channel = serenity::ChannelId::new(state.channel_id);
-    let finish = super::super::mailbox_finish_turn_if_matches_started_before(
+    let finish = super::super::mailbox_finish_turn_if_matches_started_before_without_completion(
         shared,
         provider,
         channel,
@@ -300,6 +302,11 @@ pub(super) async fn finalize_abandoned_mailbox(
             provider.clone(),
             channel,
             "placeholder_sweeper_abandon",
+        );
+    }
+    if actions.publish_completion_after_cleanup {
+        super::super::turn_completion_events::publish_mailbox_release_completion_event(
+            shared, channel, &finish,
         );
     }
     AbandonedTmuxCleanupOutcome::from_plan(plan)
@@ -645,7 +652,25 @@ mod tests {
 
         assert!(!tokenless_pending.cancel_removed_token);
         assert!(tokenless_pending.schedule_queue_kickoff);
+        assert!(!tokenless_pending.publish_completion_after_cleanup);
         assert!(!tokenless_idle.schedule_queue_kickoff);
+    }
+
+    #[test]
+    fn destructive_finalize_publishes_only_after_cleanup_actions() {
+        let actions = abandoned_mailbox_finish_actions(true, true);
+        let mut order = Vec::new();
+        if actions.cancel_removed_token {
+            order.push("cancel");
+        }
+        if actions.schedule_queue_kickoff {
+            order.push("kickoff");
+        }
+        if actions.publish_completion_after_cleanup {
+            order.push("publish");
+        }
+
+        assert_eq!(order, ["cancel", "kickoff", "publish"]);
     }
 
     #[test]
