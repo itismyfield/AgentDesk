@@ -1806,9 +1806,10 @@ mod catch_up_recovery_tests {
         collect_catch_up_retry_pending_channels, consume_catch_up_retry_state_for_scan,
         insert_configured_catch_up_candidate, is_restart_gap_notice,
         merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
-        prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer, settled_frontier,
+        prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer,
         rearm_catch_up_retry_after_fetch_failure, recent_page_decision, run_catch_up_sweep,
-        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
+        settled_frontier, should_pace_before_scan,
+        take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::{
         EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,

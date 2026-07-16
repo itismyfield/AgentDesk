@@ -1313,12 +1313,7 @@ async fn pruned_settled_frontier_keeps_newer_unprocessed_old_message_actionable(
 
     let settled_id = message_id_with_age(1, Duration::from_secs(450));
     let unprocessed_human_id = message_id_with_age(2, Duration::from_secs(400));
-    prune_checkpoint_into_settled_frontier(
-        root.path(),
-        &provider,
-        channel_id,
-        settled_id.get(),
-    );
+    prune_checkpoint_into_settled_frontier(root.path(), &provider, channel_id, settled_id.get());
 
     let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
         channel_id,
@@ -1338,7 +1333,11 @@ async fn pruned_settled_frontier_keeps_newer_unprocessed_old_message_actionable(
             unprocessed_human_id.get()
         )
     );
-    assert!(outbox[0].content.contains("frontier보다 새로운 미처리 요청"));
+    assert!(
+        outbox[0]
+            .content
+            .contains("frontier보다 새로운 미처리 요청")
+    );
     assert_eq!(
         api.dead_letters
             .lock()
