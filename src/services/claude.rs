@@ -2998,10 +2998,8 @@ fn send_followup_to_tmux(
     });
 
     // Publish before the prompt is reachable; mark only after a successful flush.
-    let write_result = submit_claude_wrapper_followup(
-        cancel_token.as_deref(),
-        tmux_session_name,
-        || {
+    let write_result =
+        submit_claude_wrapper_followup(cancel_token.as_deref(), tmux_session_name, || {
             std::fs::OpenOptions::new()
                 .write(true)
                 .open(input_fifo_path)
@@ -3013,8 +3011,7 @@ fn send_followup_to_tmux(
                         .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
                     Ok(())
                 })
-        },
-    );
+        });
 
     if let Err(e) = write_result {
         if should_recreate_session_after_followup_fifo_error(&e) {

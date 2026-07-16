@@ -376,7 +376,7 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4393 | 2962 | 1431 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4396 | 2965 | 1431 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
@@ -997,7 +997,7 @@
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1229 | 759 | 470 |  |
 | `services::provider` | `src/services/provider.rs` | 2432 | 1818 | 614 | giant-file |
-| `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 175 | 103 | 72 |  |
+| `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 281 | 128 | 153 |  |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
