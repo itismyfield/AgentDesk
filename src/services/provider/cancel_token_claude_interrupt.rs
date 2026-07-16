@@ -28,6 +28,24 @@ impl ClaudeInterruptDeliveryGuard<'_> {
     }
 }
 
+pub(crate) fn submit_claude_wrapper_followup<Write>(
+    token: Option<&CancelToken>,
+    tmux_session_name: &str,
+    write: Write,
+) -> Result<(), String>
+where
+    Write: FnOnce() -> Result<(), String>,
+{
+    if let Some(token) = token {
+        token.bind_claude_tmux_session(tmux_session_name);
+    }
+    write()?;
+    if let Some(token) = token {
+        token.mark_claude_interrupt_submit_pending();
+    }
+    Ok(())
+}
+
 impl CancelToken {
     /// Publish this turn before its Claude pane can become reachable.
     ///
@@ -112,6 +130,46 @@ impl CancelToken {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn wrapper_followup_publishes_then_writes_then_marks_pending() {
+        let session = "claude-wrapper-followup-submit-order";
+        let stale = CancelToken::new();
+        let current = CancelToken::new();
+        stale.bind_claude_tmux_session(session);
+        let write_observed = AtomicUsize::new(0);
+
+        submit_claude_wrapper_followup(Some(&current), session, || {
+            assert!(
+                stale
+                    .lock_current_claude_interrupt_session(session)
+                    .is_none(),
+                "current generation must publish before FIFO write"
+            );
+            assert!(
+                !current.claude_interrupt_submit_pending(),
+                "submit-pending must remain false until FIFO flush succeeds"
+            );
+            write_observed.store(1, Ordering::Release);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(write_observed.load(Ordering::Acquire), 1);
+        assert!(current.claude_interrupt_submit_pending());
+    }
+
+    #[test]
+    fn wrapper_followup_write_failure_does_not_mark_submit_pending() {
+        let token = CancelToken::new();
+        assert!(
+            submit_claude_wrapper_followup(Some(&token), "claude-wrapper-write-failure", || {
+                Err("write failed".to_string())
+            })
+            .is_err()
+        );
+        assert!(!token.claude_interrupt_submit_pending());
+    }
 
     #[test]
     fn session_generation_advance_blocks_stale_stop_operation() {
