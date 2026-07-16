@@ -391,13 +391,7 @@ pub(in crate::services::discord) fn terminal_cleanup_protects_delete(
     channel_id: ChannelId,
     message_id: MessageId,
 ) -> Option<TerminalCleanupDeleteProtection> {
-    if committed_terminal_anchor_protects_delete(
-        registry,
-        provider,
-        channel_id,
-        message_id,
-        None,
-    ) {
+    if committed_terminal_anchor_protects_delete(registry, provider, channel_id, message_id, None) {
         return Some(TerminalCleanupDeleteProtection::CommittedTerminal);
     }
     registry

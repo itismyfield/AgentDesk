@@ -566,7 +566,7 @@
 | `services::discord::outbound::source_registry` | `src/services/discord/outbound/source_registry.rs` | 247 | 159 | 88 |  |
 | `services::discord::outbound::transport` | `src/services/discord/outbound/transport.rs` | 431 | 431 | 0 |  |
 | `services::discord::outbound::turn_output_controller` | `src/services/discord/outbound/turn_output_controller.rs` | 3467 | 1180 | 2287 | giant-file |
-| `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 686 | 424 | 262 |  |
+| `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 763 | 453 | 310 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 941 | 573 | 368 |  |
 | `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 678 | 678 | 0 |  |
 | `services::discord::placeholder_live_events::background_task_events` | `src/services/discord/placeholder_live_events/background_task_events.rs` | 109 | 109 | 0 |  |
@@ -722,7 +722,7 @@
 | `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2927 | 861 | 2066 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 113 | 113 | 0 |  |
 | `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1649 | 916 | 733 |  |
-| `services::discord::startup_reclaim` | `src/services/discord/startup_reclaim.rs` | 786 | 453 | 333 |  |
+| `services::discord::startup_reclaim` | `src/services/discord/startup_reclaim.rs` | 844 | 485 | 359 |  |
 | `services::discord::status_panel_orphan_store` | `src/services/discord/status_panel_orphan_store.rs` | 700 | 700 | 0 |  |
 | `services::discord::steering` | `src/services/discord/steering.rs` | 452 | 336 | 116 |  |
 | `services::discord::streaming_finalizer` | `src/services/discord/streaming_finalizer.rs` | 250 | 186 | 64 |  |
@@ -814,7 +814,7 @@
 | `services::discord::tui_prompt_relay::synthetic_orphan_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_orphan_reclaim.rs` | 326 | 127 | 199 |  |
 | `services::discord::tui_prompt_relay::synthetic_start` | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 2416 | 1079 | 1337 | giant-file |
 | `services::discord::tui_prompt_relay::synthetic_start::stale_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs` | 433 | 433 | 0 |  |
-| `services::discord::tui_prompt_relay::synthetic_start_wiring` | `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs` | 328 | 328 | 0 |  |
+| `services::discord::tui_prompt_relay::synthetic_start_wiring` | `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs` | 358 | 358 | 0 |  |
 | `services::discord::tui_prompt_relay::task_notification_prompt` | `src/services/discord/tui_prompt_relay/task_notification_prompt.rs` | 230 | 230 | 0 |  |
 | `services::discord::tui_task_card` | `src/services/discord/tui_task_card.rs` | 1461 | 818 | 643 |  |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 997 | 997 | 0 |  |
@@ -966,7 +966,7 @@
 | `services::message_outbox_recovery_support` | `src/services/message_outbox_recovery_support.rs` | 138 | 138 | 0 |  |
 | `services::monitoring_store` | `src/services/monitoring_store.rs` | 141 | 141 | 0 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 630 | 579 | 51 |  |
-| `services::observability::emit` | `src/services/observability/emit.rs` | 1225 | 772 | 453 |  |
+| `services::observability::emit` | `src/services/observability/emit.rs` | 1226 | 773 | 453 |  |
 | `services::observability::events` | `src/services/observability/events.rs` | 310 | 310 | 0 |  |
 | `services::observability::helpers` | `src/services/observability/helpers.rs` | 127 | 127 | 0 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 358 | 358 | 0 |  |
