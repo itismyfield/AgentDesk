@@ -143,6 +143,22 @@ struct AbandonedCleanupPlan {
     allows_state_delete: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AbandonedMailboxFinishActions {
+    cancel_removed_token: bool,
+    schedule_queue_kickoff: bool,
+}
+
+fn abandoned_mailbox_finish_actions(
+    removed_token_present: bool,
+    has_pending: bool,
+) -> AbandonedMailboxFinishActions {
+    AbandonedMailboxFinishActions {
+        cancel_removed_token: removed_token_present,
+        schedule_queue_kickoff: has_pending,
+    }
+}
+
 /// Pure plan consumed directly by [`finalize_abandoned_mailbox`]. Owner-death
 /// evidence authorizes bounded eviction once the final probe says Kill, even if
 /// the matching mailbox token is already absent. PreserveRetry always keeps the
@@ -232,21 +248,28 @@ pub(super) async fn finalize_abandoned_mailbox(
         serenity::MessageId::new(state.user_msg_id),
     )
     .await;
-    if let Some(removed_token) = finish.removed_token {
+    let actions =
+        abandoned_mailbox_finish_actions(finish.removed_token.is_some(), finish.has_pending);
+    if actions.cancel_removed_token
+        && let Some(removed_token) = finish.removed_token
+    {
         super::super::turn_bridge::cancel_active_token(
             &removed_token,
             plan.cleanup_policy,
             "placeholder_sweeper abandoned",
         );
         super::super::saturating_decrement_global_active(shared);
-        if finish.has_pending {
-            super::super::schedule_deferred_idle_queue_kickoff(
-                shared.clone(),
-                provider.clone(),
-                channel,
-                "placeholder_sweeper_abandon",
-            );
-        }
+    }
+    // A restarted/tokenless mailbox can still own durable soft-queued work.
+    // Schedule from the actor's authoritative backlog flag independently of
+    // token removal so deleting the orphan inflight cannot strand that queue.
+    if actions.schedule_queue_kickoff {
+        super::super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel,
+            "placeholder_sweeper_abandon",
+        );
     }
     AbandonedTmuxCleanupOutcome::from_plan(plan)
 }
@@ -304,8 +327,9 @@ mod tests {
     use super::{
         AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RuntimeActivityEvidence,
         abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
-        abandoned_tmux_cleanup_decision, abandoned_tmux_cleanup_decision_for,
-        run_blocking_cleanup_probe, runtime_activity_evidence_from,
+        abandoned_mailbox_finish_actions, abandoned_tmux_cleanup_decision,
+        abandoned_tmux_cleanup_decision_for, run_blocking_cleanup_probe,
+        runtime_activity_evidence_from,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::platform::tmux::PaneLiveness;
@@ -513,6 +537,16 @@ mod tests {
 
         assert!(dead.allows_state_delete);
         assert!(!revived.allows_state_delete);
+    }
+
+    #[test]
+    fn tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff() {
+        let tokenless_pending = abandoned_mailbox_finish_actions(false, true);
+        let tokenless_idle = abandoned_mailbox_finish_actions(false, false);
+
+        assert!(!tokenless_pending.cancel_removed_token);
+        assert!(tokenless_pending.schedule_queue_kickoff);
+        assert!(!tokenless_idle.schedule_queue_kickoff);
     }
 
     #[test]
