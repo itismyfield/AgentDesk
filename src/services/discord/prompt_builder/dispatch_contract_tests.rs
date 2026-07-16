@@ -990,6 +990,7 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
     assert!(review_prompt.contains("Review Scope Reminder"));
     assert!(review_prompt.contains("Review Verdict Guidance"));
     assert!(review_prompt.contains("Verdict Endpoint: POST /api/reviews/verdict"));
+    assert!(!review_prompt.contains("[Shared Agent Knowledge]"));
     assert!(!review_prompt.contains("[Long-term Memory]"));
     assert!(!review_prompt.contains("[Proactive Memory Guidance]"));
 
@@ -1005,6 +1006,51 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
         );
     }
     assert!(review_words * 2 < full_words);
+}
+
+#[test]
+fn review_lite_prompt_omits_unbound_shared_knowledge() {
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let shared_knowledge = "[Shared Agent Knowledge]\nUNBOUND SAK 4560";
+
+    let full_prompt = build_system_prompt(
+        "ctx",
+        &[],
+        "/tmp",
+        ChannelId::new(1),
+        "tok",
+        None,
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        Some(shared_knowledge),
+        None,
+        None,
+        false,
+        false,
+    );
+    let review_prompt = build_system_prompt(
+        "ctx",
+        &[],
+        "/tmp",
+        ChannelId::new(1),
+        "tok",
+        None,
+        false,
+        DispatchProfile::ReviewLite,
+        Some("review"),
+        None,
+        Some(shared_knowledge),
+        None,
+        None,
+        false,
+        false,
+    );
+
+    assert!(full_prompt.contains("UNBOUND SAK 4560"));
+    assert!(!review_prompt.contains("UNBOUND SAK 4560"));
 }
 
 #[test]

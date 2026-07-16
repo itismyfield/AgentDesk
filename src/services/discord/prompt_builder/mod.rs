@@ -436,8 +436,9 @@ pub(super) fn build_system_prompt_with_manifest(
         // `dedupe_tracker.record(...)` so the same SHA-256-identical block
         // is never appended twice in one build. Behavior is preserved on
         // the happy path (first-time appendage always records); duplicate
-        // attempts only trip a WARN log and skip the push.
-        if profile != DispatchProfile::Lite {
+        // attempts only trip a WARN log and skip the push. SAK remains Full-only:
+        // ReviewLite retains its review contract without the broad operational context.
+        if profile == DispatchProfile::Full {
             if let Some(sak) = shared_knowledge
                 && dedupe_tracker.record("shared_knowledge", sak)
             {
@@ -453,7 +454,7 @@ pub(super) fn build_system_prompt_with_manifest(
             }
         }
 
-        // ReviewLite/Lite: skip long-term memory and peer agents to save tokens
+        // ReviewLite/Lite: skip shared operational context, long-term memory, and peer agents.
         if profile == DispatchProfile::Full {
             if let Some(catalog) = longterm_catalog
                 && dedupe_tracker.record("longterm_catalog", catalog)
@@ -494,11 +495,11 @@ pub(super) fn build_system_prompt_with_manifest(
                 }
             }
         }
-    } else if profile != DispatchProfile::Lite {
+    } else if profile == DispatchProfile::Full {
         if let Some(sak) = shared_knowledge
             && dedupe_tracker.record("shared_knowledge", sak)
         {
-            // No role binding — still inject SAK (no LTM/peer agents to worry about)
+            // No role binding — Full still injects SAK (no LTM/peer agents to worry about)
             system_prompt_owned.push_str("\n\n");
             system_prompt_owned.push_str(sak);
             prompt_manifest_layers.push(prompt_manifest_layer(
