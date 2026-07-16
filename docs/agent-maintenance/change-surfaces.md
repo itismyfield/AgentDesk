@@ -1900,7 +1900,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   discovered and adding claimed-rollout candidate selection for restart
   rehydrate; #4411 adds a pinned-path warm tail entry point that carries the
   Discord-origin prompt through turn-local dedupe.
-- `src/services/codex_tui/input.rs` (1663) — Codex TUI input readiness
+- `src/services/codex_tui/input.rs` (1670) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract. #4411 promotes the
