@@ -532,9 +532,7 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     interrupt_outcome: &ProviderTurnInterruptOutcome,
     reason: &str,
 ) {
-    if cleanup_policy.should_cleanup_tmux()
-        || matches!(provider, ProviderKind::Claude) && !interrupt_outcome.sent_keys
-    {
+    if cleanup_policy.should_cleanup_tmux() {
         return;
     }
 

@@ -995,9 +995,9 @@ pub struct CancelToken {
     /// observers; provider cancel watchdogs must not treat that as a live
     /// mid-stream cancel that should kill the child process.
     completion_cleanup: AtomicBool,
-    /// Claude turn-interrupt fence. Each `CancelToken` is a turn generation, so
-    /// a successful compare-and-swap elects exactly one stop-delivery owner
-    /// without suppressing the next token on the same provider session.
+    /// Claude turn-interrupt fence. Each `CancelToken` is a turn generation.
+    /// `false -> true` reserves one delivery attempt; a skipped or failed attempt
+    /// rolls it back, while a successful provider write leaves it committed.
     claude_interrupt_claim: AtomicBool,
     /// Monotonic Claude turn identity used for diagnostics and fence observability.
     claude_interrupt_generation: u64,
@@ -1056,10 +1056,17 @@ impl CancelToken {
         self.completion_cleanup.load(Ordering::Relaxed)
     }
 
-    /// Elect the single Claude interrupt-delivery owner for this turn.
+    /// Reserve the Claude interrupt-delivery right for this turn.
     pub(crate) fn claim_claude_interrupt(&self) -> bool {
         self.claude_interrupt_claim
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Release an undelivered reservation so a later stop can retry this turn.
+    pub(crate) fn release_claude_interrupt_claim(&self) -> bool {
+        self.claude_interrupt_claim
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 

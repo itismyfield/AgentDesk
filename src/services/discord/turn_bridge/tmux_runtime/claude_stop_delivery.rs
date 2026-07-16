@@ -9,7 +9,145 @@ use super::process_table::{pane_foreground_is_provider_wrapper, write_line_to_wr
 use super::tmux_runtime_paths;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_turn_state::TuiTurnState;
+use std::io::{BufRead, Seek};
+use std::path::Path;
 use std::sync::Arc;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClaudeStopTurnIdentity {
+    output_path: String,
+    file_identity: (u64, u64),
+    user_line_start: u64,
+    user_line_end: u64,
+    user_line_hash: u64,
+    user_entry_id: Option<String>,
+}
+
+impl ClaudeStopTurnIdentity {
+    fn capture(output_path: &str) -> Option<Self> {
+        latest_claude_user_turn_identity(Path::new(output_path))
+    }
+
+    fn still_current(&self) -> bool {
+        latest_claude_user_turn_identity(Path::new(&self.output_path)).as_ref() == Some(self)
+    }
+}
+
+#[cfg(unix)]
+fn transcript_file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn transcript_file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    let created_ns = metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    (created_ns, 0)
+}
+
+fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentity> {
+    use std::hash::{Hash, Hasher};
+
+    const MAX_TAIL_BYTES: u64 = 256 * 1024;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let len = metadata.len();
+    let file_identity = transcript_file_identity(&metadata);
+    let start = len.saturating_sub(MAX_TAIL_BYTES);
+    file.seek(std::io::SeekFrom::Start(start)).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut offset = start;
+    if start > 0 {
+        offset = offset.saturating_add(reader.read_line(&mut line).ok()? as u64);
+    }
+
+    let mut latest = None;
+    loop {
+        line.clear();
+        let line_start = offset;
+        let bytes_read = reader.read_line(&mut line).ok()?;
+        if bytes_read == 0 {
+            return latest;
+        }
+        offset = offset.saturating_add(bytes_read as u64);
+        if !line.ends_with('\n') {
+            return latest;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if json.get("type").and_then(serde_json::Value::as_str) != Some("user") {
+            continue;
+        }
+        let user_entry_id = json
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                json.get("message")
+                    .and_then(|message| message.get("uuid"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|entry_id| !entry_id.is_empty())
+            .map(str::to_string);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        line.as_bytes().hash(&mut hasher);
+        latest = Some(ClaudeStopTurnIdentity {
+            output_path: path.display().to_string(),
+            file_identity,
+            user_line_start: line_start,
+            user_line_end: offset,
+            user_line_hash: hasher.finish(),
+            user_entry_id,
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaudeStopClaimOutcome {
+    Skipped,
+    DeliveryFailed,
+    DeliverySucceeded,
+}
+
+struct ClaudeStopDeliveryReservation<'a> {
+    token: &'a CancelToken,
+    committed: bool,
+}
+
+impl<'a> ClaudeStopDeliveryReservation<'a> {
+    fn claim(token: &'a CancelToken) -> Option<Self> {
+        token.claim_claude_interrupt().then_some(Self {
+            token,
+            committed: false,
+        })
+    }
+
+    fn finish(&mut self, outcome: ClaudeStopClaimOutcome) {
+        match outcome {
+            ClaudeStopClaimOutcome::DeliverySucceeded => self.committed = true,
+            ClaudeStopClaimOutcome::Skipped | ClaudeStopClaimOutcome::DeliveryFailed => {
+                debug_assert!(!self.committed);
+            }
+        }
+    }
+}
+
+impl Drop for ClaudeStopDeliveryReservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let released = self.token.release_claude_interrupt_claim();
+            debug_assert!(released, "undelivered Claude stop claim must roll back");
+        }
+    }
+}
 
 /// Claude state observed at the single stop-delivery ownership boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,13 +203,7 @@ pub(super) fn classify_tui_interrupt_phase(
     }
 }
 
-/// Claim the turn generation before any runtime probe so only one stop path can
-/// observe state or mutate the provider session.
-pub(super) fn claim_claude_stop_delivery(token: &CancelToken) -> bool {
-    token.claim_claude_interrupt()
-}
-
-/// Decide delivery after the caller has claimed the token-local ownership fence.
+/// Decide delivery after the caller has reserved the token-local ownership fence.
 pub(super) fn decide_claimed_claude_stop_delivery(
     delivery: ClaudeTurnInterruptDelivery,
     tui_phase: ClaudeTuiInterruptPhase,
@@ -98,9 +230,10 @@ pub(super) fn decide_claimed_claude_stop_delivery(
 /// Cancel Claude's active turn while preserving its tmux session.
 ///
 /// Delivery uses Escape for the interactive TUI or a stream-json interrupt
-/// control request for the wrapper FIFO. A token-local CAS elects one owner
-/// before runtime probing; interactive Escape additionally requires structured
-/// streaming state and positive active-pane evidence.
+/// control request for the wrapper FIFO. A token-local CAS reserves one attempt
+/// and commits only after successful provider I/O; skipped or failed attempts
+/// roll back. Interactive Escape additionally requires structured streaming
+/// state and positive active-pane evidence.
 pub(super) async fn interrupt_claude_turn_session_preserving(
     token: &Arc<CancelToken>,
     tmux_session: Option<String>,
@@ -130,11 +263,12 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         };
     };
 
-    if !claim_claude_stop_delivery(token) {
+    let expected_generation = token.claude_interrupt_generation();
+    let Some(mut reservation) = ClaudeStopDeliveryReservation::claim(token) else {
         tracing::info!(
             "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism=not_probed runtime_kind=not_probed structured_state=not_probed pane_ready=not_probed pane_active=not_probed pane_has_draft=not_probed phase=not_probed decision={}",
             session_name,
-            token.claude_interrupt_generation(),
+            expected_generation,
             reason,
             ClaudeStopDeliveryDecision::SkipDuplicate.as_str()
         );
@@ -145,7 +279,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             missing_tmux_session: false,
             sigint_target_missing: false,
         };
-    }
+    };
 
     let session_for_probe = session_name.clone();
     let probe_result = tokio::task::spawn_blocking(move || {
@@ -174,6 +308,10 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         } else {
             None
         };
+        let output_path = binding
+            .as_ref()
+            .map(|binding| binding.output_path.clone())
+            .unwrap_or(default_output_path);
         let structured_state = if matches!(delivery, ClaudeTurnInterruptDelivery::TuiEscape) {
             binding.as_ref().and_then(|binding| {
                 crate::services::tui_turn_state::runtime_binding_turn_state(
@@ -182,16 +320,13 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 )
             })
         } else {
-            let output_path = binding
-                .as_ref()
-                .map(|binding| binding.output_path.clone())
-                .unwrap_or(default_output_path);
             Some(
                 crate::services::tui_turn_state::observe_claude_jsonl_turn_state(
                     std::path::Path::new(&output_path),
                 ),
             )
         };
+        let turn_identity = ClaudeStopTurnIdentity::capture(&output_path);
         let pane = if matches!(delivery, ClaudeTurnInterruptDelivery::TuiEscape) {
             crate::services::platform::tmux::capture_pane(&session_for_probe, -160)
         } else {
@@ -223,6 +358,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             delivery,
             runtime_kind,
             wrapper_input_fifo_path,
+            turn_identity,
             structured_state,
             pane_ready,
             pane_active,
@@ -236,6 +372,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         delivery,
         runtime_kind,
         wrapper_input_fifo_path,
+        turn_identity,
         structured_state,
         pane_ready,
         pane_active,
@@ -248,7 +385,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
                 "claude turn interrupt probe join error: session={} reason={} generation={} decision=skip_ambiguous error={}",
                 session_name,
                 reason,
-                token.claude_interrupt_generation(),
+                expected_generation,
                 error
             );
             return ProviderTurnInterruptOutcome {
@@ -265,7 +402,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
     tracing::info!(
         "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism={:?} runtime_kind={} structured_state={} pane_ready={} pane_active={} pane_has_draft={} phase={} decision={}",
         session_name,
-        token.claude_interrupt_generation(),
+        expected_generation,
         reason,
         delivery,
         runtime_kind
@@ -291,25 +428,66 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
         };
     };
 
+    // Revalidate both token generation and the latest transcript user-entry
+    // identity immediately before provider I/O. The second fence is deliberately
+    // adjacent to the write: a delayed stale stop must not escape a newer turn
+    // that reused the same tmux session.
+    let generation_matches = token.claude_interrupt_generation() == expected_generation;
+    let turn_identity_matches = turn_identity
+        .as_ref()
+        .is_some_and(ClaudeStopTurnIdentity::still_current);
+    if !generation_matches || !turn_identity_matches {
+        tracing::warn!(
+            "claude turn interrupt stale before delivery: session={} expected_generation={} current_generation={} turn_identity_available={} turn_identity_matches={} reason={} mechanism={:?} phase={}",
+            session_name,
+            expected_generation,
+            token.claude_interrupt_generation(),
+            turn_identity.is_some(),
+            turn_identity_matches,
+            reason,
+            delivery,
+            phase.as_str()
+        );
+        return ProviderTurnInterruptOutcome {
+            tmux_session,
+            sent_keys: false,
+            fallback_sigint_pid: None,
+            missing_tmux_session: false,
+            sigint_target_missing: false,
+        };
+    }
+
     let session_for_task = session_name.clone();
+    let token_for_task = Arc::clone(token);
+    let turn_identity = turn_identity.expect("turn identity checked above");
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
-    let delivery_result = tokio::task::spawn_blocking(move || match delivery {
-        ClaudeTurnInterruptDelivery::TuiEscape => {
-            match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
-                Ok(output) if output.status.success() => Ok(()),
-                Ok(output) => Err(format!(
-                    "tmux send-keys Escape failed: status={}",
-                    output.status
-                )),
-                Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
-            }
+    let delivery_result = tokio::task::spawn_blocking(move || {
+        let current_generation = token_for_task.claude_interrupt_generation();
+        let turn_identity_matches = turn_identity.still_current();
+        if current_generation != expected_generation || !turn_identity_matches {
+            return Err(format!(
+                "stale Claude stop before provider write: expected_generation={} current_generation={} turn_identity_matches={}",
+                expected_generation, current_generation, turn_identity_matches
+            ));
         }
-        ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
-            let Some(input_fifo) = wrapper_input_fifo_path else {
-                return Err("claude wrapper input FIFO unavailable after probe".to_string());
-            };
-            let line = build_claude_interrupt_control_line(&request_id);
-            write_line_to_wrapper_fifo(&input_fifo, &line)
+        match delivery {
+            ClaudeTurnInterruptDelivery::TuiEscape => {
+                match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
+                    Ok(output) if output.status.success() => Ok(()),
+                    Ok(output) => Err(format!(
+                        "tmux send-keys Escape failed: status={}",
+                        output.status
+                    )),
+                    Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+                }
+            }
+            ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
+                let Some(input_fifo) = wrapper_input_fifo_path else {
+                    return Err("claude wrapper input FIFO unavailable after probe".to_string());
+                };
+                let line = build_claude_interrupt_control_line(&request_id);
+                write_line_to_wrapper_fifo(&input_fifo, &line)
+            }
         }
     })
     .await;
@@ -319,11 +497,12 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             tracing::info!(
                 "claude turn interrupt delivered (session preserved): session={} generation={} reason={} mechanism={:?} phase={}",
                 session_name,
-                token.claude_interrupt_generation(),
+                expected_generation,
                 reason,
                 delivery,
                 phase.as_str()
             );
+            reservation.finish(ClaudeStopClaimOutcome::DeliverySucceeded);
             true
         }
         Ok(Err(error)) => {
@@ -334,7 +513,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             tracing::warn!(
                 "claude turn interrupt delivery failed (session left intact, no SIGINT escalation): session={} generation={} reason={} mechanism={:?} phase={} error={}",
                 session_name,
-                token.claude_interrupt_generation(),
+                expected_generation,
                 reason,
                 delivery,
                 phase.as_str(),
@@ -346,7 +525,7 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             tracing::warn!(
                 "claude turn interrupt join error: session={} generation={} reason={} mechanism={:?} phase={} error={}",
                 session_name,
-                token.claude_interrupt_generation(),
+                expected_generation,
                 reason,
                 delivery,
                 phase.as_str(),
@@ -371,16 +550,27 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    fn claimed_decision(
+    fn reserved_decision(
         token: &CancelToken,
         delivery: ClaudeTurnInterruptDelivery,
         phase: ClaudeTuiInterruptPhase,
+        delivery_succeeded: bool,
     ) -> ClaudeStopDeliveryDecision {
-        if claim_claude_stop_delivery(token) {
-            decide_claimed_claude_stop_delivery(delivery, phase)
-        } else {
-            ClaudeStopDeliveryDecision::SkipDuplicate
-        }
+        let Some(mut reservation) = ClaudeStopDeliveryReservation::claim(token) else {
+            return ClaudeStopDeliveryDecision::SkipDuplicate;
+        };
+        let decision = decide_claimed_claude_stop_delivery(delivery, phase);
+        let outcome = match (decision, delivery_succeeded) {
+            (ClaudeStopDeliveryDecision::Deliver(_), true) => {
+                ClaudeStopClaimOutcome::DeliverySucceeded
+            }
+            (ClaudeStopDeliveryDecision::Deliver(_), false) => {
+                ClaudeStopClaimOutcome::DeliveryFailed
+            }
+            _ => ClaudeStopClaimOutcome::Skipped,
+        };
+        reservation.finish(outcome);
+        decision
     }
 
     fn decision_mutates_composer(decision: ClaudeStopDeliveryDecision) -> bool {
@@ -397,7 +587,8 @@ mod tests {
             classify_tui_interrupt_phase(Some(TuiTurnState::UserSubmitted), false, false),
         ] {
             let token = CancelToken::new();
-            let decision = claimed_decision(&token, ClaudeTurnInterruptDelivery::TuiEscape, phase);
+            let decision =
+                reserved_decision(&token, ClaudeTurnInterruptDelivery::TuiEscape, phase, false);
             assert!(matches!(
                 phase,
                 ClaudeTuiInterruptPhase::PromptReady | ClaudeTuiInterruptPhase::UserSubmitted
@@ -405,13 +596,24 @@ mod tests {
             assert_eq!(decision, ClaudeStopDeliveryDecision::SkipPreGeneration);
             assert!(!decision_mutates_composer(decision));
             assert_eq!(
-                claimed_decision(
+                reserved_decision(
                     &token,
                     ClaudeTurnInterruptDelivery::TuiEscape,
                     ClaudeTuiInterruptPhase::ActiveGeneration,
+                    true,
+                ),
+                ClaudeStopDeliveryDecision::Deliver(ClaudeTurnInterruptDelivery::TuiEscape),
+                "a pre-generation skip must roll back so the active-generation retry can deliver"
+            );
+            assert_eq!(
+                reserved_decision(
+                    &token,
+                    ClaudeTurnInterruptDelivery::TuiEscape,
+                    ClaudeTuiInterruptPhase::ActiveGeneration,
+                    true,
                 ),
                 ClaudeStopDeliveryDecision::SkipDuplicate,
-                "the pre-generation owner must fence a later observer"
+                "only a successful delivery commits the fence"
             );
         }
     }
@@ -429,10 +631,11 @@ mod tests {
                 barrier.wait();
                 (
                     reason,
-                    claimed_decision(
+                    reserved_decision(
                         token.as_ref(),
                         ClaudeTurnInterruptDelivery::TuiEscape,
                         ClaudeTuiInterruptPhase::ActiveGeneration,
+                        true,
                     ),
                 )
             }));
@@ -471,10 +674,11 @@ mod tests {
 
         for token in [&first, &next] {
             assert!(matches!(
-                claimed_decision(
+                reserved_decision(
                     token,
                     ClaudeTurnInterruptDelivery::TuiEscape,
                     ClaudeTuiInterruptPhase::ActiveGeneration,
+                    true,
                 ),
                 ClaudeStopDeliveryDecision::Deliver(_)
             ));
@@ -482,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_or_unconfirmed_streaming_state_fails_safe_and_fences_retry() {
+    fn ambiguous_or_unconfirmed_streaming_state_fails_safe_and_allows_retry() {
         for phase in [
             classify_tui_interrupt_phase(Some(TuiTurnState::Streaming), false, false),
             classify_tui_interrupt_phase(Some(TuiTurnState::Unknown), false, true),
@@ -491,37 +695,119 @@ mod tests {
             let token = CancelToken::new();
             assert_eq!(phase, ClaudeTuiInterruptPhase::Ambiguous);
             assert_eq!(
-                claimed_decision(&token, ClaudeTurnInterruptDelivery::TuiEscape, phase,),
+                reserved_decision(&token, ClaudeTurnInterruptDelivery::TuiEscape, phase, false,),
                 ClaudeStopDeliveryDecision::SkipAmbiguous
             );
             assert_eq!(
-                claimed_decision(
+                reserved_decision(
                     &token,
                     ClaudeTurnInterruptDelivery::TuiEscape,
                     ClaudeTuiInterruptPhase::ActiveGeneration,
+                    true,
                 ),
-                ClaudeStopDeliveryDecision::SkipDuplicate,
-                "an ambiguous owner must fence a later observer"
+                ClaudeStopDeliveryDecision::Deliver(ClaudeTurnInterruptDelivery::TuiEscape),
+                "an ambiguous skip must roll back so a confirmed retry can deliver"
             );
         }
+    }
+
+    #[test]
+    fn failed_delivery_rolls_back_but_successful_delivery_commits() {
+        let token = CancelToken::new();
+        assert_eq!(
+            reserved_decision(
+                &token,
+                ClaudeTurnInterruptDelivery::TuiEscape,
+                ClaudeTuiInterruptPhase::ActiveGeneration,
+                false,
+            ),
+            ClaudeStopDeliveryDecision::Deliver(ClaudeTurnInterruptDelivery::TuiEscape)
+        );
+        assert_eq!(
+            reserved_decision(
+                &token,
+                ClaudeTurnInterruptDelivery::TuiEscape,
+                ClaudeTuiInterruptPhase::ActiveGeneration,
+                true,
+            ),
+            ClaudeStopDeliveryDecision::Deliver(ClaudeTurnInterruptDelivery::TuiEscape),
+            "a failed provider write must leave the same turn retryable"
+        );
+        assert_eq!(
+            reserved_decision(
+                &token,
+                ClaudeTurnInterruptDelivery::TuiEscape,
+                ClaudeTuiInterruptPhase::ActiveGeneration,
+                true,
+            ),
+            ClaudeStopDeliveryDecision::SkipDuplicate,
+            "the first successful provider write permanently commits the fence"
+        );
+    }
+
+    fn write_turn(path: &Path, entry_id: Option<&str>, text: &str) {
+        let mut user = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": text }
+        });
+        if let Some(entry_id) = entry_id {
+            user["uuid"] = serde_json::Value::String(entry_id.to_string());
+        }
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [] }
+        });
+        std::fs::write(path, format!("{user}\n{assistant}\n"))
+            .expect("write Claude transcript fixture");
+    }
+
+    #[test]
+    fn turn_identity_rejects_newer_user_entry_before_delivery() {
+        let temp = tempfile::tempdir().expect("temp transcript root");
+        let path = temp.path().join("turn.jsonl");
+        write_turn(&path, Some("turn-a"), "first");
+        let identity = ClaudeStopTurnIdentity::capture(path.to_str().unwrap())
+            .expect("capture turn A identity");
+        assert!(identity.still_current());
+
+        write_turn(&path, Some("turn-b"), "second");
+        assert!(
+            !identity.still_current(),
+            "a stale stop must not pass the write-adjacent fence after turn B starts"
+        );
+    }
+
+    #[test]
+    fn turn_identity_without_uuid_still_detects_replaced_turn() {
+        let temp = tempfile::tempdir().expect("temp transcript root");
+        let path = temp.path().join("turn.jsonl");
+        write_turn(&path, None, "first");
+        let identity = ClaudeStopTurnIdentity::capture(path.to_str().unwrap())
+            .expect("capture identity without uuid");
+        assert!(identity.still_current());
+
+        write_turn(&path, None, "second");
+        assert!(!identity.still_current());
     }
 
     #[test]
     fn wrapper_interrupt_is_fenced_but_can_cancel_submitted_generation() {
         let token = CancelToken::new();
         assert!(matches!(
-            claimed_decision(
+            reserved_decision(
                 &token,
                 ClaudeTurnInterruptDelivery::StreamJsonControlRequest,
                 ClaudeTuiInterruptPhase::UserSubmitted,
+                true,
             ),
             ClaudeStopDeliveryDecision::Deliver(_)
         ));
         assert_eq!(
-            claimed_decision(
+            reserved_decision(
                 &token,
                 ClaudeTurnInterruptDelivery::StreamJsonControlRequest,
                 ClaudeTuiInterruptPhase::UserSubmitted,
+                true,
             ),
             ClaudeStopDeliveryDecision::SkipDuplicate
         );
