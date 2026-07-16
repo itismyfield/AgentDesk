@@ -50,6 +50,17 @@ pub(super) fn abandoned_tmux_cleanup_decision(
     }
 }
 
+fn decision_for_user_identity(
+    user_msg_id: u64,
+    owner_decision: AbandonedTmuxCleanupDecision,
+) -> AbandonedTmuxCleanupDecision {
+    if user_msg_id == 0 && owner_decision == AbandonedTmuxCleanupDecision::Kill {
+        AbandonedTmuxCleanupDecision::TerminalMarkerOnly
+    } else {
+        owner_decision
+    }
+}
+
 fn runtime_activity_evidence_from(latest_nanos: i64, now_secs: i64) -> RuntimeActivityEvidence {
     if latest_nanos <= 0 {
         return RuntimeActivityEvidence::Unknown;
@@ -87,9 +98,6 @@ where
 pub(super) async fn abandoned_tmux_cleanup_decision_for(
     state: &InflightTurnState,
 ) -> AbandonedTmuxCleanupDecision {
-    if state.user_msg_id == 0 {
-        return AbandonedTmuxCleanupDecision::TerminalMarkerOnly;
-    }
     let Some(session_name) = state.tmux_session_name.as_deref() else {
         return AbandonedTmuxCleanupDecision::PreserveRetry;
     };
@@ -98,14 +106,15 @@ pub(super) async fn abandoned_tmux_cleanup_decision_for(
         return AbandonedTmuxCleanupDecision::PreserveRetry;
     }
     let session_name = session_name.to_string();
-    run_blocking_cleanup_probe(move || {
+    let owner_decision = run_blocking_cleanup_probe(move || {
         abandoned_tmux_cleanup_decision(
             true,
             crate::services::tmux_diagnostics::tmux_session_pane_liveness(&session_name),
             runtime_activity_evidence(&session_name),
         )
     })
-    .await
+    .await;
+    decision_for_user_identity(state.user_msg_id, owner_decision)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -413,8 +422,8 @@ mod tests {
         AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RevivedVisibleRepair,
         RuntimeActivityEvidence, abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
         abandoned_mailbox_finish_actions, abandoned_tmux_cleanup_decision,
-        abandoned_tmux_cleanup_decision_for, revived_visible_repair, run_blocking_cleanup_probe,
-        runtime_activity_evidence_from, should_detach_after_cleanup,
+        abandoned_tmux_cleanup_decision_for, decision_for_user_identity, revived_visible_repair,
+        run_blocking_cleanup_probe, runtime_activity_evidence_from, should_detach_after_cleanup,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::platform::tmux::PaneLiveness;
@@ -461,14 +470,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn panel_only_state_is_terminal_marker_only() {
-        let mut state = sweep_state();
-        state.user_msg_id = 0;
-
+    #[test]
+    fn zero_id_rows_require_owner_probe_before_terminal_marker_cleanup() {
         assert_eq!(
-            abandoned_tmux_cleanup_decision_for(&state).await,
+            decision_for_user_identity(0, AbandonedTmuxCleanupDecision::PreserveRetry),
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+        assert_eq!(
+            decision_for_user_identity(0, AbandonedTmuxCleanupDecision::Kill),
             AbandonedTmuxCleanupDecision::TerminalMarkerOnly,
+        );
+        assert_eq!(
+            decision_for_user_identity(9101, AbandonedTmuxCleanupDecision::Kill),
+            AbandonedTmuxCleanupDecision::Kill,
         );
     }
 
