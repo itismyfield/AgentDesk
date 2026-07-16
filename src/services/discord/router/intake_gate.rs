@@ -1229,8 +1229,7 @@ pub(in crate::services::discord) async fn handle_event(
                     return Ok(());
                 }
 
-                if !is_allowed_bot
-                    && super::queue_status_presentation::queue_status_card_enabled()
+                if !is_allowed_bot && super::queue_status_presentation::queue_status_card_enabled()
                 {
                     render_visible_queued_ack(
                         ctx,

@@ -655,6 +655,7 @@ src/
 │   │   │   ├── intake_queue_transaction.rs
 │   │   │   ├── message_handler.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
@@ -867,6 +868,7 @@ src/
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── orphan_sweep.rs
 │   │   │   ├── queue_repair.rs
+│   │   │   ├── reaction_set.rs
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/

@@ -33,9 +33,7 @@ mod tests {
             "#,
         )));
 
-        let race_loss = compact(include_str!(
-            "message_handler/intake_turn/race_loss.rs"
-        ));
+        let race_loss = compact(include_str!("message_handler/intake_turn/race_loss.rs"));
         assert!(race_loss.contains(&compact(
             r#"
                 let want_queued_card = want_queued_card
@@ -59,9 +57,8 @@ mod tests {
             "#,
         )));
 
-        let terminal_delivery = compact(include_str!(
-            "../turn_bridge/terminal_outcome_delivery.rs"
-        ));
+        let terminal_delivery =
+            compact(include_str!("../turn_bridge/terminal_outcome_delivery.rs"));
         assert!(terminal_delivery.contains(&compact(
             r#"
                 if claude_tui_followup_pre_submit_requeue_candidate
@@ -78,9 +75,8 @@ mod tests {
             "legacy bridge notice must stay empty so retry delivery posts no card"
         );
 
-        let followup_support = compact(include_str!(
-            "../../claude_tui/hosting/followup_support.rs"
-        ));
+        let followup_support =
+            compact(include_str!("../../claude_tui/hosting/followup_support.rs"));
         assert!(followup_support.contains(&compact(
             r#"
                 if requeue_for_retry {

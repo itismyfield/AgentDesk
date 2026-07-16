@@ -183,9 +183,12 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
         "actual mailbox membership must repair 📬 despite a stale rollback attempt"
     );
     let ops = shared.turn_view_reconciler.ops();
-    assert!(
+    assert_eq!(
         ops.iter()
-            .any(|op| { op.target.message_id == message_id && !op.add && op.emoji == '⏳' })
+            .filter(|op| op.target.message_id == message_id && op.add && op.emoji == '⏳')
+            .count(),
+        1,
+        "queue repair must preserve the one acceptance hourglass without re-adding it"
     );
 }
 
