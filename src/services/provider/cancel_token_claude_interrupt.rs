@@ -28,7 +28,10 @@ impl ClaudeInterruptDeliveryGuard<'_> {
 }
 
 impl CancelToken {
-    /// Bind this turn token as the active Claude generation for a tmux session.
+    /// Publish this turn before its Claude pane can become reachable.
+    ///
+    /// The registry is monotonic per session: delayed recovery/rebind callers may
+    /// refresh their token-local tmux name, but cannot replace a newer turn.
     pub(crate) fn bind_claude_tmux_session(&self, tmux_session_name: &str) {
         let tmux_session_name = tmux_session_name.trim();
         if tmux_session_name.is_empty() {
@@ -37,10 +40,11 @@ impl CancelToken {
         ACTIVE_GENERATION_BY_TMUX
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(
-                tmux_session_name.to_string(),
-                self.claude_interrupt_generation,
-            );
+            .entry(tmux_session_name.to_string())
+            .and_modify(|generation| {
+                *generation = (*generation).max(self.claude_interrupt_generation);
+            })
+            .or_insert(self.claude_interrupt_generation);
         *self
             .tmux_session
             .lock()
@@ -118,6 +122,28 @@ mod tests {
         );
         assert_eq!(writes.load(Ordering::Relaxed), 0);
         assert!(stale.release_claude_interrupt_claim());
+    }
+
+    #[test]
+    fn stale_rebind_cannot_replace_a_newer_session_generation() {
+        let session = "claude-session-stale-rebind";
+        let stale = CancelToken::new();
+        let current = CancelToken::new();
+        stale.bind_claude_tmux_session(session);
+        current.bind_claude_tmux_session(session);
+
+        stale.bind_claude_tmux_session(session);
+
+        assert!(
+            stale
+                .lock_current_claude_interrupt_session(session)
+                .is_none()
+        );
+        assert!(
+            current
+                .lock_current_claude_interrupt_session(session)
+                .is_some()
+        );
     }
 
     #[test]

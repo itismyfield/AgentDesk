@@ -1883,6 +1883,9 @@ fn execute_streaming_local_tui_tmux(
     // required. If a proxy dies after launch, its env cannot be scrubbed from
     // the live process; this guard intentionally protects fresh launches only.
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    if let Some(ref token) = cancel_token {
+        token.bind_claude_tmux_session(tmux_session_name);
+    }
     let owner_path = prepare_and_create_claude_tui_session(
         tmux_session_name,
         working_dir,
@@ -1904,10 +1907,6 @@ fn execute_streaming_local_tui_tmux(
         debug_log(&format!(
             "failed to write spawn nonce for {tmux_session_name} (claude-tui): {e}"
         ));
-    }
-
-    if let Some(ref token) = cancel_token {
-        token.bind_claude_tmux_session(tmux_session_name);
     }
 
     let _ = sender.send(StreamMessage::Init {
@@ -2824,6 +2823,10 @@ fn execute_streaming_local_tmux(
     // === Create new tmux session ===
     debug_log("No existing tmux session — creating new one");
 
+    if let Some(ref token) = cancel_token {
+        token.bind_claude_tmux_session(tmux_session_name);
+    }
+
     // Clean up any leftover files in both persistent and legacy locations.
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
 
@@ -2942,13 +2945,6 @@ fn execute_streaming_local_tmux(
         debug_log(&format!(
             "failed to write spawn nonce for {tmux_session_name}: {e}"
         ));
-    }
-
-    debug_log("tmux session created, storing in cancel token...");
-
-    // Store tmux session name in cancel token
-    if let Some(ref token) = cancel_token {
-        token.bind_claude_tmux_session(tmux_session_name);
     }
 
     emit_fresh_session_watcher_handoff(&sender, output_path, input_fifo_path, tmux_session_name);
