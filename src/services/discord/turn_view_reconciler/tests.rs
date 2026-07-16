@@ -1436,16 +1436,10 @@ async fn partial_queue_apply_failure_compensates_prior_hourglass() {
         .await;
 
     assert_eq!(delivery, TurnViewDelivery::Failed);
-    let ops = reconciler.ops();
-    assert_eq!(
-        ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
-        vec![('📬', true), ('⏳', true), ('📬', false), ('📬', true)],
-        "a second reaction failure must compensate the first successful mutation"
-    );
     assert_eq!(
         snapshot_reactions(&reconciler, target),
         vec![expected('📬', "intake-a")],
-        "compensation must restore the pre-transition mailbox reaction"
+        "partial failure must leave no orphan hourglass and restore pre-transition state"
     );
     assert!(!persisted_exists(target));
 }

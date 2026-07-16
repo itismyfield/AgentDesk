@@ -946,12 +946,19 @@ mod busy_requeue_reaction_tests {
         assert!(intake.contains(&compact(
             r#"
                 if enqueue_outcome.enqueued {
-                    note_busy_tui_followup_queued(
+                    let queued_transition = (
                         shared,
                         http,
                         channel_id,
                         user_msg_id,
                         &enqueue_outcome,
+                    );
+                    note_busy_tui_followup_queued(
+                        queued_transition.0,
+                        queued_transition.1,
+                        queued_transition.2,
+                        queued_transition.3,
+                        queued_transition.4,
                     )
                     .await;
             "#,
