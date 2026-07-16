@@ -173,7 +173,11 @@ fn outcome_from_evidence_for_test(
     owner_decision: AbandonedTmuxCleanupDecision,
     discord_cleanup_committed: bool,
     cleanup_killed: bool,
-) -> (AbandonedTmuxCleanupOutcome, super::super::TmuxCleanupPolicy, bool) {
+) -> (
+    AbandonedTmuxCleanupOutcome,
+    super::super::TmuxCleanupPolicy,
+    bool,
+) {
     let decision = if evidence.terminal_delivered() {
         AbandonedTmuxCleanupDecision::Kill
     } else {
@@ -434,7 +438,10 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(revived.decision, AbandonedTmuxCleanupDecision::PreserveRetry);
+        assert_eq!(
+            revived.decision,
+            AbandonedTmuxCleanupDecision::PreserveRetry
+        );
         assert!(matches!(
             revived_policy,
             crate::services::discord::TmuxCleanupPolicy::CleanupSession { .. }
@@ -475,7 +482,6 @@ mod tests {
             true,
         ));
     }
-
 
     #[test]
     fn runtime_activity_zero_and_negative_are_unknown() {

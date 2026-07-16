@@ -586,8 +586,8 @@
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 399 | 399 | 0 |  |
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
 | `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 270 | 270 | 0 |  |
-| `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1353 | 1017 | 336 | giant-file |
-| `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 461 | 258 | 203 |  |
+| `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1354 | 1018 | 336 | giant-file |
+| `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 517 | 302 | 215 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 615 | 615 | 0 |  |
 | `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 419 | 200 | 219 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
