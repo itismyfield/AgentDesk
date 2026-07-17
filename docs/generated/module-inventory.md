@@ -837,7 +837,7 @@
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 411 | 303 | 108 |  |
 | `services::discord::turn_bridge::output_lifecycle` | `src/services/discord/turn_bridge/output_lifecycle.rs` | 75 | 28 | 47 |  |
 | `services::discord::turn_bridge::panel_lifecycle` | `src/services/discord/turn_bridge/panel_lifecycle.rs` | 236 | 236 | 0 |  |
-| `services::discord::turn_bridge::post_loop_finalize` | `src/services/discord/turn_bridge/post_loop_finalize.rs` | 677 | 677 | 0 |  |
+| `services::discord::turn_bridge::post_loop_finalize` | `src/services/discord/turn_bridge/post_loop_finalize.rs` | 685 | 685 | 0 |  |
 | `services::discord::turn_bridge::recall_feedback` | `src/services/discord/turn_bridge/recall_feedback.rs` | 482 | 372 | 110 |  |
 | `services::discord::turn_bridge::recovery_text` | `src/services/discord/turn_bridge/recovery_text.rs` | 841 | 595 | 246 |  |
 | `services::discord::turn_bridge::response_delivery` | `src/services/discord/turn_bridge/response_delivery.rs` | 222 | 93 | 129 |  |
