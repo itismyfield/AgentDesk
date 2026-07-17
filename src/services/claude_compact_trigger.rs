@@ -15,7 +15,10 @@ use crate::services::claude_compact_context::{CompactThreshold, compact_threshol
 use crate::services::claude_tui::input::CompactSubmitOutcome;
 use crate::services::provider::ProviderKind;
 
-const MACHINE_CONTROL_TTL: Duration = Duration::from_secs(4 * 60 * 60);
+/// A submitted control must be observed promptly. Keeping this small prevents a
+/// dropped queued `/compact` from swallowing an unrelated human command much
+/// later while still allowing normal hook/transcript scheduling jitter.
+const MACHINE_CONTROL_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CompactLatchKey {
@@ -35,7 +38,10 @@ struct MachineControlMarker {
     nonce: u64,
     fence: DateTime<Utc>,
     recorded_at: Instant,
-    passively_confirmed: bool,
+    // Set immediately after tmux accepts the submitting Enter. This is
+    // deliberately provisional: a later passive capture can still be
+    // ambiguous, in which case the ticket is cleared and never retried.
+    enter_submitted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -96,11 +102,15 @@ pub(crate) fn maybe_inject_compact(
             begin_machine_compact_control("claude", &key.tmux_session_name, &provider_session_id);
         let outcome = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
             &key.tmux_session_name,
-            || crate::services::claude_tui::input::send_compact_while_busy(&key.tmux_session_name),
+            || {
+                crate::services::claude_tui::input::send_compact_while_busy_after_enter(
+                    &key.tmux_session_name,
+                    || commit_machine_compact_control(&ticket),
+                )
+            },
         );
         match outcome {
             CompactSubmitOutcome::AcceptedOrQueued => {
-                commit_machine_compact_control(&ticket);
                 tracing::info!(
                     tmux_session_name = %key.tmux_session_name,
                     usage_tokens,
@@ -178,7 +188,7 @@ fn begin_machine_compact_control(
                 // historical transcript replay can never consume this marker.
                 fence: Utc::now(),
                 recorded_at: Instant::now(),
-                passively_confirmed: false,
+                enter_submitted: false,
             },
         );
     MachineControlTicket { key, nonce }
@@ -192,7 +202,7 @@ fn commit_machine_compact_control(ticket: &MachineControlTicket) {
     if let Some(marker) = controls.get_mut(&ticket.key)
         && marker.nonce == ticket.nonce
     {
-        marker.passively_confirmed = true;
+        marker.enter_submitted = true;
     }
 }
 
@@ -208,11 +218,12 @@ fn clear_machine_compact_control(ticket: &MachineControlTicket) {
     }
 }
 
-/// Consume exactly one confirmed machine `/compact` transcript observation.
-/// The raw slash classifier remains the fallback relay guard; this narrower
-/// marker prevents only the accepted/queued machine turn from gaining a second
-/// control lifecycle while preserving later human commands after failures.
-pub(crate) fn consume_passively_confirmed_machine_compact(
+/// Consume exactly one machine `/compact` transcript observation whose
+/// submitting Enter was accepted by tmux. The raw slash classifier remains the
+/// fallback relay guard; this narrow, provisional marker prevents only the
+/// machine turn from gaining a second control lifecycle while preserving later
+/// human commands after ambiguous sends.
+pub(crate) fn consume_enter_submitted_machine_compact(
     provider: &str,
     tmux_session_name: &str,
     provider_session_id: &str,
@@ -231,10 +242,16 @@ pub(crate) fn consume_passively_confirmed_machine_compact(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     purge_expired_machine_controls(&mut controls);
-    let consumed = controls
-        .get(&key)
-        .is_some_and(|marker| marker.passively_confirmed && observed_at >= marker.fence);
-    if consumed {
+    let Some(marker) = controls.get(&key) else {
+        return false;
+    };
+    let upper_fence = marker.fence
+        + chrono::Duration::from_std(MACHINE_CONTROL_TTL)
+            .expect("machine-control TTL fits chrono duration");
+    let expired_for_observation = observed_at > upper_fence;
+    let consumed =
+        marker.enter_submitted && observed_at >= marker.fence && !expired_for_observation;
+    if consumed || expired_for_observation {
         controls.remove(&key);
     }
     consumed
@@ -275,7 +292,7 @@ pub(crate) fn reset_for_test() {
 /// Keep every stateful test serialized so one test cannot clear another test's
 /// in-flight fixture.
 #[cfg(test)]
-static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Acquire the shared state guard and reset all compact-trigger test state while
 /// the guard is held. The caller retains the guard for its entire test.
@@ -286,6 +303,19 @@ fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|error| error.into_inner());
     reset_for_test();
     guard
+}
+
+/// Test-only fixture setup for a hook observation that races the passive tmux
+/// settle after Enter. Sibling relay tests hold [`STATE_TEST_LOCK`] while using
+/// this so they cannot collide with compact-trigger unit fixtures.
+#[cfg(test)]
+pub(crate) fn record_enter_submitted_machine_compact_for_test(
+    provider: &str,
+    tmux_session_name: &str,
+    provider_session_id: &str,
+) {
+    let ticket = begin_machine_compact_control(provider, tmux_session_name, provider_session_id);
+    commit_machine_compact_control(&ticket);
 }
 
 #[cfg(test)]
@@ -326,26 +356,29 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_marker_consumes_one_fence_bound_observation_only() {
+    fn post_enter_marker_consumes_before_passive_settle_finishes() {
         let _guard = state_test_guard();
         let ticket = begin_machine_compact_control("claude", "tmux-4591", "session-a");
         let before_fence = Utc::now() - chrono::Duration::seconds(1);
-        assert!(!consume_passively_confirmed_machine_compact(
+        assert!(!consume_enter_submitted_machine_compact(
             "claude",
             "tmux-4591",
             "session-a",
             "/compact",
             before_fence
         ));
+        // `send_compact_while_busy_after_enter` commits at this boundary, before
+        // its passive 120ms settle. A hook observed during that settle must be
+        // consumable immediately rather than creating an external turn.
         commit_machine_compact_control(&ticket);
-        assert!(consume_passively_confirmed_machine_compact(
+        assert!(consume_enter_submitted_machine_compact(
             "claude",
             "tmux-4591",
             "session-a",
             "/compact",
             Utc::now()
         ));
-        assert!(!consume_passively_confirmed_machine_compact(
+        assert!(!consume_enter_submitted_machine_compact(
             "claude",
             "tmux-4591",
             "session-a",
@@ -358,13 +391,44 @@ mod tests {
     fn ambiguous_marker_clear_does_not_swallow_later_human_compact() {
         let _guard = state_test_guard();
         let ticket = begin_machine_compact_control("claude", "tmux-4591", "session-a");
+        // Model Enter having succeeded (and thus the provisional marker being
+        // visible) before later passive confirmation becomes ambiguous.
+        commit_machine_compact_control(&ticket);
         clear_machine_compact_control(&ticket);
-        assert!(!consume_passively_confirmed_machine_compact(
+        assert!(!consume_enter_submitted_machine_compact(
             "claude",
             "tmux-4591",
             "session-a",
             "/compact",
             Utc::now()
         ));
+    }
+
+    #[test]
+    fn expired_marker_does_not_swallow_later_human_compact() {
+        let _guard = state_test_guard();
+        let ticket = begin_machine_compact_control("claude", "tmux-4591", "session-a");
+        commit_machine_compact_control(&ticket);
+
+        assert!(
+            !consume_enter_submitted_machine_compact(
+                "claude",
+                "tmux-4591",
+                "session-a",
+                "/compact",
+                Utc::now() + chrono::Duration::minutes(11),
+            ),
+            "a compact observation beyond the upper fence belongs to a later human command"
+        );
+        assert!(
+            !consume_enter_submitted_machine_compact(
+                "claude",
+                "tmux-4591",
+                "session-a",
+                "/compact",
+                Utc::now(),
+            ),
+            "the expired marker must be removed rather than waiting to swallow a later command"
+        );
     }
 }

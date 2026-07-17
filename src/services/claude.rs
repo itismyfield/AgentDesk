@@ -773,8 +773,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         model_override,
                         effective_prompt,
                         hook_endpoint,
-                        compact_percent,
-                        compact_lower_bound_tokens,
                     );
                 }
                 tracing::warn!(
@@ -1721,8 +1719,6 @@ fn execute_streaming_local_tui_tmux(
     model_override: Option<&str>,
     system_prompt: Option<&str>,
     hook_endpoint: String,
-    compact_percent: Option<u64>,
-    compact_lower_bound_tokens: u64,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tui_tmux START: {} ===",
@@ -1817,8 +1813,6 @@ fn execute_streaming_local_tui_tmux(
         model_override,
         hook_endpoint,
         resume,
-        compact_percent,
-        compact_lower_bound_tokens,
         &gateway_proxy_env,
     )?;
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
@@ -2001,8 +1995,6 @@ fn prepare_and_create_claude_tui_session(
     model_override: Option<&str>,
     hook_endpoint: String,
     resume: bool,
-    compact_percent: Option<u64>,
-    compact_lower_bound_tokens: u64,
     gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> Result<String, String> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
@@ -2031,8 +2023,6 @@ fn prepare_and_create_claude_tui_session(
             system_prompt: system_prompt.map(str::to_string),
             model: model_override.map(str::to_string),
             resume,
-            compact_percent,
-            compact_lower_bound_tokens,
             gateway_proxy_env: gateway_proxy_env.clone(),
         };
         let session_files =

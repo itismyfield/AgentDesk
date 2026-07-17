@@ -16,6 +16,9 @@ use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 
 pub(crate) const DEFAULT_CONTEXT_COMPACT_LOWER_BOUND_TOKENS: u64 = 300_000;
 const COMPACT_SAFETY_RESERVE_TOKENS: u64 = 64_000;
+const NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+const NATIVE_UNKNOWN_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
+const ONE_MILLION_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 const CLAUDE_AUTO_COMPACT_MIN_TOKENS: u64 = 100_000;
 const CLAUDE_AUTO_COMPACT_MAX_TOKENS: u64 = 1_000_000;
 const CATALOG_TTL: Duration = Duration::from_secs(5 * 60);
@@ -102,7 +105,10 @@ pub(crate) fn register_launch_provenance(
         tmux_session_name.to_string(),
         LaunchProvenanceEntry {
             provenance: ClaudeLaunchProvenance::from(gateway_proxy_env),
-            launch_model: launch_model.and_then(normalize_model_selector),
+            // Keep a `[1m]` launch suffix intact. Claude's completion event
+            // can report only the resolved base model, so normalizing here
+            // would silently discard the authoritative launch-time window.
+            launch_model: launch_model.and_then(preserve_model_selector),
             recorded_at: Instant::now(),
         },
     );
@@ -125,7 +131,7 @@ pub(crate) fn persist_launch_provenance_to_tmux(
     let payload = PersistedLaunchProvenance {
         mode: mode.to_string(),
         base_url,
-        launch_model: launch_model.and_then(normalize_model_selector),
+        launch_model: launch_model.and_then(preserve_model_selector),
     };
     let Ok(serialized) = serde_json::to_string(&payload) else {
         return;
@@ -152,30 +158,58 @@ pub(crate) fn context_window_for_turn(
     current_model: Option<&str>,
 ) -> Option<u64> {
     let launch = launch_provenance_for_tmux(tmux_session_name)?;
-    let model = current_model
-        .and_then(normalize_model_selector)
-        .or(launch.launch_model);
+    let reported_model = current_model.and_then(preserve_model_selector);
+    let model = match (reported_model, launch.launch_model) {
+        // Claude's completion records can report either a resolved base alias
+        // (`sonnet`) or its canonical id (`claude-sonnet-4-6`) even when this
+        // pane was launched as `sonnet[1m]`. Retain the launch-time 1M selector
+        // for that same known native family; a truly different live model (for
+        // example `/model opus`) still wins below.
+        (Some(reported), Some(launch_model))
+            if is_one_m_model_selector(&launch_model)
+                && selector_matches_one_m_launch(&reported, &launch_model) =>
+        {
+            Some(launch_model)
+        }
+        (Some(reported), _) => Some(reported),
+        (None, launch_model) => launch_model,
+    };
     match launch.provenance {
-        ClaudeLaunchProvenance::Scrub => native_context_window(model.as_deref()).or(Some(100_000)),
+        // A native selector that we do not explicitly recognize may still be
+        // a current Claude family with a 1M context window. Prefer the native
+        // provider's conservative upper fallback over a false early compact.
+        ClaudeLaunchProvenance::Scrub => {
+            native_context_window(model.as_deref()).or(Some(NATIVE_UNKNOWN_CONTEXT_WINDOW_TOKENS))
+        }
         ClaudeLaunchProvenance::Inject { base_url } => {
+            // An injected session's routed alias is authoritative only once
+            // its launch proxy catalog is available. After a dcserver restart
+            // the cache starts cold; do not invent a 100K/36K fallback while
+            // the background refresh is still discovering that alias.
             let catalog = cached_catalog_and_schedule_refresh(&base_url);
-            let selector = model.as_deref();
-            if let Some(window) = selector.and_then(|model| {
-                catalog
-                    .as_ref()
-                    .and_then(|windows| windows.get(model).copied())
-                    .filter(|window| *window > 0)
-            }) {
+            let selector = model.as_deref().and_then(normalize_model_selector);
+            if let Some(window) = catalog
+                .as_ref()
+                .and_then(|windows| {
+                    selector
+                        .as_deref()
+                        .and_then(|model| windows.get(model).copied())
+                })
+                .filter(|window| *window > 0)
+            {
                 return Some(window);
             }
             // Canonical native ids deliberately bypass a routed catalog when an
             // exact alias did not win. Do not family/prefix-match future models.
-            native_context_window(selector).or_else(|| {
-                catalog
-                    .as_ref()
-                    .and_then(minimum_positive_catalog_window)
-                    .or(Some(100_000))
-            })
+            if let Some(window) = native_context_window(model.as_deref()) {
+                return Some(window);
+            }
+            // A routed alias is not authoritative until a catalog exists. This
+            // is particularly important for warm panes rehydrated after a
+            // dcserver restart: scheduling the refresh is safe, inventing a
+            // 100K trigger before it returns is not.
+            let catalog = catalog?;
+            minimum_positive_catalog_window(&catalog).or(Some(100_000))
         }
     }
 }
@@ -188,6 +222,12 @@ pub(crate) fn compact_threshold(
     compact_percent: u64,
     lower_bound_tokens: u64,
 ) -> Option<CompactThreshold> {
+    // Zero is the explicit per-provider disable setting. Check it before the
+    // lower-bound max so a configured floor cannot accidentally re-enable
+    // automatic compaction.
+    if compact_percent == 0 {
+        return None;
+    }
     let ceiling = actual_window_tokens.saturating_sub(COMPACT_SAFETY_RESERVE_TOKENS);
     if ceiling == 0 {
         return None;
@@ -207,15 +247,20 @@ pub(crate) fn compact_threshold(
     })
 }
 
-/// Absolute Claude Code launch knob. It is intentionally unavailable without a
-/// concrete launch model, and accepts only Claude Code's documented range.
+/// Absolute Claude Code launch knob for immutable headless/process launches.
+/// Interactive Claude TUI sessions deliberately do not use it because `/model`
+/// can change their live model after launch. It is unavailable without a
+/// concrete launch model and accepts only Claude Code's documented range.
 pub(crate) fn launch_auto_compact_window(
     tmux_session_name: &str,
     launch_model: Option<&str>,
     compact_percent: u64,
     lower_bound_tokens: u64,
 ) -> Option<u64> {
-    let launch_model = launch_model.and_then(normalize_model_selector)?;
+    if compact_percent == 0 {
+        return None;
+    }
+    let launch_model = launch_model.and_then(preserve_model_selector)?;
     let window = context_window_for_turn(tmux_session_name, Some(&launch_model))?;
     let threshold = compact_threshold(window, compact_percent, lower_bound_tokens)?;
     (CLAUDE_AUTO_COMPACT_MIN_TOKENS..=CLAUDE_AUTO_COMPACT_MAX_TOKENS)
@@ -251,12 +296,79 @@ pub(crate) fn normalize_model_selector(model: &str) -> Option<String> {
     (!model.is_empty()).then(|| model.to_string())
 }
 
-fn native_context_window(model: Option<&str>) -> Option<u64> {
-    match model? {
-        "claude-opus-4-8" | "claude-sonnet-5" | "claude-fable-5" => Some(1_000_000),
-        "claude-haiku-4-5" => Some(200_000),
+fn preserve_model_selector(model: &str) -> Option<String> {
+    let model = model.trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+fn is_one_m_model_selector(model: &str) -> bool {
+    model
+        .trim()
+        .strip_suffix("[1m]")
+        .is_some_and(|base| !base.trim().is_empty())
+}
+
+/// Whether a completion's selector denotes the same model as a `[1m]` launch
+/// selector. Claude Code sometimes writes aliases in launch argv and canonical
+/// ids in transcript events, so exact normalized equality is not enough.
+fn selector_matches_one_m_launch(reported: &str, launch_model: &str) -> bool {
+    if normalize_model_selector(reported) == normalize_model_selector(launch_model) {
+        return true;
+    }
+    matches!(
+        (native_model_family(reported), native_model_family(launch_model)),
+        (Some(reported_family), Some(launch_family)) if reported_family == launch_family
+    )
+}
+
+/// Classify only exact native selectors known to Claude Code. This deliberately
+/// has no prefix/family fallback: an unrecognized future id must take the
+/// conservative unknown policy instead of inheriting a stale mapping.
+fn native_model_family(model: &str) -> Option<&'static str> {
+    let model = normalize_model_selector(model)?;
+    match model.as_str() {
+        "sonnet"
+        | "claude-sonnet-5"
+        | "claude-sonnet-4-6"
+        | "claude-sonnet-4-5"
+        | "claude-sonnet-4-5-20250929"
+        | "claude-sonnet-4"
+        | "claude-sonnet-4-20250514"
+        | "claude-3-7-sonnet"
+        | "claude-3-7-sonnet-20250219"
+        | "claude-3-5-sonnet"
+        | "claude-3-5-sonnet-20241022" => Some("sonnet"),
+        "opus"
+        | "claude-opus-4-8"
+        | "claude-opus-4-7"
+        | "claude-opus-4-6"
+        | "claude-opus-4-5"
+        | "claude-opus-4-5-20251101"
+        | "claude-opus-4-1"
+        | "claude-opus-4-1-20250805"
+        | "claude-opus-4"
+        | "claude-opus-4-20250514" => Some("opus"),
+        "haiku"
+        | "claude-haiku-4-5"
+        | "claude-haiku-4-5-20251001"
+        | "claude-3-5-haiku"
+        | "claude-3-5-haiku-20241022" => Some("haiku"),
+        // Opus Plan launches an Opus planning shell but its execution model is
+        // Sonnet; classify it accordingly for transcript model reconciliation.
+        "opusplan" => Some("sonnet"),
         _ => None,
     }
+}
+
+fn native_context_window(model: Option<&str>) -> Option<u64> {
+    let model = model?.trim();
+    // This suffix is emitted by Claude Code's model picker and means the
+    // selected model has explicitly opted into the 1M context beta. It must
+    // be checked before `normalize_model_selector` erases the suffix.
+    if is_one_m_model_selector(model) {
+        return Some(ONE_MILLION_CONTEXT_WINDOW_TOKENS);
+    }
+    native_model_family(model).map(|_| NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS)
 }
 
 fn launch_provenance_for_tmux(tmux_session_name: &str) -> Option<LaunchProvenanceEntry> {
@@ -313,7 +425,7 @@ fn parse_persisted_launch_provenance(
         provenance,
         payload
             .launch_model
-            .and_then(|model| normalize_model_selector(&model)),
+            .and_then(|model| preserve_model_selector(&model)),
     ))
 }
 
@@ -574,6 +686,12 @@ mod tests {
     }
 
     #[test]
+    fn zero_compact_percent_disables_before_the_lower_bound_can_reenable_it() {
+        assert_eq!(compact_threshold(1_000_000, 0, 300_000), None);
+        assert_eq!(compact_threshold(100_000, 0, u64::MAX), None);
+    }
+
+    #[test]
     fn parser_accepts_catalog_maps_arrays_and_only_positive_windows() {
         let parsed = parse_context_window_catalog(
             r#"{"contextWindows":{"routed-sonnet":{"contextWindow":372000},"bad":0},"models":[{"id":"claude-haiku-4-5","context_window":"200000"}]}"#,
@@ -612,7 +730,7 @@ mod tests {
                 ClaudeLaunchProvenance::Inject {
                     base_url: "http://proxy.test".to_string(),
                 },
-                Some("routed-sonnet".to_string()),
+                Some("routed-sonnet[1m]".to_string()),
             ))
         );
         assert_eq!(
@@ -655,7 +773,7 @@ mod tests {
         );
         assert_eq!(
             context_window_for_turn("tmux-a", Some("claude-sonnet-5")),
-            Some(1_000_000)
+            Some(200_000)
         );
         assert_eq!(
             context_window_for_turn("tmux-a", Some("unknown")),
@@ -664,7 +782,76 @@ mod tests {
     }
 
     #[test]
-    fn scrub_uses_exact_native_table_and_does_not_follow_later_config() {
+    fn injected_routed_alias_waits_for_a_cold_catalog_then_resolves_normally() {
+        let proxy = "http://proxy-cold-catalog.test";
+        let gateway = ClaudeGatewayProxyEnv::Inject {
+            base_url: proxy.to_string(),
+        };
+        register_launch_provenance("tmux-cold-routed", Some("routed-sonnet"), &gateway);
+
+        // A dcserver restart loses the in-memory catalog but the warm pane
+        // keeps its launch provenance in tmux. Schedule a refresh and wait for
+        // a real catalog rather than using the old 100K fallback.
+        assert_eq!(
+            context_window_for_turn("tmux-cold-routed", Some("routed-sonnet")),
+            None
+        );
+
+        put_catalog_for_test(
+            proxy,
+            HashMap::from([("routed-sonnet".to_string(), 372_000)]),
+        );
+        assert_eq!(
+            context_window_for_turn("tmux-cold-routed", Some("routed-sonnet")),
+            Some(372_000)
+        );
+    }
+
+    #[test]
+    fn injected_canonical_native_id_stays_authoritative_while_catalog_is_cold() {
+        let gateway = ClaudeGatewayProxyEnv::Inject {
+            base_url: "http://proxy-cold-native.test".to_string(),
+        };
+        register_launch_provenance("tmux-cold-native", Some("claude-sonnet-4-6"), &gateway);
+
+        assert_eq!(
+            context_window_for_turn("tmux-cold-native", Some("claude-sonnet-4-6")),
+            Some(NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS),
+            "a canonical native selector does not need an unavailable routed catalog"
+        );
+    }
+
+    #[test]
+    fn native_table_handles_exact_aliases_versions_and_one_million_suffixes() {
+        for model in [
+            "sonnet",
+            "opus",
+            "haiku",
+            "opusplan",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5-20250929",
+            "claude-opus-4-8",
+            "claude-opus-4-5-20251101",
+            "claude-haiku-4-5-20251001",
+        ] {
+            assert_eq!(
+                native_context_window(Some(model)),
+                Some(NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS),
+                "model {model}"
+            );
+        }
+        for model in ["sonnet[1m]", "opus[1m]", "claude-sonnet-4-6[1m]"] {
+            assert_eq!(
+                native_context_window(Some(model)),
+                Some(ONE_MILLION_CONTEXT_WINDOW_TOKENS),
+                "model {model}"
+            );
+        }
+        assert_eq!(native_context_window(Some("future-model")), None);
+    }
+
+    #[test]
+    fn scrub_uses_exact_native_table_and_conservative_unknown_fallback() {
         reset_for_test();
         register_launch_provenance(
             "tmux-native",
@@ -674,7 +861,24 @@ mod tests {
         assert_eq!(context_window_for_turn("tmux-native", None), Some(200_000));
         assert_eq!(
             context_window_for_turn("tmux-native", Some("future-model")),
-            Some(100_000)
+            Some(1_000_000)
+        );
+
+        // The launch selector must retain `[1m]` when a completion does not
+        // include a model field of its own.
+        register_launch_provenance(
+            "tmux-native-one-million",
+            Some("sonnet[1m]"),
+            &ClaudeGatewayProxyEnv::Scrub,
+        );
+        assert_eq!(
+            context_window_for_turn("tmux-native-one-million", None),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_window_for_turn("tmux-native-one-million", Some("sonnet")),
+            Some(1_000_000),
+            "a completion's resolved base alias must not erase launch-time [1m] authority"
         );
         assert_eq!(
             context_window_for_turn("unregistered", Some("claude-sonnet-5")),

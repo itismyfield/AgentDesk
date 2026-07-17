@@ -78,12 +78,22 @@ static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
 /// Starts at 1 so that 0 stays a reserved "not yet recorded" sentinel.
 static EXTERNAL_INPUT_RELAY_LEASE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// Process-global identity for the short SSH-direct observation marker. It is
+/// carried on the observation event so a machine-control suppression can clear
+/// only the effects created for that event, never a newer human submission.
+static SSH_DIRECT_OBSERVATION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 /// `generation` sentinel for a freshly constructed lease that has NOT yet been
 /// recorded (and therefore not yet stamped with a unique generation).
 pub(crate) const EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED: u64 = 0;
+pub(crate) const SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED: u64 = 0;
 
 fn next_external_input_relay_lease_generation() -> u64 {
     EXTERNAL_INPUT_RELAY_LEASE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_ssh_direct_observation_generation() -> u64 {
+    SSH_DIRECT_OBSERVATION_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +105,11 @@ pub struct ObservedTuiPrompt {
     /// Unlike byte offsets this survives compaction and head rotation.
     pub source_event_id: Option<String>,
     pub observed_at: DateTime<Utc>,
+    /// Exact side effects created before this event was published. A confirmed
+    /// machine control can clear these identities without clobbering a newer
+    /// SSH-direct observation for the same pane.
+    pub(crate) external_input_lease_generation: u64,
+    pub(crate) ssh_direct_observation_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,7 +212,7 @@ struct TuiPromptDedupeState {
     // Short-lived marker set the moment an SSH-direct prompt is observed,
     // closing the window before `record_prompt_anchor` runs (the latter has
     // to wait for the Discord notify await to land).
-    ssh_direct_observation_by_tmux: HashMap<PromptKey, TimedValue<()>>,
+    ssh_direct_observation_by_tmux: HashMap<PromptKey, TimedValue<u64>>,
     // Longer-lived response relay lease set as soon as a direct tmux prompt
     // is observed. Unlike the Discord prompt anchor this survives notify-bot
     // failures; watchers use it to keep post-terminal suppression from eating
@@ -1188,11 +1203,20 @@ fn observe_prompt_candidates_by_tmux_inner(
     if let Some(entry_id) = entry_id {
         record_relayed_entry_id(&provider, tmux_session_name, entry_id);
     }
-    record_external_input_relay_lease(&provider, tmux_session_name, None);
+    // Keep the exact identities of the pre-publish effects on the event. A
+    // confirmed machine control may consume this observation in the relay
+    // before any synthetic turn is created; it must then clear only these
+    // effects, never a newer human prompt's lease or SSH-direct marker.
+    let external_input_lease = record_external_input_turn_lease(
+        &provider,
+        tmux_session_name,
+        ExternalInputRelayLease::unassigned(None),
+    );
     if effect == PromptObservationEffect::RelayLeaseOnly {
         return PromptObservation::PublishedSshDirect;
     }
-    mark_ssh_direct_observation_pending(&provider, tmux_session_name);
+    let ssh_direct_observation_generation =
+        mark_ssh_direct_observation_pending(&provider, tmux_session_name);
     let prompt = candidates
         .first()
         .expect("non-empty candidates")
@@ -1203,6 +1227,8 @@ fn observe_prompt_candidates_by_tmux_inner(
         prompt,
         source_event_id: entry_id.map(str::to_string),
         observed_at,
+        external_input_lease_generation: external_input_lease.generation,
+        ssh_direct_observation_generation,
     };
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect
@@ -1385,20 +1411,54 @@ pub(crate) fn clear_external_input_relay_lease_if_generation_matches(
     true
 }
 
-fn mark_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) {
+/// Compare-and-clear an external-input lease by generation without requiring a
+/// channel binding. Direct prompt observation records an initially unassigned
+/// lease before relay ownership has been resolved, so a consumed machine
+/// control needs this exact unscoped cleanup path.
+fn clear_external_input_relay_lease_if_generation_matches_unscoped(
+    provider: &str,
+    tmux_session_name: &str,
+    expected_generation: u64,
+) -> bool {
+    if expected_generation == EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED {
+        return false;
+    }
+    let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     if provider.is_empty() || tmux_session_name.is_empty() {
-        return;
+        return false;
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    if state
+        .external_input_relay_lease_by_tmux
+        .get(&key)
+        .is_none_or(|entry| entry.value.generation != expected_generation)
+    {
+        return false;
+    }
+    state.external_input_relay_lease_by_tmux.remove(&key);
+    true
+}
+
+fn mark_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) -> u64 {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() {
+        return SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED;
+    }
+    let generation = next_ssh_direct_observation_generation();
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
     state.ssh_direct_observation_by_tmux.insert(
-        PromptKey::new(provider, tmux_session_name),
+        PromptKey::new(&provider, tmux_session_name),
         TimedValue {
-            value: (),
+            value: generation,
             recorded_at: Instant::now(),
         },
     );
+    generation
 }
 
 /// True when an SSH-direct prompt has been observed for this
@@ -1429,6 +1489,51 @@ fn clear_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str)
     state
         .ssh_direct_observation_by_tmux
         .remove(&PromptKey::new(&provider, tmux_session_name));
+}
+
+fn clear_ssh_direct_observation_pending_if_generation_matches(
+    provider: &str,
+    tmux_session_name: &str,
+    expected_generation: u64,
+) -> bool {
+    if expected_generation == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
+        return false;
+    }
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    if state
+        .ssh_direct_observation_by_tmux
+        .get(&key)
+        .is_none_or(|entry| entry.value != expected_generation)
+    {
+        return false;
+    }
+    state.ssh_direct_observation_by_tmux.remove(&key);
+    true
+}
+
+/// Clear the prompt-observation side effects stamped on `prompt`, but only if
+/// no newer observation has replaced either identity for this pane.
+///
+/// This is used when a machine `/compact` is confirmed after generic direct
+/// prompt observation has already created its relay lease and SSH marker.
+pub(crate) fn clear_observed_tui_prompt_effects(prompt: &ObservedTuiPrompt) {
+    let _ = clear_external_input_relay_lease_if_generation_matches_unscoped(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        prompt.external_input_lease_generation,
+    );
+    let _ = clear_ssh_direct_observation_pending_if_generation_matches(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        prompt.ssh_direct_observation_generation,
+    );
 }
 
 pub(crate) fn record_suppressed_discord_origin_prompt(
@@ -3370,6 +3475,55 @@ No response requested.\n\
         );
         assert!(clear_external_input_relay_lease("claude", "tmux-a", 42));
         assert!(!external_input_relay_lease_present("claude", "tmux-a", 42));
+    }
+
+    #[test]
+    fn consumed_observation_cleanup_preserves_newer_human_effects() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let mut observed = subscribe_observed_prompts();
+
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-effect-generation", "/compact"),
+            PromptObservation::PublishedSshDirect
+        );
+        let machine = observed.try_recv().expect("machine observation event");
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-effect-generation", "a later human prompt"),
+            PromptObservation::PublishedSshDirect
+        );
+        let human = observed.try_recv().expect("newer human observation event");
+        assert_ne!(
+            machine.external_input_lease_generation,
+            human.external_input_lease_generation
+        );
+        assert_ne!(
+            machine.ssh_direct_observation_generation,
+            human.ssh_direct_observation_generation
+        );
+
+        clear_observed_tui_prompt_effects(&machine);
+        assert_eq!(
+            external_input_relay_lease("claude", "tmux-effect-generation", 42)
+                .map(|lease| lease.generation),
+            Some(human.external_input_lease_generation),
+            "machine cleanup must not clear the newer human relay lease"
+        );
+        assert!(
+            is_ssh_direct_observation_pending("claude", "tmux-effect-generation"),
+            "machine cleanup must not clear the newer human SSH marker"
+        );
+
+        clear_observed_tui_prompt_effects(&human);
+        assert!(!external_input_relay_lease_present(
+            "claude",
+            "tmux-effect-generation",
+            42
+        ));
+        assert!(!is_ssh_direct_observation_pending(
+            "claude",
+            "tmux-effect-generation"
+        ));
     }
 
     #[test]

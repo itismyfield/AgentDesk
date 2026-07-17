@@ -446,6 +446,20 @@ fn send_prompt_with_readiness(
 /// This function deliberately contains no retry Enter, Escape, or Ctrl-U cleanup:
 /// after the first tmux mutation starts, every uncertainty stays disarmed.
 pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
+    send_compact_while_busy_after_enter(session_name, || {})
+}
+
+/// Variant of [`send_compact_while_busy`] that records a provisional
+/// machine-control marker immediately after Enter has been accepted by tmux.
+///
+/// The passive confirmation capture below intentionally waits briefly for the
+/// pane to settle. A transcript hook can observe the submitted `/compact`
+/// during that wait, so callers that need to correlate the control must arm
+/// their marker before the settle sleep, not after this function returns.
+pub(crate) fn send_compact_while_busy_after_enter(
+    session_name: &str,
+    on_enter_submitted: impl FnOnce(),
+) -> CompactSubmitOutcome {
     let snapshot = prompt_readiness_snapshot(session_name);
     if compact_steering_decision(&snapshot).is_err() {
         return CompactSubmitOutcome::PreMutationRefused;
@@ -470,6 +484,11 @@ pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
     if ensure_tmux_success(enter, &TuiInputAction::Enter).is_err() {
         return CompactSubmitOutcome::AmbiguousAfterMutation;
     }
+    // This is the earliest unambiguous boundary: tmux accepted the Enter that
+    // submits `/compact`. Do not defer the marker until after the passive
+    // settle/confirmation capture below, or a fast hook observation can race
+    // past it and create a duplicate relay lifecycle.
+    on_enter_submitted();
     std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
 
     let confirmation = prompt_readiness_snapshot(session_name);
@@ -1073,28 +1092,39 @@ pub fn send_followup_prompt_or_idle_transcript(
     transcript_path: &std::path::Path,
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
+    // The potentially long warm-follow-up readiness wait must not hold the
+    // narrow composer lock: a busy-pane `/compact` still needs to steer while
+    // this path waits for the prior turn. Once readiness returns, however,
+    // re-check the live composer and keep the dedupe record plus the entire
+    // submit/confirmation sequence serialized with every other mutation.
     wait_for_prompt_ready_or_idle_transcript(
         session_name,
         PromptReadinessKind::ProvenWarmFollowup,
         cancel_token,
         transcript_path,
     )?;
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        "claude",
-        session_name,
-        prompt,
-    );
-    match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                "claude",
-                session_name,
-                prompt,
-            );
-            Err(error)
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        let snapshot = prompt_readiness_snapshot(session_name);
+        if !proven_warm_followup_revalidates_prompt_ready(&snapshot, transcript_path) {
+            return Err("claude tui composer changed before follow-up mutation".to_string());
         }
-    }
+        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+            "claude",
+            session_name,
+            prompt,
+        );
+        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                    "claude",
+                    session_name,
+                    prompt,
+                );
+                Err(error)
+            }
+        }
+    })
 }
 
 fn wait_for_prompt_ready_inner(
@@ -1683,6 +1713,25 @@ fn prompt_marker_confirms_prompt_ready(
     snapshot.prompt_marker_detected
         && !snapshot.prompt_draft_detected
         && snapshot_allows_prompt_readiness(readiness, snapshot)
+}
+
+/// Revalidate a hosted warm follow-up after it acquires the narrow composer
+/// lock. The earlier readiness wait may validly have returned through the
+/// transcript-idle fallback before a pane capture showed the `❯` marker, so a
+/// marker-only recheck would incorrectly reject an otherwise ready warm pane.
+///
+/// This mirrors the snapshot-based success condition in
+/// `wait_for_prompt_ready_inner`: the normal prompt marker is sufficient, or a
+/// live, non-busy snapshot plus an idle transcript is sufficient for the
+/// recorded-turn warm-reuse path.
+fn proven_warm_followup_revalidates_prompt_ready(
+    snapshot: &PromptReadinessSnapshot,
+    transcript_path: &std::path::Path,
+) -> bool {
+    let readiness = PromptReadinessKind::ProvenWarmFollowup;
+    prompt_marker_confirms_prompt_ready(readiness, snapshot)
+        || (snapshot_allows_prompt_readiness(readiness, snapshot)
+            && transcript_idle_confirms_prompt_ready(snapshot, Some(transcript_path)))
 }
 
 /// #3889/#4528: an MCP-auth warning blocks readiness unless the caller proves
@@ -2280,6 +2329,43 @@ mod tests {
             TuiTurnState::Idle
         );
         assert!(transcript_has_recorded_turn(&recorded_idle));
+    }
+
+    #[test]
+    fn warm_followup_lock_revalidation_keeps_idle_transcript_fallback() {
+        // The warm hosted path can become ready through the transcript-idle
+        // fallback before a concurrent pane capture observes the prompt marker.
+        // Acquiring the composer lock must revalidate that same valid state,
+        // rather than narrowing it to a marker-only condition.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("recorded-idle.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+             {\"type\":\"user\"}\n\
+             {\"type\":\"assistant\"}\n\
+             {\"type\":\"result\"}\n",
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "completed warm turn; prompt chrome not yet captured".to_string(),
+        };
+
+        assert!(
+            !prompt_marker_confirms_prompt_ready(
+                PromptReadinessKind::ProvenWarmFollowup,
+                &snapshot
+            ),
+            "fixture must exercise the markerless transcript fallback"
+        );
+        assert!(proven_warm_followup_revalidates_prompt_ready(
+            &snapshot,
+            &transcript,
+        ));
     }
 
     #[test]

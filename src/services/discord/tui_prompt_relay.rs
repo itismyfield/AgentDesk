@@ -327,29 +327,11 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
 }
 
 async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiPrompt) {
-    // #4591: only a passively-confirmed, session/fence-bound machine compact
-    // may consume this exact observation. The generic slash classifier below
+    // #4591: only an Enter-submitted, session/fence-bound machine compact may
+    // consume this exact observation. The generic slash classifier below
     // remains the fallback formatting guard; it does not grant a long-lived
     // marker that could swallow a later human command after an ambiguous send.
-    if prompt.provider.eq_ignore_ascii_case("claude")
-        && let Some(provider_session_id) =
-            crate::services::tui_prompt_dedupe::provider_session_for_tmux(
-                "claude",
-                &prompt.tmux_session_name,
-            )
-        && crate::services::claude_compact_trigger::consume_passively_confirmed_machine_compact(
-            &prompt.provider,
-            &prompt.tmux_session_name,
-            &provider_session_id,
-            &prompt.prompt,
-            prompt.observed_at,
-        )
-    {
-        tracing::info!(
-            tmux_session_name = %prompt.tmux_session_name,
-            provider_session_id = %provider_session_id,
-            "consumed confirmed machine /compact observation"
-        );
+    if consume_machine_compact_observation(&prompt) {
         return;
     }
     let Some(channel_id) = owner_channel_for_prompt(shared, &prompt) else {
@@ -756,6 +738,38 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         let _ = &mut lease;
         let _ = deferred_synthetic_start;
     }
+}
+
+/// Consume a confirmed machine `/compact` before this observation can create a
+/// second control lifecycle. Generic prompt observation records its relay
+/// lease and SSH-direct marker before publishing the event, so successful
+/// consumption also releases those exact, event-stamped effects.
+fn consume_machine_compact_observation(prompt: &ObservedTuiPrompt) -> bool {
+    if !prompt.provider.eq_ignore_ascii_case("claude") {
+        return false;
+    }
+    let Some(provider_session_id) = crate::services::tui_prompt_dedupe::provider_session_for_tmux(
+        "claude",
+        &prompt.tmux_session_name,
+    ) else {
+        return false;
+    };
+    if !crate::services::claude_compact_trigger::consume_enter_submitted_machine_compact(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        &provider_session_id,
+        &prompt.prompt,
+        prompt.observed_at,
+    ) {
+        return false;
+    }
+    crate::services::tui_prompt_dedupe::clear_observed_tui_prompt_effects(prompt);
+    tracing::info!(
+        tmux_session_name = %prompt.tmux_session_name,
+        provider_session_id = %provider_session_id,
+        "consumed confirmed machine /compact observation and cleared pre-publish effects"
+    );
+    true
 }
 
 fn owner_channel_for_prompt(
