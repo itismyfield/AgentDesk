@@ -9,6 +9,12 @@ use crate::services::provider::ProviderKind;
 
 use super::{snapshot::WatcherStateSnapshot, stall_verdict};
 
+mod redrive_grace;
+
+// #4181 item-2: the redrive no-progress grace lives in the `redrive_grace`
+// child module (monotonic clock, kept off this file's production line count).
+pub(super) use redrive_grace::stalled_undelivered_backlog_for_redrive;
+
 pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
 /// Historical deferral-budget field for force-clean deferrals while positive
 /// liveness keeps being observed. A deferral only ever fires when
@@ -437,7 +443,7 @@ pub(super) fn clear_stall_watchdog_liveness_state(
     let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
     OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
     CAPTURE_OFFSET_WATCHDOG_STATE.retain(|key, _| !key.matches_session(&probe));
-    REDRIVE_NO_PROGRESS_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
+    redrive_grace::clear_for_session(&probe);
 }
 
 pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
@@ -452,138 +458,13 @@ pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
     true
 }
 
-/// #4181 item-2: process-start monotonic anchor for the redrive no-progress
-/// grace. `Instant` advances monotonically and cannot be stepped by an NTP
-/// correction or a manual clock change, so it is the correct basis for a PURE
-/// elapsed-time measurement that gates a *destructive* redrive. Wall-clock time
-/// is unsuitable here: a forward jump of ≥ the grace would inflate the measured
-/// frozen-duration and fire a destructive redrive early (issue #4181 item-2).
-/// It is process-local (does not survive restart), which is correct for an
-/// in-process elapsed measurement; a restart-surviving baseline (issue #4181
-/// item-3) is a distinct concern that needs durable absolute-time state.
-#[cfg(not(test))]
-static REDRIVE_MONO_ANCHOR: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
-
-// Test-only monotonic override. Tests drive time through injected wall-clock
-// seconds; with no explicit override the redrive grace mirrors that injected
-// wall clock (so every existing time-driven test still exercises the grace),
-// and a test can set this to decouple monotonic from wall time and prove the
-// grace tracks the monotonic clock alone.
-#[cfg(test)]
-thread_local! {
-    static REDRIVE_MONO_OVERRIDE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
-}
-
-/// Monotonic seconds for the redrive no-progress grace. Production reads the
-/// `Instant` anchor and ignores `wall_now_unix_secs`; test builds mirror the
-/// injected wall clock unless a test set an explicit monotonic override.
-fn redrive_mono_now_secs(wall_now_unix_secs: i64) -> i64 {
-    #[cfg(test)]
-    {
-        REDRIVE_MONO_OVERRIDE
-            .with(|cell| cell.get())
-            .unwrap_or(wall_now_unix_secs)
-    }
-    #[cfg(not(test))]
-    {
-        let _ = wall_now_unix_secs;
-        REDRIVE_MONO_ANCHOR.elapsed().as_secs() as i64
-    }
-}
-
-#[cfg(test)]
-fn set_redrive_mono_override_for_test(secs: i64) {
-    REDRIVE_MONO_OVERRIDE.with(|cell| cell.set(Some(secs)));
-}
-
-#[cfg(test)]
-fn clear_redrive_mono_override_for_test() {
-    REDRIVE_MONO_OVERRIDE.with(|cell| cell.set(None));
-}
-
-/// #4181 item-2: dedicated monotonic no-progress tracker for the redrive
-/// destructive trigger, kept separate from the wall-clock `OFFSET_OBSERVATIONS`
-/// the liveness path uses so redrive's grace can measure elapsed time on the
-/// monotonic clock without perturbing (or being perturbed by) the liveness
-/// observations.
-#[derive(Clone, Debug)]
-struct RedriveNoProgressObservation {
-    offset: u64,
-    /// Monotonic process-seconds at which `offset` last changed. The redrive
-    /// no-progress grace measures elapsed against this, so a wall-clock/NTP
-    /// step cannot fire a destructive redrive early.
-    unchanged_since_mono_secs: i64,
-    /// Wall-clock unix seconds of the last observation. Used only for TTL GC
-    /// parity with the sibling liveness maps — never for the grace gate.
-    last_updated_unix_secs: i64,
-}
-
-static REDRIVE_NO_PROGRESS_OBSERVATIONS: LazyLock<
-    dashmap::DashMap<StallLivenessKey, RedriveNoProgressObservation>,
-> = LazyLock::new(dashmap::DashMap::new);
-
-/// #4181 item-2: returns `true` iff the committed relay offset has stayed
-/// UNCHANGED for at least `STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS` of
-/// MONOTONIC time (and did not advance on this tick). Mirrors the wall-clock
-/// relay-offset observation semantics used by the liveness path, but anchored on
-/// the monotonic clock so NTP/wall-clock steps cannot shorten the grace.
-fn redrive_relay_offset_stalled_past_grace(
-    key: &StallLivenessKey,
-    current_offset: u64,
-    mono_now_secs: i64,
-    now_unix_secs: i64,
-) -> bool {
-    let key = key.for_offset_kind(OffsetObservationKind::RelayDelivered);
-    let previous = REDRIVE_NO_PROGRESS_OBSERVATIONS
-        .get(&key)
-        .map(|entry| entry.clone());
-    let advanced_this_tick = previous
-        .as_ref()
-        .is_some_and(|prev| current_offset > prev.offset);
-    let unchanged_since_mono_secs = match previous.as_ref() {
-        Some(prev) if current_offset == prev.offset => prev.unchanged_since_mono_secs,
-        _ => mono_now_secs,
-    };
-    REDRIVE_NO_PROGRESS_OBSERVATIONS.insert(
-        key,
-        RedriveNoProgressObservation {
-            offset: current_offset,
-            unchanged_since_mono_secs,
-            last_updated_unix_secs: now_unix_secs,
-        },
-    );
-    let unchanged_age_secs = mono_now_secs.saturating_sub(unchanged_since_mono_secs).max(0);
-    !advanced_this_tick
-        && unchanged_age_secs >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64
-}
-
-pub(super) fn stalled_undelivered_backlog_for_redrive(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    snapshot: &WatcherStateSnapshot,
-    now_unix_secs: i64,
-) -> bool {
-    if !live_undelivered_backlog(snapshot) {
-        return false;
-    }
-
-    let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
-    redrive_relay_offset_stalled_past_grace(
-        &key,
-        snapshot.last_relay_offset,
-        redrive_mono_now_secs(now_unix_secs),
-        now_unix_secs,
-    )
-}
-
 pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
     });
     CAPTURE_OFFSET_WATCHDOG_STATE
         .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
-    REDRIVE_NO_PROGRESS_OBSERVATIONS
-        .retain(|_, obs| !liveness_state_expired(obs.last_updated_unix_secs, now_unix_secs));
+    redrive_grace::gc(now_unix_secs);
 }
 
 fn stall_watchdog_liveness_state_is_healthy(snapshot: &WatcherStateSnapshot) -> bool {
@@ -2486,70 +2367,6 @@ mod tests {
             "pane_offset_advanced_recently"
         );
         assert!(decision.should_defer(), "{decision:?}");
-        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
-    }
-
-    /// #4181 item-2: the redrive no-progress grace must measure elapsed time on
-    /// the MONOTONIC clock, not wall-clock. A forward wall-clock/NTP step must
-    /// not inflate the frozen-duration and trip the *destructive* redrive early;
-    /// only genuine monotonic elapsed past the grace may.
-    ///
-    /// Mutation proof: revert `stalled_undelivered_backlog_for_redrive` to gate
-    /// on the wall-clock `now_unix_secs` (i.e. drop `redrive_mono_now_secs`) —
-    /// the pre-#4181 defect — and step (2)'s inflated wall delta (≥ grace) flips
-    /// the result to `true`, failing that assertion. Step (3) independently pins
-    /// the gate to the monotonic clock: with the wall clock barely moved, only a
-    /// monotonic elapsed ≥ grace makes it fire, so a mutant that reads wall time
-    /// there would return `false` and fail step (3).
-    #[test]
-    fn redrive_no_progress_grace_is_monotonic_not_wall_clock_4181() {
-        let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(4_181_002);
-        let tmux_session = "AgentDesk-codex-4181-mono-grace";
-        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
-
-        // Frozen undelivered backlog: unread bytes present, pane alive, not
-        // committed, and `last_relay_offset` held constant across every
-        // observation below (the `snapshot` helper fixes it at 10).
-        let snap = snapshot(channel.get(), tmux_session, Some(301_613));
-        assert!(
-            live_undelivered_backlog(&snap),
-            "precondition: the frozen backlog must be live"
-        );
-
-        let wall_base = 1_800_000_000;
-        let grace = STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
-
-        // (1) Prime the observation at monotonic t=0.
-        set_redrive_mono_override_for_test(0);
-        assert!(
-            !stalled_undelivered_backlog_for_redrive(&provider, channel, &snap, wall_base),
-            "the first observation can never be past the grace"
-        );
-
-        // (2) Forward wall-clock/NTP jump: the wall clock leaps past the grace,
-        // but only 10s of real MONOTONIC time elapsed. The destructive grace must
-        // see 10s, not the inflated wall delta, and must NOT fire.
-        set_redrive_mono_override_for_test(10);
-        assert!(
-            !stalled_undelivered_backlog_for_redrive(
-                &provider,
-                channel,
-                &snap,
-                wall_base + grace + 100,
-            ),
-            "a forward wall-clock/NTP jump must not trip the monotonic no-progress grace"
-        );
-
-        // (3) Genuine monotonic elapsed past the grace (offset still frozen)
-        // while the wall clock barely moved: the redrive MUST fire.
-        set_redrive_mono_override_for_test(grace);
-        assert!(
-            stalled_undelivered_backlog_for_redrive(&provider, channel, &snap, wall_base + 5),
-            "genuine monotonic elapsed past the grace must trip the redrive"
-        );
-
-        clear_redrive_mono_override_for_test();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
     }
 }
