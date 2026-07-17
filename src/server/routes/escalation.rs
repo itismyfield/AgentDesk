@@ -1025,16 +1025,19 @@ async fn emit_escalation_with_base_url(
     let requested_mode = settings.mode.clone();
     let resolved_mode = resolve_mode_at(&settings, Utc::now());
 
-    // PM 에스컬레이션 → announce 봇 (PM 에이전트가 반응해야 함)
-    // User 에스컬레이션 → notify 봇 (사람이 읽고 직접 반응)
-    let bot_name = if resolved_mode == EscalationMode::User {
-        "notify"
+    // PM escalations use the actionable role; user escalations use the
+    // informational role because a person responds directly.
+    let bot_role = if resolved_mode == EscalationMode::User {
+        crate::services::discord::bot_role::UtilityBotRole::Notify
     } else {
-        "announce"
+        crate::services::discord::bot_role::UtilityBotRole::Announce
     };
-    let announce_token = match crate::credential::read_bot_token(bot_name)
-        .or_else(|| crate::credential::read_bot_token("announce"))
-    {
+    let bot_name = bot_role.alias();
+    let announce_token = match crate::credential::read_bot_token(bot_name).or_else(|| {
+        crate::credential::read_bot_token(
+            crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+        )
+    }) {
         Some(token) => token,
         None => {
             return (

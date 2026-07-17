@@ -541,8 +541,16 @@ pub(in crate::services::discord) async fn handle_event(
             let (announce_resolution, notify_resolution) =
                 if let Some(registry) = data.shared.health_registry() {
                     (
-                        registry.utility_bot_user_id_resolution("announce").await,
-                        registry.utility_bot_user_id_resolution("notify").await,
+                        registry
+                            .utility_bot_user_id_resolution(
+                                super::super::bot_role::UtilityBotRole::Announce,
+                            )
+                            .await,
+                        registry
+                            .utility_bot_user_id_resolution(
+                                super::super::bot_role::UtilityBotRole::Notify,
+                            )
+                            .await,
                     )
                 } else {
                     (

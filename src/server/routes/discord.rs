@@ -102,7 +102,9 @@ async fn ensure_channel_is_role_mapped(
         return Ok(());
     }
 
-    let token = match crate::credential::read_bot_token("announce") {
+    let token = match crate::credential::read_bot_token(
+        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+    ) {
         Some(token) => token,
         None => {
             // Without a bot token we can't fetch the channel name; behave as
@@ -193,7 +195,9 @@ pub async fn channel_messages(
         return err;
     }
 
-    let token = match crate::credential::read_bot_token("announce") {
+    let token = match crate::credential::read_bot_token(
+        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+    ) {
         Some(t) => t,
         None => {
             return (
@@ -320,7 +324,9 @@ pub async fn channel_info(
         return err;
     }
 
-    let token = match crate::credential::read_bot_token("announce") {
+    let token = match crate::credential::read_bot_token(
+        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+    ) {
         Some(t) => t,
         None => {
             return (

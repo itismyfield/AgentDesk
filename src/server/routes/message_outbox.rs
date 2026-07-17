@@ -122,8 +122,14 @@ fn normalized_monitor_alert(
             "auto_queue.monitor_anomaly",
             crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
         ),
-        ("alert", "REVIEW_LONG") => ("auto_queue.monitor_review_long", "notify"),
-        ("recovery", _) => ("auto_queue.monitor_recovery", "notify"),
+        ("alert", "REVIEW_LONG") => (
+            "auto_queue.monitor_review_long",
+            crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+        ),
+        ("recovery", _) => (
+            "auto_queue.monitor_recovery",
+            crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+        ),
         _ => return Err("action must be alert or recovery"),
     };
     Ok((

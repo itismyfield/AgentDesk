@@ -154,8 +154,12 @@ trait CatchUpDiscordApi: Sync {
             );
         };
         (
-            registry.utility_bot_user_id_resolution("announce").await,
-            registry.utility_bot_user_id_resolution("notify").await,
+            registry
+                .utility_bot_user_id_resolution(super::bot_role::UtilityBotRole::Announce)
+                .await,
+            registry
+                .utility_bot_user_id_resolution(super::bot_role::UtilityBotRole::Notify)
+                .await,
         )
     }
 }

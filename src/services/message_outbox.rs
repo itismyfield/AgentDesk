@@ -11,7 +11,8 @@ pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
 /// outbox worker falls back to the notify bot only when that primary delivery
 /// fails, preserving human visibility without turning informational notices
 /// into agent work (#4449).
-pub(crate) const ACTIONABLE_OPS_ALERT_BOT: &str = "announce";
+pub(crate) const ACTIONABLE_OPS_ALERT_BOT: &str =
+    crate::services::discord::bot_role::UtilityBotRole::Announce.alias();
 
 pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -> bool {
     matches!(

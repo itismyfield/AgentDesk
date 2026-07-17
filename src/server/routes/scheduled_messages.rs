@@ -28,9 +28,9 @@ mod postgres_tests;
 const PAST_TOLERANCE_SECS: i64 = 60;
 
 /// Info-only scheduled pushes must not wake an agent that owns the target
-/// channel. `announce` is the authoritative agent-to-agent trigger bot, while
-/// `notify` is the canonical non-actionable delivery sink.
-const DEFAULT_SCHEDULED_MESSAGE_BOT: &str = "notify";
+/// channel, so they use the non-actionable utility-bot role.
+const DEFAULT_SCHEDULED_MESSAGE_BOT: &str =
+    crate::services::discord::bot_role::UtilityBotRole::Notify.alias();
 
 type ApiResponse = (StatusCode, Json<JsonValue>);
 

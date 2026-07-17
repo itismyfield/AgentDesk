@@ -112,7 +112,7 @@ pub(super) fn maybe_notify_orphan_queue_overflow(
             crate::services::message_outbox::OutboxMessage {
                 target: &target,
                 content: &body,
-                bot: "notify",
+                bot: super::bot_role::UtilityBotRole::Notify.alias(),
                 source: "queue_overflow_notice",
                 reason_code: Some("queue_overflow.evict"),
                 session_key: Some(&target),
