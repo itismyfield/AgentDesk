@@ -139,6 +139,30 @@ where
     delivery_guard.commit_success(write())
 }
 
+/// F1: send the interactive-TUI Escape cancel under the SAME per-pane composer
+/// mutation lock `/compact` steering (and every normal composer mutation) holds,
+/// so a user stop-Escape and a busy-pane auto `/compact` can never interleave —
+/// an Escape landing between the `/compact` literal and its Enter would swallow
+/// the user's stop, or the auto-Enter would falsely confirm a `/compact` the
+/// operator meant to cancel.
+///
+/// Lock order: this runs while `deliver_claimed_claude_stop` holds the token-local
+/// interrupt-session lock, so the acquisition here is interrupt-session-lock →
+/// composer-lock. No composer-lock holder (the `/compact` worker, stranded-draft
+/// clears, `/tui/send`, or the normal prompt-submit paths) ever takes the
+/// interrupt-session lock, so the pair is strictly one-directional and cannot
+/// deadlock. Generic over the send so the lock routing is unit-testable without a
+/// live tmux pane.
+fn deliver_tui_escape_under_composer_lock(
+    session_name: &str,
+    send_escape: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+        session_name,
+        send_escape,
+    )
+}
+
 struct ClaudeStopDeliveryReservation<'a> {
     token: &'a CancelToken,
 }
@@ -452,15 +476,19 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             turn_identity.as_ref(),
             || match delivery {
                 ClaudeTurnInterruptDelivery::TuiEscape => {
-                    match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"])
-                    {
-                        Ok(output) if output.status.success() => Ok(()),
-                        Ok(output) => Err(format!(
-                            "tmux send-keys Escape failed: status={}",
-                            output.status
-                        )),
-                        Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
-                    }
+                    deliver_tui_escape_under_composer_lock(&session_for_task, || {
+                        match crate::services::platform::tmux::send_keys(
+                            &session_for_task,
+                            &["Escape"],
+                        ) {
+                            Ok(output) if output.status.success() => Ok(()),
+                            Ok(output) => Err(format!(
+                                "tmux send-keys Escape failed: status={}",
+                                output.status
+                            )),
+                            Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+                        }
+                    })
                 }
                 ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
                     let Some(input_fifo) = wrapper_input_fifo_path else {
@@ -930,5 +958,56 @@ mod tests {
             ),
             ClaudeStopDeliveryDecision::SkipDuplicate
         );
+    }
+
+    /// F1 mutation guard: `deliver_tui_escape_under_composer_lock` must acquire
+    /// the SAME per-pane composer mutation lock `/compact` steering holds, so a
+    /// user stop-Escape cannot interleave its key send with a busy-pane auto
+    /// `/compact`. While a simulated `/compact` holds the composer lock, the
+    /// Escape send must NOT run; it proceeds only once the lock releases.
+    /// Reverting the routing (sending the Escape without the composer lock) lets
+    /// it run immediately, failing the `recv_timeout(..).is_err()` assertion.
+    #[cfg(unix)]
+    #[test]
+    fn tui_escape_delivery_serializes_with_compact_composer_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let session = format!("claude-4591-stop-escape-{}", uuid::Uuid::new_v4());
+        let (holding_tx, holding_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (escape_ran_tx, escape_ran_rx) = mpsc::channel();
+
+        // Simulate `/compact` steering holding the composer lock for this session.
+        let lock_session = session.clone();
+        thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &lock_session,
+                || {
+                    holding_tx.send(()).expect("signal compact holding lock");
+                    release_rx.recv().expect("await release");
+                },
+            );
+        });
+        holding_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("compact must acquire the composer lock first");
+
+        let escape_session = session.clone();
+        thread::spawn(move || {
+            let result = deliver_tui_escape_under_composer_lock(&escape_session, || {
+                escape_ran_tx.send(()).expect("signal escape send ran");
+                Ok::<(), String>(())
+            });
+            assert!(result.is_ok(), "escape send closure returns Ok");
+        });
+        assert!(
+            escape_ran_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "the stop Escape must wait behind the /compact composer lock"
+        );
+        release_tx.send(()).expect("release compact");
+        escape_ran_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("the stop Escape proceeds once the composer lock releases");
     }
 }
