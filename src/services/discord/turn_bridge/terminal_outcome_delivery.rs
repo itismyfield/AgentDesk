@@ -351,6 +351,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     } else {
         queue_retry_silence::apply(
             claude_tui_followup_pre_submit_requeue_candidate,
+            claude_tui_followup_busy_readiness_timeout,
             &mut full_response,
             &mut inflight_state,
         );
