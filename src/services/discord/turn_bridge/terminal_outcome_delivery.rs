@@ -829,6 +829,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 recovery_retry,
                 resume_failure_detected,
                 claude_tui_followup_pre_submit_requeue_candidate,
+                claude_tui_busy_requeue_pending,
                 tui_error_classification,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
