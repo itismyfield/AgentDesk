@@ -765,6 +765,30 @@ mod turn_source_tests {
     }
 
     #[test]
+    fn set_watcher_owner_channel_id_with_zero_channel_id_skips_record_without_panicking() {
+        // A persisted channel_id == 0 sentinel must not reach ChannelId::new(0),
+        // which panics. The opt_channel_id guard skips the delivery-record write
+        // instead. Removing the guard makes this construction panic (#4608).
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            0,
+            None,
+            7,
+            8,
+            9,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk".to_string()),
+            None,
+            None,
+            0,
+        );
+        let changed = state.set_watcher_owner_channel_id(123);
+        assert!(changed);
+        assert_eq!(state.watcher_owner_channel_id, Some(123));
+    }
+
+    #[test]
     fn watcher_owner_channel_id_defaults_absent_legacy_rows_to_none() {
         let state: InflightTurnState = serde_json::from_value(serde_json::json!({
             "version": 9,
@@ -1116,10 +1140,11 @@ impl InflightTurnState {
             ProviderKind::from_str(&self.provider),
             self.tmux_session_name.as_deref().filter(|name| !name.is_empty()),
         ) && let Some(owner_channel_id) = normalized
+            && let Some(self_channel_id) = opt_channel_id(self.channel_id)
             && let Err(error) =
                 crate::services::discord::outbound::delivery_record::record_watcher_owner_channel_context(
                     &provider,
-                    poise::serenity_prelude::ChannelId::new(self.channel_id),
+                    self_channel_id,
                     poise::serenity_prelude::ChannelId::new(owner_channel_id),
                     tmux_session_name,
                 )
