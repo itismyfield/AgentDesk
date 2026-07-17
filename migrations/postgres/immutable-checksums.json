@@ -483,8 +483,13 @@
     },
     {
       "path": "migrations/postgres/0094_intake_session_owners.sql",
-      "sha256": "9a421c4b713e4af99ec24fb5bb1ccf507f79b987c276de42382591672f3dc9fe",
+      "sha256": "104ee3d0a75ab2a183fff8a867882e25fad6a631cfd57874ce243626955282ce",
       "version": 94
+    },
+    {
+      "path": "migrations/postgres/0095_intake_outbox_idempotency_key_index.sql",
+      "sha256": "495296cbfe767a15f697d7b4b6f9c08643a74e3b375f887eb11333b962b63a61",
+      "version": 95
     }
   ],
   "version": 1

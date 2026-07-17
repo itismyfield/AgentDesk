@@ -22,6 +22,7 @@
 
 use crate::db::intake_outbox::{InsertPendingPayload, IntakeOutboxRow};
 use sqlx::{PgPool, Postgres, Transaction};
+use std::future::Future;
 
 /// Canonical intake ownership identity. Both fields are stored normalized
 /// (§3.10): `provider = lower(btrim())`, `raw_channel_id = btrim()`. The
@@ -427,7 +428,35 @@ pub(crate) async fn transfer_owner_in_tx(
     expected_generation: i64,
     target_owner: &str,
 ) -> Result<TransferOutcome, sqlx::Error> {
+    transfer_owner_with_test_seams(
+        tx,
+        id,
+        expected_owner,
+        expected_generation,
+        target_owner,
+        |_| async {},
+        || async {},
+    )
+    .await
+}
+
+async fn transfer_owner_with_test_seams<FRead, FReadFuture, FWrite, FWriteFuture>(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &OwnerIdentity,
+    expected_owner: &str,
+    expected_generation: i64,
+    target_owner: &str,
+    after_read: FRead,
+    before_successor_insert: FWrite,
+) -> Result<TransferOutcome, sqlx::Error>
+where
+    FRead: FnOnce(Option<&OwnerRecordSnapshot>) -> FReadFuture,
+    FReadFuture: Future<Output = ()>,
+    FWrite: FnOnce() -> FWriteFuture,
+    FWriteFuture: Future<Output = ()>,
+{
     let latest = read_latest_owner_in_tx(tx, id).await?;
+    after_read(latest.as_ref()).await;
 
     let Some(latest) = latest else {
         return Ok(TransferOutcome::ChannelClosed);
@@ -447,6 +476,7 @@ pub(crate) async fn transfer_owner_in_tx(
     if superseded != 1 {
         return Ok(TransferOutcome::CasConflict);
     }
+    before_successor_insert().await;
 
     // Insert the successor generation. ON CONFLICT DO NOTHING guards against a
     // racing insert of the same generation; a 0-row insert is a conflict, so
@@ -773,6 +803,27 @@ pub(crate) async fn claim_pending_for_target_fenced(
     claim_token: &str,
     provider: &str,
 ) -> Result<Option<IntakeOutboxRow>, sqlx::Error> {
+    claim_pending_after_candidate_fenced(
+        pool,
+        claimer_instance_id,
+        claim_token,
+        provider,
+        |_| async {},
+    )
+    .await
+}
+
+async fn claim_pending_after_candidate_fenced<F, Fut>(
+    pool: &PgPool,
+    claimer_instance_id: &str,
+    claim_token: &str,
+    provider: &str,
+    after_candidate: F,
+) -> Result<Option<IntakeOutboxRow>, sqlx::Error>
+where
+    F: FnOnce(&ClaimCandidate) -> Fut,
+    Fut: Future<Output = ()>,
+{
     let mut tx = pool.begin().await?;
 
     let candidate: Option<ClaimCandidate> = sqlx::query_as(CLAIM_CANDIDATE_SQL)
@@ -785,6 +836,7 @@ pub(crate) async fn claim_pending_for_target_fenced(
         tx.commit().await?;
         return Ok(None);
     };
+    after_candidate(&candidate).await;
 
     // Serialize with transfer for this channel BEFORE the fenced promote. Blocks
     // until any in-flight transfer commits and releases its advisory lock; held
@@ -1324,106 +1376,330 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Fix1 — the successor-INSERT atomicity guard, at the SQL level.
-    ///
-    /// IMPORTANT: this does NOT call `transfer_owner_in_tx`. The helper's INSERT
-    /// guard (`inserted.rows_affected() != 1 -> CasConflict`) is unreachable
-    /// in-helper by construction — the helper reads the MAX generation and
-    /// inserts `max + 1`, which is always free, so its `ON CONFLICT DO NOTHING`
-    /// can never fire from the helper's own path (removing that guard therefore
-    /// cannot fail any real-helper test). What CAN fail is a corrupted/raced
-    /// state where the successor generation already exists while a lower `active`
-    /// row is superseded. This test pins the SQL SEMANTICS the guard depends on:
-    /// running the exact supersede + `ON CONFLICT DO NOTHING` INSERT the helper
-    /// uses over `active gen5 + pre-existing gen6` yields supersede=1 rows,
-    /// insert=0 rows, and the caller's ROLLBACK restores the gen5 active owner
-    /// (no active-less channel). Reverting the fence inside those SQL statements
-    /// changes the row counts and fails the asserts. The real-helper atomicity
-    /// (single Transferred, supersede-guard rollback) is covered by
-    /// `transfer_concurrent_race_preserves_single_active`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn transfer_insert_guard_sql_maps_conflict_to_cas_conflict() {
-        let pg = TestPostgresDb::create().await;
-        let pool = pg.connect_and_migrate().await;
-        let id = identity("claude", "fix1");
-        // Crafted state unreachable via the helper's max-gen SELECT: active gen5
-        // AND an occupied gen6 slot, so supersede matches gen5 (1 row) but the
-        // successor INSERT at gen6 collides (0 rows).
-        insert_owner(&pool, "claude", "fix1", "node-A", 5, "active").await;
-        insert_owner(&pool, "claude", "fix1", "node-X", 6, "superseded").await;
+    /// Exercise the production successor-INSERT guard against an occupied next
+    /// generation. The transfer retains A@5, an out-of-band writer adds history
+    /// generation 6, and the exact helper INSERT therefore affects 0 rows.
+    async fn assert_transfer_insert_guard(pool: &PgPool, channel: &str) {
+        insert_owner(pool, "claude", channel, "node-A", 5, "active").await;
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let transfer_channel = channel.to_owned();
 
-        let mut tx = pool.begin().await.unwrap();
-        let superseded = supersede_active_owner(&mut tx, &id, "node-A", 5)
+        let transfer_pool = pool.clone();
+        let transfer = tokio::spawn(async move {
+            let id = identity("claude", &transfer_channel);
+            let mut tx = transfer_pool.begin().await.unwrap();
+            let out = transfer_owner_with_test_seams(
+                &mut tx,
+                &id,
+                "node-A",
+                5,
+                "node-B",
+                |latest| {
+                    assert_eq!(
+                        latest,
+                        Some(&OwnerRecordSnapshot {
+                            owner_instance_id: "node-A".into(),
+                            generation: 5,
+                            status: "active".into(),
+                        })
+                    );
+                    async move {
+                        read_tx.send(()).expect("test waits for read signal");
+                        resume_rx.await.expect("test resumes transfer");
+                    }
+                },
+                || async {},
+            )
             .await
             .unwrap();
-        assert_eq!(superseded, 1, "supersede of the live gen5 owner matches");
-
-        let inserted = sqlx::query(
-            "INSERT INTO intake_session_owners
-                 (provider, raw_channel_id, owner_instance_id, generation, status)
-             VALUES ($1, $2, $3, $4, 'active')
-             ON CONFLICT (provider, raw_channel_id, generation) DO NOTHING",
-        )
-        .bind(id.provider())
-        .bind(id.raw_channel_id())
-        .bind("node-B")
-        .bind(6_i64)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        assert_eq!(
-            inserted.rows_affected(),
-            0,
-            "successor generation already occupied → 0-row insert → CasConflict"
-        );
-
-        // Fix1 contract: caller rolls back on the 0-row insert.
-        tx.rollback().await.unwrap();
-
-        assert_eq!(
-            active_owner(&pool, "claude", "fix1").await,
-            Some(("node-A".into(), 5)),
-            "rollback must restore the pre-transfer active owner (no active-less channel)"
-        );
-        assert_eq!(count_active(&pool, "claude", "fix1").await, 1);
-
-        pool.close().await;
-        pg.drop().await;
-    }
-
-    /// Real-helper atomicity: two `transfer_owner_in_tx` calls race for the same
-    /// channel WITHOUT the advisory lock (deliberately exercising the guards the
-    /// lock normally makes redundant). Both may read `A@0` active and pass the
-    /// branch check; the first supersede wins (1 row) and inserts `B@1`, the
-    /// loser's supersede then affects 0 rows → supersede guard → `CasConflict`
-    /// and its tx rolls back (a late loser instead hits the owner-mismatch branch
-    /// — also `CasConflict`). The invariant is asserted deterministically:
-    /// exactly one `Transferred` + one `CasConflict`, and exactly one active row.
-    /// Removing BOTH `rows_affected` guards lets a raced loser report
-    /// `Transferred` without writing an active row → two `Transferred` and/or a
-    /// lost active owner, failing the asserts.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn transfer_concurrent_race_preserves_single_active() {
-        let pg = TestPostgresDb::create().await;
-        let pool = pg.connect_and_migrate().await;
-        insert_owner(&pool, "claude", "rc", "node-A", 0, "active").await;
-
-        async fn one(pool: &PgPool, target: &str) -> TransferOutcome {
-            let id = identity("claude", "rc");
-            let mut tx = pool.begin().await.unwrap();
-            // No advisory lock: deliberately exercise the CAS guards.
-            let out = transfer_owner_in_tx(&mut tx, &id, "node-A", 0, target)
-                .await
-                .unwrap();
             match &out {
                 TransferOutcome::Transferred { .. } => tx.commit().await.unwrap(),
                 _ => tx.rollback().await.unwrap(),
             }
             out
+        });
+
+        read_rx
+            .await
+            .expect("transfer must retain the A@5 snapshot");
+        insert_owner(pool, "claude", channel, "node-X", 6, "superseded").await;
+        resume_tx.send(()).expect("transfer still waits after read");
+
+        let out = transfer.await.unwrap();
+        assert_eq!(
+            out,
+            TransferOutcome::CasConflict,
+            "0-row successor insert must be a CAS conflict"
+        );
+        assert_eq!(
+            active_owner(pool, "claude", channel).await,
+            Some(("node-A".into(), 5)),
+            "rollback must restore the pre-transfer active owner (no active-less channel)"
+        );
+        assert_eq!(count_active(pool, "claude", channel).await, 1);
+    }
+
+    /// Fix1 — removing only the production INSERT rows-affected guard reports
+    /// `Transferred` for the occupied generation-6 attempt and commits A@5 as
+    /// superseded, so the helper's outcome and active-owner assertions fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn transfer_insert_guard_sql_maps_conflict_to_cas_conflict() {
+        let pg = TestPostgresDb::create().await;
+        let pool = pg.connect_and_migrate().await;
+        assert_transfer_insert_guard(&pool, "fix1").await;
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Fix1 — the supersede rows-affected guard under a retained stale snapshot.
+    /// The helper reads A@0 and pauses; an external transition supersedes A@0 and
+    /// commits without occupying generation 1. The helper's supersede then affects
+    /// 0 rows. Removing only the supersede guard lets its successor INSERT succeed
+    /// and returns `Transferred`, so this outcome assert fails. The INSERT guard
+    /// cannot mask this mutation because generation 1 is deliberately free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn transfer_supersede_guard_rejects_stale_snapshot_before_insert() {
+        let pg = TestPostgresDb::create().await;
+        let pool = pg.connect_and_migrate().await;
+        insert_owner(&pool, "claude", "fix1-sup", "node-A", 0, "active").await;
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+
+        let transfer_pool = pool.clone();
+        let transfer = tokio::spawn(async move {
+            let id = identity("claude", "fix1-sup");
+            let mut tx = transfer_pool.begin().await.unwrap();
+            let out = transfer_owner_with_test_seams(
+                &mut tx,
+                &id,
+                "node-A",
+                0,
+                "node-B",
+                |latest| {
+                    assert_eq!(latest.map(|owner| owner.generation), Some(0));
+                    async move {
+                        read_tx.send(()).expect("test waits for read signal");
+                        resume_rx.await.expect("test resumes transfer");
+                    }
+                },
+                || async {},
+            )
+            .await
+            .unwrap();
+            match &out {
+                TransferOutcome::Transferred { .. } => tx.commit().await.unwrap(),
+                _ => tx.rollback().await.unwrap(),
+            }
+            out
+        });
+
+        read_rx
+            .await
+            .expect("transfer must retain the A@0 snapshot");
+        let id = identity("claude", "fix1-sup");
+        let mut external = pool.begin().await.unwrap();
+        let superseded = supersede_active_owner(&mut external, &id, "node-A", 0)
+            .await
+            .unwrap();
+        assert_eq!(superseded, 1);
+        external.commit().await.unwrap();
+        resume_tx.send(()).expect("transfer still waits after read");
+
+        let out = transfer.await.unwrap();
+        assert_eq!(
+            out,
+            TransferOutcome::CasConflict,
+            "0-row supersede must stop before the free successor insert"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM intake_session_owners
+                  WHERE provider = 'claude' AND raw_channel_id = 'fix1-sup'
+                    AND generation = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0,
+            "CAS loser must not write generation 1"
+        );
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Real-helper atomicity: two transfer calls race for the same channel
+    /// WITHOUT the advisory lock (deliberately exercising guards the lock normally
+    /// makes redundant). Both calls are stopped after reading the same `A@0`
+    /// snapshot. Writer B then supersedes A@0 but pauses before INSERT; writer C
+    /// starts its supersede and is proven blocked on B's uncommitted row update.
+    /// B commits B@1, after which C's supersede affects 0 rows and returns
+    /// `CasConflict`. This fixes the exact interleaving rather than trusting the
+    /// Tokio scheduler.
+    ///
+    /// Mutation proof: removing only the supersede rows-affected guard lets C
+    /// reach a test seam that removes committed B@1, after which C writes the now
+    /// free generation 1 and reports a second `Transferred`. The focused helper
+    /// check below exercises the INSERT guard independently on a second channel;
+    /// removing either guard alone fails this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn transfer_concurrent_race_preserves_single_active() {
+        let pg = TestPostgresDb::create().await;
+        let pool = pg.connect_and_migrate().await;
+        insert_owner(&pool, "claude", "rc", "node-A", 0, "active").await;
+        let both_read = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let (winner_pid_tx, winner_pid_rx) = tokio::sync::oneshot::channel();
+        let (loser_pid_tx, loser_pid_rx) = tokio::sync::oneshot::channel();
+        let (winner_superseded_tx, winner_superseded_rx) = tokio::sync::oneshot::channel();
+        let (allow_winner_insert_tx, allow_winner_insert_rx) = tokio::sync::oneshot::channel();
+
+        let winner_pool = pool.clone();
+        let winner_read = both_read.clone();
+        let mut winner = tokio::spawn(async move {
+            let id = identity("claude", "rc");
+            let mut tx = winner_pool.begin().await.unwrap();
+            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            winner_pid_tx
+                .send(backend_pid)
+                .expect("test waits for winner backend PID");
+            let out = transfer_owner_with_test_seams(
+                &mut tx,
+                &id,
+                "node-A",
+                0,
+                "node-B",
+                |latest| {
+                    assert_eq!(
+                        latest,
+                        Some(&OwnerRecordSnapshot {
+                            owner_instance_id: "node-A".into(),
+                            generation: 0,
+                            status: "active".into(),
+                        })
+                    );
+                    async move {
+                        winner_read.wait().await;
+                    }
+                },
+                || async move {
+                    winner_superseded_tx
+                        .send(())
+                        .expect("test waits for winner supersede signal");
+                    allow_winner_insert_rx
+                        .await
+                        .expect("test releases winner insert");
+                },
+            )
+            .await
+            .unwrap();
+            match &out {
+                TransferOutcome::Transferred { .. } => tx.commit().await.unwrap(),
+                _ => tx.rollback().await.unwrap(),
+            }
+            out
+        });
+
+        let loser_pool = pool.clone();
+        let loser_mutation_pool = pool.clone();
+        let loser_read = both_read;
+        let mut loser = tokio::spawn(async move {
+            let id = identity("claude", "rc");
+            let mut tx = loser_pool.begin().await.unwrap();
+            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            loser_pid_tx
+                .send(backend_pid)
+                .expect("test waits for loser backend PID");
+            let out = transfer_owner_with_test_seams(
+                &mut tx,
+                &id,
+                "node-A",
+                0,
+                "node-C",
+                |latest| {
+                    assert_eq!(
+                        latest,
+                        Some(&OwnerRecordSnapshot {
+                            owner_instance_id: "node-A".into(),
+                            generation: 0,
+                            status: "active".into(),
+                        })
+                    );
+                    async move {
+                        loser_read.wait().await;
+                        // B is deterministically first to the UPDATE: C cannot
+                        // issue its supersede until B reports that it completed.
+                        winner_superseded_rx
+                            .await
+                            .expect("winner must supersede before loser writes");
+                    }
+                },
+                || async move {
+                    // Normally unreachable: C's supersede affected 0 rows. If the
+                    // guard is removed, free B@1 out-of-band so C's INSERT succeeds
+                    // and the final outcome asserts observe two transfers.
+                    sqlx::query(
+                        "DELETE FROM intake_session_owners
+                          WHERE provider = 'claude' AND raw_channel_id = 'rc'
+                            AND owner_instance_id = 'node-B' AND generation = 1",
+                    )
+                    .execute(&loser_mutation_pool)
+                    .await
+                    .unwrap();
+                },
+            )
+            .await
+            .unwrap();
+            match &out {
+                TransferOutcome::Transferred { .. } => tx.commit().await.unwrap(),
+                _ => tx.rollback().await.unwrap(),
+            }
+            out
+        });
+
+        // C has passed the common-read barrier and was released to supersede, but
+        // B still owns the row lock. Prove C is waiting specifically on B's
+        // transaction ID before allowing B to insert and commit.
+        let winner_pid = winner_pid_rx.await.expect("winner backend PID");
+        let loser_pid = loser_pid_rx.await.expect("loser backend PID");
+        let wait_for_loser_row_lock = async {
+            loop {
+                let blocked_by_winner: bool =
+                    sqlx::query_scalar("SELECT $1::INT = ANY(pg_blocking_pids($2::INT))")
+                        .bind(winner_pid)
+                        .bind(loser_pid)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if blocked_by_winner {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            wait = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                wait_for_loser_row_lock,
+            ) => wait.expect("loser must block on winner's supersede row lock"),
+            completed = &mut loser => panic!("loser completed before winner commit: {completed:?}"),
         }
+        assert!(
+            !loser.is_finished(),
+            "loser supersede must wait on winner row lock"
+        );
+        allow_winner_insert_tx
+            .send(())
+            .expect("winner still waits before successor insert");
 
-        let (a, b) = tokio::join!(one(&pool, "node-B"), one(&pool, "node-C"));
-
+        let a = winner.await.unwrap();
+        let b = loser.await.unwrap();
         let mut transferred = 0;
         let mut conflicts = 0;
         for out in [&a, &b] {
@@ -1434,8 +1710,18 @@ mod tests {
             }
         }
         assert_eq!(transferred, 1, "exactly one transfer wins");
-        assert_eq!(conflicts, 1, "the loser is a CAS conflict");
+        assert_eq!(conflicts, 1, "the forced loser is a CAS conflict");
+        assert_eq!(
+            active_owner(&pool, "claude", "rc").await,
+            Some(("node-B".into(), 1)),
+            "the committed winner must be the sole active generation"
+        );
         assert_eq!(count_active(&pool, "claude", "rc").await, 1);
+
+        // Removing only the INSERT guard does not bypass C's earlier supersede
+        // guard, so exercise the production INSERT branch independently inside
+        // this same mutation test. Either guard mutation now fails this test.
+        assert_transfer_insert_guard(&pool, "rc-insert-guard").await;
 
         pool.close().await;
         pg.drop().await;
@@ -1829,8 +2115,13 @@ mod tests {
         let id = identity("claude", "chanLin");
 
         // transfer_tx: hold the channel advisory lock + supersede node-W@0,
-        // uncommitted.
+        // uncommitted. Remember its backend PID so pg_locks can prove the claim
+        // is queued on this exact lock rather than relying on scheduler timing.
         let mut transfer_tx = pool.begin().await.unwrap();
+        let transfer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *transfer_tx)
+            .await
+            .unwrap();
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(id.advisory_key())
             .execute(&mut *transfer_tx)
@@ -1841,15 +2132,83 @@ mod tests {
             .unwrap();
         assert_eq!(superseded, 1);
 
-        // Spawn the real claim; with the P1-B lock it blocks on the advisory lock.
+        // Spawn the real claim with a seam that signals only after its candidate
+        // SELECT has succeeded and locked the outbox row.
         let claim_pool = pool.clone();
-        let claim = tokio::spawn(async move {
-            claim_pending_for_target_fenced(&claim_pool, "node-W", "tok-r1", "claude").await
+        let (candidate_seen_tx, candidate_seen_rx) = tokio::sync::oneshot::channel();
+        let mut claim = tokio::spawn(async move {
+            claim_pending_after_candidate_fenced(
+                &claim_pool,
+                "node-W",
+                "tok-r1",
+                "claude",
+                |candidate| {
+                    assert_eq!(candidate.id, row_id);
+                    async move {
+                        candidate_seen_tx
+                            .send(())
+                            .expect("test waits for candidate signal");
+                    }
+                },
+            )
+            .await
         });
+        candidate_seen_rx
+            .await
+            .expect("claim must acquire the seeded candidate");
 
-        // Let the claim reach the advisory-lock wait (fix present) or run the
-        // promote against the uncommitted supersede (fix absent).
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // Poll pg_locks until the claim has an ungranted request matching the
+        // exact advisory lock held by transfer_tx. If the production advisory
+        // lock is removed, the claim instead completes immediately with Some;
+        // this select takes the completed-task branch and fails deterministically.
+        let wait_for_same_advisory_lock = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                         SELECT 1
+                           FROM pg_locks held
+                           JOIN pg_locks waiter
+                             ON waiter.locktype = held.locktype
+                            AND waiter.database IS NOT DISTINCT FROM held.database
+                            AND waiter.classid IS NOT DISTINCT FROM held.classid
+                            AND waiter.objid IS NOT DISTINCT FROM held.objid
+                            AND waiter.objsubid IS NOT DISTINCT FROM held.objsubid
+                            AND waiter.mode = held.mode
+                          WHERE held.pid = $1
+                            AND held.locktype = 'advisory'
+                            AND held.granted
+                            AND NOT waiter.granted
+                    )",
+                )
+                .bind(transfer_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            wait = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                wait_for_same_advisory_lock,
+            ) => wait.expect("claim must reach the advisory-lock wait"),
+            completed = &mut claim => {
+                let completed = completed
+                    .expect("claim task")
+                    .expect("claim query");
+                panic!(
+                    "claim completed before waiting on transfer advisory lock: claimed={}",
+                    completed.is_some()
+                );
+            }
+        }
+        assert!(
+            !claim.is_finished(),
+            "claim must still be blocked while transfer_tx owns the advisory lock"
+        );
 
         // Complete + commit the transfer → node-W@0 superseded, node-V@1 active.
         sqlx::query(

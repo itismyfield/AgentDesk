@@ -61,29 +61,25 @@ CREATE INDEX IF NOT EXISTS iso_watermark
 -- (0093 preserve_on_cancel nullable-legacy pattern). The
 -- open-status-requires-owner CHECK is added at activation (PR-C, §3.9).
 --
--- Lock note (PR-A dual-review P1-A): sqlx's Migrator wraps this whole file in
--- ONE transaction (src/db/postgres.rs migrate() -> POSTGRES_MIGRATOR.run), and
--- no migration in this repo uses the `-- no-transaction` opt-out (see the lock
--- notes in 0055/0071/0075), so CREATE INDEX CONCURRENTLY is forbidden by
--- convention. To keep the ACCESS EXCLUSIVE window on the live intake_outbox
--- momentary anyway, every statement below is metadata-only or scans zero
--- qualifying rows:
---   * ADD COLUMN admission_kind NOT NULL DEFAULT 'forwarded' uses the PG 11+
---     fast-default (no table rewrite); the other ADD COLUMNs are nullable
---     metadata-only adds.
---   * The admission_kind CHECK is added NOT VALID so it does NOT scan existing
---     rows (all of which carry the 'forwarded' default and are trivially valid);
---     it is still enforced for every new INSERT/UPDATE. A later low-lock
---     VALIDATE CONSTRAINT (SHARE UPDATE EXCLUSIVE, not ACCESS EXCLUSIVE) may mark
---     it validated in PR-C; unnecessary for correctness here.
---   * intake_outbox_idempotency_key_uq is partial (WHERE idempotency_key IS NOT
---     NULL) and idempotency_key is added in THIS migration, so every existing
---     row has idempotency_key = NULL — the index qualifies ZERO rows and builds
---     momentarily (identical to the add-column + partial-index pattern in
---     0055/0071). No scan of accumulated owner-stamped work occurs.
--- Net: the transaction holds ACCESS EXCLUSIVE on intake_outbox only for catalog
--- updates plus a zero-qualifying-row index build, consistent with the
--- single-host convention the repo's existing lock notes establish.
+-- Lock note (PR-A dual-review P1-A): this transactional migration keeps the
+-- live-table change to catalog operations only. `admission_kind NOT NULL DEFAULT
+-- 'forwarded'` uses PostgreSQL 11+'s fast default (no table rewrite); the other
+-- columns are nullable metadata-only additions. Each ALTER still takes ACCESS
+-- EXCLUSIVE while it runs, and that lock remains until this short transaction
+-- commits.
+--
+-- The admission_kind CHECK is added NOT VALID. That skips the existing-row
+-- validation scan while enforcing the constraint for every new INSERT/UPDATE.
+-- PR-C may later run VALIDATE CONSTRAINT under its lower-strength SHARE UPDATE
+-- EXCLUSIVE lock; validation is unnecessary for correctness in this dormant
+-- slice.
+--
+-- The idempotency partial index is deliberately NOT built here. Even when all
+-- existing idempotency_key values are NULL, a non-concurrent partial-index build
+-- must scan the entire intake_outbox heap to evaluate its predicate and takes a
+-- write-blocking SHARE lock. Migration 0095 builds that index CONCURRENTLY in
+-- sqlx's supported non-transactional mode so normal writes can continue during
+-- the heap scans.
 ALTER TABLE intake_outbox ADD COLUMN IF NOT EXISTS owner_generation  BIGINT;   -- NULL=legacy
 ALTER TABLE intake_outbox ADD COLUMN IF NOT EXISTS owner_instance_id TEXT;
 ALTER TABLE intake_outbox ADD COLUMN IF NOT EXISTS admission_kind    TEXT NOT NULL DEFAULT 'forwarded';
@@ -93,10 +89,5 @@ ALTER TABLE intake_outbox ADD COLUMN IF NOT EXISTS idempotency_key   TEXT;
 ALTER TABLE intake_outbox ADD CONSTRAINT intake_outbox_admission_kind_check
     CHECK (admission_kind IN ('local','forwarded')) NOT VALID;
 
--- Idempotency dedup: ambiguous-commit retries reuse the same
--- (provider, channel, user_msg, attempt_no) key (§3.8), so a duplicate
--- admission collides here and is resolved as an idempotent hit inside the
--- admission SAVEPOINT (§3.3.2). Sparse (legacy NULL keys excluded); qualifies
--- zero rows at build time (idempotency_key just added above — see lock note).
-CREATE UNIQUE INDEX IF NOT EXISTS intake_outbox_idempotency_key_uq
-    ON intake_outbox (idempotency_key) WHERE idempotency_key IS NOT NULL;
+-- Migration 0095 adds the idempotency dedup index online after this transaction
+-- commits and the new nullable column is visible.
