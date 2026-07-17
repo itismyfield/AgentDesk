@@ -483,9 +483,8 @@ mod tests {
         )
         .await;
         let ops_after_queue = shared.turn_view_reconciler.ops();
-        assert_eq!(ops_after_queue.len(), 2);
+        assert_eq!(ops_after_queue.len(), 1);
         assert!(ops_after_queue[0].add && ops_after_queue[0].emoji == '📬');
-        assert!(ops_after_queue[1].add && ops_after_queue[1].emoji == '⏳');
         assert!(persisted_path(channel_id, head).exists());
 
         drain_dispatched_queue_markers(
@@ -498,16 +497,14 @@ mod tests {
         .await;
 
         let ops = shared.turn_view_reconciler.ops();
-        assert_eq!(ops.len(), ops_after_queue.len() + 1);
-        assert!(
-            !ops.last().expect("promotion op").add
-                && ops.last().expect("promotion op").emoji == '📬'
-        );
+        assert_eq!(ops.len(), ops_after_queue.len() + 2);
+        assert!(!ops[1].add && ops[1].emoji == '📬');
+        assert!(ops[2].add && ops[2].emoji == '⏳');
         assert!(persisted_path(channel_id, head).exists());
         assert_eq!(
             ops.iter().filter(|op| op.add && op.emoji == '⏳').count(),
             1,
-            "live dispatch promotion must remove only the queue marker and retain acceptance hourglass"
+            "live dispatch promotion must add the pending hourglass after removing the queue marker"
         );
         let persisted: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(persisted_path(channel_id, head)).expect("pending state"),

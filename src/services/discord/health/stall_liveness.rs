@@ -1117,6 +1117,7 @@ mod tests {
                 bridge_current_msg_id: Some(9002),
                 mailbox_has_cancel_token: true,
                 mailbox_active_user_msg_id: Some(9001),
+                mailbox_turn_started_at_ms: None,
                 queue_depth: 0,
                 pending_discord_callback_msg_id: Some(9002),
                 pending_thread_proof: false,

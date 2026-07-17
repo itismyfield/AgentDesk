@@ -33,8 +33,9 @@ test-non-pg:
     cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
-    env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
+    # Run health first so a fail-fast relay_recovery failure cannot hide it.
     python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
+    env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
 test-postgres:

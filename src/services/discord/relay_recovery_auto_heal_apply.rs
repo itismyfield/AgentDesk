@@ -526,6 +526,7 @@ mod tests {
             bridge_current_msg_id: Some(old.current_msg_id),
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(old.user_msg_id),
+            mailbox_turn_started_at_ms: None,
             queue_depth: 0,
             pending_discord_callback_msg_id: None,
             pending_thread_proof: false,
@@ -654,6 +655,11 @@ mod tests {
             let channel = ChannelId::new(4_423_301);
 
             start_turn(&shared, channel, 4_423_311).await;
+            shared
+                .mailboxes
+                .handle(channel)
+                .age_active_turn_for_test(ORPHAN_PENDING_TOKEN_ADMISSION_GRACE)
+                .await;
             let first = auto_apply_relay_recovery_for_shared(
                 &registry,
                 shared.clone(),
@@ -667,6 +673,11 @@ mod tests {
             assert!(first.applied);
 
             start_turn(&shared, channel, 4_423_312).await;
+            shared
+                .mailboxes
+                .handle(channel)
+                .age_active_turn_for_test(ORPHAN_PENDING_TOKEN_ADMISSION_GRACE)
+                .await;
             let blocked_probe = auto_apply_relay_recovery_for_shared(
                 &registry,
                 shared.clone(),

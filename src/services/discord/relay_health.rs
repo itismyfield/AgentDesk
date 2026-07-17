@@ -71,6 +71,7 @@ pub(in crate::services::discord) struct RelayHealthSnapshot {
     pub bridge_current_msg_id: Option<u64>,
     pub mailbox_has_cancel_token: bool,
     pub mailbox_active_user_msg_id: Option<u64>,
+    pub mailbox_turn_started_at_ms: Option<i64>,
     pub queue_depth: usize,
     pub pending_discord_callback_msg_id: Option<u64>,
     pub pending_thread_proof: bool,
@@ -102,6 +103,7 @@ impl RelayHealthSnapshot {
             bridge_current_msg_id: None,
             mailbox_has_cancel_token: false,
             mailbox_active_user_msg_id: None,
+            mailbox_turn_started_at_ms: None,
             queue_depth: 0,
             pending_discord_callback_msg_id: None,
             pending_thread_proof: false,
@@ -280,6 +282,7 @@ mod tests {
                 RelayHealthSnapshot {
                     mailbox_has_cancel_token: true,
                     mailbox_active_user_msg_id: Some(9001),
+                    mailbox_turn_started_at_ms: None,
                     ..RelayHealthSnapshot::test_snapshot()
                 },
                 RelayStallState::OrphanPendingToken,

@@ -614,12 +614,6 @@ async fn apply_orphan_pending_token_cleanup(
     channel_id: ChannelId,
     source: RelayRecoveryApplySource,
 ) -> Result<bool, RelayRecoveryError> {
-    if source == RelayRecoveryApplySource::StallWatchdog
-        && let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id)
-    {
-        watcher.cancel.store(true, Ordering::Relaxed);
-    }
-
     if source == RelayRecoveryApplySource::ProbeAutoHeal {
         let Some(snapshot) = registry
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
@@ -632,21 +626,44 @@ async fn apply_orphan_pending_token_cleanup(
         }
     }
 
+    let watchdog_watcher = (source == RelayRecoveryApplySource::StallWatchdog)
+        .then(|| {
+            shared.tmux_watchers.get(&channel_id).map(|watcher| {
+                (
+                    watcher.tmux_session_name.clone(),
+                    watcher.output_path.clone(),
+                    watcher.cancel.clone(),
+                )
+            })
+        })
+        .flatten();
     let response = relay_recovery::auto_apply_relay_recovery_for_shared(
         registry,
-        shared,
+        shared.clone(),
         provider,
         channel_id.get(),
         RelayRecoveryActionKind::ClearOrphanPendingToken,
         source,
     )
     .await?;
-
-    Ok(response.applied
+    let removed_mailbox_token = response.applied
         && response
             .apply_result
             .as_ref()
-            .is_some_and(|result| result.removed_mailbox_token))
+            .is_some_and(|result| result.removed_mailbox_token);
+
+    if removed_mailbox_token
+        && let Some((tmux_session_name, output_path, cancel)) = watchdog_watcher
+    {
+        shared.tmux_watchers.cancel_and_remove_channel_if_current(
+            &channel_id,
+            &tmux_session_name,
+            &output_path,
+            &cancel,
+        );
+    }
+
+    Ok(removed_mailbox_token)
 }
 
 fn trace_orphan_auto_heal_error(
@@ -748,6 +765,7 @@ mod tests {
                 bridge_current_msg_id: Some(9002),
                 mailbox_has_cancel_token: true,
                 mailbox_active_user_msg_id: Some(9001),
+                mailbox_turn_started_at_ms: None,
                 queue_depth: 0,
                 pending_discord_callback_msg_id: Some(9002),
                 pending_thread_proof: false,
