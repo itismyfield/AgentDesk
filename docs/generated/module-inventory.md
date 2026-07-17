@@ -403,7 +403,7 @@
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 840 | 439 | 401 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 651 | 328 | 323 |  |
-| `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1224 | 601 | 623 |  |
+| `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1323 | 618 | 705 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2361 | 841 | 1520 |  |
@@ -874,7 +874,7 @@
 | `services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry` | `src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs` | 103 | 103 | 0 |  |
 | `services::discord::turn_bridge::thinking` | `src/services/discord/turn_bridge/thinking.rs` | 87 | 21 | 66 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1174 | 890 | 284 |  |
-| `services::discord::turn_bridge::tmux_runtime::claude_stop_delivery` | `src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs` | 1015 | 556 | 459 |  |
+| `services::discord::turn_bridge::tmux_runtime::claude_stop_delivery` | `src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs` | 1167 | 598 | 569 |  |
 | `services::discord::turn_bridge::tmux_runtime::interrupt_policy` | `src/services/discord/turn_bridge/tmux_runtime/interrupt_policy.rs` | 374 | 225 | 149 |  |
 | `services::discord::turn_bridge::tmux_runtime::pid_exit` | `src/services/discord/turn_bridge/tmux_runtime/pid_exit.rs` | 282 | 176 | 106 |  |
 | `services::discord::turn_bridge::tmux_runtime::process_backend_cancel` | `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs` | 156 | 156 | 0 |  |

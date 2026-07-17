@@ -804,7 +804,9 @@ mod tests {
             crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
                 &lock_session,
                 || {
-                    holding_tx.send(()).expect("signal compact holding composer");
+                    holding_tx
+                        .send(())
+                        .expect("signal compact holding composer");
                     std::thread::sleep(Duration::from_millis(HOLD_MS));
                 },
             );

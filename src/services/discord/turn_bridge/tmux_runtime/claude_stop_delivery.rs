@@ -522,10 +522,8 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
             turn_identity.as_ref(),
             || match delivery {
                 ClaudeTurnInterruptDelivery::TuiEscape => {
-                    match crate::services::platform::tmux::send_keys(
-                        &session_for_task,
-                        &["Escape"],
-                    ) {
+                    match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"])
+                    {
                         Ok(output) if output.status.success() => Ok(()),
                         Ok(output) => Err(format!(
                             "tmux send-keys Escape failed: status={}",
@@ -1147,7 +1145,9 @@ mod tests {
                     .lock_current_claude_interrupt_session(&bind_session)
                     .is_some()
             );
-            bind_done_tx.send(()).expect("signal other-session bind done");
+            bind_done_tx
+                .send(())
+                .expect("signal other-session bind done");
         });
         bind_done_rx
             .recv_timeout(Duration::from_millis(250))
