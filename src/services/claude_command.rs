@@ -26,7 +26,6 @@
 //! other module references them directly, so the single authority cannot erode.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
 use std::process::Command;
 
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
@@ -64,15 +63,10 @@ impl ClaudeBinary {
         Ok((binary, resolution))
     }
 
-    pub(crate) fn from_tmux_wrapper_argv(program: &str) -> Result<Self, String> {
-        let candidate = Path::new(program);
-        let file_name = candidate.file_name().and_then(OsStr::to_str);
-        if file_name != Some("claude") {
-            return Err("tmux-wrapper requires a Claude executable as its command".to_string());
+    pub(crate) fn from_tmux_wrapper_argv(program: &str) -> Self {
+        Self {
+            program: OsString::from(program),
         }
-        Ok(Self {
-            program: candidate.as_os_str().to_os_string(),
-        })
     }
 
     fn from_cli_boundary(program: impl AsRef<OsStr>) -> Self {
@@ -402,14 +396,11 @@ impl ClaudeCommandBuilder {
     /// untyped CLI argv ingress; once it is wrapped, the path cannot escape this
     /// module. Applies the exec-path PATH plus the supplied (already-resolved)
     /// launch env by construction.
-    pub(crate) fn for_tmux_wrapper_argv(
-        program: &str,
-        launch_env: ClaudeLaunchEnv,
-    ) -> Result<Self, String> {
-        let binary = ClaudeBinary::from_tmux_wrapper_argv(program)?;
+    pub(crate) fn for_tmux_wrapper_argv(program: &str, launch_env: ClaudeLaunchEnv) -> Self {
+        let binary = ClaudeBinary::from_tmux_wrapper_argv(program);
         let mut builder = Self::build(binary.program(), None, launch_env);
         binary.augment_exec_path(builder.command_mut());
-        Ok(builder)
+        builder
     }
 
     /// Test-only constructor that injects a pre-resolved launch env, letting a
@@ -480,7 +471,7 @@ mod chokepoint_gateway_mutation_tests {
     }
 
     fn claude_binary() -> ClaudeBinary {
-        ClaudeBinary::from_tmux_wrapper_argv("claude").unwrap()
+        ClaudeBinary::from_tmux_wrapper_argv("claude")
     }
 
     // Mutation target: `ClaudeCommandBuilder::build` applies the gateway env via
@@ -548,8 +539,7 @@ mod chokepoint_gateway_mutation_tests {
         let builder = ClaudeCommandBuilder::for_tmux_wrapper_argv(
             "/opt/claude/bin/claude",
             ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
-        )
-        .unwrap();
+        );
         let envs = command_env_map(&builder.into_command());
         assert_eq!(
             envs.get(BASE_URL_ENV),
@@ -558,19 +548,6 @@ mod chokepoint_gateway_mutation_tests {
         assert_eq!(envs.get(DISCOVERY_ENV), Some(&Some("1".to_string())));
         // exec-path PATH is derived from the binary path (augment_exec_path).
         assert!(envs.get("PATH").is_some());
-    }
-
-    #[test]
-    fn tmux_wrapper_argv_rejects_non_claude_programs() {
-        let error = ClaudeCommandBuilder::for_tmux_wrapper_argv(
-            "/opt/codex/bin/codex",
-            ClaudeLaunchEnv::scrub_for_test(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error,
-            "tmux-wrapper requires a Claude executable as its command"
-        );
     }
 
     fn inject(url: &str) -> ClaudeGatewayProxyEnv {

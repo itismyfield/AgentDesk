@@ -591,10 +591,8 @@ mod simple_launch_env_tests {
         launch_env: ClaudeLaunchEnv,
     ) -> std::collections::HashMap<String, Option<String>> {
         let resolution = claude_resolution();
-        let binary = crate::services::claude_command::ClaudeBinary::from_tmux_wrapper_argv(
-            "claude",
-        )
-        .unwrap();
+        let binary =
+            crate::services::claude_command::ClaudeBinary::from_tmux_wrapper_argv("claude");
         // Route through the chokepoint exactly as the production simple `-p`
         // spawn site does: the builder applies the gateway env by construction,
         // then `configure_execute_command_simple` adds the non-gateway config.

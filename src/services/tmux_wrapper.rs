@@ -133,16 +133,8 @@ pub fn run(
     // reads the managed marker to classify, then the builder *consumes* it
     // one-hop (`env_remove`) so the marker never propagates to the Claude child
     // or its descendants — see `claude_child_command_builder`.
-    let mut builder = match claude_child_command_builder(
-        claude_bin,
-        ClaudeLaunchEnv::for_tmux_wrapper(),
-    ) {
-        Ok(builder) => builder,
-        Err(error) => {
-            redacted_eprintln!("\x1b[31mInvalid Claude command: {}\x1b[0m", error);
-            std::process::exit(1);
-        }
-    };
+    let mut builder =
+        claude_child_command_builder(claude_bin, ClaudeLaunchEnv::for_tmux_wrapper());
     {
         let claude_command = builder.command_mut();
         crate::services::process::configure_child_process_group(claude_command);
@@ -552,12 +544,12 @@ pub fn run(
 fn claude_child_command_builder(
     claude_bin: &str,
     launch_env: ClaudeLaunchEnv,
-) -> Result<ClaudeCommandBuilder, String> {
-    let mut builder = ClaudeCommandBuilder::for_tmux_wrapper_argv(claude_bin, launch_env)?;
+) -> ClaudeCommandBuilder {
+    let mut builder = ClaudeCommandBuilder::for_tmux_wrapper_argv(claude_bin, launch_env);
     builder
         .command_mut()
         .env_remove(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV);
-    Ok(builder)
+    builder
 }
 
 /// #3207 (part 1): is this `result` event a deliberate turn-abort (from a
@@ -889,8 +881,7 @@ mod marker_one_hop_tests {
         let builder = claude_child_command_builder(
             "/opt/claude/bin/claude",
             ClaudeLaunchEnv::inject_for_test("http://managed.proxy/"),
-        )
-        .unwrap();
+        );
         let envs = command_env_map(&builder.into_command());
         // Managed gateway decision is still applied to the child…
         assert_eq!(

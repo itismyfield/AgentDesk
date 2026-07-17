@@ -453,7 +453,7 @@ mod tests {
         ClaudeTuiLaunchConfig {
             tmux_session_name: "AgentDesk-claude-test".to_string(),
             working_dir: PathBuf::from("/tmp/project dir"),
-            claude_bin: ClaudeBinary::from_tmux_wrapper_argv("/usr/local/bin/claude").unwrap(),
+            claude_bin: ClaudeBinary::from_tmux_wrapper_argv("/usr/local/bin/claude"),
             agentdesk_exe: PathBuf::from("/usr/local/bin/agentdesk"),
             hook_endpoint: "http://127.0.0.1:49152".to_string(),
             session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
