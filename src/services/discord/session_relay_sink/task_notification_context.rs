@@ -75,12 +75,14 @@ pub(super) async fn ensure_task_context_card(
         return Ok(None);
     };
     let provider_http = shared.serenity_http_or_token_fallback();
-    let notify_http = super::super::health::resolve_bot_http(health_registry.as_ref(), "notify")
-        .await
-        .ok();
+    let notify_role = super::super::bot_role::UtilityBotRole::Notify;
+    let notify_http =
+        super::super::health::resolve_utility_bot_http(health_registry.as_ref(), notify_role)
+            .await
+            .ok();
     let clients = CardDeliveryClients::new(
         notify_http
-            .map(|http| CardBot::new("notify", http))
+            .map(|http| CardBot::new(notify_role.alias(), http))
             .into_iter()
             .chain(
                 provider_http.map(|http| CardBot::new(provider_bot_key(provider.as_str()), http)),
@@ -365,13 +367,16 @@ impl super::SessionBoundDiscordRelaySink {
                 &delivery.session_name,
             );
             let provider_http = shared.serenity_http_or_token_fallback();
-            let notify_http =
-                super::super::health::resolve_bot_http(self.health_registry.as_ref(), "notify")
-                    .await
-                    .ok();
+            let notify_role = super::super::bot_role::UtilityBotRole::Notify;
+            let notify_http = super::super::health::resolve_utility_bot_http(
+                self.health_registry.as_ref(),
+                notify_role,
+            )
+            .await
+            .ok();
             let clients = CardDeliveryClients::new(
                 notify_http
-                    .map(|http| CardBot::new("notify", http))
+                    .map(|http| CardBot::new(notify_role.alias(), http))
                     .into_iter()
                     .chain(
                         provider_http

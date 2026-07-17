@@ -7,11 +7,11 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchEnv, ClaudeLaunchIntent};
 use crate::services::claude_compact_context::{
     append_auto_compact_window_shell_env, apply_auto_compact_window_to_command,
     claude_model_from_args, launch_auto_compact_window_for_session,
 };
-use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 #[cfg(unix)]
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, emit_claude_tui_zero_harvest, try_claude_tui_warm_followup,
@@ -173,7 +173,7 @@ fn build_tmux_launch_env_lines(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     auto_compact_window: Option<u64>,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+    launch_env: &ClaudeLaunchEnv,
 ) -> String {
     let mut env_lines = String::from("unset CLAUDECODE\n");
     if let Some(exec_path) = exec_path {
@@ -204,8 +204,14 @@ fn build_tmux_launch_env_lines(
             provider.as_str()
         ));
     }
+    // Chokepoint base (#4559): resolved gateway launch env + managed-launch
+    // marker so the `agentdesk tmux-wrapper` reconstructs this decision rather
+    // than re-resolving config-less to a bare Scrub.
+    launch_env.append_shell_env(&mut env_lines);
+    crate::services::claude_command::append_managed_launch_marker_shell(&mut env_lines);
+    // Compact-window overlay (#4591): fence off any inherited absolute window
+    // and export the freshly resolved one when present.
     append_auto_compact_window_shell_env(&mut env_lines, auto_compact_window);
-    gateway_proxy_env.append_shell_env(&mut env_lines);
 
     env_lines
 }
@@ -213,19 +219,22 @@ fn build_tmux_launch_env_lines(
 #[cfg(test)]
 mod launch_env_tests {
     use super::build_tmux_launch_env_lines;
-    use crate::services::claude_gateway_proxy::launch_env_for_test;
+    use crate::services::claude_command::{ClaudeLaunchEnv, TMUX_WRAPPER_GATEWAY_RESOLVED_ENV};
 
     #[test]
     fn launch_env_exports_absolute_compact_window_and_gates_gateway_proxy() {
-        let gateway_env = launch_env_for_test(true, "http://proxy.example/it's-ready", true);
+        let gateway_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let enabled = build_tmux_launch_env_lines(None, None, None, Some(700_000), &gateway_env);
         assert!(enabled.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=700000\n"));
+        // Managed launches always mark the wrapper env so it reconstructs this
+        // decision rather than re-resolving to a bare Scrub.
+        assert!(enabled.contains(&format!("export {TMUX_WRAPPER_GATEWAY_RESOLVED_ENV}=1\n")));
         assert!(
             enabled.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
         assert!(enabled.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
 
-        let scrub = launch_env_for_test(false, "http://foreign.example", true);
+        let scrub = ClaudeLaunchEnv::scrub_for_test();
         let disabled = build_tmux_launch_env_lines(None, None, None, None, &scrub);
         assert!(disabled.contains("unset ANTHROPIC_BASE_URL\n"));
         assert!(disabled.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
@@ -372,9 +381,10 @@ fn execute_command_simple_with_model_and_cancel(
         args.push(model.to_string());
     }
 
-    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
-    let mut command = Command::new(&claude_bin);
-    configure_execute_command_simple(&mut command, &resolution, &args, &gateway_proxy_env);
+    let mut builder =
+        ClaudeCommandBuilder::for_binary(&claude_bin, &resolution, ClaudeLaunchIntent::Turn);
+    configure_execute_command_simple(builder.command_mut(), &args);
+    let mut command = builder.into_command();
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start Claude: {}", e))?;
@@ -425,13 +435,10 @@ fn execute_command_simple_with_model_and_cancel(
     }
 }
 
-fn configure_execute_command_simple(
-    command: &mut Command,
-    resolution: &crate::services::platform::BinaryResolution,
-    args: &[String],
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
-) {
-    crate::services::platform::apply_binary_resolution(command, resolution);
+fn configure_execute_command_simple(command: &mut Command, args: &[String]) {
+    // Binary resolution (PATH) and the gateway launch env are applied
+    // by-construction by `ClaudeCommandBuilder::for_binary`; this helper only
+    // adds the non-gateway launch config.
     // #2250: put Claude in its own process group so the simple-cancel
     // watcher can terminate any wrapper / grandchild via
     // `kill_pid_tree(child_pid)`. Without this, descendants survive cancel.
@@ -443,11 +450,12 @@ fn configure_execute_command_simple(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // This legacy/simple entrypoint does not receive the authoritative compact
-    // policy inputs. It must never inherit an absolute window from dcserver or
-    // a parent Claude process.
+    // Compact-window overlay (#4591): this legacy/simple entrypoint does not
+    // receive the authoritative compact policy inputs, so it must never inherit
+    // an absolute window from dcserver or a parent Claude process. (The gateway
+    // env is applied by-construction at the `ClaudeCommandBuilder::for_binary`
+    // call site, so it is not re-applied here.)
     apply_auto_compact_window_to_command(command, None);
-    gateway_proxy_env.apply_to_command(command);
 }
 
 // #3034: retained for the #2387 timeout-drain regression test below.
@@ -569,11 +577,10 @@ mod simple_timeout_2387_tests {
 #[cfg(test)]
 mod simple_launch_env_tests {
     use super::configure_execute_command_simple;
-    use std::process::Command;
+    use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchEnv};
 
-    #[test]
-    fn disabled_gateway_scrubs_pre_set_proxy_vars_from_simple_command() {
-        let resolution = crate::services::platform::BinaryResolution {
+    fn claude_resolution() -> crate::services::platform::BinaryResolution {
+        crate::services::platform::BinaryResolution {
             requested_binary: "claude".to_string(),
             resolved_path: Some("claude".to_string()),
             canonical_path: None,
@@ -581,24 +588,21 @@ mod simple_launch_env_tests {
             attempts: Vec::new(),
             failure_kind: None,
             exec_path: None,
-        };
-        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
-            false,
-            "http://foreign.example:10100",
-            true,
-        );
-        let mut command = Command::new("claude");
-        command
-            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
-            .env(
-                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                "foreign-value",
-            )
-            .env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "stale-window");
+        }
+    }
 
-        configure_execute_command_simple(&mut command, &resolution, &[], &scrub);
-
-        let envs = command
+    fn simple_command_env(
+        launch_env: ClaudeLaunchEnv,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        let resolution = claude_resolution();
+        // Route through the chokepoint exactly as the production simple `-p`
+        // spawn site does: the builder applies the gateway env by construction,
+        // then `configure_execute_command_simple` adds the non-gateway config.
+        let mut builder =
+            ClaudeCommandBuilder::build_for_test("claude", Some(&resolution), launch_env);
+        configure_execute_command_simple(builder.command_mut(), &[]);
+        builder
+            .into_command()
             .get_envs()
             .map(|(key, value)| {
                 (
@@ -606,13 +610,31 @@ mod simple_launch_env_tests {
                     value.map(|value| value.to_string_lossy().into_owned()),
                 )
             })
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect()
+    }
+
+    #[test]
+    fn disabled_gateway_scrubs_pre_set_proxy_vars_from_simple_command() {
+        let envs = simple_command_env(ClaudeLaunchEnv::scrub_for_test());
         assert_eq!(envs.get("ANTHROPIC_BASE_URL"), Some(&None));
         assert_eq!(
             envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&None)
         );
         assert_eq!(envs.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(&None));
+    }
+
+    #[test]
+    fn enabled_gateway_injects_proxy_vars_into_simple_command() {
+        let envs = simple_command_env(ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"));
+        assert_eq!(
+            envs.get("ANTHROPIC_BASE_URL"),
+            Some(&Some("http://127.0.0.1:10100".to_string()))
+        );
+        assert_eq!(
+            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some(&Some("1".to_string()))
+        );
     }
 }
 
@@ -914,40 +936,46 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("Env: BASH_MAX_TIMEOUT_MS=86400000");
 
     let spawn_start = std::time::Instant::now();
-    let mut command = Command::new(&claude_bin);
-    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    command
-        .args(&args)
-        .current_dir(working_dir)
-        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
-        .env("BASH_DEFAULT_TIMEOUT_MS", "86400000") // 24 hours (no practical timeout)
-        .env("BASH_MAX_TIMEOUT_MS", "86400000") // 24 hours (no practical timeout)
-        .env_remove("CLAUDECODE") // Allow running from within Claude Code sessions
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(channel_id) = report_channel_id {
-        command.env(RESTART_REPORT_CHANNEL_ENV, channel_id.to_string());
-    }
-    if let Some(provider) = report_provider {
-        command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
-    }
-    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
-    let direct_launch_key = format!(
-        "claude-direct-{}",
-        session_id
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-    );
+    // Binary resolution (PATH) + gateway launch env applied by-construction.
+    // Resolve the launch env once so the same gateway decision drives both the
+    // #4591 auto-compact-window computation and the #4559 gateway guard.
+    let launch_env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn);
     let auto_compact_window = launch_auto_compact_window_for_session(
-        &direct_launch_key,
+        &format!(
+            "claude-direct-{}",
+            session_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string)
+        ),
         model_override,
         compact_percent,
         compact_lower_bound_tokens,
-        &gateway_proxy_env,
+        launch_env.gateway_proxy_env(),
     );
-    apply_auto_compact_window_to_command(&mut command, auto_compact_window);
-    gateway_proxy_env.apply_to_command(&mut command);
+    let mut builder =
+        ClaudeCommandBuilder::for_binary_with_env(&claude_bin, &resolution, launch_env);
+    {
+        let command = builder.command_mut();
+        command
+            .args(&args)
+            .current_dir(working_dir)
+            .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
+            .env("BASH_DEFAULT_TIMEOUT_MS", "86400000") // 24 hours (no practical timeout)
+            .env("BASH_MAX_TIMEOUT_MS", "86400000") // 24 hours (no practical timeout)
+            .env_remove("CLAUDECODE") // Allow running from within Claude Code sessions
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(channel_id) = report_channel_id {
+            command.env(RESTART_REPORT_CHANNEL_ENV, channel_id.to_string());
+        }
+        if let Some(provider) = report_provider {
+            command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
+        }
+        // Compact-window overlay (#4591): pin the freshly resolved immutable
+        // threshold on top of the chokepoint's by-construction gateway env (or
+        // clear any stale inherited value when there is none).
+        apply_auto_compact_window_to_command(command, auto_compact_window);
+    }
+    let mut command = builder.into_command();
 
     let mut child = command.spawn().map_err(|e| {
         debug_log(&format!(
@@ -1806,7 +1834,7 @@ fn execute_streaming_local_tui_tmux(
     // Probe only after the warm-followup path has decided a fresh process is
     // required. If a proxy dies after launch, its env cannot be scrubbed from
     // the live process; this guard intentionally protects fresh launches only.
-    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    let launch_env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn);
     if let Some(ref token) = cancel_token {
         token.bind_claude_tmux_session(tmux_session_name);
     }
@@ -1819,7 +1847,7 @@ fn execute_streaming_local_tui_tmux(
         model_override,
         hook_endpoint,
         resume,
-        &gateway_proxy_env,
+        &launch_env,
     )?;
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
@@ -2001,7 +2029,7 @@ fn prepare_and_create_claude_tui_session(
     model_override: Option<&str>,
     hook_endpoint: String,
     resume: bool,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+    launch_env: &ClaudeLaunchEnv,
 ) -> Result<String, String> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
@@ -2029,7 +2057,7 @@ fn prepare_and_create_claude_tui_session(
             system_prompt: system_prompt.map(str::to_string),
             model: model_override.map(str::to_string),
             resume,
-            gateway_proxy_env: gateway_proxy_env.clone(),
+            launch_env: launch_env.clone(),
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
@@ -2064,7 +2092,7 @@ fn prepare_and_create_claude_tui_session(
     }
     crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
         tmux_session_name,
-        gateway_proxy_env,
+        launch_env.gateway_proxy_env(),
     );
     Ok(owner_path)
 }
@@ -2798,20 +2826,20 @@ fn execute_streaming_local_tmux(
 
     // A live warm-followup process keeps its original environment. Resolve and
     // warn only once the startup plan actually requires a fresh process.
-    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    let launch_env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn);
     let auto_compact_window = launch_auto_compact_window_for_session(
         tmux_session_name,
         claude_model_from_args(args),
         compact_percent,
         compact_lower_bound_tokens,
-        &gateway_proxy_env,
+        launch_env.gateway_proxy_env(),
     );
     let env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
         auto_compact_window,
-        &gateway_proxy_env,
+        &launch_env,
     );
 
     let script_content = format!(
@@ -2861,7 +2889,7 @@ fn execute_streaming_local_tmux(
 
     crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
         tmux_session_name,
-        &gateway_proxy_env,
+        launch_env.gateway_proxy_env(),
     );
 
     // Keep tmux session alive after process exits for post-mortem analysis
@@ -3091,13 +3119,13 @@ pub(crate) fn execute_streaming_local_process(
         .unwrap_or_default();
     // The follow-up path returned above when the existing process was healthy,
     // so probing here cannot emit one warning per warm turn.
-    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    let launch_env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn);
     let auto_compact_window = launch_auto_compact_window_for_session(
         session_name,
         claude_model_from_args(args),
         compact_percent,
         compact_lower_bound_tokens,
-        &gateway_proxy_env,
+        launch_env.gateway_proxy_env(),
     );
     let config = SessionConfig {
         session_name: session_name.to_string(),
@@ -3112,8 +3140,11 @@ pub(crate) fn execute_streaming_local_process(
 
     let backend = ProcessBackend::new();
     let handle = backend.create_session_with_command_env(&config, |command| {
+        // Chokepoint base (#4559): resolved gateway env + managed-launch marker
+        // so the spawned `agentdesk tmux-wrapper` reconstructs this decision.
+        launch_env.apply_to_managed_process_command(command);
+        // Compact-window overlay (#4591).
         apply_auto_compact_window_to_command(command, auto_compact_window);
-        gateway_proxy_env.apply_to_command(command);
     })?;
 
     // Store child PID in cancel token

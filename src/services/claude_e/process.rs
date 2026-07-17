@@ -8,17 +8,17 @@
 //! or `ProviderSessionDriver::LegacyPrompt` instead.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use serde_json::Value;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchEnv, ClaudeLaunchIntent};
 use crate::services::claude_compact_context::{
     apply_auto_compact_window_to_command, launch_auto_compact_window,
 };
-use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::process::kill_child_tree;
 use crate::services::provider::{
     CancelToken, ProviderKind, cancel_requested, register_child_pid, spawn_cancel_watchdog,
@@ -27,18 +27,6 @@ use crate::services::session_backend::{
     StreamLineState, emit_status_events_from_stream_json, observe_stream_context,
     parse_assistant_extra_tool_uses, parse_stream_message_with_state,
 };
-
-fn apply_launch_env(
-    command: &mut Command,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
-    auto_compact_window: Option<u64>,
-) {
-    // `claude-e` is a wrapper, but its real Claude child inherits this exact
-    // environment. Always remove a parent value before optionally setting the
-    // freshly resolved immutable-launch threshold.
-    apply_auto_compact_window_to_command(command, auto_compact_window);
-    gateway_proxy_env.apply_to_command(command);
-}
 
 /// Phase 1 entry point. The signature matches the subset of
 /// `claude::execute_command_streaming` parameters that are meaningful
@@ -111,30 +99,43 @@ pub fn execute_streaming(
 
     // claude-e is a fresh per-turn process and its real Claude child inherits
     // these variables, so it uses the same guarded gateway decision as native
-    // fresh launches.
-    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    // fresh launches. The chokepoint builder applies that decision
+    // by-construction; claude-e is a wrapper program, so no Claude binary
+    // resolution PATH is applied here (claude-e is resolved separately above).
+    // The launch env is resolved once so the same gateway decision drives BOTH
+    // the compact-window computation (#4591) and the by-construction gateway
+    // guard (#4559).
+    let launch_env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn);
     let auto_compact_window = compact_percent.and_then(|percent| {
         launch_auto_compact_window(
             model_override,
             percent,
             compact_lower_bound_tokens,
-            &gateway_proxy_env,
+            launch_env.gateway_proxy_env(),
         )
     });
-    let mut command = Command::new(&claude_e_bin);
-    crate::services::process::configure_child_process_group(&mut command);
-    command
-        .args(&args)
-        .current_dir(working_dir)
-        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
-        .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
-        .env("BASH_MAX_TIMEOUT_MS", "86400000")
-        .env("CLAUDE_E_SKIP_STAR_PROMPT", "1")
-        .env_remove("CLAUDECODE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_launch_env(&mut command, &gateway_proxy_env, auto_compact_window);
+    let mut builder = ClaudeCommandBuilder::for_wrapper_with_env(&claude_e_bin, launch_env);
+    {
+        let command = builder.command_mut();
+        crate::services::process::configure_child_process_group(command);
+        command
+            .args(&args)
+            .current_dir(working_dir)
+            .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
+            .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
+            .env("BASH_MAX_TIMEOUT_MS", "86400000")
+            .env("CLAUDE_E_SKIP_STAR_PROMPT", "1")
+            .env_remove("CLAUDECODE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Compact-window overlay (#4591): applied on top of the chokepoint's
+        // by-construction gateway env so claude-e's real Claude child inherits
+        // the freshly resolved immutable-launch threshold (or has any stale
+        // parent value cleared when there is none).
+        apply_auto_compact_window_to_command(command, auto_compact_window);
+    }
+    let mut command = builder.into_command();
 
     let mut child = command
         .spawn()
@@ -393,70 +394,58 @@ pub fn execute_streaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::claude_command::ClaudeLaunchEnv;
+
+    fn wrapper_command_env(
+        launch_env: ClaudeLaunchEnv,
+        auto_compact_window: Option<u64>,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        // Mirror the production claude-e spawn: a wrapper builder (no Claude
+        // binary resolution) applies the gateway env by construction, then the
+        // compact-window overlay (#4591) is applied on top.
+        let mut builder = ClaudeCommandBuilder::build_for_test("claude-e", None, launch_env);
+        apply_auto_compact_window_to_command(builder.command_mut(), auto_compact_window);
+        builder
+            .into_command()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn claude_e_command_receives_authoritative_launch_env() {
-        let gateway_env = crate::services::claude_gateway_proxy::launch_env_for_test(
-            true,
-            "http://127.0.0.1:10100",
-            true,
+        // Inject: the chokepoint applies the gateway env by construction and the
+        // compact-window overlay pins the freshly resolved immutable threshold.
+        let injected = wrapper_command_env(
+            ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
+            Some(700_000),
         );
-        let mut command = Command::new("claude-e");
-
-        apply_launch_env(&mut command, &gateway_env, Some(700_000));
-
-        let envs = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(
-            envs.get("ANTHROPIC_BASE_URL"),
+            injected.get("ANTHROPIC_BASE_URL"),
             Some(&Some("http://127.0.0.1:10100".to_string()))
         );
         assert_eq!(
-            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            injected.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&Some("1".to_string()))
         );
         assert_eq!(
-            envs.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            injected.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
             Some(&Some("700000".to_string()))
         );
 
-        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
-            false,
-            "http://foreign.example",
-            true,
-        );
-        let mut command = Command::new("claude-e");
-        command
-            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
-            .env(
-                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                "foreign-value",
-            )
-            .env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "stale-window");
-
-        apply_launch_env(&mut command, &scrub, None);
-
-        let envs = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(envs.get("ANTHROPIC_BASE_URL"), Some(&None));
+        // Scrub: the gateway vars are removed and, with no resolved window, any
+        // inherited absolute compact window is cleared rather than propagated.
+        let scrubbed = wrapper_command_env(ClaudeLaunchEnv::scrub_for_test(), None);
+        assert_eq!(scrubbed.get("ANTHROPIC_BASE_URL"), Some(&None));
         assert_eq!(
-            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            scrubbed.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&None)
         );
-        assert_eq!(envs.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(&None));
+        assert_eq!(scrubbed.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(&None));
     }
 }

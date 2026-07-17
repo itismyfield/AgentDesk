@@ -682,6 +682,7 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
+│   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
@@ -904,6 +905,7 @@ src/
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
+│   │   ├── bot_role.rs
 │   │   ├── catch_up.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
@@ -1148,6 +1150,7 @@ src/
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
 │   ├── claude.rs
+│   ├── claude_command.rs
 │   ├── claude_compact_context.rs
 │   ├── claude_compact_trigger.rs
 │   ├── claude_gateway_proxy.rs

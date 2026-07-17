@@ -1,5 +1,6 @@
 import type { Agent, KanbanCard, KanbanCardStatus } from "../../types";
 import {
+  coerceTimestampMs,
   hasManualInterventionReason,
   isManualInterventionCard,
 } from "../agent-manager/kanban-utils";
@@ -34,9 +35,9 @@ export interface OfficeAgentState {
   seatStatusByAgent: Map<string, OfficeSeatStatus>;
 }
 
-const TERMINAL_CARD_STATUSES = new Set<KanbanCardStatus>(["done"]);
+const TERMINAL_CARD_STATUSES = new Set<KanbanCardStatus>(["done", "cancelled"]);
 
-const PRIMARY_CARD_PRIORITY: Record<KanbanCardStatus, number> = {
+const PRIMARY_CARD_PRIORITY: Record<string, number> = {
   review: 0,
   in_progress: 1,
   requested: 2,
@@ -49,7 +50,7 @@ const PRIMARY_CARD_PRIORITY: Record<KanbanCardStatus, number> = {
   done: 9,
 };
 
-const ACTIVE_ISSUE_PRIORITY: Record<KanbanCardStatus, number> = {
+const ACTIVE_ISSUE_PRIORITY: Record<string, number> = {
   review: 0,
   in_progress: 1,
   requested: 2,
@@ -62,26 +63,16 @@ const ACTIVE_ISSUE_PRIORITY: Record<KanbanCardStatus, number> = {
   done: 9,
 };
 
-function normalizeTimestampMs(value: number | string | null | undefined): number | null {
-  if (value == null || value === "") return null;
-  if (typeof value === "number") {
-    return value < 1e12 ? value * 1000 : value;
-  }
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) {
-    return numeric < 1e12 ? numeric * 1000 : numeric;
-  }
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-function compareCards(left: KanbanCard, right: KanbanCard, priority: Record<KanbanCardStatus, number>): number {
+function compareCards(left: KanbanCard, right: KanbanCard, priority: Record<string, number>): number {
   const leftPriority = priority[left.status] ?? 99;
   const rightPriority = priority[right.status] ?? 99;
   if (leftPriority !== rightPriority) {
     return leftPriority - rightPriority;
   }
-  return right.updated_at - left.updated_at;
+  return (
+    (coerceTimestampMs(right.updated_at) ?? 0) -
+    (coerceTimestampMs(left.updated_at) ?? 0)
+  );
 }
 
 function selectPreferredCard(current: KanbanCard | undefined, next: KanbanCard): KanbanCard {
@@ -152,8 +143,8 @@ export function deriveOfficeAgentState(
           status: card.status,
           number: card.github_issue_number ?? null,
           url: buildIssueUrl(card),
-          startedAt: normalizeTimestampMs(card.started_at),
-          updatedAt: card.updated_at,
+          startedAt: coerceTimestampMs(card.started_at),
+          updatedAt: coerceTimestampMs(card.updated_at) ?? 0,
         }),
       );
     }
@@ -169,7 +160,7 @@ export function deriveOfficeAgentState(
           reason: hasManualInterventionReason(card) ? card.blocked_reason?.trim() ?? null : null,
           issueNumber: card.github_issue_number ?? null,
           issueUrl: buildIssueUrl(card),
-          updatedAt: card.updated_at,
+          updatedAt: coerceTimestampMs(card.updated_at) ?? 0,
         }),
       );
     }

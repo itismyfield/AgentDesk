@@ -191,11 +191,14 @@
   - `src/dispatch/dispatch_context.rs` (2817 lines).
   - `src/dispatch/dispatch_create.rs` (1334 lines).
   - `src/dispatch/dispatch_status.rs` (1445 lines).
-  - `src/services/dispatches/outbox_route.rs` (1173 lines; +1 from #4055
-    preserving the typed transient delivery result; route extraction
+  - `src/services/dispatches/outbox_route.rs` (1177 lines; +1 from #4055
+    preserving the typed transient delivery result; +4 from #4486 typing the
+    announce/notify bot identity via `UtilityBotRole::_.alias()` (mechanical,
+    non-behavioral); route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1496 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1500 lines;
     +1 from #4055 preserving the typed transient delivery result;
+    +4 from #4486 UtilityBotRole alias typing (mechanical, non-behavioral);
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -1702,7 +1705,7 @@
     ordered endpoint inventory parts under
     `src/server/routes/docs/inventory/endpoints/`; keep new API-docs data in
     those child modules and preserve `scripts/check_api_docs_coverage.py`.
-  - `src/server/routes/escalation.rs` (1376 lines).
+  - `src/server/routes/escalation.rs` (1379 lines; +3 from #4486 UtilityBotRole alias typing, mechanical/non-behavioral).
   - `src/server/routes/meetings.rs` (1290 lines; SQL extracted to `src/db/meetings.rs` in #3570 slice 1; +24 from #3742 explicit shared GitHub-only issue creation outcomes).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
     #3038 slice 1 and S1-relocated into a 26-line route shim delegating to
@@ -1866,7 +1869,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/settings.rs` (1112) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
-- `src/services/dispatches/outbox_route.rs` (1173) — dispatch outbox route
+- `src/services/dispatches/outbox_route.rs` (1177) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2969; +9 net from #4553 replacing dead native cache-TTL launch wiring with guarded gateway-proxy launch decisions and covering the simple-command spawn; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1358),
@@ -1967,7 +1970,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   migrated launchd validation, Discord notification plumbing, and agent
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
-- `src/services/platform/binary_resolver.rs` (1392) — provider CLI resolver
+- `src/services/platform/binary_resolver.rs` (1395) — provider CLI resolver
   surface. #3823 adds macOS Codex.app fallback discovery and all-candidate
   Codex semver probing so AgentDesk prefers the newest compatible Codex binary
   instead of silently launching a stale npm shim.

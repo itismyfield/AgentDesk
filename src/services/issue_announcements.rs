@@ -108,8 +108,10 @@ pub async fn create_issue_announcement_pg(
         return Ok(None);
     };
 
-    let token = crate::credential::read_bot_token("notify")
-        .ok_or_else(|| "no notify bot token configured".to_string())?;
+    let token = crate::credential::read_bot_token(
+        crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+    )
+    .ok_or_else(|| "no notify bot token configured".to_string())?;
     let created_at = Utc::now();
     let content = render_active_card(
         input.issue_number,
@@ -178,7 +180,9 @@ pub async fn complete_issue_announcement_pg(
     let title = event.title.as_deref().unwrap_or(&row.title);
     let content = render_completed_card(title, &row, &event);
     let log_key = format!("issue_announcement:{}:{}", event.repo, event.issue_number);
-    let edit_result = match crate::credential::read_bot_token("notify") {
+    let edit_result = match crate::credential::read_bot_token(
+        crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+    ) {
         Some(token) => send_issue_announcement_message(
             &token,
             &row.channel_id,

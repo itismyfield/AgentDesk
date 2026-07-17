@@ -126,7 +126,7 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                                 className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
                                 style={{ background: `${statusDef?.accent ?? "#22c55e"}22`, color: statusDef?.accent ?? "#22c55e" }}
                               >
-                                {card.status === "done" ? tr("완료", "Done") : tr("취소", "Cancelled")}
+                                {tr("완료", "Done")}
                               </span>
                               {card.github_issue_number && (
                                 <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>#{card.github_issue_number}</span>

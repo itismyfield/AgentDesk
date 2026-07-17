@@ -10,6 +10,7 @@ use super::manual_delivery::{
     deliver_manual_dm_notification, is_reserved_voice_correlation_namespace,
 };
 use super::send_gate::{SendCallerClass, send_message_with_backends_and_delivery_id_for_caller};
+use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
 
@@ -59,7 +60,7 @@ pub async fn handle_send_with_caller<'a>(
     let bot = json
         .get("bot")
         .and_then(|v| v.as_str())
-        .unwrap_or("announce");
+        .unwrap_or(UtilityBotRole::Announce.alias());
     let summary = json.get("summary").and_then(|v| v.as_str());
     let delivery_id = match (
         json.get("correlation_id").and_then(|v| v.as_str()),
@@ -264,7 +265,10 @@ fn parse_senddm_body(body: &str) -> Result<SendDmRequest, String> {
         .filter(|value| !value.is_empty())
         .ok_or("content required")?
         .to_string();
-    let bot = parsed["bot"].as_str().unwrap_or("announce").to_string();
+    let bot = parsed["bot"]
+        .as_str()
+        .unwrap_or(UtilityBotRole::Announce.alias())
+        .to_string();
     let correlation_id = parsed["correlation_id"]
         .as_str()
         .map(str::trim)

@@ -329,7 +329,9 @@ pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
     shared: &SharedData,
 ) -> Option<u64> {
     let registry = shared.health_registry()?;
-    registry.utility_bot_user_id("announce").await
+    registry
+        .utility_bot_user_id(super::bot_role::UtilityBotRole::Announce)
+        .await
 }
 
 /// Cached lookup for the notify bot's Discord user id. Used by the message
@@ -340,7 +342,9 @@ pub(in crate::services::discord) async fn resolve_notify_bot_user_id(
     shared: &SharedData,
 ) -> Option<u64> {
     let registry = shared.health_registry()?;
-    registry.utility_bot_user_id("notify").await
+    registry
+        .utility_bot_user_id(super::bot_role::UtilityBotRole::Notify)
+        .await
 }
 
 pub(in crate::services::discord) fn is_allowed_turn_sender(

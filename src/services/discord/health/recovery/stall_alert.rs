@@ -146,7 +146,7 @@ pub(super) async fn notify_suspected_stall_without_cleanup(
         crate::services::message_outbox::OutboxMessage {
             target: &target,
             content: &content,
-            bot: "notify",
+            bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
             source: "stall_watchdog",
             reason_code: Some(STALL_WATCHDOG_MENTION_REASON_CODE),
             session_key: session_key.as_deref(),

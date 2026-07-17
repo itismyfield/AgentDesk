@@ -1,7 +1,8 @@
 use super::*;
 
 pub(super) const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
-pub(super) const WATCHDOG_DEADLOCK_PREALERT_BOT: &str = "announce";
+pub(super) const WATCHDOG_DEADLOCK_PREALERT_BOT: &str =
+    crate::services::discord::bot_role::UtilityBotRole::Announce.alias();
 pub(super) const WATCHDOG_TIMEOUT_REASON: &str = "watchdog timeout";
 pub(super) const WATCHDOG_TIMEOUT_CANCEL_SOURCE: &str = "watchdog_timeout";
 #[cfg(not(test))]
