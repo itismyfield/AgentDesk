@@ -1,8 +1,6 @@
 use super::*;
-use std::sync::Arc;
-
 use crate::services::discord::inflight::opt_message_id;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 
 /// #4229 S6: no-result exit handler of the watcher loop (fresh ready-for-input
 /// idle structural finalize / tmux-death break / cancel-shutdown break /
