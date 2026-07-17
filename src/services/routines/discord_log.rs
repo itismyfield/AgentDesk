@@ -554,11 +554,7 @@ impl RoutineDiscordLogger {
             .strip_prefix("channel:")
             .unwrap_or(target.target.as_str());
         let token = crate::credential::read_bot_token(&target.bot)
-            .or_else(|| {
-                crate::credential::read_bot_token(
-                    UtilityBotRole::Notify.alias(),
-                )
-            })
+            .or_else(|| crate::credential::read_bot_token(UtilityBotRole::Notify.alias()))
             .ok_or_else(|| {
                 format!(
                     "routine run Discord summary bot token not configured for {}",
@@ -1110,13 +1106,9 @@ async fn resolve_available_log_bot(
 
 fn routine_log_bot_candidates(provider_bot: Option<&str>, agent_id: Option<&str>) -> Vec<String> {
     let mut candidates = Vec::new();
-    for bot in [
-        provider_bot,
-        agent_id,
-        Some(UtilityBotRole::Notify.alias()),
-    ]
-    .into_iter()
-    .flatten()
+    for bot in [provider_bot, agent_id, Some(UtilityBotRole::Notify.alias())]
+        .into_iter()
+        .flatten()
     {
         let bot = bot.trim();
         if bot.is_empty() || candidates.iter().any(|candidate| candidate == bot) {

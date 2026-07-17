@@ -26,7 +26,7 @@
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2728 | discord-relay | 2026-10-31 | #3837 |
 | `src/services/discord/session_relay_sink.rs` | 1676 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1621 | discord-relay | 2026-10-31 | #3841 |
-| `src/services/discord/tmux_watcher.rs` | 3558 | discord-relay | 2026-10-31 | #3832 |
+| `src/services/discord/tmux_watcher.rs` | 3560 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tmux_watcher/turn_stream_collector.rs` | 1158 | discord-relay | 2026-10-31 | #4229 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1495 | discord-relay | 2026-08-31 | #3540 |
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1083 | discord-relay | 2026-10-31 | #4019 |
@@ -102,8 +102,8 @@
 | `src/services/platform/binary_resolver.rs` | 1392 |
 | `src/services/provider.rs` | 1820 |
 | `src/services/qwen.rs` | 2198 |
-| `src/services/routines/agent_executor.rs` | 2130 |
-| `src/services/routines/discord_log.rs` | 1601 |
+| `src/services/routines/agent_executor.rs` | 2131 |
+| `src/services/routines/discord_log.rs` | 1594 |
 | `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1112 |
 | `src/services/tui_prompt_dedupe.rs` | 2105 |

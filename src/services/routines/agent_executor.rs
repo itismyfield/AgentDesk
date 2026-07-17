@@ -1011,11 +1011,7 @@ impl RoutineAgentExecutor {
                         error = %warning,
                         "routine thread setup failed; falling back to agent primary channel"
                     );
-                    (
-                        channel_id,
-                        None,
-                        UtilityBotRole::Notify.alias().to_string(),
-                    )
+                    (channel_id, None, UtilityBotRole::Notify.alias().to_string())
                 }
             };
             (

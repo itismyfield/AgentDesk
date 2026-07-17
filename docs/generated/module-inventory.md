@@ -173,7 +173,7 @@
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 1540 | 942 | 598 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 202 | 202 | 0 |  |
 | `engine::ops::log_ops` | `src/engine/ops/log_ops.rs` | 76 | 60 | 16 |  |
-| `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 146 | 107 | 39 |  |
+| `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 149 | 110 | 39 |  |
 | `engine::ops::pipeline_ops` | `src/engine/ops/pipeline_ops.rs` | 225 | 225 | 0 |  |
 | `engine::ops::quality_ops` | `src/engine/ops/quality_ops.rs` | 95 | 95 | 0 |  |
 | `engine::ops::queue_ops` | `src/engine/ops/queue_ops.rs` | 114 | 114 | 0 |  |
@@ -438,7 +438,7 @@
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1078 | 651 | 427 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1079 | 978 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
-| `services::discord::bot_role` | `src/services/discord/bot_role.rs` | 104 | 68 | 36 |  |
+| `services::discord::bot_role` | `src/services/discord/bot_role.rs` | 103 | 66 | 37 |  |
 | `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 3173 | 1796 | 1377 | giant-file |
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 291 | 291 | 0 |  |
 | `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 97 | 97 | 0 |  |
@@ -502,7 +502,7 @@
 | `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1752 | 683 | 1069 |  |
 | `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 271 | 101 | 170 |  |
 | `services::discord::health::relay_progress` | `src/services/discord/health/relay_progress.rs` | 108 | 66 | 42 |  |
-| `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 392 | 324 | 68 |  |
+| `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 388 | 320 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 264 | 242 | 22 |  |
 | `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1273 | 993 | 280 |  |
 | `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2386 | 989 | 1397 |  |
@@ -556,7 +556,7 @@
 | `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1387 | 737 | 650 |  |
 | `services::discord::outbound::delivery_frontier_probe` | `src/services/discord/outbound/delivery_frontier_probe.rs` | 75 | 75 | 0 |  |
 | `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2898 | 1276 | 1622 | giant-file |
-| `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1185 | 589 | 596 |  |
+| `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1203 | 594 | 609 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 471 | 447 | 24 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 124 | 124 | 0 |  |
 | `services::discord::outbound::reaction_control` | `src/services/discord/outbound/reaction_control.rs` | 136 | 104 | 32 |  |
@@ -760,7 +760,7 @@
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 82 | 82 | 0 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 602 | 479 | 123 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 3558 | 3558 | 0 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 3560 | 3560 | 0 | giant-file |
 | `services::discord::tmux_watcher::commit_decisions` | `src/services/discord/tmux_watcher/commit_decisions.rs` | 296 | 174 | 122 |  |
 | `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 250 | 250 | 0 |  |
 | `services::discord::tmux_watcher::completion_producer` | `src/services/discord/tmux_watcher/completion_producer.rs` | 54 | 54 | 0 |  |
@@ -972,7 +972,7 @@
 | `services::memory::memento_instructions_cache` | `src/services/memory/memento_instructions_cache.rs` | 241 | 143 | 98 |  |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 884 | 769 | 115 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 315 | 315 | 0 |  |
-| `services::message_outbox` | `src/services/message_outbox.rs` | 1421 | 864 | 557 |  |
+| `services::message_outbox` | `src/services/message_outbox.rs` | 1423 | 866 | 557 |  |
 | `services::message_outbox_recovery` | `src/services/message_outbox_recovery.rs` | 166 | 166 | 0 |  |
 | `services::message_outbox_recovery_support` | `src/services/message_outbox_recovery_support.rs` | 138 | 138 | 0 |  |
 | `services::monitoring_store` | `src/services/monitoring_store.rs` | 141 | 141 | 0 |  |
@@ -1045,8 +1045,8 @@
 | `services::review_decision::worktree_stale` | `src/services/review_decision/worktree_stale.rs` | 728 | 553 | 175 |  |
 | `services::routines` | `src/services/routines/mod.rs` | 52 | 41 | 11 |  |
 | `services::routines::action` | `src/services/routines/action.rs` | 365 | 237 | 128 |  |
-| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2692 | 2130 | 562 | giant-file |
-| `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 2059 | 1601 | 458 | giant-file |
+| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2693 | 2131 | 562 | giant-file |
+| `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 2052 | 1594 | 458 | giant-file |
 | `services::routines::fresh_session_reaper` | `src/services/routines/fresh_session_reaper.rs` | 395 | 215 | 180 |  |
 | `services::routines::loader` | `src/services/routines/loader.rs` | 2313 | 670 | 1643 |  |
 | `services::routines::migrated` | `src/services/routines/migrated.rs` | 1257 | 854 | 403 |  |
