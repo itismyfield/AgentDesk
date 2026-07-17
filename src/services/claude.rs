@@ -938,17 +938,13 @@ IMPORTANT: Format your responses using Markdown for better readability:
     let spawn_start = std::time::Instant::now();
     // Binary resolution (PATH) + gateway launch env applied by-construction.
     // Resolve the launch env once so the same gateway decision drives both the
-    // auto-compact-window computation (#4591) and the by-construction gateway
-    // guard (#4559).
+    // #4591 auto-compact-window computation and the #4559 gateway guard.
     let launch_env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn);
-    let direct_launch_key = format!(
-        "claude-direct-{}",
-        session_id
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-    );
     let auto_compact_window = launch_auto_compact_window_for_session(
-        &direct_launch_key,
+        &format!(
+            "claude-direct-{}",
+            session_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string)
+        ),
         model_override,
         compact_percent,
         compact_lower_bound_tokens,
