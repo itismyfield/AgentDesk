@@ -281,7 +281,7 @@ mod tests {
     use super::*;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
-    use crate::services::discord::inflight;
+    use crate::services::discord::inflight::{self, opt_channel_id, opt_message_id};
     use crate::services::discord::make_shared_data_for_tests;
     use crate::services::discord::outbound::delivery_frontier_probe;
     use crate::services::discord::recovery_paths::shared::ChannelProbeVerdict;
@@ -604,7 +604,8 @@ mod tests {
             &state,
             Some((128, 256)),
             shared.restart.current_generation,
-        );
+        )
+        .expect("non-zero test channel id");
         let gateway = RecoveryFakeGateway::new(
             ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error: "404 stale anchor".to_string(),
@@ -618,8 +619,8 @@ mod tests {
                 &gateway,
                 &shared,
                 &provider,
-                ChannelId::new(state.channel_id),
-                MessageId::new(state.current_msg_id),
+                opt_channel_id(state.channel_id).expect("non-zero test channel id"),
+                opt_message_id(state.current_msg_id).expect("non-zero test message id"),
                 "answer",
                 Some(&context),
                 || async move { ChannelProbeVerdict::Gone },
@@ -637,7 +638,8 @@ mod tests {
         );
         let anchor = delivery_frontier_probe::current_generation_delivered_anchor(
             &provider,
-            ChannelId::new(state.delivery_record_owner_channel_id()),
+            opt_channel_id(state.delivery_record_owner_channel_id())
+                .expect("non-zero test record channel id"),
             tmux,
             Some(u64::MAX),
         )

@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-use poise::serenity_prelude as serenity;
-
 use super::super::SharedData;
 use super::super::inflight::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
-    clear_inflight_state_if_matches_identity_generation,
+    clear_inflight_state_if_matches_identity_generation, opt_channel_id, opt_message_id,
 };
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
@@ -272,12 +270,27 @@ pub(super) async fn finalize_abandoned_mailbox(
         return AbandonedTmuxCleanupOutcome::from_plan(plan);
     }
 
-    let channel = serenity::ChannelId::new(state.channel_id);
+    let Some(channel) = opt_channel_id(state.channel_id) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            "abandoned mailbox cleanup skipped because persisted channel id is zero"
+        );
+        return AbandonedTmuxCleanupOutcome::from_plan(plan);
+    };
+    let Some(user_msg_id) = opt_message_id(state.user_msg_id) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel.get(),
+            "abandoned mailbox cleanup skipped because persisted user message id is zero"
+        );
+        return AbandonedTmuxCleanupOutcome::from_plan(plan);
+    };
     let finish = super::super::mailbox_finish::mailbox_finish_turn_if_matches_started_before_without_completion(
         shared,
         provider,
         channel,
-        serenity::MessageId::new(state.user_msg_id),
+        user_msg_id,
         sweep_started_before,
     )
     .await;
@@ -315,11 +328,10 @@ pub(super) async fn finalize_abandoned_mailbox(
 fn abandoned_placeholder_key(
     state: &InflightTurnState,
 ) -> Option<super::super::placeholder_controller::PlaceholderKey> {
-    let provider = ProviderKind::from_str(&state.provider)?;
-    (state.current_msg_id != 0).then(|| super::super::placeholder_controller::PlaceholderKey {
-        provider,
-        channel_id: serenity::ChannelId::new(state.channel_id),
-        message_id: serenity::MessageId::new(state.current_msg_id),
+    Some(super::super::placeholder_controller::PlaceholderKey {
+        provider: ProviderKind::from_str(&state.provider)?,
+        channel_id: opt_channel_id(state.channel_id)?,
+        message_id: opt_message_id(state.current_msg_id)?,
     })
 }
 

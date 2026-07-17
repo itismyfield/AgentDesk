@@ -16,7 +16,8 @@ mod model;
 // item at its original visibility so existing `inflight::*` / `super::*`
 // references across the discord module resolve unchanged.
 pub(in crate::services::discord) use model::{
-    InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, optional_message_id,
+    InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, opt_channel_id,
+    opt_message_id, optional_message_id,
 };
 
 mod episode_guard;

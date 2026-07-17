@@ -19,6 +19,13 @@ pub(super) async fn relay_recovery_terminal_notice(
     state: &super::inflight::InflightTurnState,
     text: &str,
 ) -> RecoveryRelayOutcome {
+    let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            "recovery terminal notice skipped because persisted channel id is zero"
+        );
+        return RecoveryRelayOutcome::TransientFailure;
+    };
     let recovery_context = RecoveryDeliveryContext::from_state(
         provider,
         state,
@@ -28,10 +35,10 @@ pub(super) async fn relay_recovery_terminal_notice(
     relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
-        ChannelId::new(state.channel_id),
-        super::inflight::optional_message_id(state.current_msg_id),
+        channel_id,
+        super::inflight::opt_message_id(state.current_msg_id),
         text,
-        Some(&recovery_context),
+        recovery_context.as_ref(),
     )
     .await
 }
@@ -226,7 +233,13 @@ where
     S: FnOnce(Option<String>) -> SniffFuture,
     SniffFuture: std::future::Future<Output = bool>,
 {
-    let channel_id = ChannelId::new(state.channel_id);
+    let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            "recovery visible completion skipped because persisted channel id is zero"
+        );
+        return RecoveryCompletionOutcome::Emitted;
+    };
     // A recovery/orphan turn may carry no user message (user_msg_id == 0,
     // e.g. a TUI-direct turn). There is then no user message to react against,
     // so the ⏳→✅ reaction step is skipped while the quiescence gate and
@@ -400,6 +413,32 @@ mod recovery_completion_outcome_tests {
             recovery_status_panel::message_id_for_completion(&snapshot, Some(&persisted));
 
         assert_eq!(status_msg_id, Some(super::MessageId::new(4004)));
+    }
+
+    #[test]
+    fn completion_skips_zero_persisted_and_snapshot_status_ids_without_panicking() {
+        let mut snapshot = state_for_recovery(9101);
+        snapshot.status_message_id = Some(0);
+        let mut persisted = state_for_recovery(9101);
+        persisted.status_message_id = Some(0);
+
+        let status_msg_id =
+            recovery_status_panel::message_id_for_completion(&snapshot, Some(&persisted));
+
+        assert_eq!(status_msg_id, None);
+    }
+
+    #[test]
+    fn completion_skips_zero_persisted_status_then_uses_nonzero_snapshot() {
+        let mut snapshot = state_for_recovery(9101);
+        snapshot.status_message_id = Some(3003);
+        let mut persisted = state_for_recovery(9101);
+        persisted.status_message_id = Some(0);
+
+        let status_msg_id =
+            recovery_status_panel::message_id_for_completion(&snapshot, Some(&persisted));
+
+        assert_eq!(status_msg_id, Some(super::MessageId::new(3003)));
     }
 
     #[test]

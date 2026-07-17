@@ -18,6 +18,7 @@ use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
+use super::super::inflight::opt_channel_id;
 use super::super::recovery_engine::{finish_recovered_turn_mailbox, save_missing_session_handoff};
 use super::super::runtime_store::{atomic_write, discord_recovery_force_clear_root};
 use super::super::{SharedData, inflight};
@@ -97,13 +98,14 @@ pub(in crate::services::discord) async fn dispose_recovery_relay_outcome(
         tmux_alive,
     ) {
         RowDisposition::FinishAndClear => {
-            finish_recovered_turn_mailbox(
-                shared,
-                provider,
-                ChannelId::new(state.channel_id),
-                finish_stop_source,
-            )
-            .await;
+            let Some(channel_id) = opt_channel_id(state.channel_id) else {
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    "recovery relay disposition skipped mailbox cleanup because persisted channel id is zero"
+                );
+                return;
+            };
+            finish_recovered_turn_mailbox(shared, provider, channel_id, finish_stop_source).await;
             // #3918: do NOT silently ignore the clear result. A `false` here
             // means the row is still on disk, so the next boot re-enters this
             // branch — for the anchor-repost path that would re-probe the gone
@@ -204,17 +206,20 @@ fn anchor_record_lookup_channel_ids(
 ) -> Vec<u64> {
     let mut channel_ids = Vec::with_capacity(2);
     if let Some(tmux_session_name) = state.tmux_session_name.as_deref()
+        && let Some(delivery_channel_id) = opt_channel_id(state.channel_id)
         && let Some(owner) =
             super::super::outbound::delivery_record::watcher_owner_channel_for_delivery_channel(
                 provider,
-                ChannelId::new(state.channel_id),
+                delivery_channel_id,
                 tmux_session_name,
             )
     {
         channel_ids.push(owner.get());
     }
-    let fallback_channel_id = state.delivery_record_owner_channel_id();
-    if !channel_ids.contains(&fallback_channel_id) {
+    if let Some(fallback_channel_id) =
+        opt_channel_id(state.delivery_record_owner_channel_id()).map(ChannelId::get)
+        && !channel_ids.contains(&fallback_channel_id)
+    {
         channel_ids.push(fallback_channel_id);
     }
     channel_ids
@@ -236,16 +241,19 @@ fn matching_recovery_anchors(
         .as_deref()
         .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len()));
     for record_channel_id in anchor_record_lookup_channel_ids(provider, state) {
+        let Some(record_channel_id) = opt_channel_id(record_channel_id) else {
+            continue;
+        };
         let Some(anchor) = delivery_frontier_probe::current_generation_delivered_anchor(
             provider,
-            ChannelId::new(record_channel_id),
+            record_channel_id,
             tmux_session_name,
             output_eof,
         ) else {
             tracing::debug!(
                 provider = %provider.as_str(),
                 channel_id = state.channel_id,
-                record_channel = record_channel_id,
+                record_channel = record_channel_id.get(),
                 "  · recovery anchor-repost: no current anchor at candidate record channel"
             );
             continue;
@@ -257,7 +265,7 @@ fn matching_recovery_anchors(
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = state.channel_id,
-                record_channel = record_channel_id,
+                record_channel = record_channel_id.get(),
                 anchor_channel_id = anchor.panel_channel_id,
                 "  ✗ recovery anchor-repost: anchor channel does not match this turn — trying next candidate (stale-owner guard)"
             );
@@ -269,7 +277,7 @@ fn matching_recovery_anchors(
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = state.channel_id,
-                record_channel = record_channel_id,
+                record_channel = record_channel_id.get(),
                 anchor_range = ?anchor.range,
                 turn_start_offset = ?state.turn_start_offset,
                 last_offset = state.last_offset,
@@ -278,7 +286,7 @@ fn matching_recovery_anchors(
             continue;
         }
 
-        anchors.push((record_channel_id, anchor));
+        anchors.push((record_channel_id.get(), anchor));
     }
     anchors
 }
@@ -549,19 +557,35 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         return refusal;
     }
 
+    let Some(anchor_channel_id) = opt_channel_id(anchor.panel_channel_id) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            "recovery anchor-repost skipped because recorded anchor channel id is zero"
+        );
+        return AnchorRepostOutcome::NotReposted;
+    };
+    let Some(record_channel_id) = opt_channel_id(record_channel_id) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            "recovery anchor-repost skipped because delivery record channel id is zero"
+        );
+        return AnchorRepostOutcome::NotReposted;
+    };
     let recovery_context =
         super::super::recovery_engine::RecoveryDeliveryContext::send_new_after_gone_anchor(
             provider,
             state,
-            ChannelId::new(anchor.panel_channel_id),
+            anchor_channel_id,
             Some(anchor.range),
             shared.restart.current_generation,
         )
-        .with_record_channel_id(ChannelId::new(record_channel_id));
+        .with_record_channel_id(record_channel_id);
     let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
-        ChannelId::new(anchor.panel_channel_id),
+        anchor_channel_id,
         None,
         terminal_text,
         Some(&recovery_context),
@@ -747,13 +771,20 @@ async fn apply_undeliverable_relay_disposition(
                 report_path = report_path_display.as_deref(),
                 "recovery relay unrecoverable — force-clearing inflight row"
             );
-            finish_recovered_turn_mailbox_if_registered(
-                shared,
-                provider,
-                ChannelId::new(state.channel_id),
-                reason_code,
-            )
-            .await;
+            if let Some(channel_id) = opt_channel_id(state.channel_id) {
+                finish_recovered_turn_mailbox_if_registered(
+                    shared,
+                    provider,
+                    channel_id,
+                    reason_code,
+                )
+                .await;
+            } else {
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    "recovery force-clear skipped mailbox cleanup because persisted channel id is zero"
+                );
+            }
             inflight::clear_inflight_state(provider, state.channel_id);
         }
         RowDisposition::PreserveAndCount => {

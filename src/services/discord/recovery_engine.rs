@@ -436,6 +436,8 @@ pub struct RebindOutcome {
 pub enum RebindError {
     /// Target tmux session is not alive — nothing to rebind to. 404.
     TmuxNotAlive { tmux_session: String },
+    /// A persisted or supplied Discord channel id was zero. 400.
+    ChannelIdZero,
     /// An inflight state already exists for this channel. Caller must clear
     /// it (force-kill or natural completion) before rebinding. 409.
     InflightAlreadyExists,
@@ -473,6 +475,7 @@ impl std::fmt::Display for RebindError {
             Self::TmuxNotAlive { tmux_session } => {
                 write!(f, "tmux session not alive: {tmux_session}")
             }
+            Self::ChannelIdZero => write!(f, "channel id must be non-zero"),
             Self::InflightAlreadyExists => {
                 write!(f, "inflight state already exists for this channel")
             }

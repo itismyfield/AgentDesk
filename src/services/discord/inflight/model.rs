@@ -3,30 +3,57 @@
 //! Pure data types for the inflight turn state contract: the
 //! [`InflightTurnState`] row, its turn-identity projection
 //! [`InflightTurnIdentity`], the [`TurnSource`] / [`RelayOwnerKind`] audit
-//! enums, the `optional_message_id` zero-id helper, and the version-tolerant
-//! serde adapters. Behaviour-preserving move out of `inflight.rs`; the parent
+//! enums, the `opt_message_id` zero-id helper, and the version-tolerant serde
+//! adapters. Behaviour-preserving move out of `inflight.rs`; the parent
 //! re-exports every public item so existing `inflight::*` paths still resolve.
+
+use std::num::NonZeroU64;
 
 use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 
-/// Build an optional `serenity::MessageId` from a possibly-zero raw inflight id.
+/// Build an optional `serenity::MessageId` from a possibly-zero raw persisted id.
 ///
-/// `current_msg_id == 0` is a LEGITIMATE state: a TUI-direct / recovery turn
-/// (`runtime_kind = claude_tui`, `status_message_id = None`) that never anchored
-/// a Discord placeholder message. `serenity::MessageId::new(0)` PANICS
-/// ("Attempted to call MessageId::new with invalid (0) value"), so every
-/// recovery/relay path that derives a placeholder id from a possibly-zero
-/// inflight field must funnel through this helper and treat `None` as
-/// "no anchored placeholder" — skipping the placeholder-specific step while
-/// still performing watcher/session recovery — rather than panicking.
-pub(in crate::services::discord) fn optional_message_id(
+/// A zero message id is a legitimate sentinel for an unanchored TUI-direct or
+/// recovery turn. Callers must treat `None` as "skip the message-specific step"
+/// instead of constructing `MessageId::new(0)`, which panics.
+pub(in crate::services::discord) fn opt_message_id(
     raw: u64,
 ) -> Option<poise::serenity_prelude::MessageId> {
-    if raw == 0 {
-        None
-    } else {
-        Some(poise::serenity_prelude::MessageId::new(raw))
+    let Some(raw) = NonZeroU64::new(raw) else {
+        tracing::warn!("skipping Discord message-id operation because persisted id is zero");
+        return None;
+    };
+    Some(poise::serenity_prelude::MessageId::new(raw.get()))
+}
+
+/// Build an optional `serenity::ChannelId` from a persisted Discord channel id.
+///
+/// Stored recovery state must never construct `ChannelId::new(0)`: the invalid
+/// state is skipped and left available for a later diagnostic or repair.
+pub(in crate::services::discord) fn opt_channel_id(
+    raw: u64,
+) -> Option<poise::serenity_prelude::ChannelId> {
+    let Some(raw) = NonZeroU64::new(raw) else {
+        tracing::warn!("skipping Discord channel operation because persisted id is zero");
+        return None;
+    };
+    Some(poise::serenity_prelude::ChannelId::new(raw.get()))
+}
+
+pub(in crate::services::discord) use opt_message_id as optional_message_id;
+
+#[cfg(test)]
+mod discord_id_tests {
+    use super::{opt_channel_id, opt_message_id};
+    use poise::serenity_prelude::{ChannelId, MessageId};
+
+    #[test]
+    fn optional_id_helpers_return_none_for_zero_without_panicking() {
+        assert_eq!(opt_message_id(0), None);
+        assert_eq!(opt_message_id(42), Some(MessageId::new(42)));
+        assert_eq!(opt_channel_id(0), None);
+        assert_eq!(opt_channel_id(43), Some(ChannelId::new(43)));
     }
 }
 

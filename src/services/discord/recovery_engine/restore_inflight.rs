@@ -177,7 +177,13 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             continue;
         }
 
-        let channel_id = ChannelId::new(state.channel_id);
+        let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                "inflight recovery skipped because persisted channel id is zero"
+            );
+            continue;
+        };
 
         // #2235: silent-skip rows whose on-disk `runtime_kind` was a
         // present-but-unknown variant string. `load_inflight_states_from_root`
@@ -330,7 +336,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         provider,
                     )
                 };
-                let channel_id = ChannelId::new(state.channel_id);
                 // An un-anchored TUI-direct/recovery turn (current_msg_id == 0)
                 // delivers the recovered text as a NEW channel message, not an
                 // in-place edit (the helper handles both); `relay_ok` still
@@ -349,7 +354,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     channel_id,
                     optional_message_id(state.current_msg_id),
                     &final_text,
-                    Some(&recovery_context),
+                    recovery_context.as_ref(),
                 )
                 .await
                 .delivered();
@@ -993,7 +998,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 channel_id,
                 current_msg_id,
                 &final_text,
-                Some(&recovery_context),
+                recovery_context.as_ref(),
             )
             .await
             .delivered();
@@ -1249,7 +1254,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 channel_id,
                 current_msg_id,
                 &final_text,
-                Some(&recovery_context),
+                recovery_context.as_ref(),
             )
             .await
             .delivered();
@@ -1836,7 +1841,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                             channel_id,
                             current_msg_id,
                             &format!("❌ {error}\nmain workspace fallback blocked."),
-                            Some(&recovery_context),
+                            recovery_context.as_ref(),
                         )
                         .await
                         .delivered();
@@ -2062,7 +2067,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     channel_id,
                     current_msg_id,
                     &format!("❌ {error}\nmain workspace fallback blocked."),
-                    Some(&recovery_context),
+                    recovery_context.as_ref(),
                 )
                 .await
                 .delivered();

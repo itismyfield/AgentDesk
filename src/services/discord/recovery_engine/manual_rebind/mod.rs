@@ -287,7 +287,8 @@ async fn rebind_inflight_for_channel_inner(
     minimum_initial_offset: Option<u64>,
     expected_episode: Option<&super::inflight::InflightEpisodePin>,
 ) -> Result<RebindOutcome, RebindError> {
-    let discord_channel_id = ChannelId::new(channel_id);
+    let discord_channel_id =
+        super::inflight::opt_channel_id(channel_id).ok_or(RebindError::ChannelIdZero)?;
 
     // Preflight existence check — fast 409 before walking the validation /
     // tmux-liveness path. Advisory only; the AUTHORITATIVE guard is the atomic
@@ -839,6 +840,7 @@ async fn rebind_inflight_for_channel_inner(
             shared,
             provider,
             channel_id,
+            discord_channel_id,
             &recovered_state_for_session,
             locked_episode_from_adoption.take(),
             existing_inflight.is_some(),

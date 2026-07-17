@@ -1456,7 +1456,8 @@ pub(super) fn rebind_error_status_and_message(
         | discord::recovery_engine::RebindError::InflightEpisodeChanged
         | discord::recovery_engine::RebindError::StaleOutputPath { .. }
         | discord::recovery_engine::RebindError::RuntimeBindingUnavailable { .. } => "409 Conflict",
-        discord::recovery_engine::RebindError::ChannelNotBound
+        discord::recovery_engine::RebindError::ChannelIdZero
+        | discord::recovery_engine::RebindError::ChannelNotBound
         | discord::recovery_engine::RebindError::ChannelNameMissing => "400 Bad Request",
         discord::recovery_engine::RebindError::Internal(_) => "500 Internal Server Error",
     };
@@ -1481,6 +1482,14 @@ mod rebind_error_status_tests {
         assert_eq!(status, "409 Conflict");
         assert!(message.contains("codex_tui"));
         assert!(message.contains("AgentDesk-codex-adk-cdx"));
+    }
+
+    #[test]
+    fn zero_channel_id_maps_to_bad_request() {
+        let (status, message) = rebind_error_status_and_message(&RebindError::ChannelIdZero);
+
+        assert_eq!(status, "400 Bad Request");
+        assert!(message.contains("non-zero"));
     }
 }
 

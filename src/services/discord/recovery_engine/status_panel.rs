@@ -1,5 +1,6 @@
 use poise::serenity_prelude::{ChannelId, MessageId};
 
+use super::super::inflight::opt_message_id;
 use super::super::{inflight, single_message_panel, turn_bridge};
 use crate::services::provider::ProviderKind;
 
@@ -40,7 +41,7 @@ pub(super) fn message_id_for_completion(
         .and_then(|inflight| {
             if inflight.user_msg_id == state.user_msg_id {
                 turn_bridge::normalize_status_panel_message_id(
-                    inflight.status_message_id.map(MessageId::new),
+                    inflight.status_message_id.and_then(opt_message_id),
                 )
             } else {
                 None
@@ -48,7 +49,7 @@ pub(super) fn message_id_for_completion(
         })
         .or_else(|| {
             turn_bridge::normalize_status_panel_message_id(
-                state.status_message_id.map(MessageId::new),
+                state.status_message_id.and_then(opt_message_id),
             )
         })
 }

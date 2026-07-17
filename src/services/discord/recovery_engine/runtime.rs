@@ -178,13 +178,20 @@ async fn reregister_active_turn_from_inflight_inner(
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
 ) -> bool {
-    let finalizer_turn_id = state.effective_finalizer_turn_id();
-    if finalizer_turn_id == 0 {
+    let Some(finalizer_msg_id) =
+        super::inflight::opt_message_id(state.effective_finalizer_turn_id())
+    else {
+        tracing::warn!(
+            channel_id = state.channel_id,
+            "inflight reregister skipped because finalizer turn id is zero"
+        );
         return false;
-    }
-
-    let channel_id = ChannelId::new(state.channel_id);
-    let finalizer_msg_id = MessageId::new(finalizer_turn_id);
+    };
+    let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
+        tracing::warn!("inflight reregister skipped because persisted channel id is zero");
+        return false;
+    };
+    let finalizer_turn_id = finalizer_msg_id.get();
     let snapshot = super::mailbox_snapshot(shared, channel_id).await;
     let Some(provider) = ProviderKind::from_str(&state.provider) else {
         tracing::error!(
