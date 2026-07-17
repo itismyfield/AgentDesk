@@ -62,10 +62,7 @@ pub fn execute_streaming(
     })?;
     let (claude_bin, _claude_resolution) = ClaudeBinary::resolve()?;
 
-    let mut args: Vec<String> = vec![
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-    ];
+    let mut args: Vec<String> = vec!["--output-format".to_string(), "stream-json".to_string()];
     claude_bin.append_claude_e_bin_arg(&mut args);
     args.push("--no-session-footer".to_string());
     crate::services::claude::append_claude_mcp_config_arg(&mut args, dispatch_type);

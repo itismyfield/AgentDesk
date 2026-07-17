@@ -319,7 +319,11 @@ impl ClaudeCommandBuilder {
         resolution: &BinaryResolution,
         intent: ClaudeLaunchIntent,
     ) -> Self {
-        Self::build(binary.program(), Some(resolution), ClaudeLaunchEnv::resolve(intent))
+        Self::build(
+            binary.program(),
+            Some(resolution),
+            ClaudeLaunchEnv::resolve(intent),
+        )
     }
 
     /// Binary-launch variant of [`for_binary`] that threads in an

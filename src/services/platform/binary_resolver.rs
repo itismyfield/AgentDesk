@@ -804,14 +804,13 @@ pub fn probe_resolved_binary_version(
     resolution: &BinaryResolution,
 ) -> (Option<String>, Option<String>) {
     let mut command = if resolution.requested_binary == "claude" {
-        let Some(binary) = crate::services::claude_command::ClaudeBinary::from_resolution(
-            resolution,
-        ) else {
+        let Some(binary) =
+            crate::services::claude_command::ClaudeBinary::from_resolution(resolution)
+        else {
             return (None, Some("version_probe_spawn_failed".to_string()));
         };
         crate::services::claude_command::ClaudeCommandBuilder::for_resolved_version_probe(
-            &binary,
-            resolution,
+            &binary, resolution,
         )
         .into_command()
     } else {

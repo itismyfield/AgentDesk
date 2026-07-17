@@ -133,8 +133,7 @@ pub fn run(
     // reads the managed marker to classify, then the builder *consumes* it
     // one-hop (`env_remove`) so the marker never propagates to the Claude child
     // or its descendants — see `claude_child_command_builder`.
-    let mut builder =
-        claude_child_command_builder(claude_bin, ClaudeLaunchEnv::for_tmux_wrapper());
+    let mut builder = claude_child_command_builder(claude_bin, ClaudeLaunchEnv::for_tmux_wrapper());
     {
         let claude_command = builder.command_mut();
         crate::services::process::configure_child_process_group(claude_command);
