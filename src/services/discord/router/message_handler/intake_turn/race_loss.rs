@@ -147,8 +147,8 @@ pub(super) async fn handle_race_loss_enqueue(
     // for the dispatch path to pick up. Skip the placeholder POST + the
     // mapping insert entirely — POSTing a fresh card here would orphan
     // it. `📬` reaction is also skipped (the prior live enqueue already
-    // owns the card and emoji). Only the matching start attempt may clear
-    // its own `⏳`; a delayed attempt must not erase a newer attempt's state.
+    // owns the card and emoji). Only the matching start attempt may clear its
+    // own pending `⏳`; a delayed attempt must not erase a newer attempt's state.
     if !enqueue_outcome.enqueued {
         mailbox_reaction::clear_rejected_attempt_pending(
             shared,
@@ -231,11 +231,10 @@ pub(super) async fn handle_race_loss_enqueue(
                 // later kickoff (or the deferred idle drain scheduled
                 // above) will dispatch it — `dispatch_queued_turn` ->
                 // `handle_text_message` will POST its own fresh card
-                // through the missing-mapping fallback. The user
-                // briefly sees `⏳` only and no `📬`, but the message
-                // WILL be processed correctly. Roll back the `⏳`
-                // sentinel so the user knows we did not silently
-                // accept the message.
+                // through the missing-mapping fallback. The user briefly
+                // sees no queue marker, but the message WILL be processed
+                // correctly. Roll back the pending `⏳` to the marker-only
+                // queued state so the user knows the message remains queued.
                 if let Some(turn_start_attempt) = turn_start_attempt {
                     crate::services::discord::turn_view_reconciler::note_intake_start_rolled_back_to_queued(
                         shared,
@@ -339,8 +338,8 @@ pub(super) async fn handle_race_loss_enqueue(
             // In all cases our POSTed placeholder is an orphan that no
             // future dispatch or queue-exit cleanup will ever reference
             // — drop the lock before the HTTP DELETE await, delete the
-            // orphan, remove the `⏳` reaction, and skip the mapping
-            // insert.
+            // orphan, clear the matching pending attempt, and skip the
+            // mapping insert.
             drop(persist_guard);
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
             crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_current_if_attempt_matches(

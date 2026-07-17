@@ -266,11 +266,29 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
     let ops = shared.turn_view_reconciler.ops();
     assert_eq!(
         ops.iter()
+            .filter(|op| op.target.message_id == message_id && !op.add && op.emoji == '⏳')
+            .count(),
+        1,
+        "queue repair must remove the pending hourglass before adding the marker-only queued state"
+    );
+    assert_eq!(
+        ops.iter()
             .filter(|op| op.target.message_id == message_id && op.add && op.emoji == '⏳')
             .count(),
         1,
-        "queue repair must preserve the one acceptance hourglass without re-adding it"
+        "same-state redispatch must not add a second pending hourglass"
     );
+    let mut visible = Vec::new();
+    for op in ops.iter().filter(|op| op.target.message_id == message_id) {
+        if op.add {
+            if !visible.contains(&op.emoji) {
+                visible.push(op.emoji);
+            }
+        } else {
+            visible.retain(|emoji| *emoji != op.emoji);
+        }
+    }
+    assert_eq!(visible, vec!['📬']);
 }
 
 #[tokio::test(flavor = "current_thread")]
