@@ -237,9 +237,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{
-        is_stale, is_sweep_candidate, should_remove, APPROVED_NAME_PREFIXES,
-    };
+    use super::{is_stale, is_sweep_candidate, should_remove, APPROVED_NAME_PREFIXES};
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
 
     fn prefixes() -> Vec<String> {
