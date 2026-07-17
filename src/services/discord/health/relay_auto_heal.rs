@@ -397,7 +397,13 @@ impl HealthRegistry {
             return Ok(false);
         };
 
-        if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, now_unix_secs) {
+        if !should_redrive_undelivered_backlog(
+            provider,
+            channel_id,
+            &snapshot,
+            now_unix_secs,
+            shared.committed_relay_offset(channel_id),
+        ) {
             return Ok(false);
         }
         if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
@@ -508,6 +514,7 @@ fn should_redrive_undelivered_backlog(
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
+    live_committed_offset: u64,
 ) -> bool {
     // #4181 item-2: the no-progress grace runs on a MONOTONIC clock owned by
     // `stall_liveness::redrive_grace`; production passes no wall-clock input (a
@@ -523,8 +530,16 @@ fn should_redrive_undelivered_backlog(
     {
         let _ = now_unix_secs;
     }
+    // `live_committed_offset` is the current authoritative `confirmed_end_offset`
+    // (JSONL rotation can lower it on the same session/turn); the grace uses it to
+    // tell a legitimate rotation coordinate reset from a stale lagging snapshot.
     has_live_undelivered_backlog(snapshot)
-        && stall_liveness::stalled_undelivered_backlog_for_redrive(provider, channel_id, snapshot)
+        && stall_liveness::stalled_undelivered_backlog_for_redrive(
+            provider,
+            channel_id,
+            snapshot,
+            live_committed_offset,
+        )
 }
 
 fn live_relay_frontier_advanced_since_snapshot(
@@ -559,7 +574,13 @@ fn nudge_existing_watcher_for_backlog(
     channel_id: ChannelId,
     now_unix_secs: i64,
 ) -> bool {
-    if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, now_unix_secs) {
+    if !should_redrive_undelivered_backlog(
+        provider,
+        channel_id,
+        snapshot,
+        now_unix_secs,
+        shared.committed_relay_offset(channel_id),
+    ) {
         return false;
     }
 
@@ -1105,7 +1126,13 @@ mod tests {
         channel_id: ChannelId,
         now: i64,
     ) -> (bool, Option<u8>) {
-        if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, now) {
+        if !should_redrive_undelivered_backlog(
+            provider,
+            channel_id,
+            snapshot,
+            now,
+            shared.committed_relay_offset(channel_id),
+        ) {
             return (false, None);
         }
         let decision = shared.redrive_attempt_decision(provider, channel_id, snapshot, now);

@@ -85,6 +85,15 @@ pub(in crate::services::discord::health) fn set_redrive_grace_test_clock(mono_se
     TEST_CLOCK_OVERRIDE.with(|cell| cell.set(Some(mono_secs)));
 }
 
+/// #4181 item-2 P3-2: clear the override so the production `Instant` reader runs.
+/// Required under `--test-threads=1`, where a prior deep-chain test's override
+/// would otherwise leak into the production-clock coverage test and silently
+/// bypass the real `MONO_ANCHOR.elapsed()` reader.
+#[cfg(test)]
+fn clear_redrive_grace_test_clock() {
+    TEST_CLOCK_OVERRIDE.with(|cell| cell.set(None));
+}
+
 /// Dedicated no-progress tracker, kept separate from the wall-clock
 /// `OFFSET_OBSERVATIONS` the liveness path uses. Every timestamp here is
 /// monotonic: the redrive lifecycle has zero wall dependence (#4181 item-2).
@@ -106,16 +115,33 @@ static NO_PROGRESS_OBSERVATIONS: LazyLock<
     dashmap::DashMap<StallLivenessKey, NoProgressObservation>,
 > = LazyLock::new(dashmap::DashMap::new);
 
-/// Returns `true` iff the committed relay offset has stayed UNCHANGED for at
-/// least `STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS` of MONOTONIC time.
+/// Returns `true` iff the observed committed relay offset has stayed UNCHANGED
+/// for at least `STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS` of MONOTONIC time.
 ///
 /// The read-modify-write runs under the DashMap entry lock so concurrent
-/// watchdog passes for the same key serialize (#4181 P3), and a snapshot
-/// reporting a lower committed offset than already recorded is rejected as stale
-/// rather than rewinding the freeze anchor.
+/// watchdog passes for the same key serialize (#4181 P3).
+///
+/// When `observed_offset` REGRESSES below the recorded coordinate, `live_offset`
+/// (the current authoritative `confirmed_end_offset`) disambiguates two cases
+/// that both look like a lower offset:
+///   * `observed_offset >= live_offset` — the authoritative committed frontier
+///     itself is now at (or below) the observed value. A JSONL size-cap rotation
+///     resets `confirmed_end_offset` to a lower new EOF on the SAME session/turn
+///     (`reset_stale_relay_watermark_if_output_regressed`, same-wrapper branch of
+///     `watermark_after_output_regression`), and `StallLivenessKey` carries no
+///     output generation to separate the coordinate systems. This is a legitimate
+///     reset: RE-ARM the grace at the new coordinate so a real stall at the
+///     post-rotation frontier still fires. (Generation cannot distinguish this —
+///     a same-wrapper rotation keeps the `.generation` mtime unchanged.)
+///   * `observed_offset < live_offset` — the live frontier is still higher, so
+///     this is a stale/lagging snapshot (e.g. a concurrent watchdog pass). KEEP
+///     the recorded coordinate; do NOT rewind the freeze anchor. This preserves
+///     the #4181 P3 guarantee (a stale snapshot cannot rewind the anchor) with no
+///     over-firing.
 fn relay_offset_stalled_past_grace(
     key: &StallLivenessKey,
-    current_offset: u64,
+    observed_offset: u64,
+    live_offset: u64,
     mono_now: i64,
 ) -> bool {
     let key = key.for_offset_kind(OffsetObservationKind::RelayDelivered);
@@ -123,15 +149,24 @@ fn relay_offset_stalled_past_grace(
         Entry::Occupied(mut occupied) => {
             let observation = occupied.get_mut();
             observation.last_seen_mono_secs = mono_now;
-            if current_offset < observation.offset {
-                // Stale/regressed snapshot: keep the higher committed offset and
-                // do NOT rewind the freeze anchor. Not a stall this pass.
-                false
-            } else if current_offset > observation.offset {
+            if observed_offset > observation.offset {
                 // Relay advanced: reset the freeze anchor.
-                observation.offset = current_offset;
+                observation.offset = observed_offset;
                 observation.unchanged_since_mono_secs = mono_now;
                 false
+            } else if observed_offset < observation.offset {
+                if observed_offset >= live_offset {
+                    // Legitimate coordinate reset (rotation): the authoritative
+                    // frontier itself dropped here. Re-arm at the new coordinate
+                    // so a real post-rotation stall still fires.
+                    observation.offset = observed_offset;
+                    observation.unchanged_since_mono_secs = mono_now;
+                    false
+                } else {
+                    // Stale/lagging snapshot (live frontier is higher): keep the
+                    // recorded coordinate; do not rewind the freeze anchor.
+                    false
+                }
             } else {
                 // Frozen at the same offset: measure the monotonic freeze age.
                 mono_now.saturating_sub(observation.unchanged_since_mono_secs)
@@ -140,7 +175,7 @@ fn relay_offset_stalled_past_grace(
         }
         Entry::Vacant(vacant) => {
             vacant.insert(NoProgressObservation {
-                offset: current_offset,
+                offset: observed_offset,
                 unchanged_since_mono_secs: mono_now,
                 last_seen_mono_secs: mono_now,
             });
@@ -154,15 +189,22 @@ fn relay_offset_stalled_past_grace(
 /// been frozen past the no-progress grace (monotonic), so the redrive
 /// destructive trigger is eligible to fire. The production path measures time
 /// with the process `MonotonicRedriveClock`.
+///
+/// `live_committed_offset` is the current authoritative `confirmed_end_offset`
+/// (`SharedData::committed_relay_offset`), passed alongside the snapshot's
+/// possibly-stale copy so a JSONL-rotation coordinate reset can be told apart
+/// from a stale lagging snapshot (see `relay_offset_stalled_past_grace`).
 pub(in crate::services::discord::health) fn stalled_undelivered_backlog_for_redrive(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
+    live_committed_offset: u64,
 ) -> bool {
     stalled_undelivered_backlog_for_redrive_with_clock(
         provider,
         channel_id,
         snapshot,
+        live_committed_offset,
         &MonotonicRedriveClock,
     )
 }
@@ -171,13 +213,19 @@ fn stalled_undelivered_backlog_for_redrive_with_clock(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
+    live_committed_offset: u64,
     clock: &dyn RedriveClock,
 ) -> bool {
     if !live_undelivered_backlog(snapshot) {
         return false;
     }
     let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
-    relay_offset_stalled_past_grace(&key, snapshot.last_relay_offset, clock.mono_secs())
+    relay_offset_stalled_past_grace(
+        &key,
+        snapshot.last_relay_offset,
+        live_committed_offset,
+        clock.mono_secs(),
+    )
 }
 
 /// Drop redrive no-progress observations for a cleared session. Called by the
@@ -328,24 +376,32 @@ mod tests {
         );
         let grace = STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
         let clock = FakeClock::new(0);
+        // The frozen offset equals the live committed frontier throughout.
+        let live = 10;
 
         // (1) Prime at monotonic t=0.
         assert!(
-            !stalled_undelivered_backlog_for_redrive_with_clock(&provider, channel, &snap, &clock),
+            !stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &snap, live, &clock,
+            ),
             "the first observation can never be past the grace"
         );
 
         // (2) Only 10s of monotonic time elapsed: must NOT fire.
         clock.set(10);
         assert!(
-            !stalled_undelivered_backlog_for_redrive_with_clock(&provider, channel, &snap, &clock),
+            !stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &snap, live, &clock,
+            ),
             "10s of monotonic elapsed is inside the grace"
         );
 
         // (3) Genuine monotonic elapsed past the grace: MUST fire.
         clock.set(grace);
         assert!(
-            stalled_undelivered_backlog_for_redrive_with_clock(&provider, channel, &snap, &clock),
+            stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &snap, live, &clock,
+            ),
             "monotonic elapsed past the grace must trip the redrive"
         );
 
@@ -373,10 +429,11 @@ mod tests {
         let grace = STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
         let ttl = STALL_LIVENESS_STATE_TTL_SECS as i64;
         let clock = FakeClock::new(1_000);
+        let live = 10;
 
         // Prime the frozen observation at mono=1000.
         assert!(!stalled_undelivered_backlog_for_redrive_with_clock(
-            &provider, channel, &snap, &clock,
+            &provider, channel, &snap, live, &clock,
         ));
 
         // GC one second before the grace boundary. Monotonic age is grace-1
@@ -388,7 +445,9 @@ mod tests {
         // The freeze anchor survived: crossing the grace fires WITHOUT re-priming.
         clock.set(1_000 + grace);
         assert!(
-            stalled_undelivered_backlog_for_redrive_with_clock(&provider, channel, &snap, &clock),
+            stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &snap, live, &clock,
+            ),
             "monotonic GC must not evict a monotonically-recent observation"
         );
 
@@ -397,7 +456,9 @@ mod tests {
         clock.set(1_000 + grace + ttl + 1);
         gc_with_clock(&clock);
         assert!(
-            !stalled_undelivered_backlog_for_redrive_with_clock(&provider, channel, &snap, &clock),
+            !stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &snap, live, &clock,
+            ),
             "monotonic GC must evict a monotonically-stale observation (re-prime)"
         );
 
@@ -408,9 +469,9 @@ mod tests {
     /// reporting a LOWER committed offset than already recorded must not rewind
     /// the freeze anchor and re-arm the grace.
     ///
-    /// Mutation proof: dropping the `current_offset < observation.offset` stale
-    /// arm (so a lower offset resets `unchanged_since_mono_secs`) makes the final
-    /// grace-boundary check measure ~1s of freeze and return `false`, failing.
+    /// Mutation proof: dropping the stale sub-branch (so a lower offset always
+    /// re-arms `unchanged_since_mono_secs`) makes the final grace-boundary check
+    /// measure ~1s of freeze and return `false`, failing.
     #[test]
     fn redrive_rejects_stale_lower_offset_4181() {
         let provider = ProviderKind::Codex;
@@ -420,28 +481,92 @@ mod tests {
 
         let grace = STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
         let clock = FakeClock::new(0);
+        // The live committed frontier stays at 100 the whole time — the lower
+        // snapshot below is stale (lagging), NOT an authoritative rotation.
+        let live = 100;
 
         // Frozen backlog at a HIGH committed offset (100). Prime at mono=0.
         let high = frozen_backlog_snapshot(channel.get(), tmux_session, 100, 301_613);
         assert!(!stalled_undelivered_backlog_for_redrive_with_clock(
-            &provider, channel, &high, &clock,
+            &provider, channel, &high, live, &clock,
         ));
 
         // A stale concurrent snapshot reporting a LOWER offset (50) arrives near
-        // the grace boundary. It must NOT rewind the freeze anchor: the recorded
-        // high-offset freeze keeps aging.
+        // the grace boundary while the live frontier is still 100. It must NOT
+        // rewind the freeze anchor: the recorded high-offset freeze keeps aging.
         clock.set(grace - 1);
         let stale_low = frozen_backlog_snapshot(channel.get(), tmux_session, 50, 301_613);
         assert!(!stalled_undelivered_backlog_for_redrive_with_clock(
-            &provider, channel, &stale_low, &clock,
+            &provider, channel, &stale_low, live, &clock,
         ));
 
         // Crossing the grace with the true high offset fires — the stale lower
         // snapshot did not re-arm the grace.
         clock.set(grace);
         assert!(
-            stalled_undelivered_backlog_for_redrive_with_clock(&provider, channel, &high, &clock),
+            stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &high, live, &clock,
+            ),
             "a stale lower-offset snapshot must not rewind the monotonic freeze anchor"
+        );
+
+        super::super::clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #4181 (rotation re-arm): a JSONL size-cap rotation lowers the authoritative
+    /// `confirmed_end_offset` H->L on the SAME session/turn (same key). The grace
+    /// must RE-ARM at the new coordinate L — not treat L as a stale snapshot
+    /// forever — so a real stall at L still fires. This is the failure the
+    /// unconditional stale-rejection introduced: the observed lower offset equals
+    /// the live frontier (rotation reset), unlike the stale case above where it
+    /// is below the live frontier.
+    ///
+    /// Mutation proof: removing the `observed_offset >= live_offset` re-arm arm
+    /// (so a rotation-lowered offset is rejected like a stale snapshot) leaves the
+    /// grace anchored at H forever; the post-rotation stall then never fires and
+    /// the final assertion fails.
+    #[test]
+    fn redrive_rotation_reset_rearms_grace_4181() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_181_006);
+        let tmux_session = "AgentDesk-codex-4181-rotation";
+        super::super::clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+
+        let grace = STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
+        let clock = FakeClock::new(0);
+
+        // Frozen at a HIGH offset H=100 (live frontier 100). Prime at mono=0 and
+        // let it age right up to the grace boundary.
+        let high = frozen_backlog_snapshot(channel.get(), tmux_session, 100, 301_613);
+        assert!(!stalled_undelivered_backlog_for_redrive_with_clock(
+            &provider, channel, &high, 100, &clock,
+        ));
+        clock.set(grace - 1);
+        assert!(!stalled_undelivered_backlog_for_redrive_with_clock(
+            &provider, channel, &high, 100, &clock,
+        ));
+
+        // Rotation: the authoritative confirmed_end_offset drops to L=40. A fresh
+        // snapshot reads L=40 AND the live frontier is now 40 (observed == live).
+        // Even though H's grace has fully elapsed, this must RE-ARM at L, not fire
+        // on H's stale elapsed.
+        let low = frozen_backlog_snapshot(channel.get(), tmux_session, 40, 301_613);
+        clock.set(grace);
+        assert!(
+            !stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &low, 40, &clock,
+            ),
+            "rotation must re-arm the grace at the new coordinate, not fire on old H's elapsed"
+        );
+
+        // A genuine stall at the post-rotation coordinate L: frozen for a full
+        // grace measured from the rotation instant → MUST fire.
+        clock.set(grace + grace);
+        assert!(
+            stalled_undelivered_backlog_for_redrive_with_clock(
+                &provider, channel, &low, 40, &clock,
+            ),
+            "a real stall at the post-rotation frontier must fire after the grace"
         );
 
         super::super::clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
@@ -458,10 +583,14 @@ mod tests {
         let channel = ChannelId::new(4_181_005);
         let tmux_session = "AgentDesk-codex-4181-prod-clock";
         super::super::clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        // #4181 P3-2: under `--test-threads=1` a prior deep-chain test may have
+        // left the override set on this thread; clear it so the REAL `Instant`
+        // reader runs (otherwise this coverage assertion is silently bypassed).
+        clear_redrive_grace_test_clock();
 
         let snap = frozen_backlog_snapshot(channel.get(), tmux_session, 10, 301_613);
         assert!(
-            !stalled_undelivered_backlog_for_redrive(&provider, channel, &snap),
+            !stalled_undelivered_backlog_for_redrive(&provider, channel, &snap, 10),
             "first observation on the real monotonic clock is not past the grace"
         );
         // The production GC runs on the real clock without panicking.
