@@ -45,10 +45,7 @@ export async function deleteKanbanCard(id: string): Promise<void> {
 }
 
 const nonEmptyStringSchema = z.string().trim().min(1);
-const timestampSchema = z.string().refine(
-  (value) => Number.isFinite(Date.parse(value)),
-  { message: "Invalid timestamp" },
-);
+const timestampSchema = z.string();
 const nullableTimestampSchema = timestampSchema.nullable();
 const kanbanCardStatusSchema = z.string().regex(/^[a-z][a-z0-9_]*$/);
 

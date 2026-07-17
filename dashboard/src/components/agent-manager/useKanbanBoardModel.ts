@@ -179,7 +179,9 @@ export function useKanbanBoardModel(params: UseKanbanBoardModelParams) {
       grouped.set(column.status, []);
     }
     for (const card of filteredCards) {
-      grouped.get(getBoardColumnStatus(card.status))?.push(card);
+      const mappedStatus = getBoardColumnStatus(card.status);
+      const targetStatus = grouped.has(mappedStatus) ? mappedStatus : "backlog";
+      grouped.get(targetStatus)?.push(card);
     }
 
     const isAncestor = (possibleAncestorId: string, card: KanbanCard): boolean => {

@@ -53,7 +53,7 @@ export const BOARD_COLUMN_DEFS: Array<KanbanColumnDef<KanbanBoardColumnStatus>> 
   { status: "done", labelKo: "완료 일감", labelEn: "Completed Work", accent: KANBAN_STATUS_TONES.done.accent },
 ];
 
-export const TERMINAL_STATUSES = new Set<KanbanCardStatus>(["done"]);
+export const TERMINAL_STATUSES = new Set<KanbanCardStatus>(["done", "cancelled"]);
 export const QA_STATUSES = new Set<KanbanCardStatus>(["qa_pending", "qa_in_progress", "qa_failed"]);
 export const PRIORITY_OPTIONS: KanbanCardPriority[] = ["low", "medium", "high", "urgent"];
 export const REVIEW_DISPATCH_TYPES = new Set(["review", "review-decision"]);
@@ -133,6 +133,7 @@ export function getBoardColumnStatus(
 ): KanbanCardStatus | KanbanBoardColumnStatus {
   if (status === "ready" || status === "requested") return "requested";
   if (status === "blocked" || status === "failed" || status === "qa_failed") return "failed";
+  if (status === "cancelled") return "done";
   return status;
 }
 

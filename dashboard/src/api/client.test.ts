@@ -176,7 +176,7 @@ describe("kanban dispatch mutation responses", () => {
   it.each(["failed", "cancelled"])(
     "accepts the %s server status and preserves PostgreSQL timestamps",
     async (status) => {
-      const postgresTimestamp = "2026-07-17 00:00:00+00";
+      const postgresTimestamp = "2026-07-17 00:00:00.123456+00";
       vi.stubGlobal(
         "fetch",
         vi.fn().mockResolvedValue(
