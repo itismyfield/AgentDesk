@@ -745,10 +745,11 @@ impl SessionBoundDiscordRelaySink {
                 );
                 Ok(SessionRelayDeliveryOutcome::Delivered)
             }
-            // #4046 S1r-1 P2: FreshDelivered is a confirmed cross-verb POST (unreachable
-            // here) → non-retriable; all other non-deliveries are uncommitted → retriable.
-            // Classified out-of-line so this frozen #3016 giant stays put (see
-            // `delivery_outcome_classify`, mirrors terminal_send's conservative Skipped).
+            // #4046 S1r-1 P2: FreshDelivered is a confirmed cross-verb POST (dormant
+            // here); its `Permanent` mapping is a non-retry INTENT marker only and does
+            // NOT itself prevent a duplicate POST — the sink consumer is
+            // error-variant-blind (see `delivery_outcome_classify` doc + #4623). Others
+            // are uncommitted → retriable. Classified out-of-line (frozen #3016 giant).
             non_delivery @ (toc::DeliveryOutcome::FreshDelivered { .. }
             | toc::DeliveryOutcome::Transient { .. }
             | toc::DeliveryOutcome::Unknown { .. }
