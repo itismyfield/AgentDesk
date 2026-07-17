@@ -501,7 +501,7 @@
 | `services::discord::health::relay_progress` | `src/services/discord/health/relay_progress.rs` | 108 | 66 | 42 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 264 | 242 | 22 |  |
-| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1248 | 980 | 268 |  |
+| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1273 | 993 | 280 |  |
 | `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2386 | 989 | 1397 |  |
 | `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1339 | 425 | 914 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1385 | 627 | 758 |  |
@@ -635,7 +635,7 @@
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 569 | 253 | 316 |  |
 | `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 308 | 187 | 121 |  |
 | `services::discord::relay_owner_observability` | `src/services/discord/relay_owner_observability.rs` | 458 | 343 | 115 |  |
-| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 3479 | 1522 | 1957 | giant-file |
+| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 3491 | 1522 | 1969 | giant-file |
 | `services::discord::relay_recovery::tests::circuit_breaker_apply` | `src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs` | 324 | 0 | 324 |  |
 | `services::discord::relay_recovery_auto_heal_apply` | `src/services/discord/relay_recovery_auto_heal_apply.rs` | 713 | 294 | 419 |  |
 | `services::discord::relay_recovery_auto_heal_attempts` | `src/services/discord/relay_recovery_auto_heal_attempts.rs` | 374 | 220 | 154 |  |

@@ -381,6 +381,15 @@ struct RelayHealthBuildInput {
     last_outbound_activity_ms: Option<i64>,
 }
 
+fn authoritative_tmux_session(
+    enriched_session: Option<&str>,
+    mailbox_cancel_session: Option<&str>,
+) -> Option<String> {
+    enriched_session
+        .or(mailbox_cancel_session)
+        .map(str::to_string)
+}
+
 fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnapshot {
     RelayHealthSnapshot {
         provider: input.provider,
@@ -542,10 +551,15 @@ async fn watcher_state_snapshot_for_shared(
             .unwrap_or_else(|err| err.into_inner())
             .clone()
     });
-    let tmux_session_for_liveness_probe = session
-        .tmux_session
-        .as_deref()
-        .or(mailbox_cancel_tmux_session.as_deref());
+    // Use one authority for both the probe target and the published identity.
+    // The cancel token is the earliest turn-owned tmux proof and can exist
+    // before inflight/watcher enrichment. Keeping only the probe fallback would
+    // publish `tmux_alive=None` with `tmux_session=None` on a transient probe
+    // error, allowing aged orphan cleanup to bypass AgentDesk-name protection.
+    let authoritative_tmux_session = authoritative_tmux_session(
+        session.tmux_session.as_deref(),
+        mailbox_cancel_tmux_session.as_deref(),
+    );
     let has_thread_proof = shared.dispatch.thread_parents.contains_key(&channel)
         || shared
             .dispatch
@@ -562,7 +576,7 @@ async fn watcher_state_snapshot_for_shared(
     }
 
     let tmux_session_alive =
-        SessionEnrichment::probe_tmux_session_alive(tmux_session_for_liveness_probe).await;
+        SessionEnrichment::probe_tmux_session_alive(authoritative_tmux_session.as_deref()).await;
     let desynced = session.desynced(tmux_session_alive == Some(true), session.attached);
     let active_turn =
         relay_active_turn_from_inflight(mailbox_has_cancel_token, session.inflight.as_ref());
@@ -585,7 +599,7 @@ async fn watcher_state_snapshot_for_shared(
         watcher_attached: session.attached,
         watcher_attached_stale: session.watcher_attached_stale,
         watcher_owner_channel_id: session.watcher_owner_channel_id,
-        tmux_session: session.tmux_session.clone(),
+        tmux_session: authoritative_tmux_session.clone(),
         tmux_alive: tmux_session_alive,
         bridge_inflight_present: session.inflight_state_present,
         bridge_current_msg_id: session.inflight_current_msg_id(),
@@ -608,8 +622,7 @@ async fn watcher_state_snapshot_for_shared(
     // runtime binding is a sync single-shot lookup (its Mutex guard is released
     // inside the call and never held across the awaits above/below), so this adds
     // no `await_holding_lock` allow.
-    let tmux_runtime_binding = session
-        .tmux_session
+    let tmux_runtime_binding = authoritative_tmux_session
         .as_deref()
         .and_then(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session);
     let (bound_output_path, bound_session_id) = resolve_bound_selector(
@@ -626,7 +639,7 @@ async fn watcher_state_snapshot_for_shared(
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
         attached: session.attached,
-        tmux_session: session.tmux_session.clone(),
+        tmux_session: authoritative_tmux_session,
         watcher_owner_channel_id: session.watcher_owner_channel_id,
         last_relay_offset: session.last_relay_offset,
         inflight_state_present: session.inflight_state_present,
@@ -986,8 +999,8 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
     use super::{
-        HealthRegistry, build_health_snapshot, rebind_origin_inflight_is_idle,
-        relay_active_turn_from_inflight, resolve_bound_selector,
+        HealthRegistry, authoritative_tmux_session, build_health_snapshot,
+        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::inflight::InflightTurnState;
@@ -1159,6 +1172,18 @@ mod tests {
         );
         // A whitespace-only session id is treated as absent, not an empty bind.
         assert!(emitted.get("bound_session_id").is_none());
+    }
+
+    #[test]
+    fn enriched_tmux_identity_precedes_mailbox_fallback() {
+        assert_eq!(
+            authoritative_tmux_session(Some("inflight-owner"), Some("token-fallback")),
+            Some("inflight-owner".to_string())
+        );
+        assert_eq!(
+            authoritative_tmux_session(None, Some("token-fallback")),
+            Some("token-fallback".to_string())
+        );
     }
 
     #[tokio::test]

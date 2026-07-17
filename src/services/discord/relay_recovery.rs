@@ -2902,6 +2902,28 @@ mod tests {
     }
 
     #[test]
+    fn token_only_agentdesk_tmux_with_unknown_liveness_stays_protected_after_grace() {
+        let decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                mailbox_has_cancel_token: true,
+                mailbox_active_user_msg_id: Some(9001),
+                mailbox_turn_started_at_ms: Some(1_000),
+                tmux_session: Some("AgentDesk-codex-token-only".to_string()),
+                tmux_alive: None,
+                ..snapshot()
+            },
+            RelayStallState::OrphanPendingToken,
+            1_000 + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
+        );
+
+        assert!(!decision.auto_heal.eligible);
+        assert_eq!(
+            decision.auto_heal.skipped_reason,
+            Some("protected_agentdesk_tmux_session")
+        );
+    }
+
+    #[test]
     fn orphan_token_live_evidence_and_agentdesk_tmux_stay_protected() {
         let live = plan_relay_recovery(
             &RelayHealthSnapshot {
@@ -3170,11 +3192,6 @@ mod tests {
         let channel = ChannelId::new(3_360_005);
 
         let first_token = start_test_turn(&shared, channel, MessageId::new(94)).await;
-        first_token
-            .tmux_session
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .replace("AgentDesk-codex-3360-watchdog-first".to_string());
         shared.restart.global_active.store(1, Ordering::Relaxed);
         let first = auto_apply_relay_recovery_for_shared_at(
             &registry,
@@ -3215,11 +3232,6 @@ mod tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
 
         let second_token = start_test_turn(&shared, channel, MessageId::new(95)).await;
-        second_token
-            .tmux_session
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .replace("AgentDesk-codex-3360-watchdog-second".to_string());
         shared.restart.global_active.store(1, Ordering::Relaxed);
         let second = auto_apply_relay_recovery_for_shared_at(
             &registry,
