@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import type { KanbanCard, KanbanRepoSource } from "../types";
 import { request, SLOW_MUTATION_TIMEOUT_MS } from "./httpClient";
 
@@ -42,78 +44,49 @@ export async function deleteKanbanCard(id: string): Promise<void> {
   await request(`/api/kanban-cards/${id}`, { method: "DELETE" });
 }
 
-export interface KanbanDispatchMutationResponse {
-  card: KanbanCard;
-  new_dispatch_id: string | null;
-  cancelled_dispatch_id: string | null;
-  next_action: string;
-}
+const nonEmptyStringSchema = z.string().trim().min(1);
+const timestampSchema = z.string();
+const nullableTimestampSchema = timestampSchema.nullable();
+const kanbanCardStatusSchema = z.string().regex(/^[a-z][a-z0-9_]*$/);
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+const kanbanCardSchema = z.looseObject({
+  id: nonEmptyStringSchema,
+  title: z.string(),
+  description: z.string().nullable(),
+  status: kanbanCardStatusSchema,
+  github_repo: z.string().nullable(),
+  owner_agent_id: z.string().nullable(),
+  requester_agent_id: z.string().nullable(),
+  assignee_agent_id: z.string().nullable(),
+  parent_card_id: z.string().nullable(),
+  latest_dispatch_id: z.string().nullable(),
+  sort_order: z.number(),
+  priority: z.string(),
+  depth: z.number(),
+  blocked_reason: z.string().nullable(),
+  review_notes: z.string().nullable(),
+  github_issue_number: z.number().nullable(),
+  github_issue_url: z.string().nullable(),
+  metadata_json: z.string().nullable(),
+  pipeline_stage_id: z.string().nullable(),
+  review_status: z.string().nullable(),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+  started_at: nullableTimestampSchema,
+  requested_at: nullableTimestampSchema,
+  completed_at: nullableTimestampSchema,
+}) satisfies z.ZodType<KanbanCard>;
 
-function hasOwn(value: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
+const kanbanDispatchMutationResponseSchema = z.object({
+  card: kanbanCardSchema,
+  new_dispatch_id: z.string().nullable(),
+  cancelled_dispatch_id: z.string().nullable(),
+  next_action: nonEmptyStringSchema,
+});
 
-function requireFields(
-  endpoint: string,
-  value: Record<string, unknown>,
-  keys: string[],
-): void {
-  for (const key of keys) {
-    if (!hasOwn(value, key)) {
-      throw new Error(
-        `${endpoint} response contract invalid: missing required field '${key}'`,
-      );
-    }
-  }
-}
-
-function parseKanbanDispatchMutationResponse(
-  endpoint: string,
-  raw: unknown,
-): KanbanDispatchMutationResponse {
-  if (!isObjectRecord(raw)) {
-    throw new Error(`${endpoint} response contract invalid: expected object`);
-  }
-  requireFields(endpoint, raw, [
-    "card",
-    "new_dispatch_id",
-    "cancelled_dispatch_id",
-    "next_action",
-  ]);
-  if (!isObjectRecord(raw.card)) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'card' must be an object`,
-    );
-  }
-  if (raw.new_dispatch_id !== null && typeof raw.new_dispatch_id !== "string") {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'new_dispatch_id' must be string or null`,
-    );
-  }
-  if (
-    raw.cancelled_dispatch_id !== null &&
-    typeof raw.cancelled_dispatch_id !== "string"
-  ) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'cancelled_dispatch_id' must be string or null`,
-    );
-  }
-  if (typeof raw.next_action !== "string" || raw.next_action.trim() === "") {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'next_action' must be a non-empty string`,
-    );
-  }
-  return {
-    card: raw.card as unknown as KanbanCard,
-    new_dispatch_id: raw.new_dispatch_id,
-    cancelled_dispatch_id: raw.cancelled_dispatch_id,
-    next_action: raw.next_action,
-  };
-}
+export type KanbanDispatchMutationResponse = z.infer<
+  typeof kanbanDispatchMutationResponseSchema
+>;
 
 export async function retryKanbanCard(
   id: string,
@@ -122,12 +95,15 @@ export async function retryKanbanCard(
   const endpoint = `/api/kanban-cards/${id}/retry`;
   // #2050 P3 finding 15 — retry hits GitHub + Discord; 15s would race
   // ahead of a still-processing server. Bump to 60s.
-  const res = await request<unknown>(endpoint, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-    timeoutMs: SLOW_MUTATION_TIMEOUT_MS,
-  });
-  return parseKanbanDispatchMutationResponse(endpoint, res);
+  return request(
+    endpoint,
+    {
+      method: "POST",
+      body: JSON.stringify(payload ?? {}),
+      timeoutMs: SLOW_MUTATION_TIMEOUT_MS,
+    },
+    kanbanDispatchMutationResponseSchema,
+  );
 }
 
 export async function redispatchKanbanCard(
@@ -136,12 +112,15 @@ export async function redispatchKanbanCard(
 ): Promise<KanbanDispatchMutationResponse> {
   const endpoint = `/api/kanban-cards/${id}/redispatch`;
   // #2050 P3 finding 15 — same external-I/O envelope as retry.
-  const res = await request<unknown>(endpoint, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-    timeoutMs: SLOW_MUTATION_TIMEOUT_MS,
-  });
-  return parseKanbanDispatchMutationResponse(endpoint, res);
+  return request(
+    endpoint,
+    {
+      method: "POST",
+      body: JSON.stringify(payload ?? {}),
+      timeoutMs: SLOW_MUTATION_TIMEOUT_MS,
+    },
+    kanbanDispatchMutationResponseSchema,
+  );
 }
 
 export async function patchKanbanDeferDod(
@@ -163,119 +142,47 @@ export async function patchKanbanDeferDod(
   return res.card;
 }
 
-export interface AssignmentResult {
-  ok: boolean;
-  agent_id: string;
-}
+const assignmentResultSchema = z.object({
+  ok: z.boolean(),
+  agent_id: nonEmptyStringSchema,
+});
 
-export interface AssignmentTransitionResult {
-  attempted: boolean;
-  ok: boolean;
-  from?: string;
-  to?: string;
-  target?: string;
-  target_status: string;
-  next_action: string;
-  steps?: string[];
-  completed_steps?: Array<{ from?: string; to?: string; changed?: boolean }>;
-  failed_step?: string;
-  error: string | null;
-}
+const assignmentTransitionResultSchema = z.object({
+  attempted: z.boolean(),
+  ok: z.boolean(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  target: z.string().optional(),
+  target_status: nonEmptyStringSchema,
+  next_action: nonEmptyStringSchema,
+  steps: z.array(z.string()).optional(),
+  completed_steps: z
+    .array(
+      z.object({
+        from: z.string().optional(),
+        to: z.string().optional(),
+        changed: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+  failed_step: z.string().optional(),
+  error: z.string().nullable(),
+});
 
-export interface AssignKanbanIssueResponse {
-  card: KanbanCard;
-  deduplicated?: boolean;
-  assignment: AssignmentResult;
-  transition: AssignmentTransitionResult;
-}
+const assignKanbanIssueResponseSchema = z.object({
+  card: kanbanCardSchema,
+  deduplicated: z.boolean().optional(),
+  assignment: assignmentResultSchema,
+  transition: assignmentTransitionResultSchema,
+});
 
-function parseAssignKanbanIssueResponse(
-  endpoint: string,
-  raw: unknown,
-): AssignKanbanIssueResponse {
-  if (!isObjectRecord(raw)) {
-    throw new Error(`${endpoint} response contract invalid: expected object`);
-  }
-  requireFields(endpoint, raw, ["card", "assignment", "transition"]);
-
-  const assignment = raw.assignment;
-  const transition = raw.transition;
-  if (!isObjectRecord(raw.card)) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'card' must be an object`,
-    );
-  }
-  if (!isObjectRecord(assignment)) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'assignment' must be an object`,
-    );
-  }
-  if (!isObjectRecord(transition)) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'transition' must be an object`,
-    );
-  }
-
-  requireFields(endpoint, assignment, ["ok", "agent_id"]);
-  requireFields(endpoint, transition, [
-    "attempted",
-    "ok",
-    "target_status",
-    "error",
-    "next_action",
-  ]);
-
-  if (typeof assignment.ok !== "boolean") {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'assignment.ok' must be boolean`,
-    );
-  }
-  if (
-    typeof assignment.agent_id !== "string" ||
-    assignment.agent_id.trim() === ""
-  ) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'assignment.agent_id' must be a non-empty string`,
-    );
-  }
-  if (
-    typeof transition.attempted !== "boolean" ||
-    typeof transition.ok !== "boolean"
-  ) {
-    throw new Error(
-      `${endpoint} response contract invalid: transition booleans must be boolean`,
-    );
-  }
-  if (
-    typeof transition.target_status !== "string" ||
-    transition.target_status.trim() === ""
-  ) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'transition.target_status' must be a non-empty string`,
-    );
-  }
-  if (transition.error !== null && typeof transition.error !== "string") {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'transition.error' must be string or null`,
-    );
-  }
-  if (
-    typeof transition.next_action !== "string" ||
-    transition.next_action.trim() === ""
-  ) {
-    throw new Error(
-      `${endpoint} response contract invalid: field 'transition.next_action' must be a non-empty string`,
-    );
-  }
-
-  return {
-    card: raw.card as unknown as KanbanCard,
-    deduplicated:
-      typeof raw.deduplicated === "boolean" ? raw.deduplicated : undefined,
-    assignment: assignment as unknown as AssignmentResult,
-    transition: transition as unknown as AssignmentTransitionResult,
-  };
-}
+export type AssignmentResult = z.infer<typeof assignmentResultSchema>;
+export type AssignmentTransitionResult = z.infer<
+  typeof assignmentTransitionResultSchema
+>;
+export type AssignKanbanIssueResponse = z.infer<
+  typeof assignKanbanIssueResponseSchema
+>;
 
 export async function assignKanbanIssue(payload: {
   github_repo: string;
@@ -286,11 +193,14 @@ export async function assignKanbanIssue(payload: {
   assignee_agent_id: string;
 }): Promise<AssignKanbanIssueResponse> {
   const endpoint = "/api/kanban-cards/assign-issue";
-  const res = await request<unknown>(endpoint, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  return parseAssignKanbanIssueResponse(endpoint, res);
+  return request(
+    endpoint,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    assignKanbanIssueResponseSchema,
+  );
 }
 
 export async function getStalledCards(): Promise<KanbanCard[]> {
