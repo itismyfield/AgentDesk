@@ -67,8 +67,13 @@ use auto_heal_attempts::{
 };
 
 const FROZEN_BUSY_JSONL_READY_FALLBACK_AGE: Duration = Duration::from_secs(10 * 60);
-// Cover the observed three-second admission race with a 10x margin while
-// bounding delayed reclamation of a genuinely orphaned token to 30 seconds.
+/// Protect probe and manual cleanup across the #4569 incident window: mailbox
+/// admission at 05:16:44.468 was misclassified at 05:16:47.320 (~2.9 seconds).
+/// The 30-second margin plus the 30-second probe cadence reclaims a genuine
+/// orphan on the first post-grace tick (normally within 60 seconds), not at the
+/// grace boundary itself. Stall-watchdog cleanup is exempt because its caller
+/// has already passed the independent death-evidence gate. A wall-clock rollback
+/// extends this protection because age uses `saturating_sub` below.
 const ORPHAN_PENDING_TOKEN_ADMISSION_GRACE: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
@@ -354,12 +359,16 @@ fn orphan_pending_token_within_admission_grace(
         })
 }
 
-fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot, now_ms: i64) -> bool {
+fn eligible_orphan_pending_token_without_admission_grace(snapshot: &RelayHealthSnapshot) -> bool {
     snapshot.mailbox_has_cancel_token
         && !snapshot.bridge_inflight_present
         && !snapshot.watcher_attached
         && snapshot.tmux_alive != Some(true)
         && !is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
+}
+
+fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot, now_ms: i64) -> bool {
+    eligible_orphan_pending_token_without_admission_grace(snapshot)
         && !orphan_pending_token_within_admission_grace(snapshot, now_ms)
 }
 
@@ -637,8 +646,31 @@ async fn auto_apply_relay_recovery_for_shared_at(
             provider: Some(provider.as_str().to_string()),
         })?;
 
-    let mut decision =
-        plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
+    let mut planning_health = snapshot.relay_health.clone();
+    let planning_stall_state = if source == RelayRecoveryApplySource::StallWatchdog {
+        // The watchdog caller reaches this source only after its independent
+        // death-evidence gate authorizes cleanup. Plan against that committed
+        // verdict without mutating the real watcher before mailbox reclaim is
+        // known to have applied.
+        planning_health.tmux_session = None;
+        planning_health.tmux_alive = None;
+        planning_health.watcher_attached = false;
+        planning_health.watcher_attached_stale = false;
+        planning_health.watcher_owner_channel_id = None;
+        planning_health.watcher_owns_live_relay = false;
+        RelayStallState::OrphanPendingToken
+    } else {
+        snapshot.relay_stall_state
+    };
+    let mut decision = plan_relay_recovery(&planning_health, planning_stall_state, now_ms);
+    if source == RelayRecoveryApplySource::StallWatchdog
+        && decision.relay_stall_state == RelayStallState::OrphanPendingToken
+        && decision.auto_heal.skipped_reason == Some("orphan_token_within_admission_grace")
+    {
+        decision.auto_heal.eligible =
+            eligible_orphan_pending_token_without_admission_grace(&planning_health);
+        decision.auto_heal.skipped_reason = None;
+    }
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
     trace_relay_recovery_decision(&decision, true);
 
@@ -3050,6 +3082,29 @@ mod tests {
         );
         assert!(!token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+
+        let manual = auto_apply_relay_recovery_for_shared(
+            &registry,
+            shared.clone(),
+            &provider,
+            channel.get(),
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::Manual,
+        )
+        .await
+        .expect("fresh manual recovery should evaluate");
+        assert!(!manual.applied);
+        assert_eq!(
+            manual.decision.auto_heal.skipped_reason,
+            Some("orphan_token_within_admission_grace")
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_some()
+        );
+        assert!(!token.cancelled.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

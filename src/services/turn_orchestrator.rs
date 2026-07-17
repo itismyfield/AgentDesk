@@ -1477,6 +1477,16 @@ impl ChannelMailboxHandle {
     }
 
     #[cfg(test)]
+    pub(crate) async fn age_active_turn_for_test(&self, age: Duration) {
+        let _ = self
+            .request(
+                |reply| ChannelMailboxMsg::AgeActiveTurnForTest { age, reply },
+                (),
+            )
+            .await;
+    }
+
+    #[cfg(test)]
     pub(crate) async fn age_pending_dispatch_for_test(&self, age: Duration) {
         let _ = self
             .request(
@@ -1944,6 +1954,11 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<Option<WatchdogDeadlineExtension>>,
     },
     ClearTimeoutOverride {
+        reply: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    AgeActiveTurnForTest {
+        age: Duration,
         reply: oneshot::Sender<()>,
     },
     #[cfg(test)]
@@ -3271,6 +3286,16 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::ClearTimeoutOverride { reply } => {
                     state.watchdog_deadline_override = None;
+                    let _ = reply.send(());
+                }
+                #[cfg(test)]
+                ChannelMailboxMsg::AgeActiveTurnForTest { age, reply } => {
+                    if state.cancel_token.is_some() {
+                        let wall_age = chrono::Duration::from_std(age)
+                            .expect("active-turn test age must fit chrono duration");
+                        state.turn_started_at = Some(Utc::now() - wall_age);
+                        state.turn_started_instant = Some(Instant::now() - age);
+                    }
                     let _ = reply.send(());
                 }
                 #[cfg(test)]

@@ -21,7 +21,7 @@
 | `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1180 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine/restore_inflight.rs` | 2313 | discord-relay | 2026-10-31 | #3834 |
-| `src/services/discord/relay_recovery.rs` | 1490 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/relay_recovery.rs` | 1522 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1585 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2727 | discord-relay | 2026-10-31 | #3837 |
 | `src/services/discord/session_relay_sink.rs` | 1676 | discord-relay | 2026-08-31 | #3405 |
@@ -107,5 +107,5 @@
 | `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1102 |
 | `src/services/tui_prompt_dedupe.rs` | 1970 |
-| `src/services/turn_orchestrator.rs` | 3263 |
+| `src/services/turn_orchestrator.rs` | 3288 |
 | `src/voice/receiver.rs` | 1108 |
