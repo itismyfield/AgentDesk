@@ -25,6 +25,13 @@ use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 
+fn manual_delivery_log_emoji(bot: &str) -> &'static str {
+    match UtilityBotRole::from_alias(bot) {
+        Some(UtilityBotRole::Notify) => "🔔",
+        Some(UtilityBotRole::Announce) | None => "📨",
+    }
+}
+
 pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundClient>(
     client: &C,
     dedup: &OutboundDeduper,
@@ -53,9 +60,7 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
             delivery,
         } => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            let emoji = UtilityBotRole::from_alias(bot)
-                .map(UtilityBotRole::log_emoji)
-                .unwrap_or("📨");
+            let emoji = manual_delivery_log_emoji(bot);
             let delivery_tag = delivery
                 .map(|value| format!(" +{value}"))
                 .unwrap_or_default();
@@ -593,6 +598,19 @@ mod manual_v3_delivery_tests {
     use std::sync::{Arc, Mutex};
 
     use crate::services::discord::health::{HealthRegistry, handle_send};
+
+    #[test]
+    fn manual_delivery_log_emoji_preserves_legacy_mapping() {
+        assert_eq!(
+            manual_delivery_log_emoji(UtilityBotRole::Announce.alias()),
+            "📨"
+        );
+        assert_eq!(
+            manual_delivery_log_emoji(UtilityBotRole::Notify.alias()),
+            "🔔"
+        );
+        assert_eq!(manual_delivery_log_emoji("provider"), "📨");
+    }
 
     #[derive(Clone, Default)]
     struct MockManualOutboundClient {

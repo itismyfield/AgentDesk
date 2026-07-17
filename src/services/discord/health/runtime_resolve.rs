@@ -43,15 +43,11 @@ pub(crate) async fn resolve_utility_bot_http(
         Some(http) => Ok(http),
         None => Err((
             "503 Service Unavailable",
-            serde_json::json!({
-                "ok": false,
-                "error": format!(
-                    "{} bot not configured (missing {})",
-                    role.alias(),
-                    role.credential_label()
-                ),
-            })
-            .to_string(),
+            format!(
+                r#"{{"ok":false,"error":"{} bot not configured (missing {})"}}"#,
+                role.alias(),
+                role.credential_label()
+            ),
         )),
     }
 }

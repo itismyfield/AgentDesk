@@ -2,7 +2,10 @@ use std::borrow::Cow;
 
 use sqlx::PgPool;
 
-use crate::services::provider::{CancelToken, cancel_requested};
+use crate::services::{
+    discord::bot_role::UtilityBotRole,
+    provider::{CancelToken, cancel_requested},
+};
 
 pub(crate) const LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS: i64 = 5 * 60;
 pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
@@ -11,8 +14,7 @@ pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
 /// outbox worker falls back to the notify bot only when that primary delivery
 /// fails, preserving human visibility without turning informational notices
 /// into agent work (#4449).
-pub(crate) const ACTIONABLE_OPS_ALERT_BOT: &str =
-    crate::services::discord::bot_role::UtilityBotRole::Announce.alias();
+pub(crate) const ACTIONABLE_OPS_ALERT_BOT: &str = UtilityBotRole::Announce.alias();
 
 pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -> bool {
     matches!(
@@ -951,7 +953,7 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     )
     .bind(target)
     .bind(content)
-    .bind("notify")
+    .bind(UtilityBotRole::Notify.alias())
     .bind(LIFECYCLE_NOTIFIER_SOURCE)
     .bind(reason_code)
     .bind(session_key.as_deref())

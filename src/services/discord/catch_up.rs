@@ -1435,7 +1435,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 CatchUpTooOldOutboxRequest {
                     target: format!("channel:{channel_id}"),
                     content: notice,
-                    bot: "notify",
+                    bot: super::bot_role::UtilityBotRole::Notify.alias(),
                     source: "catch_up_too_old",
                     reason_code: "catch_up.too_old",
                     session_key: format!("catch_up_too_old:{channel_id}:{batch_id}"),

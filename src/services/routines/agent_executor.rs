@@ -4,6 +4,7 @@ use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::{
     HealthRegistry, reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm,
     resolve_bot_http, start_reserved_headless_agent_turn_in_dm,
@@ -1010,7 +1011,11 @@ impl RoutineAgentExecutor {
                         error = %warning,
                         "routine thread setup failed; falling back to agent primary channel"
                     );
-                    (channel_id, None, "notify".to_string())
+                    (
+                        channel_id,
+                        None,
+                        UtilityBotRole::Notify.alias().to_string(),
+                    )
                 }
             };
             (
@@ -1537,7 +1542,7 @@ async fn resolve_routine_thread_http(
 ) -> Result<RoutineThreadHttp> {
     let mut errors = Vec::new();
     let mut tried = Vec::new();
-    for bot in [provider_name, agent_id, "notify"] {
+    for bot in [provider_name, agent_id, UtilityBotRole::Notify.alias()] {
         if bot.trim().is_empty() || tried.contains(&bot) {
             continue;
         }

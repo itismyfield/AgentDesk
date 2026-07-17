@@ -25,9 +25,7 @@ impl UtilityBotRole {
     }
 
     pub fn from_alias(alias: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|role| role.alias() == alias.trim())
+        Self::ALL.into_iter().find(|role| role.alias() == alias)
     }
 
     pub const fn credential_label(self) -> &'static str {
@@ -81,6 +79,7 @@ mod tests {
             assert_eq!(role.alias().parse(), Ok(role));
         }
         assert_eq!(UtilityBotRole::from_alias("unknown"), None);
+        assert_eq!(UtilityBotRole::from_alias(" notify "), None);
     }
 
     #[test]

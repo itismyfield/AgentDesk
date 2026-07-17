@@ -3530,7 +3530,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     OutboxMessage {
                         target: target.as_str(),
                         content: content.as_str(),
-                        bot: "notify",
+                        bot: super::bot_role::UtilityBotRole::Notify.alias(),
                         source: "system",
                         reason_code: None,
                         session_key: None,
