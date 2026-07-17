@@ -753,10 +753,8 @@ mod chokepoint_guard_tests {
             let resolve_item = crate::services::claude_gateway_proxy::resolve_for_launch;
         "#;
         let gateway_violations = scan_gateway_primitive_sources([(SANCTIONED[0], consumer_source)]);
-        let raw_spawn_violations = scan_raw_spawn_sources([(
-            SANCTIONED[0],
-            "let command = Command::new(claude_bin);",
-        )]);
+        let raw_spawn_violations =
+            scan_raw_spawn_sources([(SANCTIONED[0], "let command = Command::new(claude_bin);")]);
 
         assert!(
             gateway_violations
