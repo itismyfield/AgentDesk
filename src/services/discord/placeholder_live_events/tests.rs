@@ -6525,7 +6525,7 @@ fn confirmed_task_notification_card_evicts_only_exact_terminal_footer_slot() {
 }
 
 #[test]
-fn task_completion_card_suppression_requires_idful_matching_subagent_slot() {
+fn success_subagent_completion_requires_card_alongside_footer() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_654_002);
     events.push_status_events(
@@ -6550,9 +6550,9 @@ fn task_completion_card_suppression_requires_idful_matching_subagent_slot() {
         <tool-use-id>toolu_subagent_match</tool-use-id><status>completed</status>\
         <summary>Agent \"Scout issue #3654\" completed</summary></task-notification>";
     assert!(
-        events
+        !events
             .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, true,),
-        "matching idful subagent completion should suppress the duplicate card"
+        "successful subagent completion should post a card alongside footer ✓"
     );
 
     let idless = "<task-notification><task-id>sub2</task-id><status>completed</status>\
