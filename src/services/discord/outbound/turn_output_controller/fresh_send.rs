@@ -141,9 +141,8 @@ where
         .commit(ctx.holder, key.clone(), start, end, lease_outcome);
     debug_assert!(committed, "fresh-send commit must match its acquired lease");
 
-    let persistence_recorded = advanced
-        && committed
-        && record_success(record, Some(range), message_id, ctx.body);
+    let persistence_recorded =
+        advanced && committed && record_success(record, Some(range), message_id, ctx.body);
     lease_guard.release_and_disarm();
 
     if advanced && !committed {
