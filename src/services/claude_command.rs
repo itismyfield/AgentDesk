@@ -26,6 +26,7 @@
 //! other module references them directly, so the single authority cannot erode.
 
 use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::process::Command;
 
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
