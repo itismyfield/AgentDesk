@@ -889,19 +889,18 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
         );
     }
 
-    // The exact-token trigger runs even when `occupied == 0`: a post-compact
-    // usage reset is the re-arm signal. It is deliberately gated on a proven
-    // launch-bound Claude window, rather than inventing a live-config fallback.
-    // Pass every Claude completion through it, though: an explicit zero-percent
-    // policy must clear an old latch even when this completion cannot prove a
-    // model/window identity.
+    // The token trigger runs even when `occupied == 0`: a post-compact usage
+    // reset is the observable re-arm signal handled inside the trigger. It is
+    // deliberately gated on a proven launch-bound Claude window
+    // (`claude_launch_window`), rather than inventing a live-config fallback, so
+    // a window this turn cannot prove fails closed to no-inject. Idempotency is
+    // keyed on the observable USAGE occupancy (`occupied`), never on a cosmetic
+    // `auto_compacted` string heuristic.
     if matches!(provider, ProviderKind::Claude) {
         crate::services::claude_compact_trigger::maybe_inject_compact(
             channel_id.get(),
             tmux_session_name,
             provider,
-            state.last_session_id.as_deref(),
-            state.last_model.as_deref(),
             occupied,
             claude_launch_window,
             compact_pct,
