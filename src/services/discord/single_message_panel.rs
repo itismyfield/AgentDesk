@@ -660,7 +660,7 @@ fn text_has_single_message_footer_surface(text: &str) -> bool {
                 || line == "Tasks"
                 || line == "Subagents"
                 || line.starts_with("└ ")
-                // #3983: the footer's line-2 time line identifies the new panel surface.
+                // #4601: the footer's split last-update line identifies the panel surface.
                 || line.starts_with("마지막 업데이트 ")
                 // Legacy pre-#3983 merged header shape.
                 || (line.contains(" — ") && line.contains("(<t:"))
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn footer_rollover_reservation_is_bound_by_panel_budget_s3() {
-        const STREAMING_PLACEHOLDER_MARGIN_BYTES: usize = 10;
+        const STREAMING_PLACEHOLDER_MARGIN_CHARS: usize = 10;
 
         let huge_panel = format!(
             "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nTools\n{}",
@@ -1301,21 +1301,24 @@ mod tests {
         );
         let status_block = super::compose_footer_status_block("⠸", &huge_panel);
         let merged_header = footer_header(&status_block);
-        let max_footer_len =
-            2 + merged_header.len() + 1 + super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES;
+        let max_footer_chars = 2
+            + merged_header.chars().count()
+            + 1
+            + super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES;
         let footer = format!("\n\n{status_block}");
+        let footer_chars = footer.chars().count();
         let expected_body_budget = DISCORD_MSG_LIMIT
-            .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN_BYTES)
+            .saturating_sub(footer_chars + STREAMING_PLACEHOLDER_MARGIN_CHARS)
             .max(1);
         let minimum_body_budget = DISCORD_MSG_LIMIT
-            .saturating_sub(max_footer_len + STREAMING_PLACEHOLDER_MARGIN_BYTES)
+            .saturating_sub(max_footer_chars + STREAMING_PLACEHOLDER_MARGIN_CHARS)
             .max(1);
         let current_portion = "x".repeat(expected_body_budget + 1);
         let plan =
             super::super::formatting::plan_streaming_rollover(&current_portion, &status_block)
                 .expect("body should roll over after reserving the bounded footer");
 
-        assert!(footer.len() <= max_footer_len);
+        assert!(footer_chars <= max_footer_chars);
         assert_eq!(plan.split_at, expected_body_budget);
         assert!(plan.split_at >= minimum_body_budget);
         assert!(plan.display_snapshot.ends_with(&footer));
@@ -1401,7 +1404,18 @@ mod tests {
     }
 
     #[test]
-    fn footer_only_surface_recognizes_fixed_kst_time_line() {
+    fn footer_only_surface_recognizes_split_fixed_kst_time_lines() {
+        let panel = "🟢 진행 중\n턴 트리거: https://discord.com/channels/1/2/3\n턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)";
+        let rendered = super::compose_footer_status_block("⠸", panel);
+
+        assert!(super::streaming_footer_only_surface_was_exposed(
+            &rendered,
+            &ProviderKind::Claude
+        ));
+    }
+
+    #[test]
+    fn footer_only_surface_recognizes_legacy_combined_time_line() {
         let panel = "🟢 진행 중\n\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)";
         let rendered = super::compose_footer_status_block("⠸", panel);
 
