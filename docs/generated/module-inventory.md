@@ -496,14 +496,14 @@
 | `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 515 | 174 | 341 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
-| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1752 | 683 | 1069 |  |
+| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1761 | 692 | 1069 |  |
 | `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 271 | 101 | 170 |  |
 | `services::discord::health::relay_progress` | `src/services/discord/health/relay_progress.rs` | 108 | 66 | 42 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 264 | 242 | 22 |  |
 | `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1273 | 993 | 280 |  |
-| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2372 | 975 | 1397 |  |
-| `services::discord::health::stall_liveness::redrive_grace` | `src/services/discord/health/stall_liveness/redrive_grace.rs` | 295 | 158 | 137 |  |
+| `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 2379 | 982 | 1397 |  |
+| `services::discord::health::stall_liveness::redrive_grace` | `src/services/discord/health/stall_liveness/redrive_grace.rs` | 472 | 204 | 268 |  |
 | `services::discord::health::stall_verdict` | `src/services/discord/health/stall_verdict.rs` | 1339 | 425 | 914 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1385 | 627 | 758 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 360 | 266 | 94 |  |
