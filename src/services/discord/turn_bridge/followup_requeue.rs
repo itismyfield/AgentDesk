@@ -7,6 +7,17 @@ fn should_publish_queue_marker(outcome: &crate::services::discord::MailboxEnqueu
     )
 }
 
+fn retry_present_or_accepted(outcome: &crate::services::discord::MailboxEnqueueOutcome) -> bool {
+    outcome.enqueued
+        || matches!(
+            outcome.refusal_reason,
+            Some(
+                crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                    | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
+            )
+        )
+}
+
 pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     shared_owned: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -15,7 +26,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     dispatch_id: Option<&str>,
     adk_session_key: Option<&str>,
     turn_id: &str,
-) {
+) -> bool {
     let requeue_outcome = super::super::mailbox_requeue_inflight_for_followup_retry(
         shared_owned,
         provider,
@@ -50,14 +61,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
         }),
     );
 
-    let retry_present_or_accepted = requeue_outcome.enqueued
-        || matches!(
-            requeue_outcome.refusal_reason,
-            Some(
-                crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
-                    | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
-            )
-        );
+    let retry_present_or_accepted = retry_present_or_accepted(&requeue_outcome);
     if retry_present_or_accepted {
         if should_publish_queue_marker(&requeue_outcome)
             && let Some(http) = shared_owned.serenity_http_or_token_fallback()
@@ -118,6 +122,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
             "claude_tui_followup_requeue_inflight",
         );
     }
+    retry_present_or_accepted
 }
 
 #[cfg(test)]
@@ -182,6 +187,23 @@ mod tests {
         assert!(
             !should_publish_queue_marker(&outcome),
             "duplicate refusal must not rewrite the live queue entry's merged/standalone marker"
+        );
+        assert!(
+            retry_present_or_accepted(&outcome),
+            "existing queue entry makes the retry safe to report"
+        );
+    }
+
+    #[test]
+    fn persistence_failure_is_not_reported_as_requeued() {
+        let outcome = crate::services::discord::MailboxEnqueueOutcome {
+            persistence_error: Some("pending queue write failed".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            !retry_present_or_accepted(&outcome),
+            "a failed queue write must preserve inflight rather than report requeue success"
         );
     }
 

@@ -680,7 +680,7 @@
 | `services::discord::router::message_handler::voice_announcement_route` | `src/services/discord/router/message_handler/voice_announcement_route.rs` | 444 | 106 | 338 |  |
 | `services::discord::router::message_handler::voice_announcement_scope` | `src/services/discord/router/message_handler/voice_announcement_scope.rs` | 125 | 73 | 52 |  |
 | `services::discord::router::message_handler::watchdog` | `src/services/discord/router/message_handler/watchdog.rs` | 1255 | 960 | 295 |  |
-| `services::discord::router::queue_status_presentation` | `src/services/discord/router/queue_status_presentation.rs` | 91 | 7 | 84 |  |
+| `services::discord::router::queue_status_presentation` | `src/services/discord/router/queue_status_presentation.rs` | 92 | 7 | 85 |  |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 519 | 371 | 148 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 130 | 130 | 0 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 526 | 526 | 0 |  |
@@ -831,7 +831,7 @@
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 169 | 100 | 69 |  |
 | `services::discord::turn_bridge::early_tui_completion` | `src/services/discord/turn_bridge/early_tui_completion.rs` | 62 | 62 | 0 |  |
 | `services::discord::turn_bridge::finalize_epilogue` | `src/services/discord/turn_bridge/finalize_epilogue.rs` | 306 | 156 | 150 |  |
-| `services::discord::turn_bridge::followup_requeue` | `src/services/discord/turn_bridge/followup_requeue.rs` | 237 | 122 | 115 |  |
+| `services::discord::turn_bridge::followup_requeue` | `src/services/discord/turn_bridge/followup_requeue.rs` | 259 | 127 | 132 |  |
 | `services::discord::turn_bridge::guards` | `src/services/discord/turn_bridge/guards.rs` | 76 | 76 | 0 |  |
 | `services::discord::turn_bridge::headless_delivery` | `src/services/discord/turn_bridge/headless_delivery.rs` | 518 | 442 | 76 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 411 | 303 | 108 |  |
@@ -859,10 +859,10 @@
 | `services::discord::turn_bridge::task_notification_lifecycle` | `src/services/discord/turn_bridge/task_notification_lifecycle.rs` | 221 | 104 | 117 |  |
 | `services::discord::turn_bridge::terminal_controller_cutover` | `src/services/discord/turn_bridge/terminal_controller_cutover.rs` | 1838 | 960 | 878 |  |
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 2002 | 738 | 1264 |  |
-| `services::discord::turn_bridge::terminal_outcome_delivery` | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 891 | 891 | 0 |  |
+| `services::discord::turn_bridge::terminal_outcome_delivery` | `src/services/discord/turn_bridge/terminal_outcome_delivery.rs` | 918 | 918 | 0 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::cancel_prompt_replace` | `src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs` | 445 | 445 | 0 |  |
-| `services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue` | `src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` | 427 | 427 | 0 |  |
-| `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery.rs` | 472 | 457 | 15 |  |
+| `services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue` | `src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` | 430 | 430 | 0 |  |
+| `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery.rs` | 465 | 450 | 15 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery/guidance.rs` | 34 | 8 | 26 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance` | `src/services/discord/turn_bridge/terminal_outcome_delivery/prompt_too_long_guidance.rs` | 187 | 9 | 178 |  |
 | `services::discord::turn_bridge::terminal_outcome_delivery::queue_retry_silence` | `src/services/discord/turn_bridge/terminal_outcome_delivery/queue_retry_silence.rs` | 42 | 27 | 15 |  |

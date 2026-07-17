@@ -160,12 +160,11 @@ pub(super) async fn run_terminal_outcome_delivery(
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
     let tui_error_classification = ctx.tui_error_classification;
     let claude_tui_followup_busy_readiness_timeout =
-        claude_tui_followup_pre_submit_requeue_candidate
-            && bridge_claude_tui_followup_busy_readiness_timeout(
-                &state.provider,
-                state.inflight_state.runtime_kind,
-                tui_error_classification,
-            );
+        bridge_claude_tui_followup_busy_readiness_timeout(
+            &state.provider,
+            state.inflight_state.runtime_kind,
+            tui_error_classification,
+        );
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
@@ -217,6 +216,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     // resurrecting. When the holder FAILS (does not clear), the row is still
     // present + matching, so the bridge refreshes it and retry survives.
     let mut bridge_skip_holder_owns_inflight = false;
+    let mut claude_tui_busy_requeue_pending = false;
     let (mut terminal_delivery_committed, mut terminal_body_visible) = (false, false);
     let mut status_panel_terminal_committed = false;
     let mut completion_footer_terminal_text: Option<String> = None;
@@ -426,6 +426,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 terminal_body_visible: &mut terminal_body_visible,
                 preserve_inflight_for_cleanup_retry: &mut preserve_inflight_for_cleanup_retry,
                 bridge_skip_holder_owns_inflight: &mut bridge_skip_holder_owns_inflight,
+                claude_tui_busy_requeue_pending: &mut claude_tui_busy_requeue_pending,
             },
         )
         .await;
@@ -456,6 +457,32 @@ pub(super) async fn run_terminal_outcome_delivery(
                 true,
             ),
         };
+        if claude_tui_busy_requeue_pending {
+            let requeued = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
+                &shared_owned,
+                &provider,
+                channel_id,
+                &inflight_state,
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                turn_id.as_str(),
+            )
+            .await;
+            if requeued {
+                delivery_response = "⏳ Claude TUI가 이전 턴을 처리 중이라 메시지를 아직 주입하지 못했습니다. 기존 세션은 유지하고 메시지를 큐에 다시 넣어, TUI가 한가해지면 자동으로 처리합니다."
+                    .to_string();
+            } else {
+                preserve_inflight_for_cleanup_retry = true;
+                delivery_response = "⚠ Claude TUI가 이전 턴을 처리 중이라 메시지 재큐에 실패했습니다. 기존 세션은 유지했으니 잠시 후 다시 보내 주세요."
+                    .to_string();
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel_id = channel_id.get(),
+                    user_msg_id = inflight_state.user_msg_id,
+                    "Claude TUI busy follow-up requeue failed; preserving inflight instead of reporting success"
+                );
+            }
+        }
         if silent_turn_handled {
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {

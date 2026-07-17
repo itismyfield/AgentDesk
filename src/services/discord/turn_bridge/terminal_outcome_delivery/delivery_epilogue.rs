@@ -321,8 +321,11 @@ pub(super) async fn handle_delivery_epilogue(
                         "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                     );
                 }
-                if claude_tui_followup_pre_submit_requeue_candidate {
-                    followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
+                if claude_tui_followup_pre_submit_requeue_candidate
+                    && !terminal_delivery_committed
+                    && !preserve_inflight_for_cleanup_retry
+                {
+                    let _ = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
                         &shared_owned,
                         &provider,
                         channel_id,
