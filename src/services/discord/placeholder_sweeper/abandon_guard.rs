@@ -449,12 +449,25 @@ mod tests {
         AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RevivedVisibleRepair,
         RuntimeActivityEvidence, abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
         abandoned_mailbox_finish_actions, abandoned_tmux_cleanup_decision,
-        abandoned_tmux_cleanup_decision_for, decision_for_user_identity, revived_visible_repair,
-        run_blocking_cleanup_probe, runtime_activity_evidence_from, should_detach_after_cleanup,
+        abandoned_tmux_cleanup_decision_for, decision_for_user_identity,
+        finalize_probe_cleanup_if_same_turn, revived_visible_repair, run_blocking_cleanup_probe,
+        runtime_activity_evidence_from, should_detach_after_cleanup,
     };
-    use crate::services::discord::inflight::InflightTurnState;
+    use super::super::PlaceholderProbe;
+    use crate::services::discord::formatting::MonitorHandoffReason;
+    use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    use crate::services::discord::inflight::{
+        InflightTurnState, load_inflight_state, save_inflight_state,
+    };
+    use crate::services::discord::make_shared_data_for_tests;
+    use crate::services::discord::placeholder_controller::{
+        PlaceholderActiveInput, PlaceholderControllerOutcome, PlaceholderKey,
+    };
     use crate::services::platform::tmux::PaneLiveness;
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn sweep_state() -> InflightTurnState {
         InflightTurnState::new(
@@ -471,6 +484,140 @@ mod tests {
             None,
             0,
         )
+    }
+
+    fn inflight_state(channel_id: u64, message_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            None,
+            7,
+            9101,
+            message_id,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-codex".to_string()),
+            Some("/tmp/recovery.jsonl".to_string()),
+            None,
+            0,
+        )
+    }
+
+    fn key(channel_id: u64, message_id: u64) -> PlaceholderKey {
+        PlaceholderKey {
+            provider: ProviderKind::Codex,
+            channel_id: ChannelId::new(channel_id),
+            message_id: MessageId::new(message_id),
+        }
+    }
+
+    fn input() -> PlaceholderActiveInput {
+        PlaceholderActiveInput {
+            reason: MonitorHandoffReason::ExplicitCall,
+            started_at_unix: 1_700_000_000,
+            tool_summary: Some("Monitor".to_string()),
+            command_summary: Some("session=abandon-guard-race".to_string()),
+            reason_detail: None,
+            context_line: None,
+            request_line: None,
+            progress_line: None,
+        }
+    }
+
+    struct BlockingGateway {
+        calls: AtomicUsize,
+        entered: tokio::sync::Semaphore,
+        release: tokio::sync::Semaphore,
+    }
+
+    impl BlockingGateway {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                entered: tokio::sync::Semaphore::new(0),
+                release: tokio::sync::Semaphore::new(0),
+            }
+        }
+    }
+
+    impl TurnGateway for BlockingGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async { Ok(MessageId::new(1)) })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.add_permits(1);
+                self.release
+                    .acquire()
+                    .await
+                    .expect("release semaphore remains open")
+                    .forget();
+                Ok(())
+            })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<
+            'a,
+            Result<crate::services::discord::formatting::ReplaceLongMessageOutcome, String>,
+        > {
+            Box::pin(async {
+                Ok(crate::services::discord::formatting::ReplaceLongMessageOutcome::EditedOriginal)
+            })
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a crate::services::discord::Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            Some(ProviderKind::Codex)
+        }
     }
 
     #[test]
@@ -778,9 +925,7 @@ mod tests {
             let controller = shared.ui.placeholder_controller.clone();
             let key = key.clone();
             let input = input.clone();
-            tokio::spawn(
-                async move { controller.ensure_active(gateway.as_ref(), key, input).await },
-            )
+            tokio::spawn(async move { controller.ensure_active(gateway.as_ref(), key, input).await })
         };
         gateway
             .entered
@@ -803,12 +948,7 @@ mod tests {
                 .await
             })
         };
-        while shared
-            .ui
-            .placeholder_controller
-            .entry_detached_for_test(&key)
-            != Some(true)
-        {
+        while shared.ui.placeholder_controller.entry_detached_for_test(&key) != Some(true) {
             tokio::task::yield_now().await;
         }
         gateway.release.add_permits(1);
@@ -818,13 +958,7 @@ mod tests {
             PlaceholderControllerOutcome::Rejected
         );
         assert!(finalize.await.expect("finalize task joins"));
-        assert_eq!(
-            shared
-                .ui
-                .placeholder_controller
-                .entry_detached_for_test(&key),
-            None
-        );
+        assert_eq!(shared.ui.placeholder_controller.entry_detached_for_test(&key), None);
         assert!(load_inflight_state(&ProviderKind::Codex, 11).is_none());
     }
 
