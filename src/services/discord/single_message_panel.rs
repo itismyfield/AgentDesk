@@ -660,7 +660,7 @@ fn text_has_single_message_footer_surface(text: &str) -> bool {
                 || line == "Tasks"
                 || line == "Subagents"
                 || line.starts_with("└ ")
-                // #3983: the footer's line-2 time line identifies the new panel surface.
+                // #4601: the footer's split last-update line identifies the panel surface.
                 || line.starts_with("마지막 업데이트 ")
                 // Legacy pre-#3983 merged header shape.
                 || (line.contains(" — ") && line.contains("(<t:"))
@@ -1401,7 +1401,18 @@ mod tests {
     }
 
     #[test]
-    fn footer_only_surface_recognizes_fixed_kst_time_line() {
+    fn footer_only_surface_recognizes_split_fixed_kst_time_lines() {
+        let panel = "🟢 진행 중\n턴 트리거: https://discord.com/channels/1/2/3\n턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)";
+        let rendered = super::compose_footer_status_block("⠸", panel);
+
+        assert!(super::streaming_footer_only_surface_was_exposed(
+            &rendered,
+            &ProviderKind::Claude
+        ));
+    }
+
+    #[test]
+    fn footer_only_surface_recognizes_legacy_combined_time_line() {
         let panel = "🟢 진행 중\n\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)";
         let rendered = super::compose_footer_status_block("⠸", panel);
 

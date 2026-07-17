@@ -600,10 +600,10 @@ impl StatusPanelState {
 pub(super) fn render_status_panel(
     snapshot: StatusPanelState,
     provider: &ProviderKind,
-    // #3983 item 2: precomputed `마지막 업데이트 : … / 턴 시작 : …` time line (line 2).
+    // #4601: precomputed `턴 시작 : …\n마지막 업데이트 : …` time lines.
     time_line: String,
-    // #3983 item 3: precomputed `턴 트리거:` deeplink, appended as the LAST footer
-    // line (or `None` for headless/synthetic/id-0 turns with no real user message).
+    // #4601: precomputed `턴 트리거:` deeplink, rendered immediately after the
+    // activity line (or `None` for headless/synthetic/id-0 turns).
     turn_trigger_line: Option<String>,
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
@@ -613,22 +613,22 @@ pub(super) fn render_status_panel(
     } else {
         snapshot.status.clone()
     };
-    // #3983: line 1 = derived-status ACTIVITY label, line 2 = relative TIME line
-    // (both built in the colocated `freshness` module — status_panel.rs is at the
-    // namespace cap). The pre-#3983 confidence line + `진행 중 — provider` header is
-    // retired (item 2); the request anchor no longer prepends here (item 3, see the
-    // trailing `턴 트리거:` push below).
-    let mut sections = vec![
-        super::freshness::render_activity_line(&header_status),
-        time_line,
-    ];
+    // #4601: the header opens with the derived-status ACTIVITY label, followed by
+    // the request anchor when present, then the start/update TIME fields. Keep the
+    // entire header in one section so each field occupies the immediately following
+    // physical line and section-wise truncation preserves the header atomically.
+    let mut header_lines = vec![super::freshness::render_activity_line(&header_status)];
+    if let Some(trigger) = turn_trigger_line.filter(|line| !line.trim().is_empty()) {
+        header_lines.push(trigger);
+    }
+    header_lines.push(time_line);
+    let mut sections = vec![header_lines.join("\n")];
 
     // #3983 item4: the session line is NO LONGER rendered in the every-tick
     // footer. It is composed once at the top of the first answer message via
     // `session_banner.rs`, so the
     // repeated per-tick footer echo of `🆕 새 세션 시작 · provider session … · tmux …`
-    // is retired. Track A's 3-line header (activity / time / 턴 트리거) is
-    // unaffected.
+    // is retired. Track A's header is unaffected.
 
     if let Some(task) = snapshot.task.as_ref() {
         sections.push(render_task_panel_line(task));
@@ -687,13 +687,6 @@ pub(super) fn render_status_panel(
         if !lines.is_empty() {
             sections.push(format!("Workflow\n{}", lines.join("\n")));
         }
-    }
-
-    // #3983 item 3: the `턴 트리거:` original-request deeplink is the LAST footer
-    // line (it previously prepended above the header). Absent for headless /
-    // synthetic / id-0 turns that carry no real Discord user message.
-    if let Some(trigger) = turn_trigger_line.filter(|line| !line.trim().is_empty()) {
-        sections.push(trigger);
     }
 
     truncate_status_panel_sections(sections)
