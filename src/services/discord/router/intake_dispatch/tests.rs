@@ -172,7 +172,13 @@ async fn seed_foreign_owner(pool: &sqlx::PgPool, channel_id: ChannelId, owner_in
         "INSERT INTO worker_nodes (instance_id, status, role, effective_role,
          labels, capabilities, last_heartbeat_at, started_at, updated_at)
          VALUES ($1, 'online', 'worker', 'worker', '[]'::jsonb,
-         '{\"intake_worker\":{\"enabled\":true,\"providers\":[\"claude\"]}}'::jsonb,
+         -- A real foreign worker always advertises \"preserve_on_cancel_v1\" via
+         -- capabilities_with_runtime_state() (intake_worker_capabilities.rs). Without
+         -- it, node_supports_intake_request() treats the node as protocol-incompatible
+         -- for preserve_on_cancel=true requests, and resolve_session_owner() classifies
+         -- it as LiveForeignIncompatible instead of LiveForeign, blocking the forward
+         -- entirely (#4550 multinode preserve tri-state).
+         '{\"intake_worker\":{\"enabled\":true,\"providers\":[\"claude\"],\"features\":[\"preserve_on_cancel_v1\"]}}'::jsonb,
          NOW(), NOW(), NOW())",
     )
     .bind(owner_instance_id)
