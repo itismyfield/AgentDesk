@@ -8,6 +8,7 @@ import type {
   KanbanCard,
   UiLanguage,
 } from "../../types";
+import { coerceTimestampMs } from "../agent-manager/kanban-utils";
 
 export interface OfficeSkillRow {
   skillName: string;
@@ -50,19 +51,6 @@ export function formatElapsed(value: number | null, isKo: boolean): string | nul
   return t(isKo, `${days}일째`, `${days}d running`);
 }
 
-export function normalizeTimestampMs(value: number | string | null | undefined): number | null {
-  if (value == null || value === "") return null;
-  if (typeof value === "number") {
-    return value < 1e12 ? value * 1000 : value;
-  }
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) {
-    return numeric < 1e12 ? numeric * 1000 : numeric;
-  }
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
 function extractSkillNameFromEventContent(content: string): string | null {
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>;
@@ -83,7 +71,7 @@ function deriveFallbackSkillRows(transcripts: SessionTranscript[]): OfficeSkillR
   const aggregates = new Map<string, OfficeSkillRow>();
 
   for (const transcript of transcripts) {
-    const usedAt = normalizeTimestampMs(transcript.created_at);
+    const usedAt = coerceTimestampMs(transcript.created_at);
     if (!usedAt || usedAt < cutoff) continue;
 
     const used = new Set<string>();

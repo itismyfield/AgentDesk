@@ -35,7 +35,7 @@ export interface OfficeAgentState {
   seatStatusByAgent: Map<string, OfficeSeatStatus>;
 }
 
-const TERMINAL_CARD_STATUSES = new Set<KanbanCardStatus>(["done"]);
+const TERMINAL_CARD_STATUSES = new Set<KanbanCardStatus>(["done", "cancelled"]);
 
 const PRIMARY_CARD_PRIORITY: Record<string, number> = {
   review: 0,
