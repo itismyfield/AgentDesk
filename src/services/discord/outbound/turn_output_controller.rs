@@ -45,6 +45,10 @@ use super::super::{
 };
 use super::decision::LengthPolicyDecision;
 
+mod fresh_send;
+#[cfg(test)]
+mod fresh_send_tests;
+
 /// The narrow delivery-lease surface the turn-output controller drives
 /// (acquire → commit → release, plus `read` for the tests). Abstracting the
 /// concrete [`DeliveryLeaseCell`] behind this trait lets the controller's tests
@@ -83,6 +87,11 @@ pub(in crate::services::discord) trait DeliveryLease {
     /// POST is in flight (#3151) — replacing A1's fixed-TTL acquire.
     #[allow(dead_code)] // #3089 A2a: driven by the owner's PostHeartbeat at A2b cutover.
     fn renew(&self, holder: LeaseHolder, key: DeliveryLeaseKey, new_deadline_ms: u64) -> bool;
+    /// Reclaim an expired holder before a fresh-send attempt. Normal owner paths
+    /// are reconciled externally; S1r-1's NoRange pseudo-range must recover the
+    /// same dead-holder window as the D1 recovery path.
+    #[allow(dead_code)] // #4046 S1r-1: used by the fresh-send verb before S1r-2~5 wiring.
+    fn reclaim_if_expired(&self, now_ms: u64) -> bool;
     #[allow(dead_code)] // #3089 A1: read by the controller's own tests only.
     fn read(&self) -> LeaseSnapshot;
 }
@@ -113,6 +122,9 @@ impl DeliveryLease for DeliveryLeaseCell {
     }
     fn renew(&self, holder: LeaseHolder, key: DeliveryLeaseKey, new_deadline_ms: u64) -> bool {
         DeliveryLeaseCell::renew(self, holder, key, new_deadline_ms)
+    }
+    fn reclaim_if_expired(&self, now_ms: u64) -> bool {
+        DeliveryLeaseCell::reclaim_if_expired(self, now_ms)
     }
     fn read(&self) -> LeaseSnapshot {
         DeliveryLeaseCell::read(self)
@@ -169,6 +181,9 @@ impl DeliveryLease for NoLease {
     fn renew(&self, _holder: LeaseHolder, _key: DeliveryLeaseKey, _new_deadline_ms: u64) -> bool {
         false
     }
+    fn reclaim_if_expired(&self, _now_ms: u64) -> bool {
+        false
+    }
     fn read(&self) -> LeaseSnapshot {
         // Never held → `Unleased`.
         LeaseSnapshot::Unleased
@@ -216,6 +231,17 @@ pub(in crate::services::discord) enum PlaceholderSlot {
 /// no owner, so the variants and the mapping fn are dormant outside tests.
 #[allow(dead_code)] // #3089 A1: built by owners at A2 cutover.
 pub(in crate::services::discord) enum OutputPlan {
+    /// Publish a new anchor-less message. The body is carried by
+    /// [`TurnOutputCtx::body`]; `range` is the authoritative transcript byte range
+    /// when one exists, while `None` activates the required NoRange
+    /// content-fingerprint and D1-style pseudo-range protections. `reference` is
+    /// reserved for the later S1r owner cutovers; S1r-1 accepts only `None`.
+    #[allow(dead_code)] // #4046 S1r-1: constructed by S1r-2~5 owner cutovers.
+    SendFresh {
+        range: Option<(u64, u64)>,
+        reference: Option<(ChannelId, MessageId)>,
+        record: FreshSendRecord,
+    },
     /// Replace/edit the live placeholder in place (Inline body that fits a
     /// single message). The `lifecycle` distinguishes the three replace
     /// variants (cancel / prompt-too-long / normal) so a cutover owner can
@@ -232,6 +258,8 @@ pub(in crate::services::discord) enum OutputPlan {
     /// Nothing to deliver (empty / suppressed body).
     NoOp,
 }
+
+pub(in crate::services::discord) use fresh_send::RecordContext as FreshSendRecord;
 
 impl OutputPlan {
     /// Map an `outbound::decide_policy` length decision into an `OutputPlan`.
@@ -645,11 +673,16 @@ where
     G: TurnGateway + ?Sized,
     L: DeliveryLease + ?Sized,
 {
+    if matches!(&ctx.plan, OutputPlan::SendFresh { .. }) {
+        return fresh_send::deliver(gateway, ctx).await;
+    }
+
     let (start, end) = ctx.send_range;
 
     // NoOp short-circuits before touching the lease — nothing to deliver.
     let chunk_count = match &ctx.plan {
         OutputPlan::NoOp => return DeliveryOutcome::Skipped,
+        OutputPlan::SendFresh { .. } => unreachable!("fresh-send dispatches to its child module"),
         OutputPlan::Replace { .. } => 1usize,
         OutputPlan::SendNewChunks { chunk_count, .. } => *chunk_count,
     };
@@ -992,6 +1025,9 @@ where
                 Err(error) => classify_transport_failure(ctx, &error),
             }
         }
+        (OutputPlan::SendFresh { .. }, _) => {
+            unreachable!("fresh-send transport is owned by the child module")
+        }
         (OutputPlan::NoOp, _) => TransportResult::Delivered {
             replace_kind: None,
             new_chunks: None,
@@ -1294,6 +1330,9 @@ mod tests {
         fn renew(&self, holder: LeaseHolder, key: DeliveryLeaseKey, new_deadline_ms: u64) -> bool {
             self.renew_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.renew(holder, key, new_deadline_ms)
+        }
+        fn reclaim_if_expired(&self, now_ms: u64) -> bool {
+            self.inner.reclaim_if_expired(now_ms)
         }
         fn read(&self) -> LeaseSnapshot {
             self.inner.read()

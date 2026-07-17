@@ -1001,7 +1001,7 @@ fn recent_delivered_content_matches_at(
         .is_some_and(|record| recent_content_fingerprint_matches(record, &fingerprint, now_ms))
 }
 
-fn record_delivered_content_fingerprint_for_generation(
+pub(in crate::services::discord::outbound) fn record_delivered_content_fingerprint_for_generation(
     provider: &ProviderKind,
     channel_id: u64,
     body: &str,
