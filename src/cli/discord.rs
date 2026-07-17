@@ -12,21 +12,78 @@ enum LegacyDiscordDestination {
     User(u64),
 }
 
+trait LegacyDiscordSender {
+    async fn send_file(
+        &self,
+        token: &str,
+        channel_id: u64,
+        path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+
+    async fn send_channel_message(
+        &self,
+        token: &str,
+        channel_id: u64,
+        message: &str,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+
+    async fn send_user_message(
+        &self,
+        token: &str,
+        user_id: u64,
+        message: &str,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+struct ServiceLegacyDiscordSender;
+
+impl LegacyDiscordSender for ServiceLegacyDiscordSender {
+    async fn send_file(
+        &self,
+        token: &str,
+        channel_id: u64,
+        path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        services::discord::send_file_to_channel(token, channel_id, path).await
+    }
+
+    async fn send_channel_message(
+        &self,
+        token: &str,
+        channel_id: u64,
+        message: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        services::discord::send_message_to_channel(token, channel_id, message).await
+    }
+
+    async fn send_user_message(
+        &self,
+        token: &str,
+        user_id: u64,
+        message: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        services::discord::send_message_to_user(token, user_id, message).await
+    }
+}
+
 impl LegacyDiscordPayload<'_> {
-    async fn send(
+    async fn send<S: LegacyDiscordSender + ?Sized>(
         self,
+        sender: &S,
         token: &str,
         destination: LegacyDiscordDestination,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match (self, destination) {
             (Self::File(path), LegacyDiscordDestination::Channel(channel_id)) => {
-                services::discord::send_file_to_channel(token, channel_id, path).await
+                sender.send_file(token, channel_id, path).await
             }
             (Self::Message(message), LegacyDiscordDestination::Channel(channel_id)) => {
-                services::discord::send_message_to_channel(token, channel_id, message).await
+                sender
+                    .send_channel_message(token, channel_id, message)
+                    .await
             }
             (Self::Message(message), LegacyDiscordDestination::User(user_id)) => {
-                services::discord::send_message_to_user(token, user_id, message).await
+                sender.send_user_message(token, user_id, message).await
             }
             (Self::File(_), LegacyDiscordDestination::User(_)) => {
                 unreachable!("legacy Discord file sends only support channels")
@@ -144,7 +201,11 @@ fn execute_legacy_discord_send(request: LegacyDiscordSend<'_>) {
     runtime.block_on(async move {
         let mut last_error = None;
         for token in tokens {
-            match request.payload.send(&token, request.destination).await {
+            match request
+                .payload
+                .send(&ServiceLegacyDiscordSender, &token, request.destination)
+                .await
+            {
                 Ok(()) => {
                     println!("{}", request.destination.success_message(request.payload));
                     return;
@@ -188,12 +249,80 @@ pub fn handle_discord_senddm(message: &str, user_id: u64, hash_key: Option<&str>
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::{
-        LegacyDiscordDestination, LegacyDiscordPayload, LegacyDiscordTokenSelection,
-        resolve_legacy_discord_tokens_with,
+        LegacyDiscordDestination, LegacyDiscordPayload, LegacyDiscordSender,
+        LegacyDiscordTokenSelection, resolve_legacy_discord_tokens_with,
     };
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecordedSend {
+        File {
+            token: String,
+            channel_id: u64,
+            path: String,
+        },
+        ChannelMessage {
+            token: String,
+            channel_id: u64,
+            message: String,
+        },
+        UserMessage {
+            token: String,
+            user_id: u64,
+            message: String,
+        },
+    }
+
+    #[derive(Default)]
+    struct RecordingSender {
+        sends: RefCell<Vec<RecordedSend>>,
+    }
+
+    impl LegacyDiscordSender for RecordingSender {
+        async fn send_file(
+            &self,
+            token: &str,
+            channel_id: u64,
+            path: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.sends.borrow_mut().push(RecordedSend::File {
+                token: token.to_string(),
+                channel_id,
+                path: path.to_string(),
+            });
+            Ok(())
+        }
+
+        async fn send_channel_message(
+            &self,
+            token: &str,
+            channel_id: u64,
+            message: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.sends.borrow_mut().push(RecordedSend::ChannelMessage {
+                token: token.to_string(),
+                channel_id,
+                message: message.to_string(),
+            });
+            Ok(())
+        }
+
+        async fn send_user_message(
+            &self,
+            token: &str,
+            user_id: u64,
+            message: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.sends.borrow_mut().push(RecordedSend::UserMessage {
+                token: token.to_string(),
+                user_id,
+                message: message.to_string(),
+            });
+            Ok(())
+        }
+    }
 
     #[test]
     fn hashed_token_selection_is_shared_by_all_legacy_send_shapes() {
@@ -296,5 +425,48 @@ mod tests {
         assert!(channel.supports(LegacyDiscordPayload::Message("hello")));
         assert!(user.supports(LegacyDiscordPayload::Message("hello")));
         assert!(!user.supports(LegacyDiscordPayload::File("report.txt")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn payload_dispatches_to_the_matching_low_level_sender() {
+        let sender = RecordingSender::default();
+
+        LegacyDiscordPayload::File("/tmp/report.txt")
+            .send(&sender, "file-token", LegacyDiscordDestination::Channel(42))
+            .await
+            .expect("file dispatch should succeed");
+        LegacyDiscordPayload::Message("channel body")
+            .send(
+                &sender,
+                "channel-token",
+                LegacyDiscordDestination::Channel(43),
+            )
+            .await
+            .expect("channel message dispatch should succeed");
+        LegacyDiscordPayload::Message("dm body")
+            .send(&sender, "dm-token", LegacyDiscordDestination::User(44))
+            .await
+            .expect("user message dispatch should succeed");
+
+        assert_eq!(
+            *sender.sends.borrow(),
+            vec![
+                RecordedSend::File {
+                    token: "file-token".to_string(),
+                    channel_id: 42,
+                    path: "/tmp/report.txt".to_string(),
+                },
+                RecordedSend::ChannelMessage {
+                    token: "channel-token".to_string(),
+                    channel_id: 43,
+                    message: "channel body".to_string(),
+                },
+                RecordedSend::UserMessage {
+                    token: "dm-token".to_string(),
+                    user_id: 44,
+                    message: "dm body".to_string(),
+                },
+            ]
+        );
     }
 }
