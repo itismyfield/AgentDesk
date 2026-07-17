@@ -8891,7 +8891,10 @@ fn status_panel_free_renderer_orders_header_fields_on_separate_lines() {
         ),
         "time fields must occupy separate consecutive lines: {out:?}"
     );
-    assert!(!out.contains(" / "), "combined time line is retired: {out:?}");
+    assert!(
+        !out.contains(" / "),
+        "combined time line is retired: {out:?}"
+    );
     assert!(
         out.chars().count() <= STATUS_PANEL_MAX_CHARS,
         "panel must respect the size cap"
