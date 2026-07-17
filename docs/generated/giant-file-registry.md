@@ -99,7 +99,7 @@
 | `src/services/memory/memento.rs` | 1893 |
 | `src/services/onboarding/mod.rs` | 2937 |
 | `src/services/opencode.rs` | 2760 |
-| `src/services/platform/binary_resolver.rs` | 1408 |
+| `src/services/platform/binary_resolver.rs` | 1412 |
 | `src/services/provider.rs` | 1822 |
 | `src/services/qwen.rs` | 2198 |
 | `src/services/routines/agent_executor.rs` | 2131 |

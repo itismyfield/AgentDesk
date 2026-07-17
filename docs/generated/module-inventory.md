@@ -378,7 +378,7 @@
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
 | `services::claude` | `src/services/claude.rs` | 4308 | 2953 | 1355 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
-| `services::claude_command` | `src/services/claude_command.rs` | 949 | 458 | 491 |  |
+| `services::claude_command` | `src/services/claude_command.rs` | 956 | 465 | 491 |  |
 | `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 722 | 369 | 353 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
@@ -1003,7 +1003,7 @@
 | `services::pipeline_override` | `src/services/pipeline_override.rs` | 1001 | 333 | 668 |  |
 | `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 863 | 672 | 191 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 26 | 26 | 0 |  |
-| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1561 | 1408 | 153 | giant-file |
+| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1565 | 1412 | 153 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 97 | 97 | 0 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 49 | 49 | 0 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 1263 | 951 | 312 |  |
