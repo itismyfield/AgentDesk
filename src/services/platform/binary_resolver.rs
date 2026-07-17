@@ -27,6 +27,8 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinaryResolution {
     pub requested_binary: String,
+    // #4627: raw Claude paths remain publicly exposed here; full
+    // by-construction sealing is tracked separately from #4619.
     pub resolved_path: Option<String>,
     pub canonical_path: Option<String>,
     pub source: Option<String>,
@@ -179,6 +181,8 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
         .map(|path| path.to_string_lossy().to_string())
 }
 
+// #4627: this public resolver can return `resolved_path` for Claude, so it is
+// not a complete type-level raw-spawn barrier yet.
 pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
     match resolve_provider_binary_set(provider) {
         ProviderResolutionSet::Candidates(candidates) => match candidates.len() {

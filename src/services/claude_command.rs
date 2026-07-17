@@ -32,13 +32,17 @@ use std::process::Command;
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::platform::BinaryResolution;
 
-/// Opaque capability for the resolved Claude executable.
+/// Opaque capability for the builder's resolved Claude executable path.
 ///
-/// Its only constructor and path consumers are crate-private. In particular,
-/// this type deliberately does not implement `AsRef<OsStr>`, `AsRef<Path>`,
-/// `Deref`, `Display`, or expose any path getter, so code outside this module
-/// cannot feed it to `Command::new` (directly, through a re-binding, or through
-/// a helper).
+/// This type deliberately does not implement `AsRef<OsStr>`, `AsRef<Path>`,
+/// `Deref`, `Display`, or expose any path getter, so `Command::new(ClaudeBinary)`
+/// is a compile error. That seals the builder's typed path, including aliases,
+/// re-bindings, helpers, and closures that receive this capability.
+///
+/// This is not complete resolver-layer sealing: the public
+/// `resolve_provider_binary("claude").resolved_path` still exposes a raw path
+/// that a new spawn site could misuse. Full by-construction sealing is tracked in
+/// #4627; `FORBIDDEN_RAW_SPAWN` remains defense-in-depth in the meantime.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClaudeBinary {
     program: OsString,
@@ -80,6 +84,9 @@ impl ClaudeBinary {
         &self.program
     }
 
+    // The established wrapper/script contracts below require string argv egress.
+    // These controlled conversions are not general path getters or raw-spawn
+    // escape hatches.
     pub(crate) fn append_process_backend_wrapper_args(&self, args: &mut Vec<String>) {
         args.push("--".to_string());
         args.push(self.program.to_string_lossy().into_owned());
