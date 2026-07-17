@@ -847,7 +847,7 @@ pub(crate) fn has_live_tmux_owner(dir: &Path, live_tmux_paths: &HashSet<String>)
 /// whose DB cwd is momentarily missing must not be swept merely because tmux was
 /// temporarily unavailable). Only a SUCCESSFUL query (even an empty one) lets the
 /// sweep proceed.
-fn collect_live_tmux_pane_paths() -> Option<HashSet<String>> {
+pub(crate) fn collect_live_tmux_pane_paths() -> Option<HashSet<String>> {
     let sessions = crate::services::platform::tmux::list_session_names().ok()?;
     fold_pane_paths(sessions, |session| {
         crate::services::platform::tmux::pane_current_path(session)
@@ -889,7 +889,7 @@ fn fold_pane_paths(
     Some(paths)
 }
 
-async fn remove_orphan_worktree(path: &Path) -> Result<()> {
+pub(crate) async fn remove_orphan_worktree(path: &Path) -> Result<()> {
     // Try `git worktree remove --force <path>` first. This requires running
     // from the parent repo, which we infer by reading the .git file inside
     // the worktree (format: `gitdir: /abs/path/.git/worktrees/<name>`).

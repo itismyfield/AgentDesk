@@ -20,6 +20,9 @@
 //!     swept (#3231); pass B recurses one level into the managed root
 //!     (`worktrees/<repo_name>/`) and removes terminal dispatch/automation
 //!     worktrees via `cleanup_managed_worktree` (dirty/unmerged skip).
+//!   * `storage.tmp_pipeline_sweep` — daily. Scans only direct `/private/tmp`
+//!     children with the `adk-` or `agentdesk-` basename prefix; a 3-day activity
+//!     age gate and live-tmux owner guard fail closed before removal.
 //!   * `storage.hang_dump_cleanup` — weekly. Deletes `adk-hang-*.txt` files
 //!     older than 14 days from the `logs/` directory.
 //!   * `storage.db_retention` — weekly. Applies retention policies to
@@ -53,6 +56,7 @@ pub mod db_retention;
 pub mod hang_dump_cleanup;
 pub mod memento_consolidation;
 pub mod target_sweep;
+pub mod tmp_pipeline_sweep;
 pub mod voice_cache_sweep;
 pub mod worktree_orphan_sweep;
 
@@ -88,6 +92,13 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
                 worktree_orphan_sweep::run(config, pool).await
             })
         },
+    );
+
+    // Daily stale pipeline directory sweep under /private/tmp.
+    register_maintenance_job(
+        "storage.tmp_pipeline_sweep",
+        Duration::from_secs(24 * 60 * 60),
+        || Box::pin(tmp_pipeline_sweep::run(tmp_pipeline_sweep::Config::default_runtime())),
     );
 
     // Weekly hang dump cleanup.
