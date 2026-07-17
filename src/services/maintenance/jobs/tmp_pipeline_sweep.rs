@@ -255,7 +255,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{is_stale, is_sweep_candidate, should_remove, APPROVED_NAME_PREFIXES};
+    use super::{APPROVED_NAME_PREFIXES, is_stale, is_sweep_candidate, should_remove};
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
 
     fn prefixes() -> Vec<String> {
@@ -302,7 +302,10 @@ mod tests {
         live_tmux_paths.insert("/private/tmp/adk-impl-4173/src".to_string());
 
         let has_owner = has_live_tmux_owner(candidate, &live_tmux_paths);
-        assert!(has_owner, "a nested live pane must own its candidate directory");
+        assert!(
+            has_owner,
+            "a nested live pane must own its candidate directory"
+        );
         assert!(!should_remove(true, true, has_owner));
     }
 }

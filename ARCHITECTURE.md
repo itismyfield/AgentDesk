@@ -1045,6 +1045,7 @@ src/
 │   │   │   ├── memento_consolidation.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── target_sweep.rs
+│   │   │   ├── tmp_pipeline_sweep.rs
 │   │   │   ├── voice_cache_sweep.rs
 │   │   │   └── worktree_orphan_sweep.rs
 │   │   └── mod.rs
