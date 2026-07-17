@@ -419,7 +419,7 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
 }
 
 #[cfg(unix)]
-pub(super) fn rehydrated_claude_tui_binding_for_tmux_session(
+pub(in crate::services::discord) fn rehydrated_claude_tui_binding_for_tmux_session(
     tmux_session_name: &str,
 ) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
     let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(

@@ -123,6 +123,7 @@ src/
 │   ├── session_agent_resolution.rs
 │   ├── session_observability.rs
 │   ├── session_status.rs
+│   ├── session_tmux_bindings.rs
 │   ├── session_transcripts.rs
 │   ├── table_metadata.rs
 │   └── turns.rs

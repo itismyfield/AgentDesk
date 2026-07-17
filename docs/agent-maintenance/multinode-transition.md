@@ -445,6 +445,10 @@
 
 ### Audited touches
 
+- #4145 DM restart adoption is **WORKER-LOCAL**: the discovery loop and Discord
+  watcher restore read only recent live `sessions` rows whose owner instance
+  matches the current host, and only adopt rows whose exact tmux session is
+  present locally. No leader lease or cross-node routing authority changes.
 - #4550/#4604 intake preservation rolling-deploy contract: worker heartbeats
   advertise `preserve_on_cancel_v1`, and all three routing authorities
   (durable foreign session owner, explicit `/node`, and preferred labels) use the

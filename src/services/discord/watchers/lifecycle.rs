@@ -751,9 +751,8 @@ pub(super) fn load_restored_provider_session_id(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
-    channel_name: &str,
+    tmux_name: &str,
 ) -> Option<String> {
-    let tmux_name = provider.build_tmux_session_name(channel_name);
     let session_keys =
         super::super::adk_session::build_session_key_candidates(token_hash, provider, &tmux_name);
 
@@ -2045,11 +2044,13 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         return;
     }
 
-    // Build channel name → ChannelId map from Discord API (sessions map may be empty after restart)
+    // Build channel name → ChannelId map from restart-safe sources. Runtime
+    // memory is empty after a dcserver restart, and guild enumeration cannot
+    // discover private DM channels.
     let mut name_to_channel: std::collections::HashMap<String, (ChannelId, String)> =
         std::collections::HashMap::new();
 
-    // Try from in-memory sessions first
+    // Try from in-memory sessions first.
     {
         let data = shared.core.lock().await;
         for (&ch_id, session) in &data.sessions {
@@ -2060,7 +2061,49 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         }
     }
 
-    // If in-memory sessions don't cover all tmux sessions, fetch from Discord API
+    // Recover durable runtime bindings next. This is the only deterministic
+    // source for `DM channel id ↔ dm-<user id>` after process memory is lost.
+    if let Some(pool) = shared.pg_pool.as_ref() {
+        let live_session_names = agent_sessions
+            .iter()
+            .map(|session_name| (*session_name).to_string())
+            .collect();
+        let local_instance_id =
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+        match crate::db::session_tmux_bindings::load_live_session_tmux_bindings_pg(
+            pool,
+            &live_session_names,
+            Some(&local_instance_id),
+        )
+        .await
+        {
+            Ok(bindings) => {
+                for binding in bindings {
+                    if binding.provider != provider {
+                        continue;
+                    }
+                    let Ok(channel_id) = binding.channel_id.parse::<u64>() else {
+                        tracing::warn!(
+                            session_name = %binding.session_name,
+                            channel_id = %binding.channel_id,
+                            "watcher restore ignored a persisted non-numeric channel binding"
+                        );
+                        continue;
+                    };
+                    name_to_channel
+                        .entry(binding.session_name)
+                        .or_insert((ChannelId::new(channel_id), binding.tmux_segment));
+                }
+            }
+            Err(error) => tracing::warn!(
+                ?error,
+                "watcher restore could not load persisted tmux channel bindings"
+            ),
+        }
+    }
+
+    // If restart-safe sources don't cover all tmux sessions, fetch guild
+    // channels from Discord as a compatibility fallback.
     let unresolved: Vec<&&str> = agent_sessions
         .iter()
         .filter(|s| !name_to_channel.contains_key(**s))
@@ -2429,6 +2472,20 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         owned_sessions
             .entry(*channel_id)
             .or_insert_with(|| channel_name.clone());
+        crate::services::tui_prompt_dedupe::register_tmux_channel(
+            session_name,
+            channel_id.get(),
+        );
+        if provider == ProviderKind::Claude
+            && let Some(binding) = super::super::tui_prompt_relay::rehydration::rehydrated_claude_tui_binding_for_tmux_session(session_name)
+        {
+            crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+                provider.as_str(),
+                session_name,
+                channel_id.get(),
+                binding,
+            );
+        }
 
         let mut restored_turn = None;
         let initial_offset = if let Some(state) =
@@ -2486,15 +2543,15 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 &shared.token_hash,
                 channel_id.get(),
             );
+            let tmux_name = provider.build_tmux_session_name(channel_name);
             let persisted_session_id = load_restored_provider_session_id(
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &provider,
-                channel_name,
+                &tmux_name,
             );
             let configured_path =
                 super::super::settings::resolve_workspace(*channel_id, Some(channel_name.as_str()));
-            let tmux_name = provider.build_tmux_session_name(channel_name);
             let session_keys = super::super::adk_session::build_session_key_candidates(
                 &shared.token_hash,
                 &provider,

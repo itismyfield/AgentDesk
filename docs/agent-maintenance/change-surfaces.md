@@ -207,9 +207,11 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2077 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2134 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
-    lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
+    lifecycle behavior; +57 from #4145 loading restart-safe persisted tmux↔channel
+    bindings so live DM panes are re-adopted after dcserver restart; #3016
+    phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
     heartbeat timestamp selection into `watchers/lifecycle_decision.rs` and
     keeps lifecycle below its frozen ratchet; -6 from #3736 removing legacy
