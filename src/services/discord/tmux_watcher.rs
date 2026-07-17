@@ -3530,8 +3530,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     OutboxMessage {
                         target: target.as_str(),
                         content: content.as_str(),
-                        // #4486: kept raw — tmux_watcher.rs is a #3016 no-concurrent-edit
-                        // hotfile; alias typing here is deferred to a hotfile-owner pass.
                         bot: "notify",
                         source: "system",
                         reason_code: None,
