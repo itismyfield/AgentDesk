@@ -205,9 +205,9 @@ impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
     }
 }
 
+mod checkpoint_prune;
 mod classification;
 mod phase2;
-mod settled_frontier;
 mod too_old_notice;
 
 #[cfg(test)]
@@ -597,12 +597,12 @@ fn prune_stale_checkpoint_files(dir: &Path, max_checkpoint_age: std::time::Durat
         .filter(|entry| {
             let path = entry.path();
             path.extension().and_then(|extension| extension.to_str()) == Some("txt")
-                && settled_frontier::prune_stale_checkpoint(&path, max_checkpoint_age)
+                && checkpoint_prune::prune_stale_checkpoint(&path, max_checkpoint_age)
                     .inspect_err(|error| {
                         tracing::warn!(
                             path = %path.display(),
                             error = %error,
-                            "catch-up stale checkpoint retained because frontier promotion failed"
+                            "catch-up stale checkpoint could not be pruned"
                         );
                     })
                     .unwrap_or(false)
@@ -1142,7 +1142,6 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let (announce_resolution, notify_resolution) = api.utility_bot_user_ids(shared).await;
         let announce_bot_id = announce_resolution.user_id();
         let notify_bot_id = notify_resolution.user_id();
-        let durable_settled_frontier = settled_frontier::load(&dir, channel_id.get());
         // Newest message that this oldest-first scan has durably settled.
         // Non-recover classifications settle immediately; Recover settles only
         // after an accepted/safe-dedup enqueue. The current cap/defer item never
@@ -1174,11 +1173,6 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
 
         for msg in &messages {
             let mid = msg.id.get();
-            if settled_frontier::contains(durable_settled_frontier, mid) {
-                max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
-                stats.record(CatchUpClassification::Duplicate);
-                continue;
-            }
             let text = msg.content.trim().to_string();
             let msg_ts = msg.id.created_at();
             let age_reference = catch_up_message_age_reference_time(
@@ -1399,9 +1393,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             );
         }
 
-        // Persist the contiguous settled frontier even when a retry is pending.
-        // The current cap/defer item was deliberately not folded in, so this
-        // retires permanent skips without crossing work that still needs retry.
+        // Persist the contiguous scan checkpoint even when a retry is pending.
+        // It remains a mutable recovery cursor, not durable settlement evidence:
+        // an `After` scan can start above a pre-dispatch live checkpoint whose
+        // message has never completed (#4564).
         if let Some(newest) = max_settled_id {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             if retry_checkpoint.is_some()
@@ -1752,6 +1747,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         }
 
         if let Some(newest) = max_recovered_id {
+            // Phase 2 can skip an older raw checkpoint id before accepting a
+            // newer message, so this remains a mutable recovery cursor only.
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             phase2_recovered += stats.enqueued;
         }
@@ -1808,8 +1805,7 @@ mod catch_up_recovery_tests {
         merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
         prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer,
         rearm_catch_up_retry_after_fetch_failure, recent_page_decision, run_catch_up_sweep,
-        settled_frontier, should_pace_before_scan,
-        take_catch_up_retry_checkpoint_after_queue_drain,
+        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::{
         EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
@@ -2080,7 +2076,7 @@ mod catch_up_recovery_tests {
     }
 
     #[test]
-    fn stale_checkpoint_prune_preserves_last_message_lock_sidecars() {
+    fn stale_checkpoint_prune_preserves_lock_and_unrelated_sidecars() {
         let root = scoped_runtime_root();
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(1479671298497183835);
@@ -2093,13 +2089,16 @@ mod catch_up_recovery_tests {
             .join(provider.as_str());
         let checkpoint_path = dir.join(format!("{}.txt", channel_id.get()));
         let lock_path = dir.join(format!("{}.txt.lock", channel_id.get()));
-        std::fs::write(&lock_path, "lock").expect("write lock sidecar");
+        let settled_path = dir.join(format!("{}.txt.settled", channel_id.get()));
+        std::fs::write(&lock_path, "lock-sidecar").expect("write lock sidecar");
+        std::fs::write(&settled_path, "independent-sidecar").expect("write sidecar");
 
         let old_mtime = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - Duration::from_secs(700),
         );
         filetime::set_file_mtime(&checkpoint_path, old_mtime).expect("age checkpoint");
         filetime::set_file_mtime(&lock_path, old_mtime).expect("age lock sidecar");
+        filetime::set_file_mtime(&settled_path, old_mtime).expect("age settled sidecar");
 
         let pruned = prune_stale_checkpoint_files(&dir, Duration::from_secs(600));
 
@@ -2112,22 +2111,14 @@ mod catch_up_recovery_tests {
             lock_path.exists(),
             ".txt.lock flock sidecar must not be pruned"
         );
-        let settled_path = dir.join(format!("{}.txt.settled", channel_id.get()));
-        assert_eq!(
-            settled_frontier::load(&dir, channel_id.get()),
-            Some(1504812094456070174),
-            "pruning must preserve the checkpoint value as a durable settled frontier"
+        assert!(
+            settled_path.exists(),
+            "non-checkpoint sidecars must not be pruned"
         );
-        filetime::set_file_mtime(&settled_path, old_mtime).expect("age settled sidecar");
-
         assert_eq!(
             prune_stale_checkpoint_files(&dir, Duration::from_secs(600)),
             0,
-            "settled sidecars are not checkpoint prune candidates"
-        );
-        assert!(
-            settled_path.exists(),
-            "a stale settled sidecar must survive later prune sweeps"
+            "sidecars are not checkpoint prune candidates"
         );
     }
 

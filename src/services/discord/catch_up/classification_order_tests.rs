@@ -627,35 +627,6 @@ fn write_role_map(root: &std::path::Path, provider: &ProviderKind, channel_id: C
     .expect("write role map");
 }
 
-fn prune_checkpoint_into_settled_frontier(
-    root: &std::path::Path,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    checkpoint: u64,
-) {
-    write_checkpoint(root, provider, channel_id, checkpoint);
-    let checkpoint = checkpoint_path(root, provider, channel_id);
-    filetime::set_file_mtime(
-        &checkpoint,
-        filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - Duration::from_secs(700),
-        ),
-    )
-    .expect("age checkpoint");
-    assert_eq!(
-        prune_stale_checkpoint_files(
-            checkpoint.parent().expect("checkpoint provider dir"),
-            Duration::from_secs(600),
-        ),
-        1,
-        "restart prune must promote and remove the stale checkpoint"
-    );
-    assert!(
-        !checkpoint.exists(),
-        "the configured channel must enter Recent mode after pruning"
-    );
-}
-
 struct TestCatchUpApi {
     messages: Vec<serenity::Message>,
     phase2_messages: Option<Vec<serenity::Message>>,
@@ -1256,87 +1227,71 @@ async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pruned_settled_frontier_suppresses_answered_old_message() {
+async fn pruned_raw_intake_checkpoint_does_not_suppress_undispatched_old_message() {
+    // #4564 P1 end-to-end guard. A human message received by live intake is
+    // stamped into the mutable intake checkpoint BEFORE dispatch, then the
+    // process crashes before dispatch completes. On restart the stale checkpoint
+    // is deleted, never reinterpreted as settlement evidence. The message stays
+    // actionable and is recovered as a TooOld resend notice + DLQ evidence
+    // (#4260 contract).
     let root = scoped_runtime_root();
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(4_564_001);
+    let channel_id = ChannelId::new(4_564_003);
     write_role_map(root.path(), &provider, channel_id);
 
-    let answered_human_id = message_id_with_age(1, Duration::from_secs(450));
-    let bot_response_id = message_id_with_age(2, Duration::from_secs(420));
-    prune_checkpoint_into_settled_frontier(
+    let undispatched_human_id = message_id_with_age(1, Duration::from_secs(450));
+
+    // Intake advanced the mutable cursor to this id, but dispatch never ran, so
+    // there is no processing-completion evidence for it.
+    write_checkpoint(
         root.path(),
         &provider,
         channel_id,
-        bot_response_id.get(),
+        undispatched_human_id.get(),
     );
-
-    let (api, outbox) = TestCatchUpApi::new(vec![
-        discord_message(
-            channel_id,
-            bot_response_id,
-            CURRENT_BOT_ID,
-            true,
-            "이전 요청에 대한 답변",
+    let checkpoint_file = checkpoint_path(root.path(), &provider, channel_id);
+    filetime::set_file_mtime(
+        &checkpoint_file,
+        filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - Duration::from_secs(700),
         ),
-        discord_message(
-            channel_id,
-            answered_human_id,
-            HUMAN_ID,
-            false,
-            "이미 답변된 오래된 요청",
+    )
+    .expect("age checkpoint");
+    assert_eq!(
+        prune_stale_checkpoint_files(
+            checkpoint_file.parent().expect("checkpoint provider dir"),
+            Duration::from_secs(600),
         ),
-    ]);
-    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
-
-    assert!(
-        outbox.lock().expect("outbox capture lock").is_empty(),
-        "answered ids at or below the durable frontier must not be re-notified"
+        1,
+        "the stale intake checkpoint must be pruned",
     );
     assert!(
-        api.dead_letters
-            .lock()
-            .expect("dead-letter capture lock")
-            .is_empty(),
-        "answered ids at or below the durable frontier must not re-enter DLQ"
+        !checkpoint_file.with_extension("txt.settled").exists(),
+        "pruning an unsettled intake checkpoint must not mint settled evidence",
     );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn pruned_settled_frontier_keeps_newer_unprocessed_old_message_actionable() {
-    let root = scoped_runtime_root();
-    let shared = super::super::make_shared_data_for_tests();
-    let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(4_564_002);
-    write_role_map(root.path(), &provider, channel_id);
-
-    let settled_id = message_id_with_age(1, Duration::from_secs(450));
-    let unprocessed_human_id = message_id_with_age(2, Duration::from_secs(400));
-    prune_checkpoint_into_settled_frontier(root.path(), &provider, channel_id, settled_id.get());
 
     let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
         channel_id,
-        unprocessed_human_id,
+        undispatched_human_id,
         HUMAN_ID,
         false,
-        "frontier보다 새로운 미처리 요청",
+        "다운타임 중 유실될 뻔한 미처리 요청",
     )]);
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
     let outbox = outbox.lock().expect("outbox capture lock");
-    assert_eq!(outbox.len(), 1, "the newer old request still needs notice");
+    assert_eq!(
+        outbox.len(),
+        1,
+        "an undispatched downtime message must still be notified once",
+    );
     assert_eq!(
         outbox[0].session_key,
         format!(
             "catch_up_too_old:{channel_id}:{}",
-            unprocessed_human_id.get()
+            undispatched_human_id.get()
         )
-    );
-    assert!(
-        outbox[0]
-            .content
-            .contains("frontier보다 새로운 미처리 요청")
     );
     assert_eq!(
         api.dead_letters
@@ -1345,8 +1300,8 @@ async fn pruned_settled_frontier_keeps_newer_unprocessed_old_message_actionable(
             .iter()
             .filter_map(|record| record.message_id.clone())
             .collect::<Vec<_>>(),
-        vec![unprocessed_human_id.get().to_string()],
-        "a message above the frontier must remain TooOld evidence"
+        vec![undispatched_human_id.get().to_string()],
+        "the undispatched message must be preserved as TooOld DLQ evidence",
     );
 }
 
