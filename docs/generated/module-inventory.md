@@ -521,7 +521,7 @@
 | `services::discord::inflight::episode_guard` | `src/services/discord/inflight/episode_guard.rs` | 158 | 158 | 0 |  |
 | `services::discord::inflight::finalizer_identity` | `src/services/discord/inflight/finalizer_identity.rs` | 56 | 56 | 0 |  |
 | `services::discord::inflight::invariant_test_capture` | `src/services/discord/inflight/invariant_test_capture.rs` | 66 | 0 | 66 |  |
-| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1316 | 987 | 329 |  |
+| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1314 | 985 | 329 |  |
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 821 | 307 | 514 |  |
 | `services::discord::inflight::ownership_ops` | `src/services/discord/inflight/ownership_ops.rs` | 329 | 329 | 0 |  |
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 810 | 810 | 0 |  |

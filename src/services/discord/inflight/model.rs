@@ -16,15 +16,13 @@ use crate::services::agent_protocol::TaskNotificationKind;
 ///
 /// A zero message id is a legitimate sentinel for an unanchored TUI-direct or
 /// recovery turn. Callers must treat `None` as "skip the message-specific step"
-/// instead of constructing `MessageId::new(0)`, which panics.
+/// instead of constructing `MessageId::new(0)`, which panics. Because zero is an
+/// expected sentinel here (not an anomaly), the zero case is silent — unlike
+/// [`opt_channel_id`], where a zero channel id is never legitimate.
 pub(in crate::services::discord) fn opt_message_id(
     raw: u64,
 ) -> Option<poise::serenity_prelude::MessageId> {
-    let Some(raw) = NonZeroU64::new(raw) else {
-        tracing::warn!("skipping Discord message-id operation because persisted id is zero");
-        return None;
-    };
-    Some(poise::serenity_prelude::MessageId::new(raw.get()))
+    NonZeroU64::new(raw).map(|raw| poise::serenity_prelude::MessageId::new(raw.get()))
 }
 
 /// Build an optional `serenity::ChannelId` from a persisted Discord channel id.
