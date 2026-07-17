@@ -81,7 +81,7 @@
 | `src/services/auto_queue.rs` | 1545 |
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
-| `src/services/claude.rs` | 2947 |
+| `src/services/claude.rs` | 2953 |
 | `src/services/claude_tui/input.rs` | 2112 |
 | `src/services/codex.rs` | 3131 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
@@ -106,6 +106,6 @@
 | `src/services/routines/discord_log.rs` | 1593 |
 | `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1112 |
-| `src/services/tui_prompt_dedupe.rs` | 2086 |
+| `src/services/tui_prompt_dedupe.rs` | 2146 |
 | `src/services/turn_orchestrator.rs` | 3288 |
 | `src/voice/receiver.rs` | 1108 |

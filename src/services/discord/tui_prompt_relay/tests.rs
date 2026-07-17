@@ -1738,6 +1738,32 @@ fn slash_command_control_turn_dedupes_double_post_but_not_distinct_commands() {
 }
 
 #[test]
+fn local_compact_bypasses_the_two_second_external_slash_control_gate() {
+    let sess = format!("local-compact-gate-{:p}", &0u8 as *const u8);
+    let compact = relay_observed_prompt_injected_prompt_decision("/compact");
+    assert!(compact.local_only_slash);
+    assert!(
+        !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
+        "the first human local /compact must not enter the external /loop time gate"
+    );
+    assert!(
+        !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
+        "a second human local /compact inside two seconds is still distinct"
+    );
+
+    let loop_control = relay_observed_prompt_injected_prompt_decision("/loop 5m inspect status");
+    assert!(!loop_control.local_only_slash);
+    assert!(
+        !slash_command_control_turn_is_duplicate_external_replay(&loop_control, &sess),
+        "the first external slash control proceeds"
+    );
+    assert!(
+        slash_command_control_turn_is_duplicate_external_replay(&loop_control, &sess),
+        "the existing external /loop raw-wrapper replay guard remains intact"
+    );
+}
+
+#[test]
 fn compact_replay_kind_note_suppression_is_session_scoped_and_expires() {
     let now = std::time::Instant::now();
     let recent = now - Duration::from_secs(29);

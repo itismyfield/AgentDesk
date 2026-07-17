@@ -127,6 +127,7 @@ pub mod tmux_wrapper;
 pub mod tool_output_guard;
 // #3034: 4 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during tui_prompt_dedupe dead-code cleanup.
+pub(crate) mod tui_prompt_control;
 #[allow(dead_code)]
 pub(crate) mod tui_prompt_dedupe;
 pub(crate) mod tui_turn_state;

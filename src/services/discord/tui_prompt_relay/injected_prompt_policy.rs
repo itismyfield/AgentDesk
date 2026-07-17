@@ -9,11 +9,11 @@
 
 use super::*;
 
-// #3075: `strip_terminal_controls` and the ASCII `truncate_chars` are shared
-// with the task-card renderer; the single definitions live in `tui_task_card`
-// so the classifier, formatters, and card parser stay in sync. The parent's
-// glob (`use super::*`) does not re-export these `use`-imported names, so the
-// child module imports them directly to keep the moved bodies byte-identical.
+// #3075: the terminal sanitizer is service-level so prompt observation can use
+// it before Discord relay state exists; `tui_task_card` delegates to that same
+// definition. The ASCII truncator remains task-card owned. The parent's glob
+// (`use super::*`) does not re-export these `use`-imported names, so the child
+// module imports them directly.
 use super::super::response_sanitizer::subagent_notification_card;
 use super::super::tui_task_card::{
     clamp_discord_message_content, strip_terminal_controls, truncate_chars_ascii as truncate_chars,
@@ -238,33 +238,7 @@ fn provider_reuse_prologue_has_prompt_tail(rest: &str, prologue: &str) -> bool {
 
 /// Removes a leading SSH-direct wrapper line/fence; mid-body quotes are untouched.
 pub(super) fn strip_leading_injection_wrapper(text: &str) -> &str {
-    const WRAPPER_MARKER: &str = "터미널에 직접 주입된 입력";
-    if !text.starts_with(WRAPPER_MARKER) {
-        return text;
-    }
-    let Some(after_wrapper_line) = text.find('\n').map(|idx| &text[idx + 1..]) else {
-        return text;
-    };
-    let trimmed = after_wrapper_line.trim_start_matches(['\r', '\n']);
-    if let Some(rest) = trimmed.strip_prefix("```") {
-        if let Some(idx) = rest.find('\n') {
-            return strip_trailing_injection_code_fence(&rest[idx + 1..]);
-        }
-        return after_wrapper_line;
-    }
-    after_wrapper_line
-}
-
-fn strip_trailing_injection_code_fence(text: &str) -> &str {
-    let trimmed = text.trim_end();
-    let Some(before_fence) = trimmed.strip_suffix("```") else {
-        return text;
-    };
-    if before_fence.is_empty() || before_fence.ends_with('\r') || before_fence.ends_with('\n') {
-        before_fence
-    } else {
-        text
-    }
+    crate::services::tui_prompt_control::strip_leading_injection_wrapper(text)
 }
 
 pub(super) fn format_ssh_direct_prompt_notification(

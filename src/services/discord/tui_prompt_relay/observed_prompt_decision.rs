@@ -1,21 +1,19 @@
-//! Pure observed-prompt lifecycle decisions and exact local-only cleanup.
+//! Pure observed-prompt lifecycle decisions.
 //!
-//! Generic prompt observation publishes relay side effects before this relay
-//! loop classifies command text. Keep the classification and its generation-
-//! exact cleanup together so no text/time correlation is needed afterward.
+//! Local-only command classification belongs to the service-level observation
+//! policy because it must run before the dedupe layer records any relay state.
 
-use super::injected_prompt_policy::{
-    InjectedPromptClass, classify_injected_prompt, is_slash_command_control_prompt,
-    slash_command_control_kind, slash_command_control_prompt_is_caveat_only,
-    slash_command_control_prompt_is_local_command_stdout,
+use super::injected_prompt_policy::{InjectedPromptClass, classify_injected_prompt};
+use crate::services::tui_prompt_control::{
+    LocalOnlySlashControl, classify_local_only_slash_control,
 };
-use crate::services::tui_prompt_dedupe::{ObservedTuiPrompt, clear_observed_tui_prompt_effects};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RelayObservedPromptInjectionDecision {
     pub(super) injected_class: InjectedPromptClass,
     pub(super) slash_command_kind: Option<String>,
     pub(super) local_only_slash: bool,
+    pub(super) local_only_control: Option<LocalOnlySlashControl>,
 }
 
 impl RelayObservedPromptInjectionDecision {
@@ -37,79 +35,27 @@ pub(super) fn relay_observed_prompt_injected_prompt_decision(
     prompt: &str,
 ) -> RelayObservedPromptInjectionDecision {
     let injected_class = classify_injected_prompt(prompt);
+    let local_only_control = classify_local_only_slash_control(prompt);
     let slash_command_kind = matches!(injected_class, InjectedPromptClass::SlashCommandControl)
-        .then(|| slash_command_control_kind(prompt));
-    let local_only_slash = matches!(injected_class, InjectedPromptClass::SlashCommandControl)
-        && is_local_only_slash_command_prompt(prompt);
+        .then(|| {
+            local_only_control
+                .as_ref()
+                .map(|control| control.kind.clone())
+                .unwrap_or_else(|| {
+                    super::injected_prompt_policy::slash_command_control_kind(prompt)
+                })
+        });
+    let local_only_slash = local_only_control.is_some();
 
     RelayObservedPromptInjectionDecision {
         injected_class,
         slash_command_kind,
         local_only_slash,
+        local_only_control,
     }
 }
 
 /// Local-completing slash-control prompts skip synthetic turn ownership.
 pub(super) fn is_local_only_slash_command_prompt(prompt: &str) -> bool {
-    if !is_slash_command_control_prompt(prompt) {
-        return false;
-    }
-    let kind = slash_command_control_kind(prompt);
-    super::super::commands::is_local_only_slash_command_kind(&kind)
-        || slash_command_control_prompt_is_caveat_only(prompt)
-        || slash_command_control_prompt_is_local_command_stdout(prompt)
-}
-
-/// Generic observation has already created a lease and SSH marker when this
-/// classifier runs. Clear only the exact generations carried by this event;
-/// a later human `/compact` has different generations and remains untouched.
-pub(super) fn clear_local_only_observation_effects(
-    prompt: &ObservedTuiPrompt,
-    decision: &RelayObservedPromptInjectionDecision,
-) {
-    if decision.local_only_slash {
-        clear_observed_tui_prompt_effects(prompt);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn local_only_compact_clears_only_its_exact_observation_effects() {
-        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        crate::services::tui_prompt_dedupe::reset_state_for_tests();
-
-        let tmux = "tmux-4591-local-only-effects";
-        let mut observed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
-        assert_eq!(
-            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux("claude", tmux, "/compact"),
-            crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect,
-        );
-        let prompt = observed
-            .try_recv()
-            .expect("published local-only observation");
-        assert!(
-            crate::services::tui_prompt_dedupe::external_input_relay_lease("claude", tmux, 1)
-                .is_some()
-        );
-        assert!(
-            crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending("claude", tmux)
-        );
-
-        let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
-        assert!(decision.local_only_slash);
-        clear_local_only_observation_effects(&prompt, &decision);
-
-        assert!(
-            crate::services::tui_prompt_dedupe::external_input_relay_lease("claude", tmux, 1)
-                .is_none()
-        );
-        assert!(
-            !crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending("claude", tmux)
-        );
-    }
+    classify_local_only_slash_control(prompt).is_some()
 }

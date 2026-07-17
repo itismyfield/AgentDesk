@@ -39,8 +39,7 @@ mod task_notification_prompt;
 mod observed_prompt_decision;
 pub(in crate::services::discord) use self::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle;
 use self::observed_prompt_decision::{
-    RelayObservedPromptInjectionDecision, clear_local_only_observation_effects,
-    relay_observed_prompt_injected_prompt_decision,
+    RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
 
 mod idle_transcript_scan;
@@ -332,12 +331,10 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
 }
 
 async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiPrompt) {
-    // Generic prompt observation stamps its relay lease and SSH marker before
-    // publishing. Local-only slash commands clear those exact event generations
-    // immediately, before routing can return early; no text/time marker links
-    // an automatic `/compact` to a later human command.
+    // Local-only controls were classified before publication, so this relay path
+    // never needs to repair pre-publish lease/SSH state. A missing or lagged
+    // receiver therefore cannot strand a local `/compact` relay lease.
     let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
-    clear_local_only_observation_effects(&prompt, &relay_prompt_decision);
     let Some(channel_id) = owner_channel_for_prompt(shared, &prompt) else {
         tracing::debug!(
             provider = %prompt.provider,
@@ -346,6 +343,58 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    if let Some(control) = relay_prompt_decision.local_only_control.as_ref() {
+        let kind = control.kind.as_str();
+        // A newly typed raw local command is never hidden by a nearby compact
+        // continuation. Only a non-raw replay representation may suppress its
+        // duplicate note after the continuation banner.
+        if !control.form.is_raw_invocation()
+            && local_only_kind_note_suppressed_by_recent_continuation(
+                &prompt.tmux_session_name,
+                kind,
+            )
+        {
+            tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                session = %prompt.tmux_session_name,
+                kind = %kind,
+                "suppressed local-only command replay note after recent system continuation"
+            );
+            return;
+        }
+        let Some(notify_http) = shared.serenity_http_or_token_fallback() else {
+            tracing::warn!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                slash_command_kind = %kind,
+                "skipping local-only slash-command note; provider serenity http unavailable"
+            );
+            return;
+        };
+        let note =
+            format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt);
+        match channel_id.say(&*notify_http, note).await {
+            Ok(message) => tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                slash_command_kind = %kind,
+                note_message_id = message.id.get(),
+                "rendered local-only slash command without relay lease, anchor, or synthetic lifecycle"
+            ),
+            Err(error) => tracing::warn!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                slash_command_kind = %kind,
+                error = %error,
+                "failed to send local-only slash-command note"
+            ),
+        }
+        return;
+    }
     // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
     let live_events = &shared.ui.placeholder_live_events;
     live_events.set_turn_request_anchor(channel_id, None);
@@ -360,27 +409,27 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     let injected_class = relay_prompt_decision.injected_class;
     let task_notification =
         task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
-    // #3305/#4033/#4082: one pure decision drives dedupe and the lifecycle
-    // skips, so stdout halves and compact continuation records use the same
-    // classifier for note rendering, external-owner selection, and synthetic start.
-    let local_only_slash = relay_prompt_decision.local_only_slash;
-    if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
+    // Only external slash controls enter this broad two-second kind gate. Local
+    // controls were paired at observation by complementary representation, not
+    // by command text/time, so a second human `/compact` stays observable.
+    if slash_command_control_turn_is_duplicate_external_replay(
+        &relay_prompt_decision,
+        &prompt.tmux_session_name,
+    ) {
         let kind = relay_prompt_decision
             .slash_command_kind
             .as_deref()
-            .expect("slash command control decisions carry a kind");
-        if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, kind) {
-            // #3153 second half within the 2s window: drop before any lease/anchor/
-            // inflight exists; the first half already relays via its own bridge tail.
-            tracing::info!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                tmux_session_name = %prompt.tmux_session_name,
-                slash_command_kind = %kind,
-                "deduped near-simultaneous machine slash-command control half (within 2s window); dropped BEFORE recording any external-input lease so the first active turn's lease is preserved"
-            );
-            return;
-        }
+            .expect("external slash command control decisions carry a kind");
+        // #3153 second half within the 2s window: drop before any lease/anchor/
+        // inflight exists; the first half already relays via its own bridge tail.
+        tracing::info!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            slash_command_kind = %kind,
+            "deduped near-simultaneous machine slash-command control half (within 2s window); dropped BEFORE recording any external-input lease so the first active turn's lease is preserved"
+        );
+        return;
     }
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
@@ -466,56 +515,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // true when the synthetic turn-start is deferred to the detached worker, so the
     // observer skips its own BridgeAdapter tail (no duplicate relay).
     let deferred_synthetic_start: bool;
-    if local_only_slash {
-        // #3305: a LOCAL-completing pass-through (/effort /compact /cost /context)
-        // renders in the TUI but starts no model turn. Post ONLY the kind-only
-        // guidance note (the operator still sees the command ran) and RETURN —
-        // before the `disarm()` below — so the armed `observed_lease_early_return
-        // _guard` clears EXACTLY the lease this observation recorded (generation-
-        // exact, #3041 infra, no new cleanup path). No anchor → no ⏳ (so the #3164
-        // add≡remove invariant holds trivially: no add, no asymmetry); no
-        // `claim_tui_direct_synthetic_turn` → no synthetic inflight → the next
-        // injection is not FOREIGN-ABORTed and the #3302 sweeper sees no fake row.
-        let kind = relay_prompt_decision
-            .slash_command_kind
-            .as_deref()
-            .expect("local-only slash decisions carry a kind");
-        // #3388: in-session /compact rewrites can replay the local command stub
-        // seconds after the continuation banner; hide that duplicate note. The
-        // real machine-injected /compact (#3262) happens minutes before compaction
-        // completes, so it stays outside this narrow replay window.
-        if local_only_kind_note_suppressed_by_recent_continuation(&prompt.tmux_session_name, kind) {
-            tracing::info!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                session = %prompt.tmux_session_name,
-                kind = %kind,
-                "suppressed local-only slash-command kind note after recent system continuation note"
-            );
-            return;
-        }
-        let note =
-            format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt);
-        match channel_id.say(&*notify_http, note).await {
-            Ok(message) => tracing::info!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                tmux_session_name = %prompt.tmux_session_name,
-                slash_command_kind = %kind,
-                note_message_id = message.id.get(),
-                "rendered local-only pass-through slash command as a kind-only note; no active-turn lifecycle (no ⏳/anchor/synthetic inflight), no model turn to relay"
-            ),
-            Err(error) => tracing::warn!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                tmux_session_name = %prompt.tmux_session_name,
-                slash_command_kind = %kind,
-                error = %error,
-                "failed to send local-only pass-through slash command note"
-            ),
-        }
-        return;
-    }
     if suppresses_user_turn_lifecycle {
         // #3178 (codex fix): only SystemContinuation reaches here now —
         // SlashCommandControl was removed from `suppresses_user_turn_lifecycle`
@@ -827,6 +826,29 @@ fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &
     }
     guard.insert(key, now);
     true
+}
+
+/// The old two-second kind gate owns external machine controls such as `/loop`.
+/// Local controls were already paired (raw ↔ envelope only) by prompt
+/// observation, so running them through this broad time gate would collapse a
+/// distinct human `/compact` merely because it arrived nearby.
+fn slash_command_control_turn_is_duplicate_external_replay(
+    decision: &RelayObservedPromptInjectionDecision,
+    tmux_session_name: &str,
+) -> bool {
+    if decision.local_only_slash
+        || !matches!(
+            decision.injected_class,
+            InjectedPromptClass::SlashCommandControl
+        )
+    {
+        return false;
+    }
+    let kind = decision
+        .slash_command_kind
+        .as_deref()
+        .expect("external slash command control decisions carry a kind");
+    !slash_command_control_turn_is_first_sighting(tmux_session_name, kind)
 }
 
 fn record_system_continuation_note_rendered(tmux_session_name: &str) {

@@ -302,6 +302,11 @@ pub fn prepare_claude_tui_launch(
 ) -> Result<ClaudeTuiSessionFiles, String> {
     let files = config.session_files();
     let result = (|| {
+        // A freshly prepared hosted pane must never inherit a disarmed or
+        // ambiguous compact latch from a prior process that used this tmux
+        // name. The next completion establishes its own session/model/window
+        // identity.
+        crate::services::claude_compact_trigger::clear_for_tmux(&config.tmux_session_name);
         crate::services::tui_prompt_dedupe::register_provider_session(
             "claude",
             &config.session_id,

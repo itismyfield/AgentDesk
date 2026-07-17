@@ -443,6 +443,10 @@ fn configure_execute_command_simple(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // This legacy/simple entrypoint does not receive the authoritative compact
+    // policy inputs. It must never inherit an absolute window from dcserver or
+    // a parent Claude process.
+    apply_auto_compact_window_to_command(command, None);
     gateway_proxy_env.apply_to_command(command);
 }
 
@@ -589,7 +593,8 @@ mod simple_launch_env_tests {
             .env(
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
                 "foreign-value",
-            );
+            )
+            .env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "stale-window");
 
         configure_execute_command_simple(&mut command, &resolution, &[], &scrub);
 
@@ -607,6 +612,7 @@ mod simple_launch_env_tests {
             envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&None)
         );
+        assert_eq!(envs.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(&None));
     }
 }
 
@@ -672,6 +678,8 @@ pub fn execute_command_streaming(
             report_provider,
             model_override,
             fast_mode_enabled,
+            compact_percent,
+            compact_lower_bound_tokens,
             cache_ttl_minutes,
             dispatch_type,
         );
