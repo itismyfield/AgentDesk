@@ -31,8 +31,9 @@ use super::formatting::{
 use super::gateway::edit_outbound_message;
 use super::inflight::{
     InflightTurnState, delete_inflight_state_file, emit_reap_abandoned_rebind_origin,
-    load_inflight_states_for_sweep, parse_started_at_unix, reap_abandoned_rebind_origin_locked,
-    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin,
+    load_inflight_states_for_sweep, opt_channel_id, parse_started_at_unix,
+    reap_abandoned_rebind_origin_locked, should_reap_abandoned_rebind_origin,
+    sweep_reap_dead_watcher_rebind_origin,
 };
 use crate::services::provider::ProviderKind;
 
@@ -806,7 +807,9 @@ async fn sweep_orphan_status_panel(
     if !inflight_state_still_same_turn(provider, state, age_secs) {
         return;
     }
-    let channel = serenity::ChannelId::new(state.channel_id);
+    let Some(channel) = opt_channel_id(state.channel_id) else {
+        return;
+    };
     if super::placeholder_cleanup::committed_terminal_panel_anchor_skip(
         &shared.ui.placeholder_cleanup,
         provider,

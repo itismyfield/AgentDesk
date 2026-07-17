@@ -1,5 +1,7 @@
 use super::*;
 use std::sync::Arc;
+
+use crate::services::discord::inflight::opt_message_id;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// #4229 S6: no-result exit handler of the watcher loop (fresh ready-for-input
@@ -640,9 +642,9 @@ pub(super) async fn handle_no_result_exits(
                         // `MessageId::new(0)` would panic.
                         if let Some(state) = ready_for_input_stall_inflight_snapshot
                             .as_ref()
-                            .filter(|state| !state.rebind_origin && state.user_msg_id != 0)
+                            .filter(|state| !state.rebind_origin)
+                            && let Some(user_msg_id) = opt_message_id(state.user_msg_id)
                         {
-                            let user_msg_id = serenity::MessageId::new(state.user_msg_id);
                             crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
                                     &shared,
                                     &http,

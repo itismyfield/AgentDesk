@@ -491,7 +491,7 @@
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 113 | 113 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
 | `services::discord::health::rebind_request` | `src/services/discord/health/rebind_request.rs` | 112 | 87 | 25 |  |
-| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5800 | 2558 | 3242 | giant-file |
+| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5808 | 2566 | 3242 | giant-file |
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 515 | 174 | 341 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
@@ -586,7 +586,7 @@
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 399 | 399 | 0 |  |
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
 | `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 270 | 270 | 0 |  |
-| `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1290 | 995 | 295 |  |
+| `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1293 | 998 | 295 |  |
 | `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 749 | 437 | 312 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 687 | 687 | 0 |  |
 | `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 419 | 200 | 219 |  |
@@ -744,7 +744,7 @@
 | `services::discord::task_notification_delivery::terminal_identity` | `src/services/discord/task_notification_delivery/terminal_identity.rs` | 150 | 150 | 0 |  |
 | `services::discord::task_supervisor` | `src/services/discord/task_supervisor.rs` | 105 | 83 | 22 |  |
 | `services::discord::terminal_ui_obligation` | `src/services/discord/terminal_ui_obligation.rs` | 570 | 507 | 63 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 2515 | 1624 | 891 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 2512 | 1621 | 891 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 70 | 60 | 10 |  |
 | `services::discord::tmux_kill_policy` | `src/services/discord/tmux_kill_policy.rs` | 637 | 547 | 90 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 190 | 190 | 0 |  |
@@ -766,7 +766,7 @@
 | `services::discord::tmux_watcher::jsonl_rotation` | `src/services/discord/tmux_watcher/jsonl_rotation.rs` | 78 | 78 | 0 |  |
 | `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 697 | 519 | 178 |  |
 | `services::discord::tmux_watcher::loop_poll_prologue` | `src/services/discord/tmux_watcher/loop_poll_prologue.rs` | 609 | 609 | 0 |  |
-| `services::discord::tmux_watcher::no_result_exits` | `src/services/discord/tmux_watcher/no_result_exits.rs` | 814 | 814 | 0 |  |
+| `services::discord::tmux_watcher::no_result_exits` | `src/services/discord/tmux_watcher/no_result_exits.rs` | 816 | 816 | 0 |  |
 | `services::discord::tmux_watcher::orphan_status_panel_cleanup` | `src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs` | 227 | 227 | 0 |  |
 | `services::discord::tmux_watcher::panel_decisions` | `src/services/discord/tmux_watcher/panel_decisions.rs` | 599 | 574 | 25 |  |
 | `services::discord::tmux_watcher::placeholder_reclaim` | `src/services/discord/tmux_watcher/placeholder_reclaim.rs` | 320 | 133 | 187 |  |
@@ -781,12 +781,12 @@
 | `services::discord::tmux_watcher::streaming_status_tick` | `src/services/discord/tmux_watcher/streaming_status_tick.rs` | 937 | 937 | 0 |  |
 | `services::discord::tmux_watcher::streaming_status_tick::types` | `src/services/discord/tmux_watcher/streaming_status_tick/types.rs` | 62 | 62 | 0 |  |
 | `services::discord::tmux_watcher::supervisor_relay` | `src/services/discord/tmux_watcher/supervisor_relay.rs` | 619 | 619 | 0 |  |
-| `services::discord::tmux_watcher::task_response_authority` | `src/services/discord/tmux_watcher/task_response_authority.rs` | 472 | 472 | 0 |  |
-| `services::discord::tmux_watcher::terminal_abort_exits` | `src/services/discord/tmux_watcher/terminal_abort_exits.rs` | 537 | 537 | 0 |  |
+| `services::discord::tmux_watcher::task_response_authority` | `src/services/discord/tmux_watcher/task_response_authority.rs` | 478 | 478 | 0 |  |
+| `services::discord::tmux_watcher::terminal_abort_exits` | `src/services/discord/tmux_watcher/terminal_abort_exits.rs` | 534 | 534 | 0 |  |
 | `services::discord::tmux_watcher::terminal_commit_epilogue` | `src/services/discord/tmux_watcher/terminal_commit_epilogue.rs` | 527 | 527 | 0 |  |
 | `services::discord::tmux_watcher::terminal_direct_fallback` | `src/services/discord/tmux_watcher/terminal_direct_fallback.rs` | 698 | 694 | 4 |  |
 | `services::discord::tmux_watcher::terminal_long_chunks` | `src/services/discord/tmux_watcher/terminal_long_chunks.rs` | 303 | 303 | 0 |  |
-| `services::discord::tmux_watcher::terminal_readiness` | `src/services/discord/tmux_watcher/terminal_readiness.rs` | 625 | 579 | 46 |  |
+| `services::discord::tmux_watcher::terminal_readiness` | `src/services/discord/tmux_watcher/terminal_readiness.rs` | 628 | 582 | 46 |  |
 | `services::discord::tmux_watcher::terminal_send` | `src/services/discord/tmux_watcher/terminal_send.rs` | 634 | 580 | 54 |  |
 | `services::discord::tmux_watcher::turn_identity` | `src/services/discord/tmux_watcher/turn_identity.rs` | 511 | 511 | 0 |  |
 | `services::discord::tmux_watcher::turn_stream_collector` | `src/services/discord/tmux_watcher/turn_stream_collector.rs` | 1158 | 1158 | 0 | giant-file |

@@ -6,6 +6,7 @@ use super::*;
 
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::discord::SharedData;
+use crate::services::discord::inflight::opt_message_id;
 use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::provider::ProviderKind;
 
@@ -117,9 +118,14 @@ async fn prepare_watcher_task_response(
                 .placeholder_live_events
                 .claim_terminal_slot_for_card(channel_id, event.kind(), event.tool_use_id());
         }
+        let Some(card_message_id) = opt_message_id(existing.card_message_id) else {
+            return Err(PrepareWatcherTaskResponseError::Transient(
+                "persisted task response card message id is zero".to_string(),
+            ));
+        };
         return Ok(PreparedWatcherTaskResponse {
             claim: existing.outcome,
-            card_message_id: MessageId::new(existing.card_message_id),
+            card_message_id,
             event,
             clients,
         });

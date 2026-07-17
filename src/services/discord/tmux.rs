@@ -235,7 +235,6 @@ pub(super) fn restored_watcher_turn_from_inflight(
     finish_mailbox_on_completion: bool,
 ) -> Option<RestoredWatcherTurn> {
     if state.rebind_origin
-        || state.current_msg_id == 0
         || state
             .tmux_session_name
             .as_deref()
@@ -245,11 +244,14 @@ pub(super) fn restored_watcher_turn_from_inflight(
     }
 
     let provider = state.provider_kind()?;
+    let current_msg_id = super::inflight::opt_message_id(state.current_msg_id)?;
     let response_sent_offset =
         normalize_response_sent_offset(&state.full_response, state.response_sent_offset);
     Some(RestoredWatcherTurn {
-        current_msg_id: MessageId::new(state.current_msg_id),
-        status_message_id: state.status_message_id.map(MessageId::new),
+        current_msg_id,
+        status_message_id: state
+            .status_message_id
+            .and_then(super::inflight::opt_message_id),
         response_sent_offset,
         full_response: state.full_response.clone(),
         last_edit_text: reconstructed_inflight_placeholder_body(state, &provider),
@@ -261,7 +263,7 @@ pub(super) fn restored_watcher_turn_from_inflight(
             .streaming_rollover_frozen_msg_ids
             .iter()
             .copied()
-            .map(MessageId::new)
+            .filter_map(super::inflight::opt_message_id)
             .collect(),
         same_turn_rewind: false,
     })
@@ -1836,18 +1838,13 @@ async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
     let Some(state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
         return;
     };
-    // A restored inflight with no current message id (current_msg_id == 0 — e.g. a
-    // TUI-direct/recovery turn that never anchored a Discord placeholder) has no
-    // placeholder message to reconcile, and `MessageId::new(0)` panics. Skip it so
-    // a single such orphan cannot abort startup watcher reconciliation (which would
-    // leave `reconcile_done` stuck false and the provider permanently degraded).
-    if state.current_msg_id == 0 {
+    let Some(placeholder_msg_id) = super::inflight::opt_message_id(state.current_msg_id) else {
         return;
-    }
+    };
     let ctx = PlaceholderSuppressContext {
         origin: PlaceholderSuppressOrigin::OrphanRestartHandoff,
         provider,
-        placeholder_msg_id: Some(MessageId::new(state.current_msg_id)),
+        placeholder_msg_id: Some(placeholder_msg_id),
         response_sent_offset: state.response_sent_offset,
         last_edit_text: "",
         inflight_state: Some(&state),
@@ -1858,7 +1855,7 @@ async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
     };
     let decision = decide_placeholder_suppression(&ctx);
     let is_edit = matches!(decision, PlaceholderSuppressDecision::Edit(_));
-    let msg_id = MessageId::new(state.current_msg_id);
+    let msg_id = placeholder_msg_id;
     apply_placeholder_suppression(
         http,
         channel_id,

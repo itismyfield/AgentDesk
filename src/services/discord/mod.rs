@@ -2761,14 +2761,14 @@ fn cleanup_retry_inflight_blocks_idle_kickoff(
     let Some(state) = inflight::load_inflight_state(provider, channel_id.get()) else {
         return false;
     };
-    if state.current_msg_id == 0 {
+    let Some(current_msg_id) = inflight::opt_message_id(state.current_msg_id) else {
         return false;
-    }
+    };
 
     shared
         .ui
         .placeholder_cleanup
-        .terminal_cleanup_retry_pending(provider, channel_id, MessageId::new(state.current_msg_id))
+        .terminal_cleanup_retry_pending(provider, channel_id, current_msg_id)
 }
 
 fn idle_queue_snapshot_has_pending_or_marker_backlog(

@@ -16,6 +16,7 @@
 
 use super::super::RestoredWatcherTurn;
 use super::*;
+use crate::services::discord::inflight::opt_message_id;
 use crate::services::discord::replace_outcome_policy::{
     WatcherSendFailureClass, WatcherTerminalRelayPlan, watcher_partial_continuation_retry_plan,
     watcher_send_failure_retry_plan,
@@ -45,14 +46,16 @@ pub(super) fn adopt_watcher_terminal_message_ids_from_inflight(
     if placeholderless_discord_turn {
         return;
     }
-    if placeholder_msg_id.is_none() && inflight.current_msg_id != 0 {
-        *placeholder_msg_id = Some(serenity::MessageId::new(inflight.current_msg_id));
+    if placeholder_msg_id.is_none()
+        && let Some(message_id) = opt_message_id(inflight.current_msg_id)
+    {
+        *placeholder_msg_id = Some(message_id);
         *placeholder_from_restored_inflight = true;
     }
     if status_panel_msg_id.is_none() {
         *status_panel_msg_id =
             crate::services::discord::turn_bridge::normalize_status_panel_message_id(
-                inflight.status_message_id.map(serenity::MessageId::new),
+                inflight.status_message_id.and_then(opt_message_id),
             );
     }
 }
@@ -71,7 +74,7 @@ pub(super) fn merge_persisted_rollover_frozen_msg_ids(
         .streaming_rollover_frozen_msg_ids
         .iter()
         .copied()
-        .map(serenity::MessageId::new)
+        .filter_map(opt_message_id)
     {
         if !local.contains(&msg_id) {
             local.push(msg_id);

@@ -1,5 +1,7 @@
 use super::*;
 use std::sync::Arc;
+
+use crate::services::discord::inflight::opt_message_id;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,11 +273,9 @@ pub(super) async fn handle_terminal_abort_exits(
         // `/api/inflight/rebind` to adopt a live tmux session. The same
         // holds for any user_msg_id == 0 (e.g. a TUI-direct turn) — there
         // is no message to react against and `MessageId::new(0)` panics.
-        if let Some(state) = inflight_state
-            .as_ref()
-            .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
+        if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin)
+            && let Some(user_msg_id) = opt_message_id(state.user_msg_id)
         {
-            let user_msg_id = serenity::MessageId::new(state.user_msg_id);
             crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
                 shared,
                 http,
@@ -437,11 +437,9 @@ pub(super) async fn handle_terminal_abort_exits(
         // to react against and no real user text to re-prompt. The same
         // holds for user_msg_id == 0 (e.g. a TUI-direct turn): no message
         // to react against, and `MessageId::new(0)` would panic.
-        if let Some(state) = inflight_state
-            .as_ref()
-            .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
+        if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin)
+            && let Some(user_msg_id) = opt_message_id(state.user_msg_id)
         {
-            let user_msg_id = serenity::MessageId::new(state.user_msg_id);
             if matches!(&decision, ProviderOverloadDecision::Exhausted) {
                 crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
                     shared,
@@ -484,16 +482,15 @@ pub(super) async fn handle_terminal_abort_exits(
                     // user_msg_id == 0, e.g. a TUI-direct turn) has no
                     // message to re-prompt against; clear retry state
                     // instead of building `MessageId::new(0)` (panics).
-                    if let Some(state) = inflight_state
-                        .as_ref()
-                        .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
+                    if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin)
+                        && let Some(user_msg_id) = opt_message_id(state.user_msg_id)
                     {
                         schedule_provider_overload_retry(
                             Arc::clone(shared),
                             Arc::clone(http),
                             watcher_provider.clone(),
                             channel_id,
-                            serenity::MessageId::new(state.user_msg_id),
+                            user_msg_id,
                             retry_text,
                             attempt,
                             delay,
