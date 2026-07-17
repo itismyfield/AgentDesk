@@ -1477,3 +1477,25 @@
   the verified flag. Fresh provider continuity is cleared only after the shared
   transcript boundary succeeds. No new worker, queue, lease, singleton, routing
   decision, or node-local authority is introduced.
+- #4538 PR-A durable intake placement-owner (dormant schema + owner-CAS
+  primitives) — **PG-lease-backed shared authority, dormant**: migration 0094
+  adds `intake_session_owners` (history-row registry keyed on
+  `(provider, raw_channel_id)` with a monotonic generation, one `active` row per
+  identity via `iso_unique_active`) plus `intake_outbox` owner-stamp columns
+  (`owner_generation`, `owner_instance_id`, `admission_kind`, `idempotency_key`
+  with its sparse unique index). The
+  `src/services/cluster/intake_router_hook/owner_record.rs` acquire / transfer
+  (3-way CAS) / adopt / fenced claim / stale-sweep / SAVEPOINT-admission helpers
+  serialize per channel on a deterministic `pg_advisory_xact_lock` key and fence
+  every authoritative write on `(owner_instance_id, generation)`. This is a
+  **generation-fenced PG-lease** authority in the taxonomy above
+  (`pg_lease_backed_claim`), not leader-only or worker-local. PR-A ships it
+  DORMANT: no production caller resolves ownership or routes intake through it
+  (reader flip + admission wiring are PR-C / #4548), and the schema-activation
+  CHECK (`intake_outbox_open_requires_owner`) and open-route unique re-alignment
+  are deferred to PR-C. Migration 0094 is an irreversible binary-floor boundary:
+  binaries embedding only migrations 0093 or earlier fail SQLx startup
+  validation once 0094 exists, so pre-stage and upgrade the whole fleet before
+  applying it, and do not restart/roll back a pre-0094 binary afterward. Its
+  migration-specific CI gate activates only when the 0094 SQL file is in the
+  changed-file set.

@@ -1,3 +1,5 @@
+use super::injected_prompt_policy::slash_command_control_kind;
+use super::observed_prompt_decision::is_local_only_slash_command_prompt;
 use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
@@ -1736,35 +1738,29 @@ fn slash_command_control_turn_dedupes_double_post_but_not_distinct_commands() {
 }
 
 #[test]
-fn compact_replay_kind_note_suppression_is_session_scoped_and_expires() {
-    let now = std::time::Instant::now();
-    let recent = now - Duration::from_secs(29);
-    let expired = now - Duration::from_secs(31);
-
-    assert!(should_suppress_local_only_kind_note_after_continuation(
-        "/compact",
-        Some(recent),
-        now,
-    ));
-    assert!(should_suppress_local_only_kind_note_after_continuation(
-        "slash",
-        Some(recent),
-        now,
-    ));
+fn local_compact_bypasses_the_two_second_external_slash_control_gate() {
+    let sess = format!("local-compact-gate-{:p}", &0u8 as *const u8);
+    let compact = relay_observed_prompt_injected_prompt_decision("/compact");
+    assert!(compact.local_only_slash);
     assert!(
-        !should_suppress_local_only_kind_note_after_continuation("/compact", None, now),
-        "a different session with no continuation timestamp must not suppress",
+        !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
+        "the first human local /compact must not enter the external /loop time gate"
     );
-    assert!(!should_suppress_local_only_kind_note_after_continuation(
-        "/compact",
-        Some(expired),
-        now,
-    ));
-    assert!(!should_suppress_local_only_kind_note_after_continuation(
-        "/cost",
-        Some(recent),
-        now,
-    ));
+    assert!(
+        !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
+        "a second human local /compact inside two seconds is still distinct"
+    );
+
+    let loop_control = relay_observed_prompt_injected_prompt_decision("/loop 5m inspect status");
+    assert!(!loop_control.local_only_slash);
+    assert!(
+        !slash_command_control_turn_is_duplicate_external_replay(&loop_control, &sess),
+        "the first external slash control proceeds"
+    );
+    assert!(
+        slash_command_control_turn_is_duplicate_external_replay(&loop_control, &sess),
+        "the existing external /loop raw-wrapper replay guard remains intact"
+    );
 }
 
 // #3178 (codex P2 fix): the kind is the REAL command name, so two distinct
@@ -2462,6 +2458,10 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
         prompt: "direct input without runtime binding".to_string(),
         source_event_id: None,
         observed_at: chrono::Utc::now(),
+        external_input_lease_generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        ssh_direct_observation_generation:
+            crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
     };
     let lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -2530,6 +2530,10 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
         prompt: "<task-notification><task-id>repeat-x</task-id><status>completed</status></task-notification>".to_string(),
         source_event_id: None,
             observed_at: chrono::Utc::now(),
+            external_input_lease_generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            ssh_direct_observation_generation:
+                crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         };
     let lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -2587,6 +2591,10 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
         prompt: "<task-notification><task-id>repeat-y</task-id></task-notification>".to_string(),
         source_event_id: None,
         observed_at: chrono::Utc::now(),
+        external_input_lease_generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        ssh_direct_observation_generation:
+            crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
     };
     let repeat_lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -3475,6 +3483,10 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
         prompt: prompt_text.to_string(),
         source_event_id: None,
         observed_at: chrono::Utc::now(),
+        external_input_lease_generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        ssh_direct_observation_generation:
+            crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert_eq!(
@@ -3548,6 +3560,10 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         prompt: "please review PR #1234".to_string(),
         source_event_id: None,
         observed_at: chrono::Utc::now(),
+        external_input_lease_generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        ssh_direct_observation_generation:
+            crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert_eq!(decision.injected_class, InjectedPromptClass::HumanTuiDirect);

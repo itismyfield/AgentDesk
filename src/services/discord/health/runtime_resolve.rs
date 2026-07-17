@@ -9,48 +9,46 @@ use serenity::ChannelId;
 
 use super::HealthRegistry;
 use crate::services::discord::SharedData;
+use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::provider::ProviderKind;
 
-/// Resolve the bot HTTP client by name.
-/// Supported: "announce", "notify", or a provider name like "claude"/"codex".
+/// Resolve the bot HTTP client by alias.
+/// Utility aliases are parsed into a stable role before provider lookup.
 pub async fn resolve_bot_http(
     registry: &HealthRegistry,
     bot: &str,
 ) -> Result<Arc<serenity::Http>, (&'static str, String)> {
-    match bot {
-        "notify" => {
-            let guard = registry.notify_http.lock().await;
-            match guard.as_ref() {
-                Some(http) => Ok(http.clone()),
-                None => Err((
-                    "503 Service Unavailable",
-                    r#"{"ok":false,"error":"notify bot not configured (missing credential/notify_bot_token)"}"#.to_string(),
-                )),
-            }
+    if let Some(role) = UtilityBotRole::from_alias(bot) {
+        return resolve_utility_bot_http(registry, role).await;
+    }
+
+    // Look up provider bot (e.g. "claude", "codex").
+    let clients = registry.discord_http.lock().await;
+    for (name, http) in clients.iter() {
+        if bot_names_match(name, bot) {
+            return Ok(http.clone());
         }
-        "announce" => {
-            let guard = registry.announce_http.lock().await;
-            match guard.as_ref() {
-                Some(http) => Ok(http.clone()),
-                None => Err((
-                    "503 Service Unavailable",
-                    r#"{"ok":false,"error":"announce bot not configured (missing credential/announce_bot_token)"}"#.to_string(),
-                )),
-            }
-        }
-        provider => {
-            // Look up provider bot (e.g. "claude", "codex")
-            let clients = registry.discord_http.lock().await;
-            for (name, http) in clients.iter() {
-                if bot_names_match(name, provider) {
-                    return Ok(http.clone());
-                }
-            }
-            Err((
-                "400 Bad Request",
-                format!(r#"{{"ok":false,"error":"unknown bot: {provider}"}}"#),
-            ))
-        }
+    }
+    Err((
+        "400 Bad Request",
+        format!(r#"{{"ok":false,"error":"unknown bot: {bot}"}}"#),
+    ))
+}
+
+pub(crate) async fn resolve_utility_bot_http(
+    registry: &HealthRegistry,
+    role: UtilityBotRole,
+) -> Result<Arc<serenity::Http>, (&'static str, String)> {
+    match registry.utility_bot_http_clone(role).await {
+        Some(http) => Ok(http),
+        None => Err((
+            "503 Service Unavailable",
+            format!(
+                r#"{{"ok":false,"error":"{} bot not configured (missing {})"}}"#,
+                role.alias(),
+                role.credential_label()
+            ),
+        )),
     }
 }
 

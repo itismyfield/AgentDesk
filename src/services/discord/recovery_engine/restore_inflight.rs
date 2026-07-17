@@ -2269,8 +2269,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         // `context_compact_percent_claude`) instead of `ContextThresholds::default()`
         // so the recovered turn's status panel reflects the user-set auto-compact
         // percent, matching the live launch paths (intake_turn/headless_turn).
-        // This is the display value; the spawn-side `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
-        // env is exported by the launch script (claude_tui/session.rs, #3166).
+        // This is the display ratio; Claude's launch script derives an absolute
+        // `CLAUDE_CODE_AUTO_COMPACT_WINDOW` when its launch model is known.
         let recovery_compact_percent =
             super::adk_session::fetch_context_thresholds(shared.api_port)
                 .await

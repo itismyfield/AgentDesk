@@ -19,10 +19,13 @@
 //! 2. **Pipe input thread**: Reads from process stdin → writes to Claude stdin (pre-formatted)
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::services::claude_command::{
+    ClaudeCommandBuilder, ClaudeLaunchEnv, TMUX_WRAPPER_GATEWAY_RESOLVED_ENV,
+};
 use crate::utils::format::safe_prefix;
 
 #[cfg(unix)]
@@ -118,22 +121,35 @@ pub fn run(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| working_dir.to_string());
 
-    // Spawn Claude with piped stdin (kept open for multi-turn)
-    let mut claude_command = Command::new(claude_bin);
-    crate::services::platform::augment_exec_path(&mut claude_command, claude_bin);
-    crate::services::process::configure_child_process_group(&mut claude_command);
-    let mut child = match claude_command
-        .args(claude_args)
-        .current_dir(&expanded_dir)
-        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
-        .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
-        .env("BASH_MAX_TIMEOUT_MS", "86400000")
-        .env_remove("CLAUDECODE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    // Spawn Claude with piped stdin (kept open for multi-turn). Route the spawn
+    // through the single chokepoint so the gateway launch env is applied
+    // by-construction — even on the public `agentdesk tmux-wrapper` CLI path,
+    // which no managed dcserver caller resolved. `for_tmux_wrapper` keeps this
+    // idempotent with managed callers (they mark the env; the wrapper
+    // reconstructs their exact decision) and safe on the public path (resolve
+    // fresh → Scrub, stripping any stale gateway env from the operator's shell).
+    // The builder also applies the exec-path PATH derived from the binary path,
+    // replacing the former explicit `augment_exec_path` call. `for_tmux_wrapper`
+    // reads the managed marker to classify, then the builder *consumes* it
+    // one-hop (`env_remove`) so the marker never propagates to the Claude child
+    // or its descendants — see `claude_child_command_builder`.
+    let mut builder = claude_child_command_builder(claude_bin, ClaudeLaunchEnv::for_tmux_wrapper());
     {
+        let claude_command = builder.command_mut();
+        crate::services::process::configure_child_process_group(claude_command);
+        claude_command
+            .args(claude_args)
+            .current_dir(&expanded_dir)
+            .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
+            .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
+            .env("BASH_MAX_TIMEOUT_MS", "86400000")
+            .env_remove("CLAUDECODE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
+    let mut claude_command = builder.into_command();
+    let mut child = match claude_command.spawn() {
         Ok(c) => c,
         Err(e) => {
             redacted_eprintln!("\x1b[31mFailed to start Claude: {}\x1b[0m", e);
@@ -508,6 +524,33 @@ pub fn run(
     redacted_eprintln!("\x1b[90m--- Session ended ({exit_reason}) ---\x1b[0m");
 }
 
+/// Build the guarded Claude child `Command` for the tmux-wrapper host and
+/// consume the managed marker as a **one-hop** signal.
+///
+/// `launch_env` is the already-resolved gateway decision from
+/// [`ClaudeLaunchEnv::for_tmux_wrapper`], which classified this launch by
+/// reading [`TMUX_WRAPPER_GATEWAY_RESOLVED_ENV`] from the wrapper's own
+/// environment (managed marker → reconstruct the authority's decision; public →
+/// resolve fresh → Scrub). Once that classification is done the marker has
+/// served its purpose, so it is stripped from the child: a `Command` inherits
+/// its parent's environment, and without this removal the managed marker would
+/// flow into Claude and **every process Claude spawns** — Bash-tool subshells,
+/// hooks, and any nested `agentdesk tmux-wrapper … -- claude …` those launch. A
+/// public wrapper invoked from inside a managed session would then inherit the
+/// marker (and a stale `ANTHROPIC_BASE_URL`) and *reconstruct* a dead-proxy
+/// decision instead of scrubbing to native. Claude needs only the resolved
+/// gateway env, never the marker itself, so removing it is exact.
+fn claude_child_command_builder(
+    claude_bin: &str,
+    launch_env: ClaudeLaunchEnv,
+) -> ClaudeCommandBuilder {
+    let mut builder = ClaudeCommandBuilder::for_binary_path(claude_bin, launch_env);
+    builder
+        .command_mut()
+        .env_remove(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV);
+    builder
+}
+
 /// #3207 (part 1): is this `result` event a deliberate turn-abort (from a
 /// stream-json `control_request{interrupt}`) rather than a fatal startup error?
 /// The interrupt path emits `is_error=true, total_cost_usd=0` just like a
@@ -799,5 +842,57 @@ mod turn_abort_classification_tests {
             "terminal_reason": "aborted_by_user"
         });
         assert!(result_event_is_turn_abort(&json));
+    }
+}
+
+#[cfg(test)]
+mod marker_one_hop_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    fn command_env_map(command: &Command) -> HashMap<String, Option<String>> {
+        command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// Managed-descendant leak guard. The wrapper reconstructs a managed
+    /// (Inject) decision — so the child still receives the resolved gateway env
+    /// — but the marker MUST NOT ride along into the Claude child, otherwise a
+    /// public `agentdesk tmux-wrapper … -- claude …` spawned by a Bash-tool
+    /// subshell inside that Claude would inherit
+    /// `AGENTDESK_CLAUDE_GATEWAY_RESOLVED` and re-inject a stale/dead proxy URL.
+    ///
+    /// `Command::get_envs` reports an explicit `env_remove` as `(key, None)`.
+    /// Deleting the `env_remove` in `claude_child_command_builder` drops this
+    /// entry entirely (the marker would instead be inherited implicitly by the
+    /// child and its descendants), so the final assertion fails — proving the
+    /// removal is what closes the leak.
+    #[test]
+    fn tmux_wrapper_consumes_managed_marker_one_hop() {
+        let builder = claude_child_command_builder(
+            "/opt/claude/bin/claude",
+            ClaudeLaunchEnv::inject_for_test("http://managed.proxy/"),
+        );
+        let envs = command_env_map(&builder.into_command());
+        // Managed gateway decision is still applied to the child…
+        assert_eq!(
+            envs.get("ANTHROPIC_BASE_URL"),
+            Some(&Some("http://managed.proxy/".to_string()))
+        );
+        // …but the managed marker is consumed one-hop (explicitly scrubbed) so
+        // no Claude descendant inherits it and misclassifies a public launch.
+        assert_eq!(
+            envs.get(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV),
+            Some(&None),
+            "the wrapper must env_remove the managed marker from the Claude child"
+        );
     }
 }

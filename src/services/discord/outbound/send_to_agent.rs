@@ -14,13 +14,14 @@
 use sqlx::PgPool;
 
 use super::send_gate::send_message_with_backends;
+use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::HealthRegistry;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ParsedSendToAgentRequest {
     pub(crate) role_id: String,
     pub(crate) message: String,
-    pub(crate) mode: String,
+    pub(crate) mode: UtilityBotRole,
 }
 
 pub(crate) fn parse_send_to_agent_body(
@@ -51,15 +52,21 @@ pub(crate) fn parse_send_to_agent_body(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("announce");
-    if !matches!(mode, "announce" | "notify") {
+        .and_then(UtilityBotRole::from_alias)
+        .unwrap_or(UtilityBotRole::Announce);
+    if json
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty() && UtilityBotRole::from_alias(value).is_none())
+    {
         return Err("mode must be announce or notify");
     }
 
     Ok(ParsedSendToAgentRequest {
         role_id,
         message,
-        mode: mode.to_string(),
+        mode,
     })
 }
 
@@ -85,7 +92,7 @@ pub async fn handle_send_to_agent(
         &target,
         &request.message,
         "system",
-        &request.mode,
+        request.mode.alias(),
         None,
     )
     .await
@@ -104,7 +111,7 @@ mod tests {
             ParsedSendToAgentRequest {
                 role_id: "td".to_string(),
                 message: "hi".to_string(),
-                mode: "announce".to_string(),
+                mode: UtilityBotRole::Announce,
             }
         );
     }
@@ -115,7 +122,7 @@ mod tests {
             parse_send_to_agent_body(r#"{"role_id":"  td  ","message":"hi","mode":"notify"}"#)
                 .expect("should parse");
         assert_eq!(parsed.role_id, "td");
-        assert_eq!(parsed.mode, "notify");
+        assert_eq!(parsed.mode, UtilityBotRole::Notify);
     }
 
     #[test]

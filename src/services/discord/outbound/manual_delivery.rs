@@ -9,6 +9,7 @@ use std::time::Duration;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateMessage};
 
+use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::formatting::{build_long_message_attachment, split_message};
 use crate::services::discord::outbound::delivery::{
     deliver_outbound as deliver_v3_outbound, first_raw_message_id,
@@ -23,6 +24,13 @@ use crate::services::discord::outbound::{
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
+
+fn manual_delivery_log_emoji(bot: &str) -> &'static str {
+    match UtilityBotRole::from_alias(bot) {
+        Some(UtilityBotRole::Notify) => "🔔",
+        Some(UtilityBotRole::Announce) | None => "📨",
+    }
+}
 
 pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundClient>(
     client: &C,
@@ -52,7 +60,7 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
             delivery,
         } => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            let emoji = if bot == "notify" { "🔔" } else { "📨" };
+            let emoji = manual_delivery_log_emoji(bot);
             let delivery_tag = delivery
                 .map(|value| format!(" +{value}"))
                 .unwrap_or_default();
@@ -263,7 +271,9 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
     if content_len > DISCORD_HARD_LIMIT_CHARS {
         // Compatibility shim: v3 text delivery does not yet own attachment
         // upload or manual chunk-posting for over-2k `/api/discord/send` payloads.
-        let result = match if bot == "announce" {
+        let result = match if UtilityBotRole::from_alias(bot)
+            .is_some_and(UtilityBotRole::uses_attachment_for_oversize)
+        {
             client
                 .post_text_attachment(channel_id, content, summary)
                 .await
@@ -354,7 +364,9 @@ pub(super) async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
                 };
             }
         };
-        let result = match if bot == "announce" {
+        let result = match if UtilityBotRole::from_alias(bot)
+            .is_some_and(UtilityBotRole::uses_attachment_for_oversize)
+        {
             client
                 .post_text_attachment(&dm_channel, content, summary)
                 .await
@@ -586,6 +598,19 @@ mod manual_v3_delivery_tests {
     use std::sync::{Arc, Mutex};
 
     use crate::services::discord::health::{HealthRegistry, handle_send};
+
+    #[test]
+    fn manual_delivery_log_emoji_preserves_legacy_mapping() {
+        assert_eq!(
+            manual_delivery_log_emoji(UtilityBotRole::Announce.alias()),
+            "📨"
+        );
+        assert_eq!(
+            manual_delivery_log_emoji(UtilityBotRole::Notify.alias()),
+            "🔔"
+        );
+        assert_eq!(manual_delivery_log_emoji("provider"), "📨");
+    }
 
     #[derive(Clone, Default)]
     struct MockManualOutboundClient {

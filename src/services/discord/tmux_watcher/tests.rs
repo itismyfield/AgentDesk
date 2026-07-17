@@ -4369,6 +4369,7 @@ mod watcher_short_replace_controller {
     fn toc_debug_outcome(outcome: &toc::DeliveryOutcome) -> &'static str {
         match outcome {
             toc::DeliveryOutcome::Delivered { .. } => "Delivered",
+            toc::DeliveryOutcome::FreshDelivered { .. } => "FreshDelivered",
             toc::DeliveryOutcome::NotDelivered { .. } => "NotDelivered",
             toc::DeliveryOutcome::Transient { .. } => "Transient",
             toc::DeliveryOutcome::Unknown { .. } => "Unknown",

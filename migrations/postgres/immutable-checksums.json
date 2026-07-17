@@ -480,6 +480,16 @@
       "path": "migrations/postgres/0093_intake_outbox_preserve_on_cancel.sql",
       "sha256": "f06e71c161037153a690ae5edf850dc036f51f3d71aff6c332bbd2885e1f4842",
       "version": 93
+    },
+    {
+      "path": "migrations/postgres/0094_intake_session_owners.sql",
+      "sha256": "104ee3d0a75ab2a183fff8a867882e25fad6a631cfd57874ce243626955282ce",
+      "version": 94
+    },
+    {
+      "path": "migrations/postgres/0095_intake_outbox_idempotency_key_index.sql",
+      "sha256": "3464e5a5657f99e808ac7125a8a68ed3e18cf3580e063f2649cf3fa7cc593d28",
+      "version": 95
     }
   ],
   "version": 1

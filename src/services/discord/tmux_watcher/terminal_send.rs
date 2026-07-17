@@ -294,6 +294,9 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         // false for it (a fallback send commits → Delivered, never reaching this
         // arm) — byte-identical: the watcher ignores the field.
         toc::DeliveryOutcome::Unknown { .. } => WatcherShortReplaceResult::PartialFailureRetry,
+        // SendFresh is not a short-replace plan; keep an impossible cross-verb
+        // result conservative rather than claiming placeholder delivery.
+        toc::DeliveryOutcome::FreshDelivered { .. } => WatcherShortReplaceResult::Skipped,
         // No-op/no-retry: empty body, or permanent watcher transport failure.
         toc::DeliveryOutcome::Skipped => WatcherShortReplaceResult::Skipped,
     }

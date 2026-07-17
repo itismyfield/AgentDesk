@@ -1,428 +1,722 @@
-//! #3262: AgentDesk-side `/compact` injection for the Claude TUI.
+//! Model-aware Claude `/compact` triggering and busy-turn steering.
 //!
-//! Claude Code documents `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, but honors it only
-//! under specific conditions (auto-compact-window, cloud sessions, or specific
-//! models). AgentDesk therefore ALSO injects `/compact` into the TUI pane as its
-//! primary mechanism instead of relying solely on that conditional env knob.
-//! Codex, by contrast, honours a `model_auto_compact_token_limit` launch knob.
+//! This trigger keeps main's proven *stateless observable-usage* shape: a single
+//! per-pane `armed` bool, consumed once per fill cycle at a turn-completion
+//! boundary and re-armed only after observable occupancy drops back below a
+//! hysteresis floor (which is exactly what a real compaction does). It never owns
+//! an identity/epoch/ticket lifecycle authority; the model-aware context window is
+//! resolved fresh each turn by the caller (`claude_compact_context`) and only the
+//! numeric threshold changes when the model/window changes.
 //!
-//! The Claude TUI *does* respond to a user typing `/compact`, and AgentDesk
-//! already delivers `/compact` into the live pane on demand (the manual
-//! `ClaudeSlashPassthrough::Compact` command → `claude_tui::input::send_followup_prompt`).
-//! This module fires that exact injection AUTOMATICALLY when live context usage
-//! crosses the configured threshold, at a safe (turn-idle) point.
+//! What #4591 keeps on top of main's shape:
+//!   * a *token* threshold (`compact_threshold`) instead of a percentage, so the
+//!     model-aware CTW resolution drives an exact absolute trigger, and
+//!   * the steering primitive (`send_compact_while_busy` under the narrow
+//!     per-pane composer lock) so an auto `/compact` steers a busy pane without
+//!     waiting behind a normal turn's readiness phase.
 //!
-//! Guards (see the issue's Phase-2 design):
-//!   * **claude-only** — the caller passes the provider and we no-op for anything
-//!     but `ProviderKind::Claude` (Codex compacts natively).
-//!   * **threshold-gated, degrade-safe** — a `0`/unset threshold short-circuits
-//!     to "no inject" without touching the latch. A `0`/low usage signal does NOT
-//!     short-circuit: it is the post-compact re-arm signal and never injects on
-//!     its own (`should_inject_compact` requires `usage >= threshold`).
-//!   * **once-per-fill-cycle** — a per-channel armed flag is consumed on inject
-//!     and only RE-ARMS after usage drops back below a hysteresis margin (which
-//!     happens when a compact resets the context, including a drop to ~0), so we
-//!     never re-inject every poll while still parked above the threshold. The
-//!     latch is consumed optimistically and restored if the send fails, so a
-//!     busy/dead-pane rejection retries on a later idle poll rather than being
-//!     silently swallowed.
-//!   * **idle-only** — the caller invokes this at the turn-completion boundary
-//!     (pane idle); the injection itself rides `send_followup_prompt`, whose
-//!     `wait_for_prompt_ready` gate refuses to submit into a busy pane.
-//!   * **no Discord leak** — `send_followup_prompt` records the prompt as
-//!     Discord-originated (`record_discord_originated_prompt`), and the observed
-//!     `/compact` echo is suppressed by the #3153 machine-slash-command
-//!     classifier, so the control string never surfaces as user-visible prose.
+//! Lock discipline (the freeze-bug fix): the per-pane armed state lock is a
+//! LEAF. It is taken only for a brief flip/read in [`observe_and_decide`],
+//! [`pane_still_disarmed_for_send`], [`rearm_for_retry`], and [`clear_for_tmux`],
+//! and is NEVER held across tmux I/O. Only the per-pane composer lock is held
+//! across the send. This removes the old global-latch-held-across-submit
+//! linearization that froze every pane's observation for the duration of a send.
+//!
+//! What #4591 rework adds on top of the stateless shape:
+//!   * F2 — a per-pane fill-cycle GENERATION (a single process-global monotonic
+//!     `u64`, owned in exactly one place under the leaf lock). Every crossing
+//!     that consumes the armed flag stamps the pane with a fresh generation; a
+//!     queued worker carries the generation it was spawned for and proceeds only
+//!     on an exact match. Because the counter is globally monotonic and never
+//!     reused, a same-name pane recreated after [`clear_for_tmux`] gets a
+//!     strictly greater generation, so a stale worker can never match a NEW
+//!     pane's `Some(false)` (closes the armed-bool ABA), and a late
+//!     [`rearm_for_retry`] cannot clobber a newer crossing's consumed flag.
+//!   * F3 — the pre-send recheck re-reads the freshest observed OCCUPANCY (also
+//!     leaf-lock state) under the composer lock and bails when it has fallen
+//!     below the trigger threshold, atomizing "is it still valid to send" with
+//!     the send inside one composer critical section.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
+use crate::services::claude_compact_context::{CompactThreshold, compact_threshold};
+use crate::services::claude_tui::input::CompactSubmitOutcome;
 use crate::services::provider::ProviderKind;
 
-/// Hysteresis margin (percentage points): once we inject at/above the threshold,
-/// the channel only RE-ARMS after usage falls to `threshold - REARM_MARGIN_PCT`
-/// or below. A successful `/compact` drops usage far below the threshold, so this
-/// re-arms naturally on the next turn; a small jitter around the threshold does
-/// not. Keeping the margin modest means a genuine post-compact drop always
-/// re-arms while a same-cycle re-cross never does.
-const REARM_MARGIN_PCT: u64 = 5;
-
-/// Per-channel "armed" state for the once-per-fill-cycle guard. `true` (the
-/// default, via `entry().or_insert(true)`) means the next threshold crossing is
-/// allowed to inject; injecting flips it to `false` until usage drops below the
-/// re-arm point.
-static ARMED_BY_CHANNEL: LazyLock<Mutex<HashMap<u64, bool>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Pure decision: should we inject `/compact` for this poll?
-///
-/// `armed` carries the once-per-cycle latch. Returns `true` only when the
-/// threshold is meaningful (`> 0`), the live usage has reached it, and the
-/// channel is still armed for this fill cycle.
-pub(crate) fn should_inject_compact(usage_pct: u64, threshold_pct: u64, armed: bool) -> bool {
-    threshold_pct > 0 && armed && usage_pct >= threshold_pct
+/// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
+/// channel and the physical tmux pane so [`clear_for_tmux`] can forget every
+/// channel's flag for a recreated pane name (launch/teardown hygiene).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CompactPaneKey {
+    channel_id: u64,
+    tmux_session_name: String,
 }
 
-/// Pure re-arm decision: after a channel has fired (disarmed), should usage at
-/// `usage_pct` re-arm it? Re-arm once usage falls to the hysteresis floor
-/// (`threshold - REARM_MARGIN_PCT`, saturating) or below — i.e. a real context
-/// reset occurred, not a same-cycle jitter at the threshold.
-pub(crate) fn should_rearm(usage_pct: u64, threshold_pct: u64) -> bool {
-    usage_pct <= threshold_pct.saturating_sub(REARM_MARGIN_PCT)
+/// Per-pane once-per-fill-cycle state.
+///
+/// `armed == true` (the default, [`PaneArmState::fresh`]) means the next
+/// threshold crossing may inject; injecting flips it to `false` until observable
+/// occupancy drops below the re-arm floor. `generation` is the fill-cycle id
+/// stamped by the crossing that last consumed `armed` (F2); `last_occupied` is
+/// the freshest observed usage occupancy (F3). All three are read/written only
+/// under [`COMPACT_TRIGGER_STATE`]'s leaf lock.
+#[derive(Clone, Copy, Debug)]
+struct PaneArmState {
+    armed: bool,
+    generation: u64,
+    last_occupied: u64,
 }
 
-/// Update the per-channel armed latch from the latest usage observation and
-/// report whether THIS observation should inject. Combines [`should_inject_compact`]
-/// (consuming the latch on a yes) with [`should_rearm`] (restoring it after a
-/// post-compact drop), so callers get a single edge-triggered answer.
-///
-/// Disarming here is *optimistic*: it consumes the latch the moment we decide to
-/// inject, so two near-simultaneous idle polls cannot both fire (no
-/// double-injection on success). If the subsequent send fails, the caller calls
-/// [`rearm_after_failed_inject`] to restore the latch so a later idle poll
-/// retries while usage is still parked above the threshold (issue #1).
-///
-/// The re-arm check runs FIRST and is independent of `usage_pct == 0`: a
-/// post-compact drop to (or near) zero MUST re-arm the latch. Callers therefore
-/// must NOT short-circuit on `usage_pct == 0` before reaching here, or a
-/// disarmed channel could never re-arm (issue #4).
-fn observe_and_decide(channel_id: u64, usage_pct: u64, threshold_pct: u64) -> bool {
-    let mut guard = ARMED_BY_CHANNEL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let armed = *guard.entry(channel_id).or_insert(true);
-    if !armed && should_rearm(usage_pct, threshold_pct) {
-        guard.insert(channel_id, true);
-        return false;
+impl PaneArmState {
+    fn fresh() -> Self {
+        Self {
+            armed: true,
+            generation: 0,
+            last_occupied: 0,
+        }
     }
-    if should_inject_compact(usage_pct, threshold_pct, armed) {
-        // Optimistically consume the latch so concurrent polls don't double-fire.
-        // Restored by `rearm_after_failed_inject` if the send fails.
-        guard.insert(channel_id, false);
-        return true;
-    }
-    false
 }
 
-/// Restore the armed latch after an injection attempt failed (busy/dead pane or a
-/// rejected send), so a later idle poll retries `/compact` while usage remains
-/// high. Setting the channel back to armed is idempotent — if a concurrent
-/// post-compact drop already re-armed it, this is a harmless no-op write.
-fn rearm_after_failed_inject(channel_id: u64) {
-    let mut guard = ARMED_BY_CHANNEL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.insert(channel_id, true);
+/// The entire persistent trigger state: per-pane arm state plus the single
+/// process-global monotonic fill-cycle counter (F2). One `Mutex` is the sole
+/// authority for both, so a generation is never read or written anywhere else.
+struct CompactTriggerState {
+    panes: HashMap<CompactPaneKey, PaneArmState>,
+    /// Monotonic fill-cycle counter. Only ever increases (one bump per consume),
+    /// so no two crossings — across any pane, or a recreated same-name pane —
+    /// ever share a generation. Generation `0` is reserved for a never-consumed
+    /// pane, which no spawned worker ever carries.
+    next_generation: u64,
 }
 
-/// Claude-only: when the latest (turn-idle) context usage crosses the configured
-/// threshold for the first time this fill cycle, inject `/compact` into the live
-/// TUI via the proven `send_followup_prompt` path on a blocking thread.
+static COMPACT_TRIGGER_STATE: LazyLock<Mutex<CompactTriggerState>> = LazyLock::new(|| {
+    Mutex::new(CompactTriggerState {
+        panes: HashMap::new(),
+        next_generation: 0,
+    })
+});
+
+/// Update the per-pane armed flag from the latest turn-completion occupancy and
+/// report the fill-cycle generation to inject for (`Some(generation)`), or `None`
+/// when THIS observation must not inject.
 ///
-/// `usage_pct` is the live context occupancy percentage already computed for the
-/// status panel; `threshold_pct` is `compact_pct_for(Claude)`. No-ops (and never
-/// touches the latch) for any non-Claude provider or a `0` threshold, so an unset
-/// threshold degrades safely. A `0`/low `usage_pct` is NOT short-circuited: it is
-/// the post-compact re-arm signal and is handled by `observe_and_decide` (which
-/// only injects when usage has reached the threshold).
+/// The re-arm check runs FIRST and is edge-triggered on an observable occupancy
+/// drop (`occupied <= rearm_floor_tokens`): a real context reset — a landed
+/// compaction — drops occupancy far below the threshold and re-arms; a small
+/// jitter around the threshold does not. The inject check consumes the flag
+/// optimistically the moment we decide to fire and stamps the pane with a fresh
+/// generation, so two near-simultaneous completion observations cannot both
+/// inject and a queued worker is bound to exactly its crossing. A non-confirmed
+/// send restores the flag via [`rearm_for_retry`] so a later turn retries while
+/// usage stays high.
+///
+/// `occupied` is the observable USAGE occupancy (`context_occupancy_input_tokens`
+/// = input + cache_create + cache_read). Idempotency is keyed on this reliable
+/// signal, never on a cosmetic `auto_compacted` string heuristic. Every call
+/// records `occupied` as the pane's `last_occupied` for the F3 pre-send re-read.
+fn observe_and_decide(
+    pane: &CompactPaneKey,
+    occupied: u64,
+    threshold: CompactThreshold,
+) -> Option<u64> {
+    let mut guard = COMPACT_TRIGGER_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let state = &mut *guard;
+    // Record the freshest occupancy and read the armed bit; the entry borrow ends
+    // with this block so the generation counter can be mutated below.
+    let armed = {
+        let entry = state
+            .panes
+            .entry(pane.clone())
+            .or_insert_with(PaneArmState::fresh);
+        entry.last_occupied = occupied;
+        entry.armed
+    };
+    // Re-arm first, independent of the inject check: a post-compact occupancy
+    // drop (possibly to ~0) must re-arm a disarmed pane. It never injects and it
+    // leaves the generation untouched (no new crossing was consumed).
+    if !armed && occupied <= threshold.rearm_floor_tokens {
+        if let Some(entry) = state.panes.get_mut(pane) {
+            entry.armed = true;
+        }
+        return None;
+    }
+    if armed && occupied >= threshold.effective_tokens {
+        // Optimistically consume the flag and stamp a fresh generation so
+        // concurrent completion observations do not double-inject and the queued
+        // worker is bound to THIS crossing. Restored by `rearm_for_retry` on a
+        // non-confirmed send; re-armed naturally by the drop branch after a real
+        // compact.
+        let generation = state.next_generation.wrapping_add(1);
+        state.next_generation = generation;
+        if let Some(entry) = state.panes.get_mut(pane) {
+            entry.armed = false;
+            entry.generation = generation;
+        }
+        return Some(generation);
+    }
+    None
+}
+
+/// Observable pre-send revalidation, performed under the composer lock right
+/// before the tmux mutation. A queued worker proceeds only when the pane is:
+///   * still present AND still disarmed for `generation` — no observable
+///     occupancy drop re-armed it and no NEW crossing (a different generation)
+///     superseded it, and no teardown/policy-clear removed it (F2 ABA close),
+///     AND
+///   * still at/above the trigger threshold — the freshest observed occupancy
+///     has not fallen below `effective_tokens`, so a compact is still warranted
+///     (F3 occupancy re-read; a bare `Some(false)` bool cannot express a drop
+///     into the hysteresis band).
+/// The leaf lock is read and released here; it is NEVER held across the send.
+fn pane_still_disarmed_for_send(
+    pane: &CompactPaneKey,
+    generation: u64,
+    threshold: CompactThreshold,
+) -> bool {
+    let guard = COMPACT_TRIGGER_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard.panes.get(pane).is_some_and(|entry| {
+        !entry.armed
+            && entry.generation == generation
+            && entry.last_occupied >= threshold.effective_tokens
+    })
+}
+
+/// Restore the armed flag after a non-confirmed send so a later turn-completion
+/// retries `/compact` while usage stays high — observable retry. Generation-gated
+/// (F2): the restore only lands while the pane is still on the worker's crossing
+/// `generation`, so a stale worker cannot clobber a NEWER crossing's consumed
+/// flag. Idempotent and resurrection-safe: a pane the teardown path already
+/// removed stays removed, so a late worker cannot revive a stale entry.
+fn rearm_for_retry(pane: &CompactPaneKey, generation: u64) {
+    let mut guard = COMPACT_TRIGGER_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(entry) = guard.panes.get_mut(pane) {
+        if entry.generation == generation {
+            entry.armed = true;
+        }
+    }
+}
+
+/// Run the observable pre-send recheck and, if the world is unchanged, the
+/// compact submit — both inside a single per-pane composer critical section. The
+/// composer lock (not the leaf state lock) is the only lock held across the tmux
+/// mutation, so a queued worker may wait behind another composer mutation but
+/// never carries the leaf state lock into `submit`. `None` means the pre-send
+/// recheck bailed (stale/torn-down/below-threshold) and no mutation was
+/// attempted.
+fn submit_under_composer_lock(
+    pane: &CompactPaneKey,
+    generation: u64,
+    threshold: CompactThreshold,
+    submit: impl FnOnce() -> CompactSubmitOutcome,
+) -> Option<CompactSubmitOutcome> {
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+        &pane.tmux_session_name,
+        || {
+            if !pane_still_disarmed_for_send(pane, generation, threshold) {
+                return None;
+            }
+            Some(submit())
+        },
+    )
+}
+
+/// Claude-only: at a watcher-completed (pane-idle) turn boundary, inject
+/// `/compact` into the live TUI when observable context occupancy first crosses
+/// the model-aware token threshold this fill cycle.
+///
+/// `usage_tokens` is the observable occupancy (`context_occupancy_input_tokens`);
+/// `actual_window_tokens` is the launch-provenance-resolved Claude context window
+/// for this turn (`None` when the window cannot be proven — fail closed, never
+/// invent a native fallback). The percentage/lower-bound are combined into an
+/// absolute token threshold each turn, so a model/window change simply changes
+/// the number on the next turn.
+///
+/// Degrade-safe no-ops that never touch the armed flag: a non-Claude provider
+/// (Codex compacts natively), an unresolvable window, or a `0`/disabled percent.
+/// A `0`/low `usage_tokens` is deliberately NOT short-circuited: it is the
+/// post-compact re-arm signal handled inside [`observe_and_decide`].
 pub(crate) fn maybe_inject_compact(
     channel_id: u64,
     tmux_session_name: &str,
     provider: &ProviderKind,
-    usage_pct: u64,
-    threshold_pct: u64,
+    usage_tokens: u64,
+    actual_window_tokens: Option<u64>,
+    compact_percent: u64,
+    lower_bound_tokens: u64,
 ) {
-    // Degrade-safe no-ops: a non-Claude provider (Codex compacts natively) or an
-    // unset/zero threshold (feature off) never inject AND never touch the latch.
-    //
-    // NOTE: `usage_pct == 0` is deliberately NOT short-circuited here. A drop to
-    // (or near) zero is exactly the post-compact signal that must RE-ARM a
-    // disarmed channel; `observe_and_decide` runs the re-arm check first and only
-    // injects when `usage_pct >= threshold_pct`, so usage 0 still cannot inject
-    // (issue #4).
-    if !matches!(provider, ProviderKind::Claude) || threshold_pct == 0 {
+    if !matches!(provider, ProviderKind::Claude) {
         return;
     }
-    if !observe_and_decide(channel_id, usage_pct, threshold_pct) {
+    let tmux_session_name = tmux_session_name.trim();
+    if tmux_session_name.is_empty() {
         return;
     }
-    // The latch was just consumed (disarmed) by `observe_and_decide`. From here
-    // the latch is only left disarmed if the send SUCCEEDS; any failure re-arms
-    // it via `rearm_after_failed_inject` so a later idle poll retries (issue #1).
-    let tmux_session_name = tmux_session_name.to_string();
-    // `send_followup_prompt` is blocking (it polls the pane for readiness and
-    // drives tmux send-keys), so it must not run on the async watcher runtime.
+    // A window this turn could not prove is fail-closed to no-inject (the caller
+    // already applied the model-aware [1m] same-family guard). Unresolvable
+    // window / zero-percent degrade safely WITHOUT touching the armed flag, just
+    // like main's `threshold_pct == 0` short-circuit.
+    let Some(actual_window_tokens) = actual_window_tokens else {
+        return;
+    };
+    let Some(threshold) =
+        compact_threshold(actual_window_tokens, compact_percent, lower_bound_tokens)
+    else {
+        return;
+    };
+    let pane = CompactPaneKey {
+        channel_id,
+        tmux_session_name: tmux_session_name.to_string(),
+    };
+    let Some(generation) = observe_and_decide(&pane, usage_tokens, threshold) else {
+        return;
+    };
+
+    // The flag was just consumed, so at most one blocking worker exists per
+    // crossing. This worker holds ONLY the per-pane composer lock across the tmux
+    // mutation (never the leaf state lock) and performs no turn-readiness wait. It
+    // carries `generation` so the pre-send recheck binds it to THIS crossing.
     tokio::task::spawn_blocking(move || {
-        tracing::info!(
-            tmux_session_name = %tmux_session_name,
-            usage_pct,
-            threshold_pct,
-            "#3262 auto-injecting /compact: live Claude context usage crossed configured threshold at turn-idle"
-        );
-        match inject_compact_under_submit_gate(&tmux_session_name) {
-            Ok(()) => tracing::info!(
-                tmux_session_name = %tmux_session_name,
-                "#3262 auto /compact injected into live Claude TUI"
+        let outcome = submit_under_composer_lock(&pane, generation, threshold, || {
+            crate::services::claude_tui::input::send_compact_while_busy(&pane.tmux_session_name)
+        });
+        match outcome {
+            None => tracing::debug!(
+                tmux_session_name = %pane.tmux_session_name,
+                "skipping stale Claude auto compact before tmux mutation (occupancy drop re-armed, pane torn down, or fell below threshold)"
             ),
-            Err(error) => {
-                // Send failed (busy/dead pane or rejected submit): re-arm so a
-                // later idle poll retries `/compact` while usage stays high.
-                rearm_after_failed_inject(channel_id);
+            Some(CompactSubmitOutcome::AcceptedOrQueued) => tracing::info!(
+                tmux_session_name = %pane.tmux_session_name,
+                usage_tokens,
+                threshold_tokens = threshold.effective_tokens,
+                "Claude auto compact accepted or queued"
+            ),
+            Some(CompactSubmitOutcome::PreMutationRefused) => {
+                // No mutation happened (pane was not in an empty-composer state).
+                // Re-arm so a later idle turn retries while usage stays high.
+                rearm_for_retry(&pane, generation);
+                tracing::debug!(
+                    tmux_session_name = %pane.tmux_session_name,
+                    "Claude auto compact refused before mutation; armed flag restored for retry"
+                );
+            }
+            Some(CompactSubmitOutcome::AmbiguousAfterMutation) => {
+                // Observable retry (replaces the old never-re-arm rule that could
+                // permanently disable auto-compact and let context grow without
+                // bound): re-arm, then `observe_and_decide` next turn only
+                // re-injects when usage is still high AND no compaction was
+                // observed. If the ambiguous send actually landed, occupancy
+                // drops and the re-arm branch keeps it armed without re-injecting.
+                rearm_for_retry(&pane, generation);
                 tracing::warn!(
-                    tmux_session_name = %tmux_session_name,
-                    error = %error,
-                    "#3262 auto /compact injection failed (pane busy/unready or send failed); latch re-armed, will retry on a later turn"
+                    tmux_session_name = %pane.tmux_session_name,
+                    "Claude auto compact outcome ambiguous after tmux mutation; armed flag restored for observable retry next turn"
                 );
             }
         }
     });
 }
 
-/// Drive the `/compact` submit through the SAME per-session turn lock that a
-/// normal Discord follow-up holds (issue #2), so the auto-injection and a user
-/// follow-up can never interleave their readiness check + tmux send against one
-/// live pane. The lock is a `std::sync::Mutex` and `send_followup_prompt` is
-/// blocking (no `.await`), so the guard is never held across an await — matching
-/// the established normal-path pattern in `claude::execute_streaming_local_tui_tmux`.
-#[cfg(unix)]
-fn inject_compact_under_submit_gate(tmux_session_name: &str) -> Result<(), String> {
-    crate::services::claude::with_claude_tui_session_turn_lock(tmux_session_name, || {
-        crate::services::claude_tui::input::send_followup_prompt(
-            tmux_session_name,
-            "/compact",
-            None,
-        )
-    })
-}
-
-/// Non-unix builds have no live tmux TUI (the per-session turn lock and the TUI
-/// driver are `#[cfg(unix)]`), so this path is unreachable in practice. Keep a
-/// degrade-safe direct call so the module still compiles everywhere.
-#[cfg(not(unix))]
-fn inject_compact_under_submit_gate(tmux_session_name: &str) -> Result<(), String> {
-    crate::services::claude_tui::input::send_followup_prompt(tmux_session_name, "/compact", None)
-}
-
-#[cfg(test)]
-pub(crate) fn reset_armed_state_for_test() {
-    ARMED_BY_CHANNEL
+/// Forget every compact armed flag tied to a physical tmux pane. This runs when a
+/// new hosted Claude pane is prepared and when runtime bindings are torn down, so
+/// a recreated pane cannot inherit an old disarmed flag under a reused name.
+pub(crate) fn clear_for_tmux(tmux_session_name: &str) {
+    let tmux_session_name = tmux_session_name.trim();
+    if tmux_session_name.is_empty() {
+        return;
+    }
+    // Removal alone invalidates every stale worker: because `next_generation` is
+    // global-monotonic and never reset here, a same-name pane recreated after
+    // this clear re-inserts as `PaneArmState::fresh` (generation 0) and its first
+    // crossing consumes a strictly greater generation than any prior worker holds.
+    COMPACT_TRIGGER_STATE
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
+        .unwrap_or_else(|error| error.into_inner())
+        .panes
+        .retain(|pane, _| pane.tmux_session_name != tmux_session_name);
 }
 
-/// Test seam (#3262 issue #4): expose the pure latch transition so a CALL-SITE
-/// integration test (in `adk_session`) can prove a turn-completion observation
-/// with `usage_pct == 0` reaches the re-arm — i.e. that the call site does not
-/// short-circuit zero usage before this latch runs. Returns whether THIS
-/// observation injects (the re-arm itself returns `false`). Side-effecting on the
-/// shared latch, so callers must hold [`state_test_guard`].
 #[cfg(test)]
-pub(crate) fn observe_and_decide_for_test(
-    channel_id: u64,
-    usage_pct: u64,
-    threshold_pct: u64,
-) -> bool {
-    observe_and_decide(channel_id, usage_pct, threshold_pct)
+fn reset_for_test() {
+    let mut guard = COMPACT_TRIGGER_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard.panes.clear();
+    guard.next_generation = 0;
 }
 
-/// The latch lives in a single process-global map and `reset_armed_state_for_test`
-/// clears it wholesale, so stateful tests (in THIS module and in any cross-module
-/// call-site integration test) must not interleave. Serialize every test that
-/// touches the shared map behind this lock.
+/// The armed flag is process-global test state. Keep every stateful test
+/// serialized so one fixture cannot clear another under normal parallel runs.
 #[cfg(test)]
-pub(crate) static STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-/// Acquire the shared-latch test serialization guard AND reset the latch, so a
-/// stateful test starts from a known-clean armed map. Used by this module's tests
-/// and by the `adk_session` call-site integration test so both serialize against
-/// the same global latch.
+/// Acquire the shared state guard and reset all compact-trigger test state while
+/// the guard is held. The caller retains the guard for its entire test.
 #[cfg(test)]
-pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = STATE_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    reset_armed_state_for_test();
+        .unwrap_or_else(|error| error.into_inner());
+    reset_for_test();
     guard
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::MutexGuard;
 
-    // Serialize stateful tests behind the module-level `STATE_TEST_LOCK` (lifted to
-    // `pub(crate)` so the `adk_session` call-site integration test serializes
-    // against the SAME global latch). `state_guard` also resets the latch.
-    fn state_guard() -> MutexGuard<'static, ()> {
-        state_test_guard()
+    fn pane() -> CompactPaneKey {
+        CompactPaneKey {
+            channel_id: 42,
+            tmux_session_name: "tmux-4591".to_string(),
+        }
     }
 
-    // A threshold crossing while armed injects.
-    #[test]
-    fn injects_when_threshold_crossed_and_armed() {
-        assert!(should_inject_compact(60, 60, true));
-        assert!(should_inject_compact(95, 60, true));
+    // window 1_000_000, percent 50, lower 300_000 → effective 500_000,
+    // rearm_floor = 500_000 - 5% * 1_000_000 = 450_000.
+    fn threshold_for(window: u64) -> CompactThreshold {
+        compact_threshold(window, 50, 300_000).expect("valid threshold fixture")
     }
 
-    // Below the threshold never injects, armed or not.
-    #[test]
-    fn does_not_inject_below_threshold() {
-        assert!(!should_inject_compact(59, 60, true));
-        assert!(!should_inject_compact(0, 60, true));
+    fn armed_state(pane: &CompactPaneKey) -> Option<bool> {
+        COMPACT_TRIGGER_STATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .panes
+            .get(pane)
+            .map(|entry| entry.armed)
     }
 
-    // Already fired this cycle (disarmed) never re-injects, even far above.
-    #[test]
-    fn does_not_inject_when_already_fired_this_cycle() {
-        assert!(!should_inject_compact(99, 60, false));
-        assert!(!should_inject_compact(60, 60, false));
+    fn panes_is_empty() -> bool {
+        COMPACT_TRIGGER_STATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .panes
+            .is_empty()
     }
 
-    // An unset / zero threshold degrades to no-inject.
+    /// Mutation guard: the optimistic consume (disarm + fresh generation) in the
+    /// inject branch of `observe_and_decide`. Reverting it (not disarming on
+    /// inject) makes the second/third parked observation inject again, so the
+    /// `.is_none()` lines below fail with a double injection while usage stays
+    /// parked above the threshold.
     #[test]
-    fn zero_threshold_never_injects() {
-        assert!(!should_inject_compact(100, 0, true));
+    fn armed_bool_consumed_once_per_fill_cycle() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        assert!(observe_and_decide(&pane, 600_000, threshold).is_some());
+        assert!(observe_and_decide(&pane, 600_000, threshold).is_none());
+        assert!(observe_and_decide(&pane, 999_000, threshold).is_none());
+        assert_eq!(armed_state(&pane), Some(false));
     }
 
-    // Re-arm only after usage drops to the hysteresis floor (post-compact),
-    // not on a same-cycle jitter right at/just-below the threshold.
+    /// Mutation guard: the `occupied <= rearm_floor_tokens` condition on the
+    /// re-arm branch. Reverting it (re-arm whenever `!armed`, without an
+    /// observable occupancy drop) re-arms on the first parked poll, so the
+    /// second parked `observe_and_decide(&pane, 600_000, ...)` finds the pane
+    /// re-armed and injects — the `.is_none()` on that line fails, i.e. a
+    /// `/compact` flood every turn with no genuine compaction between them.
     #[test]
-    fn rearms_only_after_post_compact_drop() {
-        // threshold 60, margin 5 → re-arm floor is 55.
-        assert!(should_rearm(55, 60));
-        assert!(should_rearm(20, 60)); // typical post-compact usage
-        assert!(!should_rearm(56, 60));
-        assert!(!should_rearm(60, 60));
+    fn rearm_requires_observable_occupancy_drop() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        // First crossing injects and disarms.
+        assert!(observe_and_decide(&pane, 600_000, threshold).is_some());
+        // Parked above the re-arm floor: no re-arm, and therefore no re-inject on
+        // any later poll while still parked.
+        assert!(observe_and_decide(&pane, 600_000, threshold).is_none());
+        // A dip that does NOT reach the floor (460_000 > 450_000) still no-ops.
+        assert!(observe_and_decide(&pane, 460_000, threshold).is_none());
+        assert!(observe_and_decide(&pane, 600_000, threshold).is_none());
+        assert_eq!(armed_state(&pane), Some(false));
+        // A genuine occupancy drop to/below the floor re-arms (compaction seen)
+        // and does not itself inject.
+        assert!(observe_and_decide(&pane, 450_000, threshold).is_none());
+        assert_eq!(armed_state(&pane), Some(true));
+        // The next genuine crossing injects again.
+        assert!(observe_and_decide(&pane, 600_000, threshold).is_some());
     }
 
-    // Full per-channel cycle: cross → inject once → stay disarmed while parked
-    // above → re-arm after a post-compact drop → inject again next cross.
+    /// Mutation guard: `pane_still_disarmed_for_send` (the observable pre-send
+    /// recheck). After the latch is consumed for a crossing, an observed
+    /// occupancy drop re-arms the pane (a compaction landed). Reverting the
+    /// recheck to `true` (or to `matches!(get, Some(_))`, ignoring the disarmed
+    /// bool) makes the final assert fail — the queued worker would send a STALE
+    /// second `/compact` after the context was already reset.
     #[test]
-    fn full_cycle_once_per_fill_then_rearm() {
-        let _g = state_guard();
-        let ch = 4242;
-        let threshold = 60;
-        // Below threshold: no inject, stays armed.
-        assert!(!observe_and_decide(ch, 50, threshold));
-        // First crossing: injects, disarms.
-        assert!(observe_and_decide(ch, 62, threshold));
-        // Still parked above on subsequent polls: NO re-inject (once-per-cycle).
-        assert!(!observe_and_decide(ch, 70, threshold));
-        assert!(!observe_and_decide(ch, 99, threshold));
-        // A small dip that does NOT reach the re-arm floor still no-ops.
-        assert!(!observe_and_decide(ch, 58, threshold));
-        // Post-compact drop reaches the floor: re-arms (and does not inject).
-        assert!(!observe_and_decide(ch, 18, threshold));
-        // Next genuine crossing injects again.
-        assert!(observe_and_decide(ch, 65, threshold));
+    fn pre_send_recheck_bails_when_occupancy_drop_rearmed_the_pane() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        // Cross → consume; the queued worker would still see the pane disarmed.
+        let generation = observe_and_decide(&pane, 500_000, threshold).expect("crossing injects");
+        assert!(pane_still_disarmed_for_send(&pane, generation, threshold));
+        // A later completion observes a compaction (occupancy drop) → re-arm.
+        assert!(observe_and_decide(&pane, 400_000, threshold).is_none());
+        // The pre-send recheck must now bail: the world changed.
+        assert!(!pane_still_disarmed_for_send(&pane, generation, threshold));
     }
 
-    // Channels are independent: one channel's latch does not gate another's.
+    /// F3 mutation guard: the `last_occupied >= effective_tokens` clause of
+    /// `pane_still_disarmed_for_send` (the occupancy re-read). After a crossing
+    /// consumes the flag, a later completion whose usage falls BELOW the trigger
+    /// threshold but stays ABOVE the re-arm floor leaves the pane `Some(false)`
+    /// (armed bool unchanged, no re-arm), so a recheck reading ONLY the bool would
+    /// pass. Reverting the occupancy clause makes the final assert fail — a stale
+    /// `/compact` would be sent to a pane that already fell below threshold.
     #[test]
-    fn per_channel_latch_is_independent() {
-        let _g = state_guard();
-        let threshold = 80;
-        assert!(observe_and_decide(1, 85, threshold));
-        // Channel 1 is now disarmed, but channel 2 is still armed.
-        assert!(!observe_and_decide(1, 90, threshold));
-        assert!(observe_and_decide(2, 85, threshold));
+    fn pre_send_recheck_bails_when_occupancy_fell_below_threshold_without_rearming() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        // effective_tokens = 500_000, rearm_floor_tokens = 450_000.
+        let threshold = threshold_for(1_000_000);
+        let generation = observe_and_decide(&pane, 600_000, threshold).expect("crossing injects");
+        assert!(pane_still_disarmed_for_send(&pane, generation, threshold));
+        // Hysteresis band: below effective (500_000) but above the floor
+        // (450_000), so the pane stays disarmed rather than re-arming.
+        assert!(observe_and_decide(&pane, 470_000, threshold).is_none());
+        assert_eq!(
+            armed_state(&pane),
+            Some(false),
+            "a hysteresis-band drop must NOT re-arm the pane"
+        );
+        // The bool alone still reads "disarmed" — only the occupancy re-read bails.
+        assert!(!pane_still_disarmed_for_send(&pane, generation, threshold));
     }
 
-    // Issue #1: a FAILED send must leave the latch ARMED so a later idle poll
-    // retries `/compact` while usage is still parked above the threshold.
+    /// F2 mutation guard: the `generation == generation` match in both
+    /// `pane_still_disarmed_for_send` and `rearm_for_retry`. A worker queued for
+    /// an OLD crossing must neither send nor re-arm after `clear_for_tmux` + a NEW
+    /// same-name crossing re-issued the same `Some(false)` armed value under a
+    /// strictly greater generation (the armed-bool ABA). Reverting either
+    /// generation check (matching only the bool) fails an assert below: the stale
+    /// recheck would pass, or the stale re-arm would clobber the new crossing's
+    /// consumed flag back to `true`.
     #[test]
-    fn failed_send_rearms_for_retry() {
-        let _g = state_guard();
-        let ch = 9001;
-        let threshold = 60;
-        // First crossing injects and (optimistically) disarms.
-        assert!(observe_and_decide(ch, 80, threshold));
-        // While disarmed, a re-cross does NOT inject (once-per-cycle).
-        assert!(!observe_and_decide(ch, 85, threshold));
-        // Simulate the send failing: re-arm.
-        rearm_after_failed_inject(ch);
-        // Now a re-cross at the same (still-high) usage injects again (retry).
-        assert!(observe_and_decide(ch, 85, threshold));
+    fn stale_generation_worker_neither_sends_nor_rearms_after_pane_recreated() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        // Old pane crossing consumes an old generation.
+        let old_generation =
+            observe_and_decide(&pane, 600_000, threshold).expect("old crossing injects");
+        // Teardown + same-name pane recreation, then a NEW crossing consumes.
+        clear_for_tmux(&pane.tmux_session_name);
+        let new_generation =
+            observe_and_decide(&pane, 600_000, threshold).expect("recreated crossing injects");
+        assert_ne!(
+            old_generation, new_generation,
+            "a recreated pane's crossing must get a fresh generation"
+        );
+        // The stale worker must NOT send for the new pane's crossing...
+        assert!(!pane_still_disarmed_for_send(
+            &pane,
+            old_generation,
+            threshold
+        ));
+        // ...and its late re-arm must NOT clobber the new crossing's consumed flag.
+        rearm_for_retry(&pane, old_generation);
+        assert_eq!(
+            armed_state(&pane),
+            Some(false),
+            "a stale-generation re-arm must be a no-op for a newer crossing"
+        );
+        // The current-generation worker remains valid.
+        assert!(pane_still_disarmed_for_send(
+            &pane,
+            new_generation,
+            threshold
+        ));
     }
 
-    // Issue #4: re-arm must be reachable even when usage drops to 0 (post-compact).
-    // The usage==0 case is the canonical re-arm signal and must NOT be skipped.
+    /// Mutation guard: the `None` (teardown) arm of `pane_still_disarmed_for_send`.
+    /// A pane torn down while a worker was queued must not send. Reverting the
+    /// recheck lets the worker send into a recreated/absent pane.
     #[test]
-    fn usage_zero_rearms_disarmed_channel() {
-        let _g = state_guard();
-        let ch = 9002;
-        let threshold = 60;
-        // Fire once, disarm.
-        assert!(observe_and_decide(ch, 80, threshold));
-        assert!(!observe_and_decide(ch, 90, threshold));
-        // Post-compact drop to 0 re-arms (and does not inject).
-        assert!(!observe_and_decide(ch, 0, threshold));
-        // Next genuine crossing injects again.
-        assert!(observe_and_decide(ch, 70, threshold));
+    fn pre_send_recheck_bails_after_teardown_clear() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        let generation = observe_and_decide(&pane, 600_000, threshold).expect("crossing injects");
+        assert!(pane_still_disarmed_for_send(&pane, generation, threshold));
+        clear_for_tmux(&pane.tmux_session_name);
+        assert!(!pane_still_disarmed_for_send(&pane, generation, threshold));
     }
 
-    // Issue #4: a small threshold (<= REARM_MARGIN_PCT) underflows the re-arm
-    // floor to 0 via saturating_sub. Re-arm must then require usage to fall to 0,
-    // which a post-compact drop reaches — the latch must NOT be permanently stuck.
+    /// Lock-discipline + pre-send-recheck integration. Proves (a) the composer
+    /// lock — not the leaf state lock — serializes the queued worker (it cannot
+    /// validate or send until the held composer lock releases), and (b) a teardown
+    /// that lands while the worker is queued makes the pre-send recheck bail with
+    /// zero sends. Reverting the recheck lets the worker send after teardown
+    /// (sends == 1, outcome != None). Holding the leaf lock across `submit`
+    /// instead of the composer lock would let the worker run immediately, failing
+    /// the `recv_timeout(25ms).is_err()` assertion.
+    #[cfg(unix)]
     #[test]
-    fn small_threshold_rearms_only_at_zero() {
-        // threshold 3, margin 5 → saturating floor is 0.
-        assert_eq!(3u64.saturating_sub(REARM_MARGIN_PCT), 0);
-        // Only usage 0 reaches the floor; any non-zero usage does not re-arm.
-        assert!(should_rearm(0, 3));
-        assert!(!should_rearm(1, 3));
-        assert!(!should_rearm(2, 3));
+    fn queued_worker_revalidates_under_composer_lock_and_bails_on_teardown() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
 
-        let _g = state_guard();
-        let ch = 9003;
-        let threshold = 3;
-        // Crossing at/above 3 injects and disarms.
-        assert!(observe_and_decide(ch, 5, threshold));
-        // Still parked above: no re-inject.
-        assert!(!observe_and_decide(ch, 9, threshold));
-        // A small dip that does not reach 0 does NOT re-arm.
-        assert!(!observe_and_decide(ch, 1, threshold));
-        // Post-compact drop to 0 re-arms.
-        assert!(!observe_and_decide(ch, 0, threshold));
-        // Next crossing injects again — latch was never permanently blocked.
-        assert!(observe_and_decide(ch, 4, threshold));
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        let generation = observe_and_decide(&pane, 500_000, threshold).expect("crossing injects");
+        let sends = Arc::new(AtomicUsize::new(0));
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let worker_pane = pane.clone();
+        let worker_sends = Arc::clone(&sends);
+
+        crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+            &pane.tmux_session_name,
+            || {
+                let worker = std::thread::spawn(move || {
+                    queued_tx.send(()).expect("signal queued compact worker");
+                    let outcome =
+                        submit_under_composer_lock(&worker_pane, generation, threshold, || {
+                            worker_sends.fetch_add(1, Ordering::SeqCst);
+                            CompactSubmitOutcome::AcceptedOrQueued
+                        });
+                    outcome_tx.send(outcome).expect("return compact outcome");
+                });
+                queued_rx
+                    .recv_timeout(Duration::from_millis(250))
+                    .expect("worker must queue behind the held composer lock");
+                assert!(
+                    outcome_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+                    "the queued worker must not validate or send before the composer lock releases"
+                );
+                clear_for_tmux(&pane.tmux_session_name);
+                worker
+            },
+        )
+        .join()
+        .expect("compact worker thread");
+
+        assert_eq!(
+            outcome_rx
+                .recv_timeout(Duration::from_millis(250))
+                .expect("worker outcome"),
+            None
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
     }
 
-    // Issue #4 corollary: threshold == 1 (margin underflows) still re-arms at 0.
+    /// Observable retry: a non-confirmed send (`PreMutationRefused` or
+    /// `AmbiguousAfterMutation`) restores the flag so the next turn re-injects
+    /// only while usage stays high, and a real compaction (occupancy drop) is
+    /// still observed instead of re-firing. Mutation guard: `rearm_for_retry`.
+    /// Reverting it (leave disarmed on ambiguous) permanently disables
+    /// auto-compact for a stuck-high pane — the `observe_and_decide(&pane,
+    /// 700_000, ...)` re-inject assert fails.
     #[test]
-    fn threshold_one_rearms_at_zero() {
-        assert_eq!(1u64.saturating_sub(REARM_MARGIN_PCT), 0);
-        assert!(should_rearm(0, 1));
-        assert!(!should_rearm(1, 1));
-
-        let _g = state_guard();
-        let ch = 9004;
-        let threshold = 1;
-        assert!(observe_and_decide(ch, 1, threshold));
-        assert!(!observe_and_decide(ch, 50, threshold));
-        assert!(!observe_and_decide(ch, 0, threshold)); // re-arm
-        assert!(observe_and_decide(ch, 1, threshold)); // injects again
+    fn ambiguous_after_mutation_rearms_for_observable_retry() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        let generation = observe_and_decide(&pane, 700_000, threshold).expect("crossing injects");
+        assert_eq!(armed_state(&pane), Some(false));
+        // Simulate the worker's ambiguous-after-mutation outcome.
+        rearm_for_retry(&pane, generation);
+        assert_eq!(armed_state(&pane), Some(true));
+        // Usage still high and no compaction observed → retry next turn.
+        assert!(observe_and_decide(&pane, 700_000, threshold).is_some());
     }
 
-    // The end-to-end no-op guards still hold: a zero threshold never injects and
-    // never disarms, so the latch is untouched (degrade-safe / feature off).
+    /// A pane the teardown path removed must not be resurrected by a late
+    /// worker's re-arm. Mutation guard: the `if let Some(..)` presence check in
+    /// `rearm_for_retry`. Reverting it to an unconditional insert re-creates a
+    /// stale entry, so the `armed_state(&pane).is_none()` assertion fails.
     #[test]
-    fn zero_threshold_maybe_inject_is_noop() {
-        let _g = state_guard();
-        let ch = 9005;
-        // threshold 0 → maybe_inject_compact returns before observe_and_decide.
-        maybe_inject_compact(ch, "irrelevant-session", &ProviderKind::Claude, 100, 0);
-        // Latch untouched: still armed (default), so a real threshold later fires.
-        assert!(observe_and_decide(ch, 80, 60));
+    fn rearm_after_teardown_does_not_resurrect_a_cleared_pane() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        let generation = observe_and_decide(&pane, 600_000, threshold).expect("crossing injects");
+        clear_for_tmux(&pane.tmux_session_name);
+        rearm_for_retry(&pane, generation);
+        assert!(armed_state(&pane).is_none());
     }
 
-    // Non-Claude providers never inject and never touch the latch.
+    /// `clear_for_tmux` forgets every channel's flag for a recreated pane name.
     #[test]
-    fn non_claude_provider_maybe_inject_is_noop() {
-        let _g = state_guard();
-        let ch = 9006;
-        maybe_inject_compact(ch, "irrelevant-session", &ProviderKind::Codex, 100, 60);
-        assert!(observe_and_decide(ch, 80, 60));
+    fn clear_for_tmux_removes_every_channel_flag_for_recreated_pane() {
+        let _guard = state_test_guard();
+        let first_pane = pane();
+        let second_pane = CompactPaneKey {
+            channel_id: 43,
+            tmux_session_name: first_pane.tmux_session_name.clone(),
+        };
+        let threshold = threshold_for(1_000_000);
+        assert!(observe_and_decide(&first_pane, 600_000, threshold).is_some());
+        assert!(observe_and_decide(&second_pane, 600_000, threshold).is_some());
+        clear_for_tmux(&first_pane.tmux_session_name);
+        assert!(panes_is_empty());
+        // A recreated pane starts armed again.
+        assert!(observe_and_decide(&first_pane, 600_000, threshold).is_some());
+    }
+
+    /// Degrade-safe no-inject paths never touch the armed flag and never spawn a
+    /// worker (so these are safe to call without a Tokio runtime): a non-Claude
+    /// provider, an unresolvable window, and a zero/disabled percent.
+    #[test]
+    fn maybe_inject_degrades_safely_without_touching_the_flag() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        maybe_inject_compact(
+            pane.channel_id,
+            &pane.tmux_session_name,
+            &ProviderKind::Codex,
+            600_000,
+            Some(1_000_000),
+            50,
+            300_000,
+        );
+        assert!(armed_state(&pane).is_none());
+        maybe_inject_compact(
+            pane.channel_id,
+            &pane.tmux_session_name,
+            &ProviderKind::Claude,
+            600_000,
+            None,
+            50,
+            300_000,
+        );
+        assert!(armed_state(&pane).is_none());
+        maybe_inject_compact(
+            pane.channel_id,
+            &pane.tmux_session_name,
+            &ProviderKind::Claude,
+            600_000,
+            Some(1_000_000),
+            0,
+            300_000,
+        );
+        assert!(armed_state(&pane).is_none());
+    }
+
+    /// Empty tmux session names are ignored (no flag entry created).
+    #[test]
+    fn blank_tmux_session_name_is_ignored() {
+        let _guard = state_test_guard();
+        maybe_inject_compact(
+            42,
+            "   ",
+            &ProviderKind::Claude,
+            600_000,
+            Some(1_000_000),
+            50,
+            300_000,
+        );
+        assert!(panes_is_empty());
     }
 }

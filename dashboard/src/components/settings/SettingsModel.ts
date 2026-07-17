@@ -134,6 +134,7 @@ export const NUMERIC_CONFIG_KEYS = new Set([
   "context_compact_percent",
   "context_compact_percent_codex",
   "context_compact_percent_claude",
+  "context_compact_lower_bound_tokens",
   "server_port",
 ]);
 
@@ -203,6 +204,10 @@ export const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string
   context_compact_percent_claude: {
     ko: "Claude 전용 컨텍스트 compact 기준입니다.",
     en: "Provider-specific context compaction threshold for Claude.",
+  },
+  context_compact_lower_bound_tokens: {
+    ko: "컨텍스트 compact를 요청하기 전의 최소 사용 토큰입니다.",
+    en: "Minimum context usage in tokens before compaction is requested.",
   },
 };
 

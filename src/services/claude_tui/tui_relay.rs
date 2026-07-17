@@ -210,7 +210,24 @@ async fn handle_send(
     State(backend): State<Arc<dyn SendBackend>>,
     Json(req): Json<SendRequest>,
 ) -> (StatusCode, Json<Value>) {
-    handle_send_with_backend(req, backend.as_ref())
+    // P3 #4616: `handle_send_with_backend` acquires the per-pane composer mutation
+    // lock (a `std::sync::Mutex`) and holds it across the blocking tmux paste +
+    // Enter, which can wait several seconds behind a busy-pane auto `/compact`.
+    // Blocking a tokio worker thread on a std Mutex starves the async runtime, so
+    // run the whole blocking section on a blocking thread — matching the other
+    // composer holders, which already offload via `spawn_blocking`
+    // (`claude_stop_delivery`, `claude_compact_trigger`).
+    let outcome =
+        tokio::task::spawn_blocking(move || handle_send_with_backend(req, backend.as_ref())).await;
+    match outcome {
+        Ok(response) => response,
+        Err(join_error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(error_json(&format!(
+                "tui send worker join error: {join_error}"
+            ))),
+        ),
+    }
 }
 
 fn handle_send_with_backend(
@@ -236,39 +253,53 @@ fn handle_send_with_backend(
     }
 
     let bytes = req.text.len();
-    if !req.text.is_empty() {
-        let buffer_name = allocate_buffer_name();
-        if let Err(error) = backend.load_buffer(&buffer_name, &req.text) {
-            return ok_error_json(&format!("tmux load-buffer failed: {error}"));
-        }
+    // F1: hold the SAME per-pane composer mutation lock `/compact` steering uses
+    // across the paste + Enter, so a `/tui/send` and a busy-pane auto `/compact`
+    // cannot interleave their key sends — otherwise the two could co-mingle into
+    // a single corrupt `/compact<user text>` submission (or `/compact` could be
+    // Enter-submitted mid-paste). This HTTP handler holds no other lock, so the
+    // composer lock is the outermost acquisition here (one-directional order, no
+    // deadlock). The hold is narrowed to just the paste + Enter mutation.
+    let mutation = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+        &session_name,
+        || -> Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)> {
+            if !req.text.is_empty() {
+                let buffer_name = allocate_buffer_name();
+                backend
+                    .load_buffer(&buffer_name, &req.text)
+                    .map_err(|error| ok_error_json(&format!("tmux load-buffer failed: {error}")))?;
 
-        // `paste-buffer -p -r -d` pastes in bracketed-paste mode (so the TUI
-        // recognises it as a paste, not many tiny keystrokes), preserves LF
-        // (so it does NOT get auto-Enter'd by tmux), and deletes the buffer
-        // after pasting.
-        if let Err(error) = backend.paste_buffer(&session_name, &buffer_name, true) {
-            // Best-effort cleanup of the orphan buffer is fine to skip:
-            // tmux removes buffers when the server exits and we never reuse
-            // the UUID-suffixed name.
-            return ok_error_json(&format!("tmux paste-buffer failed: {error}"));
-        }
-    }
+                // `paste-buffer -p -r -d` pastes in bracketed-paste mode (so the
+                // TUI recognises it as a paste, not many tiny keystrokes),
+                // preserves LF (so it does NOT get auto-Enter'd by tmux), and
+                // deletes the buffer after pasting. A failed paste skips
+                // best-effort orphan-buffer cleanup: tmux removes buffers when the
+                // server exits and we never reuse the UUID-suffixed name.
+                backend
+                    .paste_buffer(&session_name, &buffer_name, true)
+                    .map_err(|error| {
+                        ok_error_json(&format!("tmux paste-buffer failed: {error}"))
+                    })?;
+            }
 
-    let mut submitted = false;
-    let mut not_before = None;
-    if req.submit {
-        let turn_boundary = Utc::now();
-        match backend.send_enter(&session_name) {
-            Ok(()) => {
+            let mut submitted = false;
+            let mut not_before = None;
+            if req.submit {
+                let turn_boundary = Utc::now();
+                backend.send_enter(&session_name).map_err(|error| {
+                    ok_error_json(&format!("tmux send-keys Enter failed: {error}"))
+                })?;
                 submitted = true;
                 not_before = Some(turn_boundary);
                 remember_send_not_before(&session_name, turn_boundary);
             }
-            Err(error) => {
-                return ok_error_json(&format!("tmux send-keys Enter failed: {error}"));
-            }
-        }
-    }
+            Ok((submitted, not_before))
+        },
+    );
+    let (submitted, not_before) = match mutation {
+        Ok(values) => values,
+        Err(response) => return response,
+    };
 
     let resp = SendResponse {
         ok: true,
@@ -658,6 +689,169 @@ mod tests {
             Some(explicit),
             "caller-supplied not_before must override the remembered send boundary"
         );
+    }
+
+    /// F1 mutation guard: `/tui/send` must hold the per-pane composer mutation
+    /// lock across its paste + Enter, so it cannot interleave key sends with a
+    /// busy-pane auto `/compact`. While a simulated `/compact` holds the composer
+    /// lock for the session, the handler must NOT reach its paste stage; it
+    /// proceeds only after the lock releases. Reverting the composer-lock wrapping
+    /// in `handle_send_with_backend` lets the paste run immediately even while the
+    /// lock is held, failing the `recv_timeout(..).is_err()` assertion.
+    #[cfg(unix)]
+    #[test]
+    fn tui_send_holds_composer_lock_across_paste_and_enter() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct SignalingBackend {
+            paste_reached: mpsc::Sender<()>,
+        }
+        impl SendBackend for SignalingBackend {
+            fn has_session(&self, _session_name: &str) -> bool {
+                true
+            }
+            fn load_buffer(&self, _buffer_name: &str, _text: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn paste_buffer(
+                &self,
+                _session_name: &str,
+                _buffer_name: &str,
+                _delete: bool,
+            ) -> Result<(), String> {
+                self.paste_reached.send(()).expect("signal paste reached");
+                Ok(())
+            }
+            fn send_enter(&self, _session_name: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let session = format!("adk-tui-send-lock-{}", uuid::Uuid::new_v4());
+        let (holding_tx, holding_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (paste_tx, paste_rx) = mpsc::channel();
+
+        // Simulate `/compact` steering holding the composer lock for this session.
+        let lock_session = session.clone();
+        std::thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &lock_session,
+                || {
+                    holding_tx.send(()).expect("signal compact holding lock");
+                    release_rx.recv().expect("await release");
+                },
+            );
+        });
+        holding_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("compact must acquire the composer lock first");
+
+        // Fire `/tui/send` on another thread; it must block on the composer lock.
+        let handler_session = session.clone();
+        std::thread::spawn(move || {
+            let req = SendRequest {
+                session_name: handler_session,
+                text: "hello".to_string(),
+                submit: true,
+            };
+            let backend = SignalingBackend {
+                paste_reached: paste_tx,
+            };
+            let _ = handle_send_with_backend(req, &backend);
+        });
+
+        assert!(
+            paste_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "/tui/send paste must wait behind the /compact composer lock"
+        );
+        release_tx.send(()).expect("release compact");
+        paste_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("/tui/send paste proceeds once the composer lock releases");
+    }
+
+    /// P3 #4616 regression: the async `handle_send` must offload its blocking
+    /// composer-lock wait (`handle_send_with_backend` holds a `std::sync::Mutex`
+    /// across the tmux paste + Enter) onto a blocking thread via `spawn_blocking`,
+    /// so it never blocks a tokio runtime worker. On a current-thread runtime, a
+    /// concurrently-spawned canary task must still make progress WHILE the handler
+    /// is parked on a composer lock held elsewhere.
+    ///
+    /// Guard removal: reverting `handle_send` to call `handle_send_with_backend`
+    /// directly (no `spawn_blocking`) blocks the single runtime worker on the std
+    /// Mutex for the whole composer hold, so the canary cannot be polled until the
+    /// lock releases — the observer samples `false` and this test fails. The
+    /// composer hold is time-bounded on an independent std thread, so the pre-fix
+    /// behaviour fails cleanly rather than hanging.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_send_offloads_blocking_composer_wait_off_the_runtime_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const HOLD_MS: u64 = 200;
+
+        let session = format!("adk-tui-send-p3-{}", uuid::Uuid::new_v4());
+
+        // A busy-pane `/compact` holds the composer lock for `HOLD_MS`, released on
+        // an independent std timer so the pre-fix path fails cleanly (never hangs).
+        let (holding_tx, holding_rx) = mpsc::channel();
+        let lock_session = session.clone();
+        std::thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &lock_session,
+                || {
+                    holding_tx
+                        .send(())
+                        .expect("signal compact holding composer");
+                    std::thread::sleep(Duration::from_millis(HOLD_MS));
+                },
+            );
+        });
+        holding_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("compact must acquire the composer lock first");
+
+        // Canary task: flips the flag the moment the runtime worker polls it.
+        let canary = std::sync::Arc::new(AtomicBool::new(false));
+        let canary_task = std::sync::Arc::clone(&canary);
+        tokio::spawn(async move {
+            canary_task.store(true, Ordering::SeqCst);
+        });
+
+        // Observer runs OFF the runtime: it samples the canary mid-hold-window, so
+        // it can witness worker starvation the starved runtime could not report.
+        let observer_canary = std::sync::Arc::clone(&canary);
+        let (observed_tx, observed_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(HOLD_MS / 2));
+            observed_tx
+                .send(observer_canary.load(Ordering::SeqCst))
+                .expect("report mid-window canary sample");
+        });
+
+        // Drive the async handler; awaiting it must free the worker (fix) so the
+        // runtime can poll the canary while the blocking paste waits off-worker.
+        let backend: Arc<dyn SendBackend> = Arc::new(FakeSendBackend);
+        let req = SendRequest {
+            session_name: session.clone(),
+            text: "hello".to_string(),
+            submit: true,
+        };
+        let (status, body) = handle_send(State(backend), Json(req)).await;
+
+        let observed_mid_window = observed_rx
+            .recv()
+            .expect("observer must report the mid-window canary sample");
+        assert!(
+            observed_mid_window,
+            "the current-thread runtime worker must stay free to poll other tasks while /tui/send is parked on the composer lock"
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["ok"], true);
     }
 
     fn make_event(provider: &str, sid: &str, kind: HookEventKind, payload: Value) -> HookEvent {

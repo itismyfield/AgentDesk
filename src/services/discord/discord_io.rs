@@ -129,7 +129,8 @@ async fn notify_source_agent(
     context: &serde_json::Value,
 ) -> Result<(), String> {
     let token =
-        crate::credential::read_bot_token("announce").ok_or("no announce bot token configured")?;
+        crate::credential::read_bot_token(super::bot_role::UtilityBotRole::Announce.alias())
+            .ok_or("no announce bot token configured")?;
 
     // Prefer the stored channel_id from the pending row (supports alt/thread channels)
     let channel_id: u64 = if let Some(ch) = stored_channel_id {

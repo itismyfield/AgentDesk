@@ -31,6 +31,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_backend::StreamLineState;
 use tracing::Instrument;
 
+mod delivery_outcome_classify;
 mod idle_jsonl;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
@@ -744,12 +745,17 @@ impl SessionBoundDiscordRelaySink {
                 );
                 Ok(SessionRelayDeliveryOutcome::Delivered)
             }
-            // Ambiguous/failed (PartialContinuationFailure / transport Err): controller released without committing (I2 — offset NOT advanced). Surface `Err(Transient)`.
-            toc::DeliveryOutcome::Transient { .. }
+            // #4046 S1r-1 P2: FreshDelivered is a confirmed cross-verb POST (dormant
+            // here); its `Permanent` mapping is a non-retry INTENT marker only and does
+            // NOT itself prevent a duplicate POST — the sink consumer is
+            // error-variant-blind (see `delivery_outcome_classify` doc + #4623). Others
+            // are uncommitted → retriable. Classified out-of-line (frozen #3016 giant).
+            non_delivery @ (toc::DeliveryOutcome::FreshDelivered { .. }
+            | toc::DeliveryOutcome::Transient { .. }
             | toc::DeliveryOutcome::Unknown { .. }
-            | toc::DeliveryOutcome::Skipped => Err(RelaySinkError::Transient(
-                "session-bound short-replace controller delivery not confirmed".to_string(),
-            )),
+            | toc::DeliveryOutcome::Skipped) => Err(
+                delivery_outcome_classify::short_replace_non_delivery_error(&non_delivery),
+            ),
         }
     }
 

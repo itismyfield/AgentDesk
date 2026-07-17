@@ -308,7 +308,9 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
     // should still be able to reset slot session state). The session/clear
     // path already covers the data side; archive is the optional Discord
     // side-effect.
-    let Some(token) = crate::credential::read_bot_token("announce") else {
+    let Some(token) = crate::credential::read_bot_token(
+        crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
+    ) else {
         tracing::warn!(
             "[auto-queue] skipping archive_slot_threads: no announce bot token configured"
         );

@@ -4,6 +4,7 @@ import type { KanbanCard, KanbanCardStatus } from "../../types";
 import {
   BOARD_COLUMN_DEFS,
   TERMINAL_STATUSES,
+  coerceTimestampMs,
   getBoardColumnStatus,
   isManualInterventionCard,
   isReviewCard,
@@ -146,7 +147,11 @@ export function useKanbanBoardModel(params: UseKanbanBoardModelParams) {
         if (cardTypeFilter === "review" && !isReviewCard(c)) return false;
         return true;
       })
-      .sort((a: KanbanCard, b: KanbanCard) => (b.completed_at ?? 0) - (a.completed_at ?? 0));
+      .sort(
+        (a: KanbanCard, b: KanbanCard) =>
+          (coerceTimestampMs(b.completed_at) ?? 0) -
+          (coerceTimestampMs(a.completed_at) ?? 0),
+      );
   }, [repoCards, cardTypeFilter]);
 
   useEffect(() => { setRecentDonePage(0); }, [selectedRepo]);
@@ -174,7 +179,9 @@ export function useKanbanBoardModel(params: UseKanbanBoardModelParams) {
       grouped.set(column.status, []);
     }
     for (const card of filteredCards) {
-      grouped.get(getBoardColumnStatus(card.status))?.push(card);
+      const mappedStatus = getBoardColumnStatus(card.status);
+      const targetStatus = grouped.has(mappedStatus) ? mappedStatus : "backlog";
+      grouped.get(targetStatus)?.push(card);
     }
 
     const isAncestor = (possibleAncestorId: string, card: KanbanCard): boolean => {
@@ -208,7 +215,12 @@ export function useKanbanBoardModel(params: UseKanbanBoardModelParams) {
         const aRoot = getRootCard(a);
         const bRoot = getRootCard(b);
         if (aRoot.sort_order !== bRoot.sort_order) return aRoot.sort_order - bRoot.sort_order;
-        if (aRoot.updated_at !== bRoot.updated_at) return bRoot.updated_at - aRoot.updated_at;
+        if (aRoot.updated_at !== bRoot.updated_at) {
+          return (
+            (coerceTimestampMs(bRoot.updated_at) ?? 0) -
+            (coerceTimestampMs(aRoot.updated_at) ?? 0)
+          );
+        }
 
         if (a.parent_card_id !== b.parent_card_id) {
           if (!a.parent_card_id) return -1;
@@ -217,7 +229,10 @@ export function useKanbanBoardModel(params: UseKanbanBoardModelParams) {
           if (a.parent_card_id > b.parent_card_id) return 1;
         }
         if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
-        return b.updated_at - a.updated_at;
+        return (
+          (coerceTimestampMs(b.updated_at) ?? 0) -
+          (coerceTimestampMs(a.updated_at) ?? 0)
+        );
       });
     }
     return grouped;

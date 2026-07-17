@@ -788,11 +788,14 @@ where
 fn configure_version_probe_command(command: &mut Command, resolution: &BinaryResolution) {
     apply_binary_resolution(command, resolution);
     if resolution.requested_binary == "claude" {
-        // `--version` never routes models or spawns subagents, so probes always run
-        // native (Scrub), independent of gateway/config state. Turn launches use
-        // `resolve_for_launch` elsewhere.
-        crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv::Scrub
-            .apply_to_command(command);
+        // `--version` never routes models or spawns subagents, so probes always
+        // run native (Scrub). The gateway policy for this launch class lives in
+        // the single chokepoint authority (`VersionProbe => Scrub`); turn
+        // launches take the `Turn` intent there.
+        crate::services::claude_command::ClaudeLaunchEnv::resolve(
+            crate::services::claude_command::ClaudeLaunchIntent::VersionProbe,
+        )
+        .apply_to_command(command);
     }
 }
 
