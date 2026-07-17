@@ -636,7 +636,8 @@ pub(super) fn apply_bridge_long_chunks_outcome(
             *locals.preserve_inflight_for_cleanup_retry = true;
             *locals.bridge_skip_holder_owns_inflight = true;
         }
-        toc::DeliveryOutcome::NotDelivered { .. }
+        toc::DeliveryOutcome::FreshDelivered { .. }
+        | toc::DeliveryOutcome::NotDelivered { .. }
         | toc::DeliveryOutcome::Unknown { .. }
         | toc::DeliveryOutcome::Skipped
         | toc::DeliveryOutcome::Delivered { .. } => {
@@ -909,8 +910,8 @@ pub(super) fn apply_bridge_short_replace_outcome(
                 turn_id,
             );
         }
-        // Empty body — excluded by the cutover gate, so unreachable in prod.
-        toc::DeliveryOutcome::Skipped => {
+        // SendFresh and empty body are excluded by this replace cutover gate.
+        toc::DeliveryOutcome::FreshDelivered { .. } | toc::DeliveryOutcome::Skipped => {
             *locals.preserve_inflight_for_cleanup_retry = true;
         }
     }

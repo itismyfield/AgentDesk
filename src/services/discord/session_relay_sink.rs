@@ -745,7 +745,8 @@ impl SessionBoundDiscordRelaySink {
                 Ok(SessionRelayDeliveryOutcome::Delivered)
             }
             // Ambiguous/failed (PartialContinuationFailure / transport Err): controller released without committing (I2 — offset NOT advanced). Surface `Err(Transient)`.
-            toc::DeliveryOutcome::Transient { .. }
+            toc::DeliveryOutcome::FreshDelivered { .. }
+            | toc::DeliveryOutcome::Transient { .. }
             | toc::DeliveryOutcome::Unknown { .. }
             | toc::DeliveryOutcome::Skipped => Err(RelaySinkError::Transient(
                 "session-bound short-replace controller delivery not confirmed".to_string(),

@@ -86,9 +86,20 @@
 - do_not_edit_without_migration_plan:
   - `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
     ordered-chunk continuation contract not yet modelled in v3).
-  - `src/services/discord/outbound/delivery_record.rs` (1276 lines; +60 from #4188 EOF-bound frontier guard — thread `current_transcript_eof` through the single durable-frontier funnel (`current_generation_durable_frontier_at`) + delivered-anchor / effective-committed-offset call-sites so a stale prior-generation frontier whose end exceeds the compacted transcript EOF is distrusted (fixes the delivered_frontier message-loss after `/compact`); +8 from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF tests ignore developer-shell AGENTDESK_DELIVERY_RECORD_SHADOW; production paths untouched; durable
-    delivery lease/frontier/owner-context sidecar, plus the #4081 bounded
-    recent-content fingerprint guard; bugfix only until split under #3405).
+  - `src/services/discord/outbound/delivery_record.rs` (1323 prod lines; +47 from
+    #4046 S1r-1 adding the isolated `discord_fresh_send_records` path,
+    Result-returning fresh-send fingerprint writer, and dedicated current-generation
+    lookup so anchor-less sends cannot enter watcher suppression authority; +60
+    from #4188 EOF-bound frontier guard — thread `current_transcript_eof` through
+    the single durable-frontier funnel (`current_generation_durable_frontier_at`)
+    + delivered-anchor / effective-committed-offset call-sites so a stale
+    prior-generation frontier whose end exceeds the compacted transcript EOF is
+    distrusted (fixes the delivered_frontier message-loss after `/compact`); +8
+    from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF
+    tests ignore developer-shell AGENTDESK_DELIVERY_RECORD_SHADOW; production
+    paths untouched; durable delivery lease/frontier/owner-context sidecar, plus
+    the #4081 bounded recent-content fingerprint guard; bugfix only until split
+    under #3405).
   - `src/services/message_outbox.rs` is the PG-backed message outbox
     enqueue/claim/accounting surface. #4465 adds a deduplicated `held` staging
     state that workers cannot claim; callers activate it to `pending` only
@@ -1468,12 +1479,15 @@
     stream/status ticks, and long-running placeholder state wiring. Its #4230
     giant registry entry was retired after S8; the measured 979-line cap remains
     below the 1000-prod-LoC threshold).
-  - `src/services/discord/outbound/turn_output_controller.rs` (1034 prod lines;
-    crossed the giant threshold in #3998 E13 when the controller-facing lease
-    guard moved from `TurnKey` to `DeliveryLeaseKey` for id-0 disambiguation.
-    Tracked decompose target — see `giant-file-registry.md` (owner
-    `discord-relay`, deadline 2026-08-31, issue #3405). Keep further
-    controller growth in narrower outbound/controller helper modules).
+  - `src/services/discord/outbound/turn_output_controller.rs` (1228 prod lines;
+    #4046 S1r-1 keeps the anchor-less `SendFresh` implementation in the 228-line
+    `turn_output_controller/fresh_send.rs` child while the root owns only the
+    shared verb/outcome contract and routing; crossed the giant threshold in
+    #3998 E13 when the controller-facing lease guard moved from `TurnKey` to
+    `DeliveryLeaseKey` for id-0 disambiguation. Tracked decompose target — see
+    `giant-file-registry.md` (owner `discord-relay`, deadline 2026-08-31, issue
+    #3405). Keep further controller growth in narrower outbound/controller
+    helper modules).
   - `src/services/discord/turn_finalizer.rs` (1048 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
@@ -2017,11 +2031,13 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
-- `src/services/discord/session_relay_sink.rs` (1689; -59 from #3998 S1-f2
-  retiring the A2b rollout getter/cache and flag-OFF pin tests; +7 from #3610
-  PR-1 passing the terminal anchor into the delivered-frontier shadow mirror;
-  -1 prod from #4055 thin card-before-answer/context wiring, with task policy
-  extracted to `session_relay_sink/task_notification_context.rs`).
+- `src/services/discord/session_relay_sink.rs` (1677 prod lines; +1 from #4046
+  S1r-1 conservatively rejecting the dormant fresh-send-only outcome at this
+  replace-only caller; -59 from #3998 S1-f2 retiring the A2b rollout getter/cache
+  and flag-OFF pin tests; +7 from #3610 PR-1 passing the terminal anchor into the
+  delivered-frontier shadow mirror; -1 prod from #4055 thin
+  card-before-answer/context wiring, with task policy extracted to
+  `session_relay_sink/task_notification_context.rs`).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,

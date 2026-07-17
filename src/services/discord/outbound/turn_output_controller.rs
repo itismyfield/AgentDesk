@@ -233,9 +233,10 @@ pub(in crate::services::discord) enum PlaceholderSlot {
 pub(in crate::services::discord) enum OutputPlan {
     /// Publish a new anchor-less message. The body is carried by
     /// [`TurnOutputCtx::body`]; `range` is the authoritative transcript byte range
-    /// when one exists, while `None` activates the required NoRange
-    /// content-fingerprint and D1-style pseudo-range protections. `reference` is
-    /// reserved for the later S1r owner cutovers; S1r-1 accepts only `None`.
+    /// when one exists. `None` is deliver-without-advance: its pseudo-range only
+    /// serializes the process-local lease, and its retry fingerprint lives outside
+    /// the watcher-shared delivery-record namespace. `reference` is reserved for
+    /// the later S1r owner cutovers; S1r-1 accepts only `None`.
     #[allow(dead_code)] // #4046 S1r-1: constructed by S1r-2~5 owner cutovers.
     SendFresh {
         range: Option<(u64, u64)>,
@@ -351,6 +352,17 @@ pub(in crate::services::discord) enum DeliveryOutcome {
         committed_to: u64,
         replace_kind: Option<ReplaceDeliveryKind>,
         new_chunks: Option<NewChunksDelivery>,
+    },
+    /// A fresh-message POST was confirmed. `committed_to` is `Some(end)` only
+    /// when a real transcript range passed the owner's advance gate; `None` is a
+    /// NoRange deliver-without-advance and never evaluates that callback.
+    /// `persistence_recorded` reports whether the range frontier/new anchor or
+    /// the isolated NoRange retry fingerprint was persisted for the current
+    /// wrapper generation. `false` is still a confirmed POST, so callers must not
+    /// blindly retry it and risk a duplicate message.
+    FreshDelivered {
+        committed_to: Option<u64>,
+        persistence_recorded: bool,
     },
     /// Transport was confirmed, but the owner's identity-gated advance callback
     /// REFUSED to advance the offset (e.g. the inflight turn was cleared /
@@ -3496,6 +3508,7 @@ mod tests {
     fn debug_outcome(o: &DeliveryOutcome) -> &'static str {
         match o {
             DeliveryOutcome::Delivered { .. } => "Delivered",
+            DeliveryOutcome::FreshDelivered { .. } => "FreshDelivered",
             DeliveryOutcome::NotDelivered { .. } => "NotDelivered",
             DeliveryOutcome::Transient { .. } => "Transient",
             DeliveryOutcome::Unknown { fell_back: true } => "Unknown{fell_back:true}",

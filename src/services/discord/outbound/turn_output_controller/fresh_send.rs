@@ -31,6 +31,14 @@ where
         unreachable!("fresh-send child received a different output plan");
     };
     debug_assert!(reference.is_none(), "S1r-1 fresh-send is anchor-less");
+    if record.record_channel_id != ctx.channel_id {
+        tracing::warn!(
+            post_channel_id = ctx.channel_id.get(),
+            record_channel_id = record.record_channel_id.get(),
+            "fresh-send refused mismatched POST and record channels"
+        );
+        return DeliveryOutcome::Skipped;
+    }
     if reference.is_some() || ctx.body.is_empty() {
         return DeliveryOutcome::Skipped;
     }
@@ -61,7 +69,7 @@ where
     };
 
     if range.is_none()
-        && delivery_record::recent_delivered_content_matches(
+        && delivery_record::recent_fresh_send_content_matches(
             &record.provider,
             record.record_channel_id,
             &record.tmux_session_name,
@@ -108,9 +116,21 @@ where
         }
     };
 
+    // A real range owns offset authority. NoRange is deliver-without-advance:
+    // its pseudo-range exists only until POST + retry-fingerprint persistence
+    // complete, and must never be presented to the owner's advance callback.
+    let Some(range) = *range else {
+        let persistence_recorded = record_success(record, None, message_id, ctx.body);
+        lease_guard.release_and_disarm();
+        return DeliveryOutcome::FreshDelivered {
+            committed_to: None,
+            persistence_recorded,
+        };
+    };
+
     // I1: advance, lease commit, durable record, then release. There is no await
     // after the transport before this whole authority sequence completes.
-    let advanced = ctx.advance.is_none_or(|advance| advance((start, end)));
+    let advanced = ctx.advance.is_none_or(|advance| advance(range));
     let lease_outcome = if advanced {
         LeaseOutcome::Delivered
     } else {
@@ -121,23 +141,22 @@ where
         .commit(ctx.holder, key.clone(), start, end, lease_outcome);
     debug_assert!(committed, "fresh-send commit must match its acquired lease");
 
-    if advanced && committed {
-        record_success(record, *range, message_id, ctx.body);
-    }
+    let persistence_recorded = advanced
+        && committed
+        && record_success(record, Some(range), message_id, ctx.body);
     lease_guard.release_and_disarm();
 
     if advanced && !committed {
         return DeliveryOutcome::Unknown { fell_back: false };
     }
     if advanced {
-        DeliveryOutcome::Delivered {
-            committed_to: range.map_or(ctx.send_range.0, |value| value.1),
-            replace_kind: None,
-            new_chunks: None,
+        DeliveryOutcome::FreshDelivered {
+            committed_to: Some(range.1),
+            persistence_recorded,
         }
     } else {
         DeliveryOutcome::NotDelivered {
-            committed_from: range.map_or(ctx.send_range.0, |value| value.0),
+            committed_from: range.0,
         }
     }
 }
@@ -152,7 +171,7 @@ fn record_success(
     range: Option<(u64, u64)>,
     message_id: MessageId,
     body: &str,
-) {
+) -> bool {
     let generation_mtime_ns =
         delivery_record::current_generation_mtime_ns(&record.tmux_session_name);
     if generation_mtime_ns == 0 {
@@ -162,10 +181,11 @@ fn record_success(
             tmux_session_name = record.tmux_session_name.as_str(),
             "fresh-send delivered without a readable generation marker"
         );
+        return false;
     }
 
-    match range {
-        Some(range) if generation_mtime_ns != 0 => {
+    let result = match range {
+        Some(range) => {
             let commit = delivery_record::DeliveredCommit {
                 range,
                 generation_mtime_ns,
@@ -173,34 +193,36 @@ fn record_success(
                 panel_msg_id: Some(message_id.get()),
                 panel_channel_id: Some(record.record_channel_id.get()),
             };
-            if let Err(error) = delivery_record::write_delivered_frontier(
+            delivery_record::write_delivered_frontier(
                 &record.provider,
                 record.record_channel_id.get(),
                 commit,
-            ) {
-                tracing::warn!(
-                    provider = record.provider.as_str(),
-                    channel_id = record.record_channel_id.get(),
-                    error = %error,
-                    "fresh-send durable frontier write failed"
-                );
-            }
+            )
         }
-        Some(_) => {}
-        None if generation_mtime_ns != 0 => {
-            // F3: NoRange cannot claim frontier coverage. Its durable dedup is the
-            // #4081 content fingerprint; the pseudo-range is process-local lease
-            // mutual exclusion only.
-            delivery_record::record_delivered_content_fingerprint_for_generation(
+        None => {
+            // F3: NoRange never claims frontier or watcher suppression authority.
+            // Its generation-scoped fingerprint is isolated retry metadata; the
+            // pseudo-range remains process-local lease mutual exclusion only.
+            delivery_record::record_fresh_send_content_fingerprint(
                 &record.provider,
                 record.record_channel_id.get(),
                 body,
                 generation_mtime_ns,
-            );
+            )
         }
-        None => {
-            // A generation-less fingerprint would collapse unrelated wrapper
-            // generations onto mtime=0. Refuse that false cross-generation claim.
+    };
+
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                provider = record.provider.as_str(),
+                channel_id = record.record_channel_id.get(),
+                error = %error,
+                range = ?range,
+                "fresh-send persistence write failed"
+            );
+            false
         }
     }
 }

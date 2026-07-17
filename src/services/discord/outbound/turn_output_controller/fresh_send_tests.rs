@@ -172,7 +172,10 @@ fn range_fresh_send_commits_and_records_durable_frontier() {
 
     assert!(matches!(
         outcome,
-        DeliveryOutcome::Delivered { committed_to, .. } if committed_to == range.1
+        DeliveryOutcome::FreshDelivered {
+            committed_to: Some(committed_to),
+            persistence_recorded: true,
+        } if committed_to == range.1
     ));
     assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
     assert!(matches!(lease.read(), LeaseSnapshot::Unleased));
@@ -215,10 +218,20 @@ fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
             None,
         ),
     ));
-    assert!(matches!(first, DeliveryOutcome::Delivered { .. }));
-    assert!(delivery_record::recent_delivered_content_matches(
+    assert!(matches!(
+        first,
+        DeliveryOutcome::FreshDelivered {
+            committed_to: None,
+            persistence_recorded: true,
+        }
+    ));
+    assert!(delivery_record::recent_fresh_send_content_matches(
         &provider, channel, tmux, body
     ));
+    assert!(
+        !delivery_record::recent_delivered_content_matches(&provider, channel, tmux, body),
+        "P2-4: fresh-send retry metadata must not enter watcher suppression authority"
+    );
 
     let retry_lease = DeliveryLeaseCell::new(channel);
     let retry = futures::executor::block_on(super::deliver_turn_output(
@@ -239,11 +252,9 @@ fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
         1,
         "mutation: removing the fingerprint write/check re-sends the retry"
     );
-    let record =
-        delivery_record::read_record(&provider, channel.get()).expect("NoRange fingerprint record");
     assert!(
-        record.delivered_frontier.is_none(),
-        "F3: NoRange must not claim durable-frontier coverage"
+        delivery_record::read_record(&provider, channel.get()).is_none(),
+        "F3/P2-4: NoRange must not create a watcher-shared delivery record"
     );
 }
 
@@ -284,8 +295,153 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
         0,
         "mutation: bypassing/removing the pseudo-range acquire posts into the fingerprint gap"
     );
-    assert!(!delivery_record::recent_delivered_content_matches(
+    assert!(!delivery_record::recent_fresh_send_content_matches(
         &provider, channel, tmux, body
     ));
     assert!(lease.release(LeaseHolder::Bridge, key, expected.0, expected.1));
+}
+
+#[test]
+fn no_range_fresh_send_never_invokes_owner_advance() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(40_460_104);
+    let tmux = "AgentDesk-claude-4046-no-advance";
+    let body = "NoRange deliver without advance";
+    seed_generation(tmux);
+    let lease = DeliveryLeaseCell::new(channel);
+    let controller = PlaceholderController::default();
+    let gateway = CountingGateway::new();
+    let advance = |_: (u64, u64)| -> bool {
+        panic!("NoRange must not invoke owner advance");
+    };
+    let mut context = ctx(channel, &lease, &controller, &provider, tmux, body, None);
+    context.advance = Some(&advance);
+
+    let outcome = futures::executor::block_on(super::deliver_turn_output(&gateway, context));
+
+    assert!(matches!(
+        outcome,
+        DeliveryOutcome::FreshDelivered {
+            committed_to: None,
+            persistence_recorded: true,
+        }
+    ));
+    assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
+    assert!(matches!(lease.read(), LeaseSnapshot::Unleased));
+}
+
+fn assert_channel_mismatch_skips_before_post(range: Option<(u64, u64)>, channel_id: u64) {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(channel_id);
+    let record_channel = ChannelId::new(channel_id + 1);
+    let tmux = "AgentDesk-claude-4046-channel-mismatch";
+    let body = "must not post to a mismatched channel";
+    seed_generation(tmux);
+    let lease = DeliveryLeaseCell::new(channel);
+    let controller = PlaceholderController::default();
+    let gateway = CountingGateway::new();
+    let mut context = ctx(channel, &lease, &controller, &provider, tmux, body, range);
+    let OutputPlan::SendFresh { record, .. } = &mut context.plan else {
+        unreachable!("test context must build SendFresh");
+    };
+    record.record_channel_id = record_channel;
+
+    let outcome = futures::executor::block_on(super::deliver_turn_output(&gateway, context));
+
+    assert!(matches!(outcome, DeliveryOutcome::Skipped));
+    assert_eq!(
+        gateway.sends.load(Ordering::SeqCst),
+        0,
+        "mutation: removing the channel-equality guard posts before rejecting mismatch"
+    );
+    assert!(matches!(lease.read(), LeaseSnapshot::Unleased));
+    assert!(!delivery_record::recent_fresh_send_content_matches(
+        &provider,
+        record_channel,
+        tmux,
+        body,
+    ));
+}
+
+#[test]
+fn range_channel_mismatch_is_refused_before_post() {
+    assert_channel_mismatch_skips_before_post(Some((10, 20)), 40_460_105);
+}
+
+#[test]
+fn no_range_channel_mismatch_is_refused_before_lookup_or_post() {
+    assert_channel_mismatch_skips_before_post(None, 40_460_107);
+}
+
+#[test]
+fn missing_generation_is_exposed_after_confirmed_no_range_post() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(40_460_109);
+    let tmux = "AgentDesk-claude-4046-missing-generation";
+    let body = "confirmed post without generation";
+    let lease = DeliveryLeaseCell::new(channel);
+    let controller = PlaceholderController::default();
+    let gateway = CountingGateway::new();
+
+    let outcome = futures::executor::block_on(super::deliver_turn_output(
+        &gateway,
+        ctx(channel, &lease, &controller, &provider, tmux, body, None),
+    ));
+
+    assert!(matches!(
+        outcome,
+        DeliveryOutcome::FreshDelivered {
+            committed_to: None,
+            persistence_recorded: false,
+        }
+    ));
+    assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn range_persistence_failure_is_not_hidden_as_delivered() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(40_460_110);
+    let tmux = "AgentDesk-claude-4046-frontier-failure";
+    let body = "confirmed range post with failed frontier";
+    let range = (80, 80 + body.len() as u64);
+    seed_generation(tmux);
+    let runtime = temp.path().join("runtime");
+    std::fs::create_dir_all(&runtime).expect("create runtime root");
+    std::fs::write(runtime.join("discord_delivery_records"), b"not a directory")
+        .expect("block delivery-record namespace");
+    let lease = DeliveryLeaseCell::new(channel);
+    let controller = PlaceholderController::default();
+    let gateway = CountingGateway::new();
+
+    let outcome = futures::executor::block_on(super::deliver_turn_output(
+        &gateway,
+        ctx(
+            channel,
+            &lease,
+            &controller,
+            &provider,
+            tmux,
+            body,
+            Some(range),
+        ),
+    ));
+
+    assert!(matches!(
+        outcome,
+        DeliveryOutcome::FreshDelivered {
+            committed_to: Some(committed_to),
+            persistence_recorded: false,
+        } if committed_to == range.1
+    ));
+    assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
+    assert!(matches!(lease.read(), LeaseSnapshot::Unleased));
 }

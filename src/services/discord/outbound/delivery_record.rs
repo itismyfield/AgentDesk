@@ -73,6 +73,7 @@ use crate::services::provider::ProviderKind;
 /// MUST NOT be `discord_inflight` (that dir is the old-binary reaper's scan
 /// target); the isolation proof test asserts this segment differs.
 const DELIVERY_RECORDS_DIR: &str = "discord_delivery_records";
+const FRESH_SEND_RECORDS_DIR: &str = "discord_fresh_send_records";
 const DELIVERY_OWNER_CONTEXT_DIR: &str = "discord_delivery_owner_context";
 const RECENT_DELIVERED_CONTENT_LIMIT: usize = 16;
 const RECENT_DELIVERED_CONTENT_WINDOW_MS: u64 = 15 * 60 * 1000;
@@ -169,6 +170,10 @@ fn delivery_records_root() -> Option<PathBuf> {
     runtime_store::runtime_root().map(|root| root.join(DELIVERY_RECORDS_DIR))
 }
 
+fn fresh_send_records_root() -> Option<PathBuf> {
+    runtime_store::runtime_root().map(|root| root.join(FRESH_SEND_RECORDS_DIR))
+}
+
 fn delivery_owner_context_root() -> Option<PathBuf> {
     runtime_store::runtime_root().map(|root| root.join(DELIVERY_OWNER_CONTEXT_DIR))
 }
@@ -193,6 +198,13 @@ pub(in crate::services::discord) fn delivery_record_path(
     channel_id: u64,
 ) -> Option<PathBuf> {
     delivery_records_root().map(|root| {
+        root.join(provider.as_str())
+            .join(format!("{channel_id}.json"))
+    })
+}
+
+fn fresh_send_record_path(provider: &ProviderKind, channel_id: u64) -> Option<PathBuf> {
+    fresh_send_records_root().map(|root| {
         root.join(provider.as_str())
             .join(format!("{channel_id}.json"))
     })
@@ -1035,6 +1047,41 @@ pub(in crate::services::discord::outbound) fn record_delivered_content_fingerpri
     }
 }
 
+pub(in crate::services::discord::outbound) fn record_fresh_send_content_fingerprint(
+    provider: &ProviderKind,
+    channel_id: u64,
+    body: &str,
+    generation_mtime_ns: i64,
+) -> Result<(), String> {
+    let path = fresh_send_record_path(provider, channel_id)
+        .ok_or_else(|| "fresh_send_record: runtime root unavailable".to_string())?;
+    record_delivered_content_fingerprint_at(
+        &path,
+        channel_id,
+        body,
+        generation_mtime_ns,
+        now_epoch_ms(),
+    )
+}
+
+pub(in crate::services::discord::outbound) fn recent_fresh_send_content_matches(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    body: &str,
+) -> bool {
+    let Some(path) = fresh_send_record_path(provider, channel.get()) else {
+        return false;
+    };
+    recent_delivered_content_matches_at(
+        &path,
+        channel.get(),
+        body,
+        current_generation_mtime_ns(tmux_session_name),
+        now_epoch_ms(),
+    )
+}
+
 pub(in crate::services::discord) fn record_delivered_content_fingerprint(
     provider: &ProviderKind,
     channel: ChannelId,
@@ -1667,6 +1714,12 @@ mod tests {
             replace_kind: None,
             new_chunks: None,
         }));
+        assert!(!outcome_is_shadow_delivered(
+            &DeliveryOutcome::FreshDelivered {
+                committed_to: Some(5),
+                persistence_recorded: false,
+            }
+        ));
         assert!(!outcome_is_shadow_delivered(
             &DeliveryOutcome::NotDelivered { committed_from: 5 }
         ));
