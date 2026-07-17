@@ -637,10 +637,9 @@ async fn run_placeholder_sweep_pass(
                 // success covers (1), and the production cleanup plan covers (4).
                 //
                 // Controller-entry detach is confined to
-                // `finalize_abandoned_after_abort_edit` (which gates it on a
-                // confirmed inflight-state delete). Never detach speculatively
-                // here — that would strand a revived turn's card (#4594 Finding
-                // 1); see the helper's doc.
+                // `finalize_abandoned_after_abort_edit`, gated on a confirmed
+                // inflight-state delete. Never detach speculatively here — it
+                // would strand a revived turn's card (#4594 Finding 1).
                 if abandon_guard::finalize_abandoned_after_abort_edit(
                     shared,
                     provider,
