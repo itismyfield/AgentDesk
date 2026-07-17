@@ -15,6 +15,7 @@ use super::stream_tick::{
 };
 use super::streaming_edit_text::bridge_claude_tui_followup_busy_readiness_timeout;
 use super::{streaming_edit_text::TuiErrorClassification, *};
+use busy_followup_retry::handle_empty_response_and_busy_requeue;
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
     CancelPromptReplaceState, handle_cancel_prompt_replace,
@@ -23,7 +24,6 @@ use delivery_epilogue::{
     DeliveryEpilogueContext, DeliveryEpilogueMessage, DeliveryEpilogueState,
     handle_delivery_epilogue,
 };
-use busy_followup_retry::handle_empty_response_and_busy_requeue;
 use empty_response_recovery::{
     EmptyResponseRecoveryContext, EmptyResponseRecoveryMessage, EmptyResponseRecoveryState,
 };
