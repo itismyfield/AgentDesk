@@ -451,6 +451,13 @@ pub(crate) async fn transfer_owner_in_tx(
     // Insert the successor generation. ON CONFLICT DO NOTHING guards against a
     // racing insert of the same generation; a 0-row insert is a conflict, so
     // the caller's rollback undoes the supersede above (Fix1 atomic restore).
+    //
+    // Reachability: with the advisory-lock contract held, this insert targets
+    // `latest.generation + 1` (the max generation was just read), which is
+    // always free, so `rows_affected` is 1 here — the != 1 branch is
+    // defense-in-depth for a contract violation / out-of-band writer and is
+    // unreachable in-helper (its SQL semantics are pinned by
+    // `transfer_insert_guard_sql_maps_conflict_to_cas_conflict`).
     let inserted = sqlx::query(
         "INSERT INTO intake_session_owners
              (provider, raw_channel_id, owner_instance_id, generation, status)
@@ -689,9 +696,11 @@ fn unique_violation_constraint(error: &sqlx::Error) -> Option<String> {
 
 /// Candidate selection: an oldest `pending`, forwarded row targeted at + stamped
 /// for `claimer_instance_id`, whose stamped `(owner, generation)` still matches
-/// the channel's `active` owner. `$1` = claimer instance, `$2` = provider.
+/// the channel's `active` owner. Returns the row id AND its channel_id (the
+/// claim needs the channel to take that channel's advisory lock before
+/// promoting — P1-B). `$1` = claimer instance, `$2` = provider.
 const CLAIM_CANDIDATE_SQL: &str = r#"
-SELECT io.id FROM intake_outbox io
+SELECT io.id, io.channel_id FROM intake_outbox io
  WHERE io.target_instance_id = $1
    AND io.status = 'pending'
    AND io.provider = $2
@@ -709,11 +718,18 @@ SELECT io.id FROM intake_outbox io
  FOR UPDATE OF io SKIP LOCKED
 "#;
 
-/// Promotion: re-checks the SAME owner fence in the UPDATE WHERE so a transfer
-/// or reclaim that committed between candidate SELECT and this UPDATE cannot be
-/// stamped over (Fix2 — `FOR UPDATE OF io` locks only the outbox row, not the
-/// owner table). `$1` = row id, `$2` = claimer instance, `$3` = claim token.
-/// A 0-row UPDATE means ownership moved: no claim.
+/// Row shape returned by `CLAIM_CANDIDATE_SQL`.
+#[derive(sqlx::FromRow)]
+struct ClaimCandidate {
+    id: i64,
+    channel_id: String,
+}
+
+/// Promotion: re-checks the SAME owner fence in the UPDATE WHERE. This is the
+/// second (defense-in-depth) fence; the primary linearization is the channel
+/// advisory lock the claim takes before this UPDATE (P1-B), which mutually
+/// excludes an in-flight `transfer`. `$1` = row id, `$2` = claimer instance,
+/// `$3` = claim token. A 0-row UPDATE means ownership moved: no claim.
 const CLAIM_PROMOTE_SQL: &str = r#"
 UPDATE intake_outbox AS io
    SET status = 'claimed', claim_owner = $3, claimed_at = NOW()
@@ -731,13 +747,26 @@ UPDATE intake_outbox AS io
  RETURNING *
 "#;
 
-/// Fenced worker-side claim (§3.5.1). Node identity (who) is
+/// Fenced worker-side claim (§3.5.1, P1-B linearization). Node identity (who) is
 /// `claimer_instance_id` (target + stamped owner + current active owner, triple
 /// checked plus the generation fence); the lease token (which restart) is
-/// `claim_token`, stored in `claim_owner`. Returns `Ok(None)` when no eligible
-/// row exists OR when ownership moved between candidate selection and promotion
-/// (Fix2 double fence) — in the latter case the row stays `pending` for the
-/// stale-claim sweep / current-owner re-stamp to reconcile.
+/// `claim_token`, stored in `claim_owner`.
+///
+/// **Linearization with transfer (P1-B):** the owner-fence EXISTS alone is NOT
+/// sufficient. Under READ COMMITTED the promote UPDATE evaluates its owner
+/// EXISTS against the statement-start snapshot, so a `transfer` that commits
+/// while the UPDATE runs (the claim holds only the outbox row lock, not the
+/// owner row) would be invisible — the UPDATE could stamp a claim on a
+/// now-superseded owner and let a stale node double-execute. To prevent that,
+/// once a candidate is found the claim takes the SAME channel advisory lock
+/// (`OwnerIdentity::advisory_key`) that `transfer` holds for its whole tx, so
+/// claim and transfer for a channel are mutually exclusive. After acquiring the
+/// lock the owner state is re-read fresh (the promote fence), so
+/// "owner the claim saw == owner at commit" holds.
+///
+/// Returns `Ok(None)` when no eligible row exists, or when ownership moved
+/// before/while the lock was acquired (promote fence 0 rows) — the row stays
+/// `pending` for the stale-claim sweep / current-owner re-stamp to reconcile.
 pub(crate) async fn claim_pending_for_target_fenced(
     pool: &PgPool,
     claimer_instance_id: &str,
@@ -746,21 +775,30 @@ pub(crate) async fn claim_pending_for_target_fenced(
 ) -> Result<Option<IntakeOutboxRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let candidate: Option<i64> = sqlx::query_scalar(CLAIM_CANDIDATE_SQL)
+    let candidate: Option<ClaimCandidate> = sqlx::query_as(CLAIM_CANDIDATE_SQL)
         .bind(claimer_instance_id)
         .bind(provider)
         .fetch_optional(&mut *tx)
         .await?;
 
-    let Some(id) = candidate else {
+    let Some(candidate) = candidate else {
         tx.commit().await?;
         return Ok(None);
     };
 
+    // Serialize with transfer for this channel BEFORE the fenced promote. Blocks
+    // until any in-flight transfer commits and releases its advisory lock; held
+    // until this tx commits so no transfer can interleave the promote (P1-B).
+    let advisory_key = OwnerIdentity::new(provider, &candidate.channel_id).advisory_key();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(advisory_key)
+        .execute(&mut *tx)
+        .await?;
+
     // fetch_optional yields None when the fenced UPDATE affects 0 rows: the
-    // owner changed after the candidate SELECT, so the claim is void.
+    // owner changed (a transfer we just waited on), so the claim is void.
     let row: Option<IntakeOutboxRow> = sqlx::query_as(CLAIM_PROMOTE_SQL)
-        .bind(id)
+        .bind(candidate.id)
         .bind(claimer_instance_id)
         .bind(claim_token)
         .fetch_optional(&mut *tx)
@@ -1143,6 +1181,36 @@ mod tests {
         pg.drop().await;
     }
 
+    /// The `iso_unique_active` partial unique index is the durable backstop the
+    /// concurrent-acquire path relies on: it forbids two `active` rows for one
+    /// identity even at DIFFERENT generations, with NO advisory lock involved.
+    /// Direct INSERTs prove it independently of the app-side serialization
+    /// (removing the index from migration 0094 makes the second INSERT succeed,
+    /// so `expect_err` panics and this test fails).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn iso_unique_active_forbids_two_active_owners() {
+        let pg = TestPostgresDb::create().await;
+        let pool = pg.connect_and_migrate().await;
+
+        insert_owner(&pool, "claude", "dup", "node-A", 0, "active").await;
+
+        let result = sqlx::query(
+            "INSERT INTO intake_session_owners
+                 (provider, raw_channel_id, owner_instance_id, generation, status)
+             VALUES ('claude', 'dup', 'node-B', 1, 'active')",
+        )
+        .execute(&pool)
+        .await;
+        let error = result.expect_err("second active owner must violate iso_unique_active");
+        assert!(
+            error.to_string().contains("iso_unique_active"),
+            "expected iso_unique_active violation, got: {error}"
+        );
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
     // -- transfer 3-way -----------------------------------------------------
 
     /// Transfer success: active `A@0` → supersede + insert `B@1` active.
@@ -1256,24 +1324,31 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Fix1 — the successor-INSERT atomicity guard. Executed with the real
-    /// `supersede`/INSERT SQL the helper uses, over a crafted state that the
-    /// helper's own max-generation SELECT cannot reach serially: an `active`
-    /// row at gen5 AND a pre-existing gen6 row. The supersede matches 1 row,
-    /// then the `ON CONFLICT DO NOTHING` successor INSERT at gen6 collides and
-    /// affects 0 rows. The helper maps `rows_affected != 1` → `CasConflict`,
-    /// and the caller's ROLLBACK restores the gen5 active owner. Reverting the
-    /// INSERT `rows_affected == 1` check (Fix1) would commit a channel whose
-    /// only active owner was just superseded — the active-owner-preserved
-    /// assert catches it.
+    /// Fix1 — the successor-INSERT atomicity guard, at the SQL level.
+    ///
+    /// IMPORTANT: this does NOT call `transfer_owner_in_tx`. The helper's INSERT
+    /// guard (`inserted.rows_affected() != 1 -> CasConflict`) is unreachable
+    /// in-helper by construction — the helper reads the MAX generation and
+    /// inserts `max + 1`, which is always free, so its `ON CONFLICT DO NOTHING`
+    /// can never fire from the helper's own path (removing that guard therefore
+    /// cannot fail any real-helper test). What CAN fail is a corrupted/raced
+    /// state where the successor generation already exists while a lower `active`
+    /// row is superseded. This test pins the SQL SEMANTICS the guard depends on:
+    /// running the exact supersede + `ON CONFLICT DO NOTHING` INSERT the helper
+    /// uses over `active gen5 + pre-existing gen6` yields supersede=1 rows,
+    /// insert=0 rows, and the caller's ROLLBACK restores the gen5 active owner
+    /// (no active-less channel). Reverting the fence inside those SQL statements
+    /// changes the row counts and fails the asserts. The real-helper atomicity
+    /// (single Transferred, supersede-guard rollback) is covered by
+    /// `transfer_concurrent_race_preserves_single_active`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn transfer_insert_zero_rows_is_cas_conflict_and_rolls_back() {
+    async fn transfer_insert_guard_sql_maps_conflict_to_cas_conflict() {
         let pg = TestPostgresDb::create().await;
         let pool = pg.connect_and_migrate().await;
         let id = identity("claude", "fix1");
-        // Corrupt/racy shape: active gen5 AND an occupied gen6 slot. The
-        // helper's ORDER BY generation DESC SELECT would return gen6, so this
-        // exercises the successor-INSERT guard directly with the shared SQL.
+        // Crafted state unreachable via the helper's max-gen SELECT: active gen5
+        // AND an occupied gen6 slot, so supersede matches gen5 (1 row) but the
+        // successor INSERT at gen6 collides (0 rows).
         insert_owner(&pool, "claude", "fix1", "node-A", 5, "active").await;
         insert_owner(&pool, "claude", "fix1", "node-X", 6, "superseded").await;
 
@@ -1311,6 +1386,56 @@ mod tests {
             "rollback must restore the pre-transfer active owner (no active-less channel)"
         );
         assert_eq!(count_active(&pool, "claude", "fix1").await, 1);
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Real-helper atomicity: two `transfer_owner_in_tx` calls race for the same
+    /// channel WITHOUT the advisory lock (deliberately exercising the guards the
+    /// lock normally makes redundant). Both may read `A@0` active and pass the
+    /// branch check; the first supersede wins (1 row) and inserts `B@1`, the
+    /// loser's supersede then affects 0 rows → supersede guard → `CasConflict`
+    /// and its tx rolls back (a late loser instead hits the owner-mismatch branch
+    /// — also `CasConflict`). The invariant is asserted deterministically:
+    /// exactly one `Transferred` + one `CasConflict`, and exactly one active row.
+    /// Removing BOTH `rows_affected` guards lets a raced loser report
+    /// `Transferred` without writing an active row → two `Transferred` and/or a
+    /// lost active owner, failing the asserts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn transfer_concurrent_race_preserves_single_active() {
+        let pg = TestPostgresDb::create().await;
+        let pool = pg.connect_and_migrate().await;
+        insert_owner(&pool, "claude", "rc", "node-A", 0, "active").await;
+
+        async fn one(pool: &PgPool, target: &str) -> TransferOutcome {
+            let id = identity("claude", "rc");
+            let mut tx = pool.begin().await.unwrap();
+            // No advisory lock: deliberately exercise the CAS guards.
+            let out = transfer_owner_in_tx(&mut tx, &id, "node-A", 0, target)
+                .await
+                .unwrap();
+            match &out {
+                TransferOutcome::Transferred { .. } => tx.commit().await.unwrap(),
+                _ => tx.rollback().await.unwrap(),
+            }
+            out
+        }
+
+        let (a, b) = tokio::join!(one(&pool, "node-B"), one(&pool, "node-C"));
+
+        let mut transferred = 0;
+        let mut conflicts = 0;
+        for out in [&a, &b] {
+            match out {
+                TransferOutcome::Transferred { new_generation: 1 } => transferred += 1,
+                TransferOutcome::CasConflict => conflicts += 1,
+                other => panic!("unexpected transfer outcome: {other:?}"),
+            }
+        }
+        assert_eq!(transferred, 1, "exactly one transfer wins");
+        assert_eq!(conflicts, 1, "the loser is a CAS conflict");
+        assert_eq!(count_active(&pool, "claude", "rc").await, 1);
 
         pool.close().await;
         pg.drop().await;
@@ -1581,16 +1706,18 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Fix2 — the promote UPDATE re-checks the owner fence. This drives the two
-    /// real claim SQL constants (`CLAIM_CANDIDATE_SQL`, `CLAIM_PROMOTE_SQL`)
-    /// across a transfer committed on a second connection BETWEEN the candidate
-    /// SELECT and the promote UPDATE — the exact SELECT↔UPDATE window the
-    /// monolithic helper cannot expose. The candidate SELECT passes (owner
-    /// still `node-W@0`), then ownership moves to `node-V@1`, so the fenced
-    /// UPDATE affects 0 rows and the row stays `pending`. Reverting Fix2 (drop
+    /// Fix2 — the promote UPDATE's owner fence (the SECOND, defense-in-depth
+    /// layer behind the P1-B advisory lock). Drives the two real claim SQL
+    /// constants (`CLAIM_CANDIDATE_SQL`, `CLAIM_PROMOTE_SQL`) across a transfer
+    /// FULLY COMMITTED between the candidate SELECT and the promote UPDATE: the
+    /// candidate SELECT passes (owner still `node-W@0`), ownership moves to
+    /// `node-V@1`, so the fenced UPDATE (fresh statement snapshot) sees the new
+    /// owner and affects 0 rows; the row stays `pending`. Reverting Fix2 (drop
     /// the EXISTS fence from `CLAIM_PROMOTE_SQL`) makes the UPDATE match on
-    /// id + target + owner alone → 1 row → the assert on 0 rows / still-pending
-    /// fails.
+    /// id + target + owner alone → 1 row → the 0-rows / still-pending asserts
+    /// fail. The OVERLAPPING (uncommitted-transfer) race that the plain fence
+    /// cannot catch is covered by
+    /// `claim_advisory_lock_serializes_with_inflight_transfer` (P1-B).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn claim_promote_fence_blocks_stale_claim_after_transfer() {
         let pg = TestPostgresDb::create().await;
@@ -1612,13 +1739,14 @@ mod tests {
 
         // Claim tx: run the real candidate SELECT (locks only the outbox row).
         let mut claim_tx = pool.begin().await.unwrap();
-        let candidate: Option<i64> = sqlx::query_scalar(CLAIM_CANDIDATE_SQL)
+        let candidate: Option<ClaimCandidate> = sqlx::query_as(CLAIM_CANDIDATE_SQL)
             .bind("node-W")
             .bind("claude")
             .fetch_optional(&mut *claim_tx)
             .await
             .unwrap();
-        assert_eq!(candidate, Some(row_id), "candidate SELECT passes the fence");
+        let candidate_id = candidate.map(|c| c.id);
+        assert_eq!(candidate_id, Some(row_id), "candidate SELECT passes the fence");
 
         // Concurrently: transfer node-W@0 → node-V@1 (touches only the owner
         // table, so it does not block on the outbox row lock).
@@ -1656,6 +1784,88 @@ mod tests {
             "pending",
             "row stays pending"
         );
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// P1-B — the claim's channel advisory lock linearizes with an in-flight
+    /// transfer. `transfer_tx` holds the channel advisory lock and has
+    /// superseded `node-W@0` but has NOT committed. The real claim runs
+    /// concurrently: it finds the candidate (owner still reads `node-W@0`
+    /// active under READ COMMITTED — the supersede is uncommitted) and then
+    /// blocks acquiring the SAME advisory lock. Only after `transfer_tx` commits
+    /// (`node-W@0` → `node-V@1`) does the claim proceed and re-read the fresh
+    /// owner, so the fence fails and it returns None; the row stays `pending`.
+    ///
+    /// Mutation: remove the `pg_advisory_xact_lock` from the claim. The promote
+    /// UPDATE then runs against its statement snapshot WHILE the supersede is
+    /// still uncommitted — READ COMMITTED sees `node-W@0` STILL active, the
+    /// stale claim succeeds (Some), and stale `node-W` could double-execute
+    /// alongside the new owner. The `is_none()` assert catches it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn claim_advisory_lock_serializes_with_inflight_transfer() {
+        let pg = TestPostgresDb::create().await;
+        let pool = pg.connect_and_migrate().await;
+        insert_owner(&pool, "claude", "chanLin", "node-W", 0, "active").await;
+        let row_id = insert_outbox(
+            &pool,
+            "chanLin",
+            "msg-1",
+            "claude",
+            "pending",
+            "forwarded",
+            Some("node-W"),
+            Some(0),
+            None,
+            None,
+        )
+        .await;
+
+        let id = identity("claude", "chanLin");
+
+        // transfer_tx: hold the channel advisory lock + supersede node-W@0,
+        // uncommitted.
+        let mut transfer_tx = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(id.advisory_key())
+            .execute(&mut *transfer_tx)
+            .await
+            .unwrap();
+        let superseded = supersede_active_owner(&mut transfer_tx, &id, "node-W", 0)
+            .await
+            .unwrap();
+        assert_eq!(superseded, 1);
+
+        // Spawn the real claim; with the P1-B lock it blocks on the advisory lock.
+        let claim_pool = pool.clone();
+        let claim = tokio::spawn(async move {
+            claim_pending_for_target_fenced(&claim_pool, "node-W", "tok-r1", "claude").await
+        });
+
+        // Let the claim reach the advisory-lock wait (fix present) or run the
+        // promote against the uncommitted supersede (fix absent).
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // Complete + commit the transfer → node-W@0 superseded, node-V@1 active.
+        sqlx::query(
+            "INSERT INTO intake_session_owners
+                 (provider, raw_channel_id, owner_instance_id, generation, status)
+             VALUES ($1, $2, 'node-V', 1, 'active')",
+        )
+        .bind(id.provider())
+        .bind(id.raw_channel_id())
+        .execute(&mut *transfer_tx)
+        .await
+        .unwrap();
+        transfer_tx.commit().await.unwrap();
+
+        let claimed = claim.await.unwrap().unwrap();
+        assert!(
+            claimed.is_none(),
+            "claim must serialize behind the transfer and fence out the stale owner"
+        );
+        assert_eq!(outbox_status(&pool, row_id).await, "pending");
 
         pool.close().await;
         pg.drop().await;
