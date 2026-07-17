@@ -47,7 +47,7 @@ fn provider_exec_registry_conformance_invariant() {
         );
         match compaction_adapter {
             ProviderCompactionAdapter::ClaudeEnvironment => {
-                assert!(!provider.compact_env_vars(80).is_empty());
+                assert!(provider.compact_env_vars(80).is_empty());
                 assert!(provider.compact_cli_config(80, 100_000).is_empty());
             }
             ProviderCompactionAdapter::CodexCli => {

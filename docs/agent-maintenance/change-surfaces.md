@@ -681,9 +681,13 @@
     #3262 (-16): the watcher-completed status-panel context-usage backfill block
     is extracted into `adk_session::backfill_completed_panel_usage_and_maybe_inject_compact`
     (a single call now replaces the inline `set_context_panel_usage` block). The
-    helper additionally fires the claude-only AgentDesk-side `/compact` injection
-    when live usage crosses `context_compact_percent_claude` (Claude Code ignores
-    `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`); see `src/services/claude_compact_trigger.rs`.
+    helper additionally fires the Claude-only AgentDesk-side `/compact` injection
+    when exact token usage crosses the model-aware threshold formed from
+    `context_compact_percent_claude` and
+    `context_compact_lower_bound_tokens` (default 300,000). Claude launch scripts
+    use `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only when that absolute window is valid;
+    see `src/services/claude_compact_trigger.rs` and
+    `src/services/claude_compact_context.rs`.
     +19 from #3296: the aborted-anchor reconcile chokepoint — on a body-visible
     normal commit (`terminal_output_committed &&
     tui_direct_anchor_terminal_body_visible && !lifecycle_stage_paused`, sited

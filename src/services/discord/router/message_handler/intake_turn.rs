@@ -2495,6 +2495,7 @@ pub(super) async fn handle_text_message(
 
     // Pre-compute provider-specific compact config
     let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
+    let compact_lower_bound_tokens = ctx_thresholds.compact_lower_bound_tokens;
     let compact_token_limit_for_codex = {
         provider
             .compact_cli_config(compact_percent, model_context_window)
@@ -2547,6 +2548,7 @@ pub(super) async fn handle_text_message(
                             model_for_turn.as_deref(),
                             native_fast_mode_override,
                             compact_percent_for_claude,
+                            compact_lower_bound_tokens,
                             cache_ttl_minutes,
                             dispatch_type_for_mcp.as_deref(),
                         ),

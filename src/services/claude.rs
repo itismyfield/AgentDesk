@@ -61,9 +61,21 @@ const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL: Duration = Duration::from
 #[cfg(unix)]
 type ClaudeTuiSessionTurnLock = Arc<Mutex<()>>;
 
+/// Serializes only the short snapshot → key mutation → confirmation critical
+/// section in a Claude composer. This is intentionally distinct from the
+/// turn-lifetime lock: `/compact` may be queued while a hosted turn is busy,
+/// whereas ordinary follow-ups still own the turn lock and readiness wait.
+#[cfg(unix)]
+type ClaudeTuiComposerMutationLock = Arc<Mutex<()>>;
+
 #[cfg(unix)]
 static CLAUDE_TUI_SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, ClaudeTuiSessionTurnLock>> =
     LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(unix)]
+static CLAUDE_TUI_COMPOSER_MUTATION_LOCKS: LazyLock<
+    dashmap::DashMap<String, ClaudeTuiComposerMutationLock>,
+> = LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(unix)]
 fn claude_tui_session_turn_lock(tmux_session_name: &str) -> ClaudeTuiSessionTurnLock {
@@ -71,6 +83,95 @@ fn claude_tui_session_turn_lock(tmux_session_name: &str) -> ClaudeTuiSessionTurn
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+#[cfg(unix)]
+fn claude_tui_composer_mutation_lock(tmux_session_name: &str) -> ClaudeTuiComposerMutationLock {
+    CLAUDE_TUI_COMPOSER_MUTATION_LOCKS
+        .entry(tmux_session_name.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Run one narrow composer mutation atomically with other mutations for the
+/// same pane. Readiness waits deliberately live outside this helper so a normal
+/// follow-up cannot block a busy-turn `/compact` for 45 seconds.
+#[cfg(unix)]
+pub(crate) fn with_claude_tui_composer_mutation_lock<R>(
+    tmux_session_name: &str,
+    f: impl FnOnce() -> R,
+) -> R {
+    let composer_lock = claude_tui_composer_mutation_lock(tmux_session_name);
+    let _composer_guard = composer_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    f()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn with_claude_tui_composer_mutation_lock<R>(
+    _tmux_session_name: &str,
+    f: impl FnOnce() -> R,
+) -> R {
+    f()
+}
+
+#[cfg(all(test, unix))]
+mod claude_tui_composer_lock_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn compact_composer_lock_proceeds_while_turn_lifetime_lock_is_held() {
+        let session = format!("claude-4591-turn-lock-{}", uuid::Uuid::new_v4());
+        let turn_lock = claude_tui_session_turn_lock(&session);
+        let _turn_guard = turn_lock.lock().unwrap();
+        let (sent, received) = mpsc::channel();
+        let worker_session = session.clone();
+        std::thread::spawn(move || {
+            with_claude_tui_composer_mutation_lock(&worker_session, || {
+                sent.send(()).unwrap();
+            });
+        });
+        received
+            .recv_timeout(Duration::from_millis(250))
+            .expect("composer mutation must not wait on the turn-lifetime lock");
+    }
+
+    #[test]
+    fn composer_mutation_lock_serializes_two_mutations() {
+        let session = format!("claude-4591-composer-lock-{}", uuid::Uuid::new_v4());
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let first_session = session.clone();
+        std::thread::spawn(move || {
+            with_claude_tui_composer_mutation_lock(&first_session, || {
+                first_entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        first_entered_rx
+            .recv_timeout(Duration::from_millis(250))
+            .unwrap();
+        let second_session = session.clone();
+        std::thread::spawn(move || {
+            with_claude_tui_composer_mutation_lock(&second_session, || {
+                second_entered_tx.send(()).unwrap();
+            });
+        });
+        assert!(
+            second_entered_rx
+                .recv_timeout(Duration::from_millis(40))
+                .is_err(),
+            "a second composer mutation must not interleave before the first releases"
+        );
+        release_tx.send(()).unwrap();
+        second_entered_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("second mutation should proceed after the first releases");
+    }
 }
 
 /// #3262: run a blocking TUI-submit closure under the SAME per-session turn lock
@@ -205,11 +306,39 @@ pub(crate) fn append_claude_fast_mode_arg(args: &mut Vec<String>, fast_mode_enab
     args.push(format!(r#"{{"fastMode":{enabled}}}"#));
 }
 
+fn claude_model_from_args(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find(|pair| pair[0] == "--model")
+        .map(|pair| pair[1].as_str())
+}
+
+fn launch_auto_compact_window_for_session(
+    launch_key: &str,
+    model: Option<&str>,
+    compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+) -> Option<u64> {
+    crate::services::claude_compact_context::register_launch_provenance(
+        launch_key,
+        model,
+        gateway_proxy_env,
+    );
+    compact_percent.and_then(|percent| {
+        crate::services::claude_compact_context::launch_auto_compact_window(
+            launch_key,
+            model,
+            percent,
+            compact_lower_bound_tokens,
+        )
+    })
+}
+
 fn build_tmux_launch_env_lines(
     exec_path: Option<&str>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
-    compact_percent: Option<u64>,
+    auto_compact_window: Option<u64>,
     gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> String {
     let mut env_lines = String::from("unset CLAUDECODE\n");
@@ -241,8 +370,10 @@ fn build_tmux_launch_env_lines(
             provider.as_str()
         ));
     }
-    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
-        env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
+    if let Some(window) = auto_compact_window {
+        env_lines.push_str(&format!(
+            "export CLAUDE_CODE_AUTO_COMPACT_WINDOW={window}\n"
+        ));
     }
     gateway_proxy_env.append_shell_env(&mut env_lines);
 
@@ -255,10 +386,10 @@ mod launch_env_tests {
     use crate::services::claude_gateway_proxy::launch_env_for_test;
 
     #[test]
-    fn launch_env_restores_compact_override_and_gates_gateway_proxy() {
+    fn launch_env_exports_absolute_compact_window_and_gates_gateway_proxy() {
         let gateway_env = launch_env_for_test(true, "http://proxy.example/it's-ready", true);
-        let enabled = build_tmux_launch_env_lines(None, None, None, Some(70), &gateway_env);
-        assert!(enabled.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70\n"));
+        let enabled = build_tmux_launch_env_lines(None, None, None, Some(700_000), &gateway_env);
+        assert!(enabled.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=700000\n"));
         assert!(
             enabled.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
@@ -269,7 +400,8 @@ mod launch_env_tests {
         assert!(disabled.contains("unset ANTHROPIC_BASE_URL\n"));
         assert!(disabled.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
 
-        assert!(!disabled.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
+        assert!(!disabled.contains("CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+        assert!(!enabled.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
         assert!(!enabled.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
         assert!(!disabled.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
     }
@@ -724,6 +856,7 @@ pub fn execute_command_streaming(
     model_override: Option<&str>,
     fast_mode_enabled: Option<bool>,
     compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
     cache_ttl_minutes: Option<u32>,
     dispatch_type: Option<&str>,
 ) -> Result<(), String> {
@@ -868,6 +1001,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         effective_prompt,
                         hook_endpoint,
                         compact_percent,
+                        compact_lower_bound_tokens,
                     );
                 }
                 tracing::warn!(
@@ -913,6 +1047,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     report_channel_id,
                     report_provider,
                     compact_percent,
+                    compact_lower_bound_tokens,
                 );
             } else {
                 let (tmux_missing, pane_liveness) =
@@ -934,6 +1069,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         report_channel_id,
                         report_provider,
                         compact_percent,
+                        compact_lower_bound_tokens,
                     );
                 }
                 // Local without tmux → ProcessBackend (new path)
@@ -946,6 +1082,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     cancel_token,
                     tmux_name,
                     compact_percent,
+                    compact_lower_bound_tokens,
                 );
             }
         }
@@ -962,6 +1099,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 cancel_token,
                 tmux_name,
                 compact_percent,
+                compact_lower_bound_tokens,
             );
         }
     }
@@ -1016,10 +1154,22 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
     }
-    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
-        command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", pct.to_string());
-    }
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    let direct_launch_key = format!(
+        "claude-direct-{}",
+        session_id
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    );
+    if let Some(window) = launch_auto_compact_window_for_session(
+        &direct_launch_key,
+        model_override,
+        compact_percent,
+        compact_lower_bound_tokens,
+        &gateway_proxy_env,
+    ) {
+        command.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", window.to_string());
+    }
     gateway_proxy_env.apply_to_command(&mut command);
 
     let mut child = command.spawn().map_err(|e| {
@@ -1798,13 +1948,8 @@ fn execute_streaming_local_tui_tmux(
     model_override: Option<&str>,
     system_prompt: Option<&str>,
     hook_endpoint: String,
-    // #3166: provider-specific compact threshold (context_compact_percent_claude),
-    // resolved by the caller via fetch_context_thresholds. Threaded into the TUI
-    // launch script so `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is exported for BOTH fresh
-    // and `--resume` spawns. Before #3166 this path silently dropped it, so every
-    // TUI-hosted claude session (the default local-tmux driver since #2110) ran
-    // without the configured auto-compact override.
     compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tui_tmux START: {} ===",
@@ -1899,6 +2044,7 @@ fn execute_streaming_local_tui_tmux(
         hook_endpoint,
         resume,
         compact_percent,
+        compact_lower_bound_tokens,
         &gateway_proxy_env,
     )?;
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
@@ -2082,6 +2228,7 @@ fn prepare_and_create_claude_tui_session(
     hook_endpoint: String,
     resume: bool,
     compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
     gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> Result<String, String> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
@@ -2111,6 +2258,7 @@ fn prepare_and_create_claude_tui_session(
             model: model_override.map(str::to_string),
             resume,
             compact_percent,
+            compact_lower_bound_tokens,
             gateway_proxy_env: gateway_proxy_env.clone(),
         };
         let session_files =
@@ -2634,6 +2782,7 @@ fn execute_streaming_local_tmux(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tmux START: {} ===",
@@ -2876,11 +3025,18 @@ fn execute_streaming_local_tmux(
     // A live warm-followup process keeps its original environment. Resolve and
     // warn only once the startup plan actually requires a fresh process.
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    let auto_compact_window = launch_auto_compact_window_for_session(
+        tmux_session_name,
+        claude_model_from_args(args),
+        compact_percent,
+        compact_lower_bound_tokens,
+        &gateway_proxy_env,
+    );
     let env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
-        compact_percent,
+        auto_compact_window,
         &gateway_proxy_env,
     );
 
@@ -3073,6 +3229,7 @@ pub(crate) fn execute_streaming_local_process(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
     compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
@@ -3153,15 +3310,21 @@ pub(crate) fn execute_streaming_local_process(
         .clone()
         .map(|path| vec![("PATH".to_string(), path)])
         .unwrap_or_default();
-    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
-        env_vars.push((
-            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
-            pct.to_string(),
-        ));
-    }
     // The follow-up path returned above when the existing process was healthy,
     // so probing here cannot emit one warning per warm turn.
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    if let Some(window) = launch_auto_compact_window_for_session(
+        session_name,
+        claude_model_from_args(args),
+        compact_percent,
+        compact_lower_bound_tokens,
+        &gateway_proxy_env,
+    ) {
+        env_vars.push((
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+            window.to_string(),
+        ));
+    }
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),

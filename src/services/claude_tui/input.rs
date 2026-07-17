@@ -32,6 +32,9 @@ const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(120);
 const PROMPT_SUBMIT_RETRY_SETTLE: Duration = Duration::from_millis(350);
 const PROMPT_SUBMIT_CONFIRM_RETRIES: usize = 2;
+/// The busy-turn `/compact` path gets exactly one passive confirmation capture.
+/// It intentionally never follows generic submit retry/cleanup behavior.
+const COMPACT_SUBMIT_PASSIVE_SETTLE: Duration = Duration::from_millis(120);
 const PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN: Option<&CancelToken> = None;
 /// Upper bound for how long we wait for an interactive selector overlay (e.g.
 /// `/effort`) to mount after submitting the slash command, before giving up and
@@ -191,6 +194,15 @@ pub struct PromptReadinessSnapshot {
     pub tmux_pane_alive: bool,
     pub capture_available: bool,
     pub pane_tail: String,
+}
+
+/// Outcome of the compact-specific steering path. Once a tmux mutation starts,
+/// an error is necessarily ambiguous: a retry could enqueue a duplicate compact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactSubmitOutcome {
+    PreMutationRefused,
+    AcceptedOrQueued,
+    AmbiguousAfterMutation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -402,23 +414,121 @@ fn send_prompt_with_readiness(
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
+    // Readiness can wait for a busy prior turn, but it must not hold the narrow
+    // composer lock while doing so. Revalidate only after acquiring that lock so
+    // `/compact` and a normal follow-up cannot interleave their key mutations.
     wait_for_prompt_ready(session_name, readiness, cancel_token)?;
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        "claude",
-        session_name,
-        prompt,
-    );
-    match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                "claude",
-                session_name,
-                prompt,
-            );
-            Err(error)
+    crate::services::claude::with_claude_tui_composer_mutation_lock(session_name, || {
+        let snapshot = prompt_readiness_snapshot(session_name);
+        if !prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
+            return Err("claude tui composer changed before follow-up mutation".to_string());
         }
+        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+            "claude",
+            session_name,
+            prompt,
+        );
+        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                    "claude",
+                    session_name,
+                    prompt,
+                );
+                Err(error)
+            }
+        }
+    })
+}
+
+/// Submit `/compact` into a busy Claude pane without the generic readiness wait.
+/// This function deliberately contains no retry Enter, Escape, or Ctrl-U cleanup:
+/// after the first tmux mutation starts, every uncertainty stays disarmed.
+pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
+    let snapshot = prompt_readiness_snapshot(session_name);
+    if compact_steering_decision(&snapshot).is_err() {
+        return CompactSubmitOutcome::PreMutationRefused;
     }
+
+    // The first call begins the mutation boundary. Even a transport/result error
+    // can mean tmux partially typed the control, so nothing after this point is
+    // retryable by this path.
+    let literal = match crate::services::platform::tmux::send_literal(session_name, "/compact") {
+        Ok(output) => output,
+        Err(_) => return CompactSubmitOutcome::AmbiguousAfterMutation,
+    };
+    if ensure_tmux_success(literal, &TuiInputAction::Literal("/compact".to_string())).is_err() {
+        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    }
+    std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
+
+    let enter = match crate::services::platform::tmux::send_keys(session_name, &["Enter"]) {
+        Ok(output) => output,
+        Err(_) => return CompactSubmitOutcome::AmbiguousAfterMutation,
+    };
+    if ensure_tmux_success(enter, &TuiInputAction::Enter).is_err() {
+        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    }
+    std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
+
+    let confirmation = prompt_readiness_snapshot(session_name);
+    if !confirmation.tmux_pane_alive || !confirmation.capture_available {
+        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    }
+    if crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(
+        &confirmation.pane_tail,
+    ) || compact_queued_message_hint(&confirmation.pane_tail)
+    {
+        CompactSubmitOutcome::AcceptedOrQueued
+    } else {
+        CompactSubmitOutcome::AmbiguousAfterMutation
+    }
+}
+
+/// Strict pre-mutation steering policy. A regular busy frame is permitted only
+/// when its bottom composer is provably empty; every modal/draft/auth/blind
+/// capture is a refusal rather than a best-effort recovery opportunity.
+pub(crate) fn compact_steering_decision(
+    snapshot: &PromptReadinessSnapshot,
+) -> Result<(), &'static str> {
+    if !snapshot.tmux_pane_alive {
+        return Err("pane dead");
+    }
+    if !snapshot.capture_available {
+        return Err("pane capture unavailable");
+    }
+    if snapshot.prompt_draft_detected {
+        return Err("composer draft");
+    }
+    if snapshot_indicates_mcp_auth_block(snapshot) {
+        return Err("MCP authentication block");
+    }
+    if crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog(
+        &snapshot.pane_tail,
+    )
+    .is_some()
+    {
+        return Err("startup dialog");
+    }
+    if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
+        &snapshot.pane_tail,
+    ) {
+        return Err("interactive modal");
+    }
+    if !crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(
+        &snapshot.pane_tail,
+    ) {
+        return Err("exact empty composer unavailable");
+    }
+    Ok(())
+}
+
+fn compact_queued_message_hint(pane_tail: &str) -> bool {
+    let lower = pane_tail.to_ascii_lowercase();
+    lower.contains("queued message")
+        || (lower.contains("queued")
+            && (lower.contains("after current") || lower.contains("will be sent")))
 }
 
 /// Drive an interactive Claude TUI selector (e.g. `/effort <level>`) to a
@@ -3546,5 +3656,73 @@ line 13";
             }
         }
         assert_eq!(reassembled, prompt);
+    }
+
+    fn compact_snapshot(pane_tail: &str) -> PromptReadinessSnapshot {
+        PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: pane_tail.to_string(),
+        }
+    }
+
+    #[test]
+    fn compact_steering_allows_idle_and_busy_empty_composers_only() {
+        let idle = compact_snapshot("Ready for input (type message + Enter)\n❯");
+        let busy = compact_snapshot("✻ Working (12s · esc to interrupt)\n❯");
+        assert_eq!(compact_steering_decision(&idle), Ok(()));
+        assert_eq!(compact_steering_decision(&busy), Ok(()));
+
+        let mut draft = compact_snapshot("✻ Working\n❯ operator draft");
+        draft.prompt_draft_detected = true;
+        assert_eq!(compact_steering_decision(&draft), Err("composer draft"));
+    }
+
+    #[test]
+    fn compact_steering_rejects_auth_modals_dead_and_blind_panes() {
+        let auth = compact_snapshot("⚠ 1 MCP server needs authentication · run /mcp\n❯");
+        assert_eq!(
+            compact_steering_decision(&auth),
+            Err("MCP authentication block")
+        );
+
+        let resume = compact_snapshot("Resume from summary\nEnter to confirm\n❯");
+        assert_eq!(compact_steering_decision(&resume), Err("startup dialog"));
+
+        let permission = compact_snapshot("Allow\nDeny\nEnter to confirm\n❯");
+        assert_eq!(
+            compact_steering_decision(&permission),
+            Err("interactive modal")
+        );
+
+        let selector = compact_snapshot("Effort\n←/→ to adjust\n❯");
+        assert_eq!(
+            compact_steering_decision(&selector),
+            Err("interactive modal")
+        );
+
+        let mut dead = compact_snapshot("❯");
+        dead.tmux_pane_alive = false;
+        assert_eq!(compact_steering_decision(&dead), Err("pane dead"));
+
+        let mut blind = compact_snapshot("❯");
+        blind.capture_available = false;
+        assert_eq!(
+            compact_steering_decision(&blind),
+            Err("pane capture unavailable")
+        );
+    }
+
+    #[test]
+    fn compact_passive_confirmation_accepts_only_clear_or_queued_hint() {
+        assert!(compact_queued_message_hint(
+            "Your queued message will be sent after current"
+        ));
+        assert!(compact_queued_message_hint("Queued message"));
+        assert!(!compact_queued_message_hint(
+            "assistant mentioned a queue in prose"
+        ));
     }
 }

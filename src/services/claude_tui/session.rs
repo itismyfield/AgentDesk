@@ -279,13 +279,10 @@ pub struct ClaudeTuiLaunchConfig {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub resume: bool,
-    /// #3166: provider-specific auto-compact threshold
-    /// (`context_compact_percent_claude`), resolved by the caller via
-    /// `fetch_context_thresholds`. When `Some(pct)` with `pct > 0` the launch
-    /// script exports `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=pct` so BOTH fresh and
-    /// `--resume` TUI spawns honour the configured override. Mirrors the
-    /// `p > 0` guard used by the non-TUI tmux/process spawn paths.
+    /// Provider-specific ratio used to derive the absolute Claude Code window.
     pub compact_percent: Option<u64>,
+    /// Live lower-bound setting captured by this launch's caller.
+    pub compact_lower_bound_tokens: u64,
     pub(crate) gateway_proxy_env: ClaudeGatewayProxyEnv,
 }
 
@@ -367,6 +364,14 @@ fn write_launch_script(
     config: &ClaudeTuiLaunchConfig,
     hook_settings_path: &Path,
 ) -> Result<(), String> {
+    // This is the final pre-exec launch artifact. Registering here makes the
+    // exact effective proxy decision available before the pane can receive its
+    // first prompt, and keeps direct script-generation tests on the same path.
+    crate::services::claude_compact_context::register_launch_provenance(
+        &config.tmux_session_name,
+        config.model.as_deref(),
+        &config.gateway_proxy_env,
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!("create TUI launch script dir {}: {error}", parent.display())
@@ -407,13 +412,19 @@ fn write_launch_script(
     // prompt entirely, the placeholder semantics here should be
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
-    // #3166: export the configured Claude auto-compact override so TUI-hosted
-    // sessions (fresh AND `--resume`) honour `context_compact_percent_claude`.
-    // Gated on `pct > 0`, mirroring the non-TUI spawn paths
-    // (`build_tmux_launch_env_lines` / `execute_streaming_local_process`); a 0
-    // or absent value leaves the var unset so the Claude CLI keeps its default.
-    let compact_export = match config.compact_percent.filter(|&pct| pct > 0) {
-        Some(pct) => format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}\n"),
+    // Claude's percentage override is retired: it can compact below the new
+    // lower bound. Export only an absolute, launch-model-derived window in the
+    // Claude Code accepted range; AgentDesk's exact-token trigger remains the
+    // authority if the model later changes mid-session.
+    let compact_export = match config.compact_percent.and_then(|pct| {
+        crate::services::claude_compact_context::launch_auto_compact_window(
+            &config.tmux_session_name,
+            config.model.as_deref(),
+            pct,
+            config.compact_lower_bound_tokens,
+        )
+    }) {
+        Some(window) => format!("export CLAUDE_CODE_AUTO_COMPACT_WINDOW={window}\n"),
         None => String::new(),
     };
     let mut gateway_exports = String::new();
@@ -453,6 +464,7 @@ mod tests {
             model: Some("sonnet".to_string()),
             resume: false,
             compact_percent: None,
+            compact_lower_bound_tokens: 300_000,
             gateway_proxy_env: crate::services::claude_gateway_proxy::launch_env_for_test(
                 false,
                 "http://127.0.0.1:10100",
@@ -564,9 +576,10 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_exports_compact_and_gates_gateway_proxy() {
+    fn launch_script_exports_absolute_compact_window_and_gates_gateway_proxy() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
+        config.model = Some("claude-sonnet-5".to_string());
         config.compact_percent = Some(60);
         config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
             true,
@@ -583,13 +596,13 @@ mod tests {
         .unwrap();
 
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
+        assert!(script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=600000\n"));
         assert!(
             script.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
         assert!(script.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
-        let export_pos = script.find("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").unwrap();
+        let export_pos = script.find("CLAUDE_CODE_AUTO_COMPACT_WINDOW").unwrap();
         let exec_pos = script.find("exec ").unwrap();
         assert!(
             export_pos < exec_pos,
@@ -608,16 +621,17 @@ mod tests {
         )
         .unwrap();
         let disabled_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(disabled_script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
+        assert!(disabled_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=600000\n"));
         assert!(disabled_script.contains("unset ANTHROPIC_BASE_URL\n"));
         assert!(disabled_script.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
     }
 
     #[test]
-    fn launch_script_resume_exports_compact_override() {
+    fn launch_script_resume_exports_absolute_compact_window() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.resume = true;
+        config.model = Some("claude-sonnet-5".to_string());
         config.compact_percent = Some(60);
         let launch_script_path = dir.path().join("launch.sh");
 
@@ -629,11 +643,11 @@ mod tests {
         .unwrap();
 
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
+        assert!(script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=600000\n"));
     }
 
     #[test]
-    fn launch_script_omits_compact_override_when_absent_or_zero() {
+    fn launch_script_omits_absolute_compact_window_without_a_known_model() {
         let dir = tempfile::tempdir().unwrap();
         for value in [None, Some(0)] {
             let mut config = sample_config();
@@ -647,9 +661,10 @@ mod tests {
             .unwrap();
             let script = std::fs::read_to_string(&launch_script_path).unwrap();
             assert!(
-                !script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
-                "value {value:?} must not export the override, got:\n{script}"
+                !script.contains("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+                "value {value:?} without a known launch model must not export a window, got:\n{script}"
             );
+            assert!(!script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
         }
     }
 

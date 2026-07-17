@@ -590,19 +590,21 @@ impl ProviderKind {
         Self::from_str(raw).unwrap_or_else(|| Self::Unsupported(raw.trim().to_string()))
     }
 
-    /// Returns provider-specific environment variables for auto-compact configuration.
-    /// - Claude: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = percent
-    /// - Codex: uses CLI args instead (see compact_cli_config)
+    /// Returns generic provider environment variables for auto-compact.
+    ///
+    /// Claude intentionally has no generic percent environment variable: its
+    /// launch path resolves a model-aware absolute
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from launch provenance instead.
     #[allow(dead_code)]
     pub fn compact_env_vars(&self, percent: u64) -> Vec<(String, String)> {
         let Some(adapter) = self.compaction_adapter() else {
             return Vec::new();
         };
         match adapter {
-            ProviderCompactionAdapter::ClaudeEnvironment => vec![(
-                "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
-                percent.to_string(),
-            )],
+            ProviderCompactionAdapter::ClaudeEnvironment => {
+                let _ = percent;
+                Vec::new()
+            }
             ProviderCompactionAdapter::CodexCli
             | ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled

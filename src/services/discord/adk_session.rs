@@ -704,17 +704,15 @@ mod compact_threshold_tests {
     use super::ContextThresholds;
     use crate::services::provider::ProviderKind;
 
-    /// #3097: a configured `context_compact_percent_claude` value must be the
-    /// value `compact_pct_for(Claude)` returns — this is exactly the number that
-    /// flows into the claude spawn's `compact_percent` and thus sets
-    /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (the spawn only sets the env var when
-    /// the value is `> 0`).
+    /// A configured `context_compact_percent_claude` value must remain distinct
+    /// from the generic and Codex percentages.
     #[test]
     fn compact_pct_for_claude_uses_claude_specific_override() {
         let thresholds = ContextThresholds {
             compact_pct: 80,
             compact_pct_codex: 100,
             compact_pct_claude: 60,
+            compact_lower_bound_tokens: 300_000,
             context_window: 1_000_000,
         };
         // Claude takes its own override, distinct from the generic value.
@@ -723,7 +721,7 @@ mod compact_threshold_tests {
         assert_eq!(thresholds.compact_pct_for(&ProviderKind::Codex), 100);
         // Other providers fall back to the generic value.
         assert_eq!(thresholds.compact_pct_for(&ProviderKind::Gemini), 80);
-        // A configured Claude value is > 0, so the override env var would be set.
+        // The launch path turns this percentage into an absolute safe window.
         assert!(thresholds.compact_pct_for(&ProviderKind::Claude) > 0);
     }
 
@@ -736,68 +734,10 @@ mod compact_threshold_tests {
             compact_pct: 55,
             compact_pct_codex: 100,
             compact_pct_claude: 55,
+            compact_lower_bound_tokens: 300_000,
             context_window: 1_000_000,
         };
         assert_eq!(thresholds.compact_pct_for(&ProviderKind::Claude), 55);
-    }
-}
-
-#[cfg(test)]
-mod compact_call_site_tests {
-    use super::claude_compact_trigger_evaluates_at_completion;
-    use crate::services::claude_compact_trigger::{observe_and_decide_for_test, state_test_guard};
-
-    // #3262 issue #4 (pure call-site gate): a zero-usage observation
-    // (`occupied == 0`) must NOT short-circuit the trigger evaluation — it is the
-    // canonical post-compact re-arm signal. Only a disabled feature (threshold 0)
-    // skips. This is the decision the call site lost in the early-`return`.
-    #[test]
-    fn zero_usage_does_not_short_circuit_trigger_evaluation() {
-        // usage 0 with a live threshold STILL evaluates (re-arm must be reached).
-        assert!(claude_compact_trigger_evaluates_at_completion(0, 60));
-        // A small threshold whose re-arm floor requires usage ≈ 0 still evaluates.
-        assert!(claude_compact_trigger_evaluates_at_completion(0, 1));
-        // Non-zero usage of course evaluates too.
-        assert!(claude_compact_trigger_evaluates_at_completion(123_456, 60));
-        // Only a disabled feature (unset/zero threshold) skips — degrade-safe.
-        assert!(!claude_compact_trigger_evaluates_at_completion(0, 0));
-        assert!(!claude_compact_trigger_evaluates_at_completion(999, 0));
-    }
-
-    // #3262 issue #4 (closes the integration gap the unit tests missed): drive the
-    // CALL-SITE path — gate → `observe_and_decide` — and prove that a
-    // turn-completion observation with usage == 0 RE-ARMS a previously-fired latch
-    // so the next threshold crossing fires again. The prior early-return
-    // (`if occupied == 0 { return; }`) starved this re-arm: a low-threshold channel
-    // fired once and stayed permanently disarmed.
-    #[test]
-    fn zero_usage_turn_completion_rearms_via_call_site_path() {
-        let _g = state_test_guard();
-        // Low threshold whose re-arm floor (threshold - 5, saturating) lands at 0,
-        // so ONLY a usage==0 observation can re-arm — exactly the case the
-        // early-return used to starve.
-        let ch = 770_001_u64;
-        let threshold = 3_u64;
-
-        // Helper mirroring the call site: gate first (usage==0 must NOT skip),
-        // then run the latch transition with the real usage percent.
-        let evaluate = |occupied: u64, usage_pct: u64| -> bool {
-            if !claude_compact_trigger_evaluates_at_completion(occupied, threshold) {
-                return false;
-            }
-            observe_and_decide_for_test(ch, usage_pct, threshold)
-        };
-
-        // First crossing fires (injects) and disarms.
-        assert!(evaluate(50_000, 5));
-        // Still parked above on a later completion: no re-fire (once-per-cycle).
-        assert!(!evaluate(90_000, 9));
-        // Post-compact turn-completion drops to ZERO usage. With the prior
-        // early-return this observation never reached the latch and the channel
-        // stayed disarmed forever. It must now re-arm (and not inject).
-        assert!(!evaluate(0, 0));
-        // Proof of re-arm: the next genuine crossing fires again.
-        assert!(evaluate(40_000, 4));
     }
 }
 
@@ -809,8 +749,10 @@ pub(super) struct ContextThresholds {
     /// Provider-specific override (if set). Falls back to compact_pct.
     pub compact_pct_codex: u64,
     /// Claude-specific override (if set). Falls back to compact_pct.
-    /// Flows to `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` on the claude spawn (#3097).
     pub compact_pct_claude: u64,
+    /// Provider-neutral minimum occupancy before compacting. Claude applies it
+    /// to its model-aware context window; unset settings default to 300k.
+    pub compact_lower_bound_tokens: u64,
     pub context_window: u64,
 }
 
@@ -822,6 +764,8 @@ impl Default for ContextThresholds {
             // Default to the generic compact_pct default so Claude inherits the
             // shared threshold unless `context_compact_percent_claude` is set.
             compact_pct_claude: 60,
+            compact_lower_bound_tokens:
+                crate::services::claude_compact_context::DEFAULT_CONTEXT_COMPACT_LOWER_BOUND_TOKENS,
             context_window: 1_000_000,
         }
     }
@@ -868,11 +812,14 @@ pub(super) async fn fetch_context_thresholds(_api_port: u16) -> ContextThreshold
     // value still applies it to Claude, while `context_compact_percent_claude`
     // takes precedence when present.
     let compact_pct_claude = find_u64("context_compact_percent_claude").unwrap_or(compact_pct);
+    let compact_lower_bound_tokens = find_u64("context_compact_lower_bound_tokens")
+        .unwrap_or(defaults.compact_lower_bound_tokens);
 
     ContextThresholds {
         compact_pct,
         compact_pct_codex,
         compact_pct_claude,
+        compact_lower_bound_tokens,
         context_window: defaults.context_window,
     }
 }
@@ -907,7 +854,20 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
         output_tokens: state.accum_output_tokens,
     };
     let occupied = usage.context_occupancy_input_tokens();
-    let context_window = provider.resolve_context_window(state.last_model.as_deref());
+    // Claude's real window belongs to the launch-time gateway provenance, not
+    // today's live config. Keep the provider fallback for panel display when a
+    // legacy/unregistered pane cannot prove launch provenance, but never use it
+    // to drive the authoritative compact trigger.
+    let claude_launch_window = matches!(provider, ProviderKind::Claude)
+        .then(|| {
+            crate::services::claude_compact_context::context_window_for_turn(
+                tmux_session_name,
+                state.last_model.as_deref(),
+            )
+        })
+        .flatten();
+    let context_window = claude_launch_window
+        .unwrap_or_else(|| provider.resolve_context_window(state.last_model.as_deref()));
     let ctx_cfg = fetch_context_thresholds(shared.api_port).await;
     let compact_pct = ctx_cfg.compact_pct_for(provider);
 
@@ -929,53 +889,18 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
         );
     }
 
-    // #3262: Claude ignores CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, so enforce the
-    // configured threshold ourselves by injecting `/compact` into the live TUI
-    // (claude-only, once-per-fill-cycle, idle-gated — see claude_compact_trigger).
-    // Runs regardless of status_panel_v2_enabled so disabling the v2 panel never
-    // silently disables auto-compact.
-    //
-    // #3262 issue #4 (call-site integration gap): the trigger evaluation runs
-    // UNCONDITIONALLY at this turn-completion boundary, including when
-    // `occupied == 0` (usage 0). A zero-usage observation cannot inject
-    // (`should_inject_compact` still requires `usage_pct >= threshold`) but it is
-    // the canonical post-compact signal that RE-ARMS the latch via
-    // `observe_and_decide`. Short-circuiting on zero usage (the prior early-return)
-    // starved the live re-arm path, leaving a low-threshold channel permanently
-    // disarmed after the first fire. `context_usage_percent` returns 0 safely when
-    // `context_window == 0`, so an unresolved window degrades to a re-arm-only 0.
-    if claude_compact_trigger_evaluates_at_completion(occupied, compact_pct) {
-        let usage_pct = context_usage_percent(occupied, context_window);
+    // The exact-token trigger runs even when `occupied == 0`: a post-compact
+    // usage reset is the re-arm signal. It is deliberately gated on a proven
+    // launch-bound Claude window, rather than inventing a live-config fallback.
+    if let Some(actual_window_tokens) = claude_launch_window {
         crate::services::claude_compact_trigger::maybe_inject_compact(
             channel_id.get(),
             tmux_session_name,
             provider,
-            usage_pct,
+            occupied,
+            actual_window_tokens,
             compact_pct,
+            ctx_cfg.compact_lower_bound_tokens,
         );
     }
-}
-
-/// Pure call-site gate for the #3262 Claude `/compact` trigger evaluation at a
-/// turn-completion boundary. Returns whether
-/// [`backfill_completed_panel_usage_and_maybe_inject_compact`] should evaluate the
-/// compact trigger for this completion.
-///
-/// The load-bearing property (issue #4): a zero-usage observation
-/// (`occupied == 0`) must NOT short-circuit — it is the canonical post-compact
-/// re-arm signal that has to reach `observe_and_decide`. The only thing that lets
-/// us skip the trigger entirely is a degrade-safe `0`/unset threshold (the feature
-/// is off), which `maybe_inject_compact` would itself no-op on anyway; gating here
-/// just avoids the redundant call. Provider gating (claude-only) and the actual
-/// re-arm/inject decision stay inside `maybe_inject_compact` /
-/// `observe_and_decide`.
-pub(crate) fn claude_compact_trigger_evaluates_at_completion(
-    occupied: u64,
-    threshold_pct: u64,
-) -> bool {
-    // usage==0 (occupied==0) MUST still evaluate (re-arm). Only a disabled feature
-    // (threshold 0) skips. `occupied` is referenced to make the zero-usage
-    // non-short-circuit explicit and testable.
-    let _ = occupied;
-    threshold_pct > 0
 }

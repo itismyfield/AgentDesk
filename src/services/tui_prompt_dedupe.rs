@@ -267,15 +267,25 @@ pub fn register_provider_session(
     if provider_session_id.is_empty() || tmux_session_name.is_empty() {
         return;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    state.tmux_by_provider_session.insert(
-        PromptKey::new(provider, provider_session_id),
-        TimedValue {
-            value: tmux_session_name.to_string(),
-            recorded_at: Instant::now(),
-        },
-    );
+    {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.purge_expired();
+        state.tmux_by_provider_session.insert(
+            PromptKey::new(provider, provider_session_id),
+            TimedValue {
+                value: tmux_session_name.to_string(),
+                recorded_at: Instant::now(),
+            },
+        );
+    }
+    // A new Claude provider UUID for this pane cannot own a previous launch's
+    // queued `/compact`. Clear after releasing the dedupe lock to avoid a lock
+    // inversion with the compact-control registry.
+    if normalize_provider(provider) == "claude" {
+        crate::services::claude_compact_trigger::clear_machine_compact_controls_for_tmux(
+            tmux_session_name,
+        );
+    }
 }
 
 /// Reverse lookup: resolve the provider session id that maps to `tmux_session_name`
@@ -880,12 +890,19 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     if tmux_session_name.is_empty() {
         return false;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
-    let removed_provider_sessions =
-        state.remove_provider_session_mappings_for_tmux(tmux_session_name);
-    removed_runtime || removed_provider_sessions
+    let removed = {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.purge_expired();
+        let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        let removed_provider_sessions =
+            state.remove_provider_session_mappings_for_tmux(tmux_session_name);
+        removed_runtime || removed_provider_sessions
+    };
+    crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
+    crate::services::claude_compact_trigger::clear_machine_compact_controls_for_tmux(
+        tmux_session_name,
+    );
+    removed
 }
 
 /// #3105 (codex P1 sub-case B): tombstone-evict every mirror mapping for a tmux
@@ -907,13 +924,20 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     if tmux_session_name.is_empty() {
         return false;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
-    let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
-    let removed_provider_sessions =
-        state.remove_provider_session_mappings_for_tmux(tmux_session_name);
-    removed_runtime || removed_channel || removed_provider_sessions
+    let removed = {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.purge_expired();
+        let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
+        let removed_provider_sessions =
+            state.remove_provider_session_mappings_for_tmux(tmux_session_name);
+        removed_runtime || removed_channel || removed_provider_sessions
+    };
+    crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
+    crate::services::claude_compact_trigger::clear_machine_compact_controls_for_tmux(
+        tmux_session_name,
+    );
+    removed
 }
 
 pub(crate) fn runtime_bindings_for_kind(
