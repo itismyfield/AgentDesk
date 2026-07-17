@@ -1462,7 +1462,13 @@ mod pg_tests {
     async fn preserving_request_forwards_to_capable_live_owner_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        seed_worker_node(&pool, "worker-capable-owner", serde_json::json!([]), "online").await;
+        seed_worker_node(
+            &pool,
+            "worker-capable-owner",
+            serde_json::json!([]),
+            "online",
+        )
+        .await;
         seed_session_owner(
             &pool,
             "claude:capable-owner",

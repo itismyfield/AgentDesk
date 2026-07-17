@@ -131,11 +131,10 @@ pub(crate) fn node_supports_intake_request(
             .get("features")
             .and_then(Value::as_array)
             .is_some_and(|features| {
-                features.iter().filter_map(Value::as_str).any(|feature| {
-                    feature
-                        .trim()
-                        .eq_ignore_ascii_case(PRESERVE_ON_CANCEL_V1)
-                })
+                features
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|feature| feature.trim().eq_ignore_ascii_case(PRESERVE_ON_CANCEL_V1))
             })
 }
 
@@ -144,9 +143,7 @@ fn node_intake_worker<'a>(node: &'a Value, provider: &str) -> Option<&'a Value> 
     if provider.is_empty() {
         return None;
     }
-    let intake_worker = node
-        .get("capabilities")?
-        .get("intake_worker")?;
+    let intake_worker = node.get("capabilities")?.get("intake_worker")?;
     if intake_worker.get("enabled").and_then(Value::as_bool) != Some(true) {
         return None;
     }
@@ -202,11 +199,7 @@ mod tests {
 
     #[test]
     fn non_preserving_request_allows_legacy_provider_worker() {
-        assert!(node_supports_intake_request(
-            &node(None),
-            "claude",
-            false
-        ));
+        assert!(node_supports_intake_request(&node(None), "claude", false));
     }
 
     #[test]

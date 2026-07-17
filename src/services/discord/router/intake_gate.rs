@@ -757,11 +757,9 @@ pub(in crate::services::discord) async fn handle_event(
             let preserve_on_cancel =
                 !new_message.author.bot && !author_excluded_from_cancel_preservation;
             if !preserve_on_cancel
-                && let Some(stale) = super::super::stale_dispatch_turn_for_text(
-                    data.shared.pg_pool.as_ref(),
-                    text,
-                )
-                .await
+                && let Some(stale) =
+                    super::super::stale_dispatch_turn_for_text(data.shared.pg_pool.as_ref(), text)
+                        .await
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(

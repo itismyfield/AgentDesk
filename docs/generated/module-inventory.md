@@ -404,11 +404,11 @@
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1129 | 587 | 542 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
-| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2157 | 826 | 1331 |  |
-| `services::cluster::intake_router_hook::session_owner` | `src/services/cluster/intake_router_hook/session_owner.rs` | 112 | 112 | 0 |  |
+| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2361 | 841 | 1520 |  |
+| `services::cluster::intake_router_hook::session_owner` | `src/services/cluster/intake_router_hook/session_owner.rs` | 134 | 134 | 0 |  |
 | `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
 | `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 456 | 341 | 115 |  |
-| `services::cluster::intake_worker_capabilities` | `src/services/cluster/intake_worker_capabilities.rs` | 152 | 152 | 0 |  |
+| `services::cluster::intake_worker_capabilities` | `src/services/cluster/intake_worker_capabilities.rs` | 233 | 178 | 55 |  |
 | `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1022 | 752 | 270 |  |
 | `services::cluster::registry_adapter_sink` | `src/services/cluster/registry_adapter_sink.rs` | 344 | 117 | 227 |  |
 | `services::cluster::relay_producer_registry` | `src/services/cluster/relay_producer_registry.rs` | 254 | 148 | 106 |  |
@@ -653,10 +653,10 @@
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 | 48 | 0 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 203 | 143 | 60 |  |
 | `services::discord::router::intake_dispatch` | `src/services/discord/router/intake_dispatch.rs` | 263 | 263 | 0 |  |
-| `services::discord::router::intake_dispatch::notice` | `src/services/discord/router/intake_dispatch/notice.rs` | 90 | 74 | 16 |  |
+| `services::discord::router::intake_dispatch::notice` | `src/services/discord/router/intake_dispatch/notice.rs` | 93 | 77 | 16 |  |
 | `services::discord::router::intake_dispatch::queued` | `src/services/discord/router/intake_dispatch/queued.rs` | 100 | 100 | 0 |  |
 | `services::discord::router::intake_dispatch::skill` | `src/services/discord/router/intake_dispatch/skill.rs` | 46 | 46 | 0 |  |
-| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1656 | 1587 | 69 | giant-file |
+| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1658 | 1583 | 75 | giant-file |
 | `services::discord::router::intake_gate::busy_duplicate_notice` | `src/services/discord/router/intake_gate/busy_duplicate_notice.rs` | 55 | 27 | 28 |  |
 | `services::discord::router::intake_gate::component_events` | `src/services/discord/router/intake_gate/component_events.rs` | 41 | 41 | 0 |  |
 | `services::discord::router::intake_gate::gate` | `src/services/discord/router/intake_gate/gate.rs` | 155 | 102 | 53 |  |
