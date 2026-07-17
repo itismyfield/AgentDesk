@@ -1145,6 +1145,7 @@ src/
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
 │   ├── claude.rs
+│   ├── claude_command.rs
 │   ├── claude_compact_context.rs
 │   ├── claude_compact_trigger.rs
 │   ├── claude_gateway_proxy.rs

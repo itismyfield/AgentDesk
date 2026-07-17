@@ -64,6 +64,25 @@ pub(crate) fn resolve_for_launch() -> ClaudeGatewayProxyEnv {
     )
 }
 
+/// Reconstruct the launch gateway decision from this process's environment.
+///
+/// Used by the `agentdesk tmux-wrapper` process, which has no installed config
+/// and therefore cannot run [`resolve_for_launch`]. Its managed dcserver parent
+/// already resolved the decision (with config) and applied it to the wrapper's
+/// environment, so reconstructing that decision here and re-applying it to the
+/// Claude child is idempotent: Inject with the inherited base URL (the parent
+/// injected it), or Scrub when the base URL is absent (the parent scrubbed it).
+pub(crate) fn reconstruct_launch_env_from_process() -> ClaudeGatewayProxyEnv {
+    reconstruct_launch_env(std::env::var(ANTHROPIC_BASE_URL_ENV).ok())
+}
+
+fn reconstruct_launch_env(base_url: Option<String>) -> ClaudeGatewayProxyEnv {
+    match base_url {
+        Some(url) if !url.trim().is_empty() => ClaudeGatewayProxyEnv::Inject { base_url: url },
+        _ => ClaudeGatewayProxyEnv::Scrub,
+    }
+}
+
 fn decide_launch_env(
     enabled: bool,
     proxy_url: &str,
@@ -189,6 +208,26 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn reconstruct_launch_env_maps_inherited_base_url_to_inject_or_scrub() {
+        // A present, non-empty base URL means the managed parent injected the
+        // proxy → reconstruct Inject with that exact URL (idempotent re-apply).
+        assert_eq!(
+            reconstruct_launch_env(Some("http://127.0.0.1:10100".to_string())),
+            ClaudeGatewayProxyEnv::Inject {
+                base_url: "http://127.0.0.1:10100".to_string()
+            }
+        );
+        // Absent or blank base URL means the parent scrubbed (or never set) it →
+        // reconstruct Scrub. This keeps the wrapper's re-application idempotent
+        // with the parent's Scrub decision instead of leaking a stale value.
+        assert_eq!(reconstruct_launch_env(None), ClaudeGatewayProxyEnv::Scrub);
+        assert_eq!(
+            reconstruct_launch_env(Some("   ".to_string())),
+            ClaudeGatewayProxyEnv::Scrub
+        );
     }
 
     #[test]
