@@ -4995,6 +4995,53 @@ mod stall_watchdog_auto_heal_tests {
         );
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+
+        let next_token = Arc::new(CancelToken::new());
+        assert!(
+            super::super::super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                next_token.clone(),
+                UserId::new(7),
+                MessageId::new(71),
+            )
+            .await
+        );
+        let next_watcher_cancel = Arc::new(AtomicBool::new(false));
+        shared.tmux_watchers.insert(
+            channel,
+            super::super::super::TmuxWatcherHandle {
+                tmux_session_name: "AgentDesk-codex-next-watchdog".to_string(),
+                output_path: "/tmp/agentdesk-test-next-watchdog.jsonl".to_string(),
+                paused: Arc::new(AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: next_watcher_cancel.clone(),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: Arc::new(AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(0)),
+            },
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let released = super::super::relay_auto_heal::apply_watchdog_orphan_token_cleanup(
+            &registry,
+            &provider,
+            shared.clone(),
+            channel,
+        )
+        .await;
+
+        assert!(!released, "watchdog rate limit must block a second reclaim");
+        assert!(shared.tmux_watchers.contains_key(&channel));
+        assert!(!next_watcher_cancel.load(Ordering::Relaxed));
+        assert!(
+            super::super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_some()
+        );
+        assert!(!next_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 }
 

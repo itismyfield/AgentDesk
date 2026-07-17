@@ -13,7 +13,9 @@ use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
 };
-use super::streaming_edit_text::TuiErrorClassification;
+use super::streaming_edit_text::{
+    TuiErrorClassification, bridge_claude_tui_followup_busy_readiness_timeout,
+};
 use super::*;
 
 pub(super) struct PostLoopFinalizeContext {
@@ -240,13 +242,19 @@ pub(super) async fn run_post_loop_finalize(
     }
 
     let claude_tui_followup_pre_submit_requeue_candidate = {
-        let base = crate::services::claude::claude_tui_followup_requeue_enabled()
-            && bridge_claude_tui_followup_requeue_prompt_error(
-                &provider,
-                inflight_state.runtime_kind,
-                &full_response,
-                tui_error_classification,
-            );
+        let busy_readiness_timeout = bridge_claude_tui_followup_busy_readiness_timeout(
+            &provider,
+            inflight_state.runtime_kind,
+            tui_error_classification,
+        );
+        let base = busy_readiness_timeout
+            || (crate::services::claude::claude_tui_followup_requeue_enabled()
+                && bridge_claude_tui_followup_requeue_prompt_error(
+                    &provider,
+                    inflight_state.runtime_kind,
+                    &full_response,
+                    tui_error_classification,
+                ));
         // #3885 (reworked): a follow-up pre-submit readiness timeout normally
         // requeues the inflight ("prompt never reached the pane → safe to
         // retry"). The dup risk is re-injecting an input that ALREADY landed:

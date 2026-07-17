@@ -13,7 +13,9 @@ use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
 };
+use super::streaming_edit_text::bridge_claude_tui_followup_busy_readiness_timeout;
 use super::{streaming_edit_text::TuiErrorClassification, *};
+use busy_followup_retry::{apply_busy_requeue_if_pending, handle_empty_response_and_busy_requeue};
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
     CancelPromptReplaceState, handle_cancel_prompt_replace,
@@ -23,14 +25,14 @@ use delivery_epilogue::{
     handle_delivery_epilogue,
 };
 use empty_response_recovery::{
-    EmptyResponseRecoveryContext, EmptyResponseRecoveryMessage, EmptyResponseRecoveryOutcome,
-    EmptyResponseRecoveryState, handle_empty_response_recovery,
+    EmptyResponseRecoveryContext, EmptyResponseRecoveryMessage, EmptyResponseRecoveryState,
 };
 use recovery_retry::{
     RecoveryRetryContext, RecoveryRetryMessage, RecoveryRetryOutcome, RecoveryRetryState,
     handle_recovery_retry,
 };
 
+mod busy_followup_retry;
 mod cancel_prompt_replace;
 mod delivery_epilogue;
 mod empty_response_recovery;
@@ -158,6 +160,12 @@ pub(super) async fn run_terminal_outcome_delivery(
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
     let tui_error_classification = ctx.tui_error_classification;
+    let claude_tui_followup_busy_readiness_timeout =
+        bridge_claude_tui_followup_busy_readiness_timeout(
+            &state.provider,
+            state.inflight_state.runtime_kind,
+            tui_error_classification,
+        );
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
@@ -209,6 +217,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     // resurrecting. When the holder FAILS (does not clear), the row is still
     // present + matching, so the bridge refreshes it and retry survives.
     let mut bridge_skip_holder_owns_inflight = false;
+    let mut claude_tui_busy_requeue_pending = false;
     let (mut terminal_delivery_committed, mut terminal_body_visible) = (false, false);
     let mut status_panel_terminal_committed = false;
     let mut completion_footer_terminal_text: Option<String> = None;
@@ -343,6 +352,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     } else {
         queue_retry_silence::apply(
             claude_tui_followup_pre_submit_requeue_candidate,
+            claude_tui_followup_busy_readiness_timeout,
             &mut full_response,
             &mut inflight_state,
         );
@@ -384,7 +394,12 @@ pub(super) async fn run_terminal_outcome_delivery(
             full_response = String::new(); // Suppress error message to user
         }
 
-        let outcome = handle_empty_response_recovery(
+        let (
+            mut delivery_response,
+            spoken_delivery_response,
+            resume_retry_queued,
+            silent_turn_handled,
+        ) = handle_empty_response_and_busy_requeue(
             empty_response_recovery_message,
             EmptyResponseRecoveryContext {
                 shared_owned: &shared_owned,
@@ -396,6 +411,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 user_text_owned: &user_text_owned,
                 had_prior_session_id_at_turn_start,
                 session_handshake_seen,
+                claude_tui_followup_busy_readiness_timeout,
                 rx_disconnected,
                 turn_start,
                 recovery_retry,
@@ -416,36 +432,26 @@ pub(super) async fn run_terminal_outcome_delivery(
                 terminal_body_visible: &mut terminal_body_visible,
                 preserve_inflight_for_cleanup_retry: &mut preserve_inflight_for_cleanup_retry,
                 bridge_skip_holder_owns_inflight: &mut bridge_skip_holder_owns_inflight,
+                claude_tui_busy_requeue_pending: &mut claude_tui_busy_requeue_pending,
             },
         )
         .await;
-        let (
-            mut delivery_response,
-            spoken_delivery_response,
-            resume_retry_queued,
-            silent_turn_handled,
-        ) = match outcome {
-            EmptyResponseRecoveryOutcome::ContinueDelivery {
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-            } => (
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-                false,
-            ),
-            EmptyResponseRecoveryOutcome::SilentTurnHandled {
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-            } => (
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-                true,
-            ),
-        };
+        // Recovery wrote `claude_tui_busy_requeue_pending` back through its state
+        // borrow (now released), so the requeue re-borrows the shared locals here
+        // sequentially — never aliased with the recovery call above.
+        apply_busy_requeue_if_pending(
+            claude_tui_busy_requeue_pending,
+            &shared_owned,
+            &provider,
+            channel_id,
+            &inflight_state,
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            turn_id.as_str(),
+            &mut delivery_response,
+            &mut preserve_inflight_for_cleanup_retry,
+        )
+        .await;
         if silent_turn_handled {
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
@@ -823,6 +829,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 recovery_retry,
                 resume_failure_detected,
                 claude_tui_followup_pre_submit_requeue_candidate,
+                claude_tui_busy_requeue_pending,
                 tui_error_classification,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,

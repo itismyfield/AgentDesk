@@ -68,7 +68,7 @@ targets = {
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
     # #4466 formally admits the non-advisory Windows named-mutex runtime proof.
-    "job_sha256" => "f920998e7117a748415d872640abff0dd07495f057215223e5b2b52228212906",
+    "job_sha256" => "4acdcbdcb8f28852cb152525a85790058cb638bce093bcec75af5d95deb83f52",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -88,8 +88,10 @@ targets = {
           "cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres",
           "cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres",
           "cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres",
+          "# Health must precede relay_recovery: fail-fast recipes otherwise hide",
+          "# health regressions whenever the earlier recovery filter also fails.",
           "python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres",
           "cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres",
           "cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres",
         ],

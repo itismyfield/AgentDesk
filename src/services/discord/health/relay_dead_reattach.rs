@@ -155,6 +155,7 @@ mod tests {
                 bridge_current_msg_id: Some(2),
                 mailbox_has_cancel_token: true,
                 mailbox_active_user_msg_id: Some(1),
+                mailbox_turn_started_at_ms: None,
                 queue_depth: 0,
                 pending_discord_callback_msg_id: Some(2),
                 pending_thread_proof: false,

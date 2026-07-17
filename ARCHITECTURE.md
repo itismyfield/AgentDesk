@@ -804,7 +804,9 @@ src/
 │   │   │   │   └── tool_arms.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── empty_response_recovery/
-│   │   │   │   │   └── guidance.rs
+│   │   │   │   │   ├── guidance.rs
+│   │   │   │   │   └── handler.rs
+│   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
