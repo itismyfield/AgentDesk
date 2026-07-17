@@ -445,6 +445,7 @@ pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
 
 #[cfg(test)]
 mod tests {
+    use super::super::PlaceholderProbe;
     use super::{
         AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RevivedVisibleRepair,
         RuntimeActivityEvidence, abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
@@ -453,7 +454,6 @@ mod tests {
         finalize_probe_cleanup_if_same_turn, revived_visible_repair, run_blocking_cleanup_probe,
         runtime_activity_evidence_from, should_detach_after_cleanup,
     };
-    use super::super::PlaceholderProbe;
     use crate::services::discord::formatting::MonitorHandoffReason;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
     use crate::services::discord::inflight::{
@@ -925,7 +925,9 @@ mod tests {
             let controller = shared.ui.placeholder_controller.clone();
             let key = key.clone();
             let input = input.clone();
-            tokio::spawn(async move { controller.ensure_active(gateway.as_ref(), key, input).await })
+            tokio::spawn(
+                async move { controller.ensure_active(gateway.as_ref(), key, input).await },
+            )
         };
         gateway
             .entered
@@ -948,7 +950,12 @@ mod tests {
                 .await
             })
         };
-        while shared.ui.placeholder_controller.entry_detached_for_test(&key) != Some(true) {
+        while shared
+            .ui
+            .placeholder_controller
+            .entry_detached_for_test(&key)
+            != Some(true)
+        {
             tokio::task::yield_now().await;
         }
         gateway.release.add_permits(1);
@@ -958,7 +965,13 @@ mod tests {
             PlaceholderControllerOutcome::Rejected
         );
         assert!(finalize.await.expect("finalize task joins"));
-        assert_eq!(shared.ui.placeholder_controller.entry_detached_for_test(&key), None);
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .entry_detached_for_test(&key),
+            None
+        );
         assert!(load_inflight_state(&ProviderKind::Codex, 11).is_none());
     }
 
