@@ -79,8 +79,8 @@ static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
 static EXTERNAL_INPUT_RELAY_LEASE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Process-global identity for the short SSH-direct observation marker. It is
-/// carried on the observation event so a machine-control suppression can clear
-/// only the effects created for that event, never a newer human submission.
+/// carried on the observation event so local-only classification can clear only
+/// the effects created for that event, never a newer human submission.
 static SSH_DIRECT_OBSERVATION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// `generation` sentinel for a freshly constructed lease that has NOT yet been
@@ -105,9 +105,9 @@ pub struct ObservedTuiPrompt {
     /// Unlike byte offsets this survives compaction and head rotation.
     pub source_event_id: Option<String>,
     pub observed_at: DateTime<Utc>,
-    /// Exact side effects created before this event was published. A confirmed
-    /// machine control can clear these identities without clobbering a newer
-    /// SSH-direct observation for the same pane.
+    /// Exact side effects created before this event was published. A local-only
+    /// slash classification can clear these identities without clobbering a
+    /// newer SSH-direct observation for the same pane.
     pub(crate) external_input_lease_generation: u64,
     pub(crate) ssh_direct_observation_generation: u64,
 }
@@ -291,14 +291,6 @@ pub fn register_provider_session(
                 value: tmux_session_name.to_string(),
                 recorded_at: Instant::now(),
             },
-        );
-    }
-    // A new Claude provider UUID for this pane cannot own a previous launch's
-    // queued `/compact`. Clear after releasing the dedupe lock to avoid a lock
-    // inversion with the compact-control registry.
-    if normalize_provider(provider) == "claude" {
-        crate::services::claude_compact_trigger::clear_machine_compact_controls_for_tmux(
-            tmux_session_name,
         );
     }
 }
@@ -914,9 +906,6 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
         removed_runtime || removed_provider_sessions
     };
     crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
-    crate::services::claude_compact_trigger::clear_machine_compact_controls_for_tmux(
-        tmux_session_name,
-    );
     removed
 }
 
@@ -949,9 +938,6 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
         removed_runtime || removed_channel || removed_provider_sessions
     };
     crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
-    crate::services::claude_compact_trigger::clear_machine_compact_controls_for_tmux(
-        tmux_session_name,
-    );
     removed
 }
 
@@ -1204,9 +1190,9 @@ fn observe_prompt_candidates_by_tmux_inner(
         record_relayed_entry_id(&provider, tmux_session_name, entry_id);
     }
     // Keep the exact identities of the pre-publish effects on the event. A
-    // confirmed machine control may consume this observation in the relay
-    // before any synthetic turn is created; it must then clear only these
-    // effects, never a newer human prompt's lease or SSH-direct marker.
+    // local-only slash decision may clear this observation in the relay before
+    // any synthetic turn is created; it must then clear only these effects,
+    // never a newer human prompt's lease or SSH-direct marker.
     let external_input_lease = record_external_input_turn_lease(
         &provider,
         tmux_session_name,
@@ -1521,8 +1507,9 @@ fn clear_ssh_direct_observation_pending_if_generation_matches(
 /// Clear the prompt-observation side effects stamped on `prompt`, but only if
 /// no newer observation has replaced either identity for this pane.
 ///
-/// This is used when a machine `/compact` is confirmed after generic direct
-/// prompt observation has already created its relay lease and SSH marker.
+/// Local-only slash commands are classified after generic direct prompt
+/// observation has already stamped these effects. Clearing by generation makes
+/// that late classification safe without correlating prompt text over time.
 pub(crate) fn clear_observed_tui_prompt_effects(prompt: &ObservedTuiPrompt) {
     let _ = clear_external_input_relay_lease_if_generation_matches_unscoped(
         &prompt.provider,

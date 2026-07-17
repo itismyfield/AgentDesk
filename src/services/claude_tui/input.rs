@@ -446,20 +446,6 @@ fn send_prompt_with_readiness(
 /// This function deliberately contains no retry Enter, Escape, or Ctrl-U cleanup:
 /// after the first tmux mutation starts, every uncertainty stays disarmed.
 pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
-    send_compact_while_busy_after_enter(session_name, || {})
-}
-
-/// Variant of [`send_compact_while_busy`] that records a provisional
-/// machine-control marker immediately after Enter has been accepted by tmux.
-///
-/// The passive confirmation capture below intentionally waits briefly for the
-/// pane to settle. A transcript hook can observe the submitted `/compact`
-/// during that wait, so callers that need to correlate the control must arm
-/// their marker before the settle sleep, not after this function returns.
-pub(crate) fn send_compact_while_busy_after_enter(
-    session_name: &str,
-    on_enter_submitted: impl FnOnce(),
-) -> CompactSubmitOutcome {
     let snapshot = prompt_readiness_snapshot(session_name);
     if compact_steering_decision(&snapshot).is_err() {
         return CompactSubmitOutcome::PreMutationRefused;
@@ -484,11 +470,6 @@ pub(crate) fn send_compact_while_busy_after_enter(
     if ensure_tmux_success(enter, &TuiInputAction::Enter).is_err() {
         return CompactSubmitOutcome::AmbiguousAfterMutation;
     }
-    // This is the earliest unambiguous boundary: tmux accepted the Enter that
-    // submits `/compact`. Do not defer the marker until after the passive
-    // settle/confirmation capture below, or a fast hook observation can race
-    // past it and create a duplicate relay lifecycle.
-    on_enter_submitted();
     std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
 
     let confirmation = prompt_readiness_snapshot(session_name);

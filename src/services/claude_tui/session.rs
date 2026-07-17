@@ -365,7 +365,6 @@ fn write_launch_script(
     // first prompt, and keeps direct script-generation tests on the same path.
     crate::services::claude_compact_context::register_launch_provenance(
         &config.tmux_session_name,
-        config.model.as_deref(),
         &config.gateway_proxy_env,
     );
     if let Some(parent) = path.parent() {
@@ -409,6 +408,12 @@ fn write_launch_script(
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
     let mut gateway_exports = String::new();
+    // Interactive TUI sessions can change model after launch, so they never
+    // inherit an absolute compact window from dcserver/tmux.
+    crate::services::claude_compact_context::append_auto_compact_window_shell_env(
+        &mut gateway_exports,
+        None,
+    );
     config
         .gateway_proxy_env
         .append_shell_env(&mut gateway_exports);
@@ -430,6 +435,10 @@ fn write_launch_script(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context_state_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::services::claude_compact_context::state_test_guard()
+    }
 
     fn sample_config() -> ClaudeTuiLaunchConfig {
         ClaudeTuiLaunchConfig {
@@ -497,6 +506,7 @@ mod tests {
 
     #[test]
     fn prepare_launch_writes_settings_and_script() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let config = sample_config();
         let hook_settings_path = dir.path().join("settings.json");
@@ -554,6 +564,7 @@ mod tests {
 
     #[test]
     fn launch_script_never_exports_absolute_compact_window_and_gates_gateway_proxy() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.model = Some("sonnet".to_string());
@@ -572,8 +583,9 @@ mod tests {
         .unwrap();
 
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
         assert!(
-            !script.contains("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            !script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="),
             "a long-lived interactive Claude TUI must not pin auto-compact to its launch model"
         );
         assert!(
@@ -594,13 +606,15 @@ mod tests {
         )
         .unwrap();
         let disabled_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(!disabled_script.contains("CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+        assert!(disabled_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!disabled_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
         assert!(disabled_script.contains("unset ANTHROPIC_BASE_URL\n"));
         assert!(disabled_script.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
     }
 
     #[test]
     fn launch_script_model_switch_cannot_leave_a_stale_auto_compact_window() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         let launch_script_path = dir.path().join("launch.sh");
@@ -612,8 +626,9 @@ mod tests {
         )
         .unwrap();
         let sonnet_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(sonnet_script.contains("--model sonnet"));
-        assert!(!sonnet_script.contains("CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+        assert!(sonnet_script.contains("'--model' 'sonnet'"));
+        assert!(sonnet_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!sonnet_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
 
         // `/model` can change the live TUI's model after this script has
         // launched. Rewriting the artifact with a different launch selector
@@ -627,9 +642,10 @@ mod tests {
         )
         .unwrap();
         let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(opus_script.contains("--model opus"));
-        assert!(!opus_script.contains("--model sonnet"));
-        assert!(!opus_script.contains("CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+        assert!(opus_script.contains("'--model' 'opus'"));
+        assert!(!opus_script.contains("'--model' 'sonnet'"));
+        assert!(opus_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!opus_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
         assert!(!opus_script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
     }
 
@@ -666,6 +682,7 @@ mod tests {
 
     #[test]
     fn continuation_cutover_rewrites_both_artifacts_and_is_idempotent() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let old_session_id = uuid::Uuid::new_v4().to_string();
         let new_session_id = uuid::Uuid::new_v4().to_string();

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
 use crate::services::claude_compact_context::{
+    append_auto_compact_window_shell_env, apply_auto_compact_window_to_command,
     claude_model_from_args, launch_auto_compact_window_for_session,
 };
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
@@ -203,11 +204,7 @@ fn build_tmux_launch_env_lines(
             provider.as_str()
         ));
     }
-    if let Some(window) = auto_compact_window {
-        env_lines.push_str(&format!(
-            "export CLAUDE_CODE_AUTO_COMPACT_WINDOW={window}\n"
-        ));
-    }
+    append_auto_compact_window_shell_env(&mut env_lines, auto_compact_window);
     gateway_proxy_env.append_shell_env(&mut env_lines);
 
     env_lines
@@ -233,7 +230,9 @@ mod launch_env_tests {
         assert!(disabled.contains("unset ANTHROPIC_BASE_URL\n"));
         assert!(disabled.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
 
-        assert!(!disabled.contains("CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+        assert!(disabled.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!disabled.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
+        assert!(enabled.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
         assert!(!enabled.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
         assert!(!enabled.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
         assert!(!disabled.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
@@ -932,15 +931,14 @@ IMPORTANT: Format your responses using Markdown for better readability:
             .map(str::to_string)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     );
-    if let Some(window) = launch_auto_compact_window_for_session(
+    let auto_compact_window = launch_auto_compact_window_for_session(
         &direct_launch_key,
         model_override,
         compact_percent,
         compact_lower_bound_tokens,
         &gateway_proxy_env,
-    ) {
-        command.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", window.to_string());
-    }
+    );
+    apply_auto_compact_window_to_command(&mut command, auto_compact_window);
     gateway_proxy_env.apply_to_command(&mut command);
 
     let mut child = command.spawn().map_err(|e| {
@@ -2058,7 +2056,6 @@ fn prepare_and_create_claude_tui_session(
     }
     crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
         tmux_session_name,
-        model_override,
         gateway_proxy_env,
     );
     Ok(owner_path)
@@ -2856,7 +2853,6 @@ fn execute_streaming_local_tmux(
 
     crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
         tmux_session_name,
-        claude_model_from_args(args),
         &gateway_proxy_env,
     );
 
@@ -3006,7 +3002,7 @@ pub(crate) fn execute_streaming_local_process(
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
 ) -> Result<(), String> {
-    use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
+    use crate::services::session_backend::{ProcessBackend, SessionConfig};
 
     debug_log(&format!(
         "=== execute_streaming_local_process START: {} ===",
@@ -3080,7 +3076,7 @@ pub(crate) fn execute_streaming_local_process(
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
-    let mut env_vars = resolution
+    let env_vars = resolution
         .exec_path
         .clone()
         .map(|path| vec![("PATH".to_string(), path)])
@@ -3088,18 +3084,13 @@ pub(crate) fn execute_streaming_local_process(
     // The follow-up path returned above when the existing process was healthy,
     // so probing here cannot emit one warning per warm turn.
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
-    if let Some(window) = launch_auto_compact_window_for_session(
+    let auto_compact_window = launch_auto_compact_window_for_session(
         session_name,
         claude_model_from_args(args),
         compact_percent,
         compact_lower_bound_tokens,
         &gateway_proxy_env,
-    ) {
-        env_vars.push((
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
-            window.to_string(),
-        ));
-    }
+    );
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),
@@ -3113,6 +3104,7 @@ pub(crate) fn execute_streaming_local_process(
 
     let backend = ProcessBackend::new();
     let handle = backend.create_session_with_command_env(&config, |command| {
+        apply_auto_compact_window_to_command(command, auto_compact_window);
         gateway_proxy_env.apply_to_command(command);
     })?;
 

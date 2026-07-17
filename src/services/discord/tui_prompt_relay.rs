@@ -28,15 +28,20 @@ mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
     format_ssh_direct_prompt_notification, format_system_continuation_note,
-    is_slash_command_control_prompt, should_suppress_local_only_kind_note_after_continuation,
-    slash_command_control_kind, slash_command_control_prompt_is_caveat_only,
-    slash_command_control_prompt_is_local_command_stdout,
+    should_suppress_local_only_kind_note_after_continuation,
 };
 #[cfg(test)]
 use self::injected_prompt_policy::{
     format_subagent_notification_card, is_start_anchored_task_notification,
 };
 mod task_notification_prompt;
+
+mod observed_prompt_decision;
+pub(in crate::services::discord) use self::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle;
+use self::observed_prompt_decision::{
+    RelayObservedPromptInjectionDecision, clear_local_only_observation_effects,
+    relay_observed_prompt_injected_prompt_decision,
+};
 
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
@@ -327,13 +332,12 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
 }
 
 async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiPrompt) {
-    // #4591: only an Enter-submitted, session/fence-bound machine compact may
-    // consume this exact observation. The generic slash classifier below
-    // remains the fallback formatting guard; it does not grant a long-lived
-    // marker that could swallow a later human command after an ambiguous send.
-    if consume_machine_compact_observation(&prompt) {
-        return;
-    }
+    // Generic prompt observation stamps its relay lease and SSH marker before
+    // publishing. Local-only slash commands clear those exact event generations
+    // immediately, before routing can return early; no text/time marker links
+    // an automatic `/compact` to a later human command.
+    let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
+    clear_local_only_observation_effects(&prompt, &relay_prompt_decision);
     let Some(channel_id) = owner_channel_for_prompt(shared, &prompt) else {
         tracing::debug!(
             provider = %prompt.provider,
@@ -353,7 +357,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // turn's lease and its guard would clear that generation, stranding the first
     // bridge tail. Drop the duplicate here, before any lease/anchor/inflight exists;
     // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
-    let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     let injected_class = relay_prompt_decision.injected_class;
     let task_notification =
         task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
@@ -740,38 +743,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     }
 }
 
-/// Consume a confirmed machine `/compact` before this observation can create a
-/// second control lifecycle. Generic prompt observation records its relay
-/// lease and SSH-direct marker before publishing the event, so successful
-/// consumption also releases those exact, event-stamped effects.
-fn consume_machine_compact_observation(prompt: &ObservedTuiPrompt) -> bool {
-    if !prompt.provider.eq_ignore_ascii_case("claude") {
-        return false;
-    }
-    let Some(provider_session_id) = crate::services::tui_prompt_dedupe::provider_session_for_tmux(
-        "claude",
-        &prompt.tmux_session_name,
-    ) else {
-        return false;
-    };
-    if !crate::services::claude_compact_trigger::consume_enter_submitted_machine_compact(
-        &prompt.provider,
-        &prompt.tmux_session_name,
-        &provider_session_id,
-        &prompt.prompt,
-        prompt.observed_at,
-    ) {
-        return false;
-    }
-    crate::services::tui_prompt_dedupe::clear_observed_tui_prompt_effects(prompt);
-    tracing::info!(
-        tmux_session_name = %prompt.tmux_session_name,
-        provider_session_id = %provider_session_id,
-        "consumed confirmed machine /compact observation and cleared pre-publish effects"
-    );
-    true
-}
-
 fn owner_channel_for_prompt(
     shared: &Arc<SharedData>,
     prompt: &ObservedTuiPrompt,
@@ -837,55 +808,6 @@ fn resolve_owner_channel_authoritatively(
         }
         (None, None) => None,
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct RelayObservedPromptInjectionDecision {
-    injected_class: InjectedPromptClass,
-    slash_command_kind: Option<String>,
-    local_only_slash: bool,
-}
-
-impl RelayObservedPromptInjectionDecision {
-    fn starts_external_turn_lifecycle(&self) -> bool {
-        !self.local_only_slash
-            && !self.injected_class.suppresses_user_turn_lifecycle()
-            && !self.injected_class.is_subagent_notification_event()
-    }
-}
-
-pub(in crate::services::discord) fn observed_prompt_starts_external_turn_lifecycle(
-    prompt: &str,
-) -> bool {
-    relay_observed_prompt_injected_prompt_decision(prompt).starts_external_turn_lifecycle()
-}
-
-/// Pure classification used before relay lease/ownership side effects.
-fn relay_observed_prompt_injected_prompt_decision(
-    prompt: &str,
-) -> RelayObservedPromptInjectionDecision {
-    let injected_class = classify_injected_prompt(prompt);
-    let slash_command_kind = matches!(injected_class, InjectedPromptClass::SlashCommandControl)
-        .then(|| slash_command_control_kind(prompt));
-    let local_only_slash = matches!(injected_class, InjectedPromptClass::SlashCommandControl)
-        && is_local_only_slash_command_prompt(prompt);
-
-    RelayObservedPromptInjectionDecision {
-        injected_class,
-        slash_command_kind,
-        local_only_slash,
-    }
-}
-
-/// Local-completing slash-control prompts skip synthetic turn ownership.
-fn is_local_only_slash_command_prompt(prompt: &str) -> bool {
-    if !is_slash_command_control_prompt(prompt) {
-        return false;
-    }
-    let kind = slash_command_control_kind(prompt);
-    super::commands::is_local_only_slash_command_kind(&kind)
-        || slash_command_control_prompt_is_caveat_only(prompt)
-        || slash_command_control_prompt_is_local_command_stdout(prompt)
 }
 
 /// Dedupe the two slash-control halves before lease/anchor/synthetic ownership.

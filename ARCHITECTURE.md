@@ -784,6 +784,7 @@ src/
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── launch_script.rs
+│   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── rehydration.rs
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs

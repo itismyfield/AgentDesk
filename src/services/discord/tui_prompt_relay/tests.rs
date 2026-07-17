@@ -1,64 +1,10 @@
+use super::injected_prompt_policy::slash_command_control_kind;
+use super::observed_prompt_decision::is_local_only_slash_command_prompt;
 use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
 fn compact_command_name_first_stub() -> &'static str {
     "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"
-}
-
-/// Generic direct-prompt observation writes its relay lease and SSH marker
-/// before publishing. A fast hook for the machine-entered `/compact` must
-/// consume the marker and remove both effects, otherwise the local-only slash
-/// path leaves a phantom external turn lease behind.
-#[test]
-fn enter_submitted_machine_compact_clears_pre_publish_lease_and_ssh_marker() {
-    let _compact_guard = crate::services::claude_compact_trigger::STATE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    crate::services::claude_compact_trigger::reset_for_test();
-    crate::services::tui_prompt_dedupe::reset_state_for_tests();
-
-    let tmux = "tmux-4591-prepublish-effects";
-    let provider_session_id = "claude-session-4591";
-    crate::services::tui_prompt_dedupe::register_provider_session(
-        "claude",
-        provider_session_id,
-        tmux,
-    );
-    crate::services::claude_compact_trigger::record_enter_submitted_machine_compact_for_test(
-        "claude",
-        tmux,
-        provider_session_id,
-    );
-    let mut observed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
-
-    assert_eq!(
-        crate::services::tui_prompt_dedupe::observe_prompt_by_tmux("claude", tmux, "/compact"),
-        crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect,
-    );
-    let prompt = observed
-        .try_recv()
-        .expect("generic observation publishes the machine compact");
-    assert!(
-        crate::services::tui_prompt_dedupe::external_input_relay_lease("claude", tmux, 1).is_some(),
-        "pre-publish generic observation created its external lease"
-    );
-    assert!(
-        crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending("claude", tmux),
-        "pre-publish generic observation created its SSH marker"
-    );
-
-    assert!(consume_machine_compact_observation(&prompt));
-    assert!(
-        crate::services::tui_prompt_dedupe::external_input_relay_lease("claude", tmux, 1).is_none(),
-        "confirmed consume removes the exact lease created before publication"
-    );
-    assert!(
-        !crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending("claude", tmux),
-        "confirmed consume removes the exact SSH-direct marker"
-    );
 }
 
 /// Scoped env-var override for inflight persistence tests. `AGENTDESK_ROOT_DIR`
