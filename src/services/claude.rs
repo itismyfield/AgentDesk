@@ -3194,8 +3194,7 @@ pub(crate) fn execute_streaming_local_process(
 
     let backend = ProcessBackend::new();
     let handle = backend.create_session_with_command_env(&config, |command| {
-        launch_env.apply_to_command(command);
-        crate::services::claude_command::mark_managed_launch_command(command);
+        launch_env.apply_to_managed_process_command(command);
     })?;
 
     // Store child PID in cancel token

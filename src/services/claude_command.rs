@@ -108,6 +108,20 @@ impl ClaudeLaunchEnv {
         self.gateway.apply_to_command(command);
     }
 
+    /// Apply this launch env to a **managed ProcessBackend** (pipe-mode) wrapper
+    /// `Command`: the resolved gateway decision, then the managed-launch marker
+    /// ([`mark_managed_launch_command`]) that tells the spawned
+    /// `agentdesk tmux-wrapper` to *reconstruct* this decision rather than
+    /// re-resolve config-less to a bare Scrub. Folding both steps here (rather
+    /// than leaving them as two lines in the `session_backend` launch closure)
+    /// makes the Command-leg marker wiring mutation-testable: deleting the
+    /// `mark_managed_launch_command` call below fails
+    /// `managed_process_command_marks_wrapper_env`.
+    pub(crate) fn apply_to_managed_process_command(&self, command: &mut Command) {
+        self.apply_to_command(command);
+        mark_managed_launch_command(command);
+    }
+
     /// Render the resolved gateway env as `export`/`unset` shell lines for
     /// launch sites that write a bash launch script rather than spawning a
     /// `Command` directly (Claude-TUI launch script, legacy tmux wrapper).
@@ -422,6 +436,52 @@ mod chokepoint_gateway_mutation_tests {
         let decision = tmux_wrapper_gateway(false, || inject("http://stale/"), scrub);
         assert_eq!(decision, scrub());
     }
+
+    // Mutation coverage for the ProcessBackend (pipe-mode) managed launch. The
+    // #4559 R-B finding was that `mark_managed_launch_command` on the Command
+    // leg had NO test — deleting it left every test green. This exercises the
+    // exact production wiring (`apply_to_managed_process_command`, which the
+    // `session_backend` launch closure calls) with a real resolved launch env —
+    // it does NOT stamp the marker directly. Deleting the
+    // `mark_managed_launch_command` call in that method drops the marker entry
+    // and fails the marker assertion; deleting `apply_to_command` fails the
+    // gateway assertion.
+    #[test]
+    fn managed_process_command_marks_wrapper_env() {
+        let mut command = Command::new("agentdesk");
+        ClaudeLaunchEnv::inject_for_test("http://managed.proxy/")
+            .apply_to_managed_process_command(&mut command);
+        let envs = command_env_map(&command);
+        // Gateway decision is applied to the wrapper Command…
+        assert_eq!(
+            envs.get(BASE_URL_ENV),
+            Some(&Some("http://managed.proxy/".to_string()))
+        );
+        assert_eq!(envs.get(DISCOVERY_ENV), Some(&Some("1".to_string())));
+        // …and the managed marker is stamped so the wrapper reconstructs rather
+        // than re-resolving config-less to a bare Scrub.
+        assert_eq!(
+            envs.get(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV),
+            Some(&Some("1".to_string())),
+            "managed ProcessBackend launch must mark the wrapper env"
+        );
+    }
+
+    // Scrub counterpart: even when the managed authority decided Scrub (proxy
+    // disabled/unreachable), the marker is STILL stamped so the wrapper knows an
+    // authority already decided and reconstructs the Scrub instead of resolving
+    // fresh. Guards against a "only mark on Inject" regression.
+    #[test]
+    fn managed_process_command_marks_wrapper_env_even_when_scrubbed() {
+        let mut command = Command::new("agentdesk");
+        ClaudeLaunchEnv::scrub_for_test().apply_to_managed_process_command(&mut command);
+        let envs = command_env_map(&command);
+        assert_eq!(envs.get(BASE_URL_ENV), Some(&None));
+        assert_eq!(
+            envs.get(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV),
+            Some(&Some("1".to_string()))
+        );
+    }
 }
 
 #[cfg(test)]
@@ -452,6 +512,16 @@ mod chokepoint_guard_tests {
         "Command::new(&claude_bin",
         "Command::new(claude_e_bin",
         "Command::new(&claude_e_bin",
+        // Full-path `std::process::Command::new(...)` equivalents. A caller could
+        // otherwise dodge the bare-`Command::new(` literals above by spelling out
+        // the module path. This is a cheap breadth extension only; it does NOT
+        // close the class (a `let p = claude_bin; Command::new(p)` or a renamed
+        // binding still slips through). The by-construction (type/AST) promotion
+        // is tracked as the #4559 raw-spawn follow-up.
+        "std::process::Command::new(claude_bin",
+        "std::process::Command::new(&claude_bin",
+        "std::process::Command::new(claude_e_bin",
+        "std::process::Command::new(&claude_e_bin",
     ];
 
     fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
