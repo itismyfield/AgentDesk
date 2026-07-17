@@ -3,7 +3,8 @@ use sqlx::{PgPool, Row as SqlxRow};
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 
-const LIVE_SESSION_BINDINGS_QUERY: &str = "SELECT agent_id, provider, channel_id, session_key, instance_id
+const LIVE_SESSION_BINDINGS_QUERY: &str =
+    "SELECT agent_id, provider, channel_id, session_key, instance_id
          FROM sessions
          WHERE NULLIF(TRIM(channel_id), '') IS NOT NULL
            AND NULLIF(TRIM(session_key), '') IS NOT NULL
@@ -116,14 +117,16 @@ async fn session_agent_matches_provider_channel(
     agent_id: &str,
     provider: &ProviderKind,
 ) -> Result<bool, sqlx::Error> {
-    Ok(crate::db::agents::load_agent_channel_bindings_pg(pool, agent_id)
-        .await?
-        .is_some_and(|bindings| {
-            bindings.resolved_primary_provider_kind().as_ref() == Some(provider)
-                || bindings
-                    .channel_for_provider(Some(provider.as_str()))
-                    .is_some()
-        }))
+    Ok(
+        crate::db::agents::load_agent_channel_bindings_pg(pool, agent_id)
+            .await?
+            .is_some_and(|bindings| {
+                bindings.resolved_primary_provider_kind().as_ref() == Some(provider)
+                    || bindings
+                        .channel_for_provider(Some(provider.as_str()))
+                        .is_some()
+            }),
+    )
 }
 
 fn live_tmux_identity_from_session_key(
@@ -199,8 +202,7 @@ mod tests {
 
     #[test]
     fn live_identity_keeps_dm_channel_segment_only_for_a_live_pane() {
-        let session_name =
-            ProviderKind::Claude.build_tmux_session_name("dm-343742347365974026");
+        let session_name = ProviderKind::Claude.build_tmux_session_name("dm-343742347365974026");
         let live = std::collections::HashSet::from([session_name.clone()]);
 
         assert_eq!(
@@ -248,8 +250,7 @@ mod tests {
         assert!(LIVE_SESSION_BINDINGS_QUERY.contains("instance_id"));
         assert!(LIVE_SESSION_BINDINGS_QUERY.contains("last_heartbeat IS NOT NULL"));
         assert!(
-            LIVE_SESSION_BINDINGS_QUERY
-                .contains("last_heartbeat > NOW() - INTERVAL '10 minutes'")
+            LIVE_SESSION_BINDINGS_QUERY.contains("last_heartbeat > NOW() - INTERVAL '10 minutes'")
         );
         assert!(!LIVE_SESSION_BINDINGS_QUERY.contains("'disconnected'"));
         assert!(!LIVE_SESSION_BINDINGS_QUERY.contains("'aborted'"));

@@ -142,7 +142,7 @@
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 304 | 278 | 26 |  |
 | `db::session_observability` | `src/db/session_observability.rs` | 216 | 216 | 0 |  |
 | `db::session_status` | `src/db/session_status.rs` | 78 | 78 | 0 |  |
-| `db::session_tmux_bindings` | `src/db/session_tmux_bindings.rs` | 257 | 195 | 62 |  |
+| `db::session_tmux_bindings` | `src/db/session_tmux_bindings.rs` | 258 | 198 | 60 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 635 | 526 | 109 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 181 | 181 | 0 |  |
 | `db::turns` | `src/db/turns.rs` | 216 | 173 | 43 |  |
@@ -415,7 +415,7 @@
 | `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1022 | 752 | 270 |  |
 | `services::cluster::registry_adapter_sink` | `src/services/cluster/registry_adapter_sink.rs` | 344 | 117 | 227 |  |
 | `services::cluster::relay_producer_registry` | `src/services/cluster/relay_producer_registry.rs` | 254 | 148 | 106 |  |
-| `services::cluster::session_discovery` | `src/services/cluster/session_discovery.rs` | 1061 | 563 | 498 |  |
+| `services::cluster::session_discovery` | `src/services/cluster/session_discovery.rs` | 1064 | 563 | 501 |  |
 | `services::cluster::session_matcher` | `src/services/cluster/session_matcher.rs` | 952 | 529 | 423 |  |
 | `services::cluster::session_registry` | `src/services/cluster/session_registry.rs` | 566 | 330 | 236 |  |
 | `services::cluster::session_routing` | `src/services/cluster/session_routing.rs` | 416 | 220 | 196 |  |
@@ -917,7 +917,7 @@
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 163 | 138 | 25 |  |
 | `services::discord::voice_sensitivity` | `src/services/discord/voice_sensitivity.rs` | 113 | 113 | 0 |  |
 | `services::discord::watchers::codex_tui_restore` | `src/services/discord/watchers/codex_tui_restore.rs` | 178 | 146 | 32 |  |
-| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2960 | 2134 | 826 | giant-file |
+| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2957 | 2131 | 826 | giant-file |
 | `services::discord::watchers::lifecycle::activity` | `src/services/discord/watchers/lifecycle/activity.rs` | 212 | 212 | 0 |  |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 363 | 212 | 151 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1600 | 1288 | 312 | giant-file |

@@ -2472,10 +2472,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         owned_sessions
             .entry(*channel_id)
             .or_insert_with(|| channel_name.clone());
-        crate::services::tui_prompt_dedupe::register_tmux_channel(
-            session_name,
-            channel_id.get(),
-        );
+        crate::services::tui_prompt_dedupe::register_tmux_channel(session_name, channel_id.get());
         if provider == ProviderKind::Claude
             && let Some(binding) = super::super::tui_prompt_relay::rehydration::rehydrated_claude_tui_binding_for_tmux_session(session_name)
         {

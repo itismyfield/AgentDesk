@@ -890,7 +890,10 @@ mod tests {
             &registry,
         );
 
-        assert_eq!(report.matched, 1, "the restarted DM pane must not cold-start");
+        assert_eq!(
+            report.matched, 1,
+            "the restarted DM pane must not cold-start"
+        );
         let matched = registry
             .lookup(&session_name)
             .expect("persisted DM binding must re-adopt the live pane");
