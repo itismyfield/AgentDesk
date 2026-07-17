@@ -271,6 +271,23 @@ pub(crate) fn reset_for_test() {
         .clear();
 }
 
+/// The compact latch and machine-control markers are process-global test state.
+/// Keep every stateful test serialized so one test cannot clear another test's
+/// in-flight fixture.
+#[cfg(test)]
+static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the shared state guard and reset all compact-trigger test state while
+/// the guard is held. The caller retains the guard for its entire test.
+#[cfg(test)]
+fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    let guard = STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    reset_for_test();
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +301,7 @@ mod tests {
 
     #[test]
     fn exact_token_crossing_and_five_percent_hysteresis() {
-        reset_for_test();
+        let _guard = state_test_guard();
         let threshold = compact_threshold(372_000, 50, 300_000).unwrap();
         assert_eq!(threshold.effective_tokens, 300_000);
         assert_eq!(threshold.rearm_floor_tokens, 281_400);
@@ -298,7 +315,7 @@ mod tests {
 
     #[test]
     fn post_mutation_unknown_stays_disarmed_but_pre_mutation_refusal_rearms() {
-        reset_for_test();
+        let _guard = state_test_guard();
         let threshold = compact_threshold(1_000_000, 50, 300_000).unwrap();
         assert!(observe_and_decide(&key(), 500_000, threshold));
         // Ambiguous-after-mutation does not call rearm; another high poll cannot
@@ -310,7 +327,7 @@ mod tests {
 
     #[test]
     fn confirmed_marker_consumes_one_fence_bound_observation_only() {
-        reset_for_test();
+        let _guard = state_test_guard();
         let ticket = begin_machine_compact_control("claude", "tmux-4591", "session-a");
         let before_fence = Utc::now() - chrono::Duration::seconds(1);
         assert!(!consume_passively_confirmed_machine_compact(
@@ -339,7 +356,7 @@ mod tests {
 
     #[test]
     fn ambiguous_marker_clear_does_not_swallow_later_human_compact() {
-        reset_for_test();
+        let _guard = state_test_guard();
         let ticket = begin_machine_compact_control("claude", "tmux-4591", "session-a");
         clear_machine_compact_control(&ticket);
         assert!(!consume_passively_confirmed_machine_compact(
