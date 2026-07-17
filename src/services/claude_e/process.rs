@@ -15,7 +15,9 @@ use std::sync::mpsc::Sender;
 use serde_json::Value;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
-use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchEnv, ClaudeLaunchIntent};
+use crate::services::claude_command::{
+    ClaudeBinary, ClaudeCommandBuilder, ClaudeLaunchEnv, ClaudeLaunchIntent,
+};
 use crate::services::claude_compact_context::{
     apply_auto_compact_window_to_command, launch_auto_compact_window,
 };
@@ -58,19 +60,14 @@ pub fn execute_streaming(
     let claude_e_bin = which::which("claude-e").map_err(|_| {
         "claude-e CLI not found. Install with `npm install -g claude-e`.".to_string()
     })?;
-    let claude_resolution = crate::services::claude::resolve_claude_binary();
-    let claude_bin = claude_resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Claude CLI not found. Is Claude CLI installed?".to_string())?;
+    let (claude_bin, _claude_resolution) = ClaudeBinary::resolve()?;
 
     let mut args: Vec<String> = vec![
         "--output-format".to_string(),
         "stream-json".to_string(),
-        "--claude-bin".to_string(),
-        claude_bin.clone(),
-        "--no-session-footer".to_string(),
     ];
+    claude_bin.append_claude_e_bin_arg(&mut args);
+    args.push("--no-session-footer".to_string());
     crate::services::claude::append_claude_mcp_config_arg(&mut args, dispatch_type);
     crate::services::claude::append_claude_fast_mode_arg(&mut args, fast_mode_enabled);
     if let Some(model) = model_override {
@@ -90,7 +87,7 @@ pub fn execute_streaming(
 
     tracing::info!(
         binary = %claude_e_bin.display(),
-        claude_bin = %claude_bin,
+        claude_binary = "resolved",
         working_dir = working_dir,
         session_id = session_id,
         model = model_override,

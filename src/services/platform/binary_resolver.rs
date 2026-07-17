@@ -803,8 +803,22 @@ pub fn probe_resolved_binary_version(
     binary_path: impl AsRef<OsStr>,
     resolution: &BinaryResolution,
 ) -> (Option<String>, Option<String>) {
-    let mut command = Command::new(binary_path);
-    configure_version_probe_command(&mut command, resolution);
+    let mut command = if resolution.requested_binary == "claude" {
+        let Some(binary) = crate::services::claude_command::ClaudeBinary::from_resolution(
+            resolution,
+        ) else {
+            return (None, Some("version_probe_spawn_failed".to_string()));
+        };
+        crate::services::claude_command::ClaudeCommandBuilder::for_resolved_version_probe(
+            &binary,
+            resolution,
+        )
+        .into_command()
+    } else {
+        let mut command = Command::new(binary_path);
+        configure_version_probe_command(&mut command, resolution);
+        command
+    };
     command.arg("--version");
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 

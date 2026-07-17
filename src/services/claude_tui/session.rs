@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::services::claude_command::ClaudeLaunchEnv;
+use crate::services::claude_command::{ClaudeBinary, ClaudeLaunchEnv};
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
 
@@ -272,7 +272,7 @@ fn persist_claude_continuation_session_files(
 pub struct ClaudeTuiLaunchConfig {
     pub tmux_session_name: String,
     pub working_dir: PathBuf,
-    pub claude_bin: PathBuf,
+    pub(crate) claude_bin: ClaudeBinary,
     pub agentdesk_exe: PathBuf,
     pub hook_endpoint: String,
     pub session_id: String,
@@ -422,6 +422,10 @@ fn write_launch_script(
         &mut gateway_exports,
         None,
     );
+    let mut escaped_claude_bin = String::new();
+    config
+        .claude_bin
+        .append_shell_escaped_to(&mut escaped_claude_bin);
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
@@ -429,7 +433,7 @@ fn write_launch_script(
          {gateway_exports}\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
-        claude_bin = shell_escape(&config.claude_bin.display().to_string()),
+        claude_bin = escaped_claude_bin,
         gateway_exports = gateway_exports,
         args = args,
     );
@@ -449,7 +453,7 @@ mod tests {
         ClaudeTuiLaunchConfig {
             tmux_session_name: "AgentDesk-claude-test".to_string(),
             working_dir: PathBuf::from("/tmp/project dir"),
-            claude_bin: PathBuf::from("/usr/local/bin/claude"),
+            claude_bin: ClaudeBinary::from_tmux_wrapper_argv("/usr/local/bin/claude").unwrap(),
             agentdesk_exe: PathBuf::from("/usr/local/bin/agentdesk"),
             hook_endpoint: "http://127.0.0.1:49152".to_string(),
             session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
