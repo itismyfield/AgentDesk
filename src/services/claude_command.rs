@@ -25,11 +25,88 @@
 //! source-scanning guard test (`chokepoint_guard_tests`) fails the build if any
 //! other module references them directly, so the single authority cannot erode.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::process::Command;
 
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::platform::BinaryResolution;
+
+/// Opaque capability for the builder's resolved Claude executable path.
+///
+/// This type deliberately does not implement `AsRef<OsStr>`, `AsRef<Path>`,
+/// `Deref`, `Display`, or expose any path getter, so `Command::new(ClaudeBinary)`
+/// is a compile error. That seals the builder's typed path, including aliases,
+/// re-bindings, helpers, and closures that receive this capability.
+///
+/// This is not complete resolver-layer sealing: the public
+/// `resolve_provider_binary("claude").resolved_path` still exposes a raw path
+/// that a new spawn site could misuse. Full by-construction sealing is tracked in
+/// #4627; `FORBIDDEN_RAW_SPAWN` remains defense-in-depth in the meantime.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClaudeBinary {
+    program: OsString,
+}
+
+impl std::fmt::Debug for ClaudeBinary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ClaudeBinary(..)")
+    }
+}
+
+impl ClaudeBinary {
+    pub(crate) fn from_resolution(resolution: &BinaryResolution) -> Option<Self> {
+        resolution.resolved_path.as_ref().map(|path| Self {
+            program: OsString::from(path),
+        })
+    }
+
+    pub(crate) fn resolve() -> Result<(Self, BinaryResolution), String> {
+        let resolution = crate::services::platform::resolve_provider_binary("claude");
+        let binary = Self::from_resolution(&resolution)
+            .ok_or_else(|| "Claude CLI not found. Is Claude CLI installed?".to_string())?;
+        Ok((binary, resolution))
+    }
+
+    pub(crate) fn from_tmux_wrapper_argv(program: &str) -> Self {
+        Self {
+            program: OsString::from(program),
+        }
+    }
+
+    fn from_cli_boundary(program: impl AsRef<OsStr>) -> Self {
+        Self {
+            program: program.as_ref().to_os_string(),
+        }
+    }
+
+    fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    // The established wrapper/script contracts below require string argv egress.
+    // These controlled conversions are not general path getters or raw-spawn
+    // escape hatches.
+    pub(crate) fn append_process_backend_wrapper_args(&self, args: &mut Vec<String>) {
+        args.push("--".to_string());
+        args.push(self.program.to_string_lossy().into_owned());
+    }
+
+    pub(crate) fn append_claude_e_bin_arg(&self, args: &mut Vec<String>) {
+        args.push("--claude-bin".to_string());
+        args.push(self.program.to_string_lossy().into_owned());
+    }
+
+    pub(crate) fn append_shell_escaped_to(&self, output: &mut String) {
+        output.push_str(&crate::services::process::shell_escape(
+            self.program.to_string_lossy().as_ref(),
+        ));
+    }
+
+    pub(crate) fn augment_exec_path(&self, command: &mut Command) {
+        crate::services::platform::augment_exec_path(command, Path::new(&self.program));
+    }
+}
 
 /// Why a Claude process is being spawned. Selects the gateway env policy so the
 /// launch-vs-probe decision is made in exactly one place.
@@ -245,11 +322,15 @@ impl ClaudeCommandBuilder {
     /// Build a command that launches the Claude binary directly. Applies the
     /// binary-resolution PATH and the gateway env for `intent` by construction.
     pub(crate) fn for_binary(
-        program: impl AsRef<OsStr>,
+        binary: &ClaudeBinary,
         resolution: &BinaryResolution,
         intent: ClaudeLaunchIntent,
     ) -> Self {
-        Self::build(program, Some(resolution), ClaudeLaunchEnv::resolve(intent))
+        Self::build(
+            binary.program(),
+            Some(resolution),
+            ClaudeLaunchEnv::resolve(intent),
+        )
     }
 
     /// Binary-launch variant of [`for_binary`] that threads in an
@@ -261,11 +342,11 @@ impl ClaudeCommandBuilder {
     /// probe the proxy twice and disagree. Applies the binary-resolution PATH
     /// plus the supplied launch env through the shared `build` guard arm.
     pub(crate) fn for_binary_with_env(
-        program: impl AsRef<OsStr>,
+        binary: &ClaudeBinary,
         resolution: &BinaryResolution,
         launch_env: ClaudeLaunchEnv,
     ) -> Self {
-        Self::build(program, Some(resolution), launch_env)
+        Self::build(binary.program(), Some(resolution), launch_env)
     }
 
     /// Build a command that launches a wrapper program which transitively
@@ -294,18 +375,43 @@ impl ClaudeCommandBuilder {
         Self::build(program, None, launch_env)
     }
 
-    /// Build a command that launches the Claude binary directly when only its
-    /// path (not a full [`BinaryResolution`]) is known — the tmux-wrapper case,
-    /// where the Claude command line arrives as argv. Applies the exec-path PATH
-    /// derived from the binary path plus the supplied (already-resolved) launch
-    /// env, both by construction. The launch env is threaded in (rather than
-    /// re-resolved) so the wrapper can honour its managed-vs-public decision from
-    /// [`ClaudeLaunchEnv::for_tmux_wrapper`]; the gateway env is still applied
-    /// through the shared `build` guard arm.
-    pub(crate) fn for_binary_path(program: impl AsRef<OsStr>, launch_env: ClaudeLaunchEnv) -> Self {
-        let program = program.as_ref();
-        let mut builder = Self::build(program, None, launch_env);
-        crate::services::platform::augment_exec_path(builder.command_mut(), program);
+    /// Build the native Claude `--version` probe from a resolved capability.
+    /// The generic platform resolver owns candidate discovery; production Claude
+    /// launches enter this builder only after the candidate is wrapped.
+    pub(crate) fn for_resolved_version_probe(
+        binary: &ClaudeBinary,
+        resolution: &BinaryResolution,
+    ) -> Self {
+        Self::build(
+            binary.program(),
+            Some(resolution),
+            ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::VersionProbe),
+        )
+    }
+
+    /// Build the native Claude version-smoke probe. This uses the CLI boundary
+    /// string only after the provider discriminator selected `claude`.
+    pub(crate) fn for_version_smoke(program: &str, canonical_path: &str) -> Self {
+        let binary = ClaudeBinary::from_cli_boundary(program);
+        let canonical = ClaudeBinary::from_cli_boundary(canonical_path);
+        let mut builder = Self::build(
+            binary.program(),
+            None,
+            ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::VersionProbe),
+        );
+        canonical.augment_exec_path(builder.command_mut());
+        builder
+    }
+
+    /// Build a command that launches the Claude binary delivered by the
+    /// `agentdesk tmux-wrapper` boundary. The wrapper boundary is the sole
+    /// untyped CLI argv ingress; once it is wrapped, the path cannot escape this
+    /// module. Applies the exec-path PATH plus the supplied (already-resolved)
+    /// launch env by construction.
+    pub(crate) fn for_tmux_wrapper_argv(program: &str, launch_env: ClaudeLaunchEnv) -> Self {
+        let binary = ClaudeBinary::from_tmux_wrapper_argv(program);
+        let mut builder = Self::build(binary.program(), None, launch_env);
+        binary.augment_exec_path(builder.command_mut());
         builder
     }
 
@@ -319,6 +425,15 @@ impl ClaudeCommandBuilder {
         launch_env: ClaudeLaunchEnv,
     ) -> Self {
         Self::build(program, resolution, launch_env)
+    }
+
+    #[cfg(test)]
+    fn build_for_binary_test(
+        binary: &ClaudeBinary,
+        resolution: Option<&BinaryResolution>,
+        launch_env: ClaudeLaunchEnv,
+    ) -> Self {
+        Self::build(binary.program(), resolution, launch_env)
     }
 
     /// Mutable access to the wrapped command for site-specific configuration
@@ -367,6 +482,10 @@ mod chokepoint_gateway_mutation_tests {
         }
     }
 
+    fn claude_binary() -> ClaudeBinary {
+        ClaudeBinary::from_tmux_wrapper_argv("claude")
+    }
+
     // Mutation target: `ClaudeCommandBuilder::build` applies the gateway env via
     // `launch_env.apply_to_command`. Every Claude spawn site funnels through
     // `build` (via `for_binary` / `for_wrapper`), so deleting that single line
@@ -376,8 +495,9 @@ mod chokepoint_gateway_mutation_tests {
     #[test]
     fn for_binary_injects_gateway_env_by_construction() {
         let resolution = claude_resolution();
-        let builder = ClaudeCommandBuilder::build_for_test(
-            "claude",
+        let binary = claude_binary();
+        let builder = ClaudeCommandBuilder::build_for_binary_test(
+            &binary,
             Some(&resolution),
             ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
         );
@@ -394,8 +514,9 @@ mod chokepoint_gateway_mutation_tests {
     #[test]
     fn for_binary_scrubs_inherited_gateway_env_by_construction() {
         let resolution = claude_resolution();
-        let builder = ClaudeCommandBuilder::build_for_test(
-            "claude",
+        let binary = claude_binary();
+        let builder = ClaudeCommandBuilder::build_for_binary_test(
+            &binary,
             Some(&resolution),
             ClaudeLaunchEnv::scrub_for_test(),
         );
@@ -424,10 +545,10 @@ mod chokepoint_gateway_mutation_tests {
     }
 
     #[test]
-    fn for_binary_path_applies_launch_env_by_construction() {
+    fn tmux_wrapper_argv_applies_launch_env_by_construction() {
         // The tmux-wrapper constructor: gateway env applied through the shared
         // `build` guard arm (removing it fails this), PATH added on top.
-        let builder = ClaudeCommandBuilder::for_binary_path(
+        let builder = ClaudeCommandBuilder::for_tmux_wrapper_argv(
             "/opt/claude/bin/claude",
             ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
         );
@@ -575,11 +696,13 @@ mod chokepoint_guard_tests {
         ".gateway_proxy_env().append",
     ];
 
-    /// Raw `Command::new(<claude binary var>)` idioms. These are exactly the
-    /// bypass class #4559 R-B flagged (tmux_wrapper spawning Claude directly):
-    /// a Claude/claude-e binary spawned as a `Command` without going through
-    /// `ClaudeCommandBuilder`. Every such spawn now routes through the builder,
-    /// so any reappearance of these idioms is a regression that fails the build.
+    /// Defense-in-depth text guard for raw `Command::new(<claude binary var>)`
+    /// idioms. The primary defense is [`ClaudeBinary`]: its private path field
+    /// and deliberately absent `AsRef<OsStr>`/`Deref` implementations make a
+    /// resolved Claude binary unusable with `Command::new`, including through
+    /// aliases, re-bindings, helpers, and closures. This scan remains as a cheap
+    /// regression tripwire for raw string argv received at the public wrapper
+    /// boundary.
     const FORBIDDEN_RAW_SPAWN: &[&str] = &[
         "Command::new(claude_bin",
         "Command::new(&claude_bin",
@@ -720,9 +843,9 @@ mod chokepoint_guard_tests {
         );
     }
 
-    /// Guards the specific bypass class R-B found: a raw `Command::new(claude…)`
-    /// that launches Claude/claude-e without the chokepoint. Removing the
-    /// tmux_wrapper builder wiring (reintroducing the raw spawn) fails here.
+    /// Defense-in-depth regression tripwire for the specific raw-spawn spelling
+    /// R-B found. `ClaudeBinary` is the primary by-construction guard; this scan
+    /// stays intentionally narrow to catch an untyped wrapper-argv regression.
     #[test]
     fn claude_binaries_are_not_raw_spawned_outside_the_chokepoint() {
         let sources = crate_source_entries();

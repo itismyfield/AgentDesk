@@ -1970,10 +1970,13 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   migrated launchd validation, Discord notification plumbing, and agent
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
-- `src/services/platform/binary_resolver.rs` (1395) — provider CLI resolver
+- `src/services/platform/binary_resolver.rs` (1412) — provider CLI resolver
   surface. #3823 adds macOS Codex.app fallback discovery and all-candidate
   Codex semver probing so AgentDesk prefers the newest compatible Codex binary
-  instead of silently launching a stale npm shim.
+  instead of silently launching a stale npm shim. #4619 threads the opaque
+  `ClaudeBinary` capability newtype through the resolver so the resolved Claude
+  path can only be consumed via `ClaudeCommandBuilder` (raw `Command::new`
+  by-construction blocked).
 - `src/services/discord/mod.rs` (now 4152 prod LoC after #4049 S4-a2 moved
   queue-marker routing into `queue_marker.rs` and retired direct reaction
   mutation call sites; 4157 prod LoC after #4048 S3 extracted

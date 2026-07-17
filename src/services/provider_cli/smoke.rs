@@ -15,13 +15,24 @@ struct CheckRunner<'a> {
 
 impl<'a> CheckRunner<'a> {
     fn run_version(&self) -> SmokeCheckStatus {
-        let mut command = Command::new(self.binary);
+        let mut command = if self.provider == "claude" {
+            crate::services::claude_command::ClaudeCommandBuilder::for_version_smoke(
+                self.binary,
+                self.canonical_path,
+            )
+            .into_command()
+        } else {
+            let mut command = Command::new(self.binary);
+            crate::services::platform::augment_exec_path(&mut command, self.canonical_path);
+            command
+        };
         command
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        crate::services::platform::augment_exec_path(&mut command, self.canonical_path);
-        configure_version_probe_command(&mut command, self.provider);
+        if self.provider != "claude" {
+            configure_version_probe_command(&mut command, self.provider);
+        }
 
         match run_command_status_with_timeout(command, SMOKE_TIMEOUT) {
             Ok(true) => SmokeCheckStatus::Ok,

@@ -204,7 +204,7 @@
 | `kanban::transition_cleanup` | `src/kanban/transition_cleanup.rs` | 341 | 341 | 0 |  |
 | `kanban::transition_core` | `src/kanban/transition_core.rs` | 674 | 674 | 0 |  |
 | `launch` | `src/launch.rs` | 67 | 67 | 0 |  |
-| `lib` | `src/lib.rs` | 170 | 170 | 0 |  |
+| `lib` | `src/lib.rs` | 187 | 187 | 0 |  |
 | `logging` | `src/logging.rs` | 554 | 382 | 172 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 35 | 35 | 0 |  |
 | `pipeline` | `src/pipeline.rs` | 1517 | 1383 | 134 | giant-file |
@@ -376,15 +376,15 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4320 | 2967 | 1353 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4308 | 2953 | 1355 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
-| `services::claude_command` | `src/services/claude_command.rs` | 833 | 350 | 483 |  |
+| `services::claude_command` | `src/services/claude_command.rs` | 956 | 465 | 491 |  |
 | `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 722 | 369 | 353 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
-| `services::claude_e::process` | `src/services/claude_e/process.rs` | 451 | 393 | 58 |  |
+| `services::claude_e::process` | `src/services/claude_e/process.rs` | 445 | 387 | 58 |  |
 | `services::claude_e::spawn_queue` | `src/services/claude_e/spawn_queue.rs` | 3 | 3 | 0 |  |
 | `services::claude_gateway_proxy` | `src/services/claude_gateway_proxy.rs` | 372 | 179 | 193 |  |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 18 | 18 | 0 |  |
@@ -401,7 +401,7 @@
 | `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 769 | 712 | 57 |  |
 | `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3989 | 2187 | 1802 | giant-file |
 | `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 1566 | 863 | 703 |  |
-| `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 828 | 439 | 389 |  |
+| `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 832 | 443 | 389 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 651 | 328 | 323 |  |
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1323 | 618 | 705 |  |
@@ -1003,14 +1003,14 @@
 | `services::pipeline_override` | `src/services/pipeline_override.rs` | 1001 | 333 | 668 |  |
 | `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 863 | 672 | 191 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 26 | 26 | 0 |  |
-| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1548 | 1395 | 153 | giant-file |
+| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1565 | 1412 | 153 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 97 | 97 | 0 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 49 | 49 | 0 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 1263 | 951 | 312 |  |
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1229 | 759 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2434 | 1820 | 614 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2436 | 1822 | 614 | giant-file |
 | `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 317 | 142 | 175 |  |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
@@ -1023,7 +1023,7 @@
 | `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 248 | 248 | 0 |  |
 | `services::provider_cli::retention` | `src/services/provider_cli/retention.rs` | 91 | 91 | 0 |  |
 | `services::provider_cli::session_guard` | `src/services/provider_cli/session_guard.rs` | 199 | 199 | 0 |  |
-| `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 216 | 172 | 44 |  |
+| `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 227 | 183 | 44 |  |
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 74 | 74 | 0 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 637 | 637 | 0 |  |
 | `services::provider_error_transcript` | `src/services/provider_error_transcript.rs` | 87 | 48 | 39 |  |

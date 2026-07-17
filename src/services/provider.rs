@@ -498,9 +498,11 @@ impl ProviderKind {
     }
 
     #[allow(dead_code)]
-    pub fn resolve_runtime_path(&self) -> Option<String> {
+    pub(crate) fn resolve_runtime_path(&self) -> Option<String> {
         match self {
-            Self::Claude => crate::services::claude::resolve_claude_path(),
+            Self::Claude => {
+                crate::services::platform::resolve_provider_binary("claude").resolved_path
+            }
             Self::Codex => crate::services::codex::resolve_codex_path(),
             Self::Gemini => crate::services::gemini::resolve_gemini_path(),
             Self::OpenCode => crate::services::opencode::resolve_opencode_path(),

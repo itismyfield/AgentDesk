@@ -143,13 +143,13 @@ mod claude_tui_followup_requeue_flag_tests {
     }
 }
 
-/// Resolve the path to the claude binary.
-pub fn resolve_claude_path() -> Option<String> {
-    crate::services::platform::resolve_provider_binary("claude").resolved_path
-}
+type ClaudeResolution = (
+    crate::services::claude_command::ClaudeBinary,
+    crate::services::platform::BinaryResolution,
+);
 
-pub(crate) fn resolve_claude_binary() -> crate::services::platform::BinaryResolution {
-    crate::services::platform::resolve_provider_binary("claude")
+fn resolve_claude_binary() -> Result<ClaudeResolution, String> {
+    crate::services::claude_command::ClaudeBinary::resolve()
 }
 
 pub(crate) fn append_claude_mcp_config_arg(args: &mut Vec<String>, dispatch_type: Option<&str>) {
@@ -363,11 +363,7 @@ fn execute_command_simple_with_model_and_cancel(
         );
     session_selection.log_start("claude.execute_command_simple");
 
-    let resolution = resolve_claude_binary();
-    let claude_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or("Claude CLI not found")?;
+    let (claude_bin, resolution) = resolve_claude_binary()?;
 
     let mut args = vec![
         "-p".to_string(),
@@ -595,11 +591,13 @@ mod simple_launch_env_tests {
         launch_env: ClaudeLaunchEnv,
     ) -> std::collections::HashMap<String, Option<String>> {
         let resolution = claude_resolution();
+        let binary =
+            crate::services::claude_command::ClaudeBinary::from_tmux_wrapper_argv("claude");
         // Route through the chokepoint exactly as the production simple `-p`
         // spawn site does: the builder applies the gateway env by construction,
         // then `configure_execute_command_simple` adds the non-gateway config.
         let mut builder =
-            ClaudeCommandBuilder::build_for_test("claude", Some(&resolution), launch_env);
+            ClaudeCommandBuilder::for_binary_with_env(&binary, &resolution, launch_env);
         configure_execute_command_simple(builder.command_mut(), &[]);
         builder
             .into_command()
@@ -910,14 +908,13 @@ IMPORTANT: Format your responses using Markdown for better readability:
         return execute_streaming_remote(profile, &args, prompt, working_dir, sender, cancel_token);
     }
 
-    let resolution = resolve_claude_binary();
-    let claude_bin = resolution.resolved_path.clone().ok_or_else(|| {
+    let (claude_bin, resolution) = resolve_claude_binary().map_err(|error| {
         debug_log("ERROR: Claude CLI not found");
-        "Claude CLI not found. Is Claude CLI installed?".to_string()
+        error
     })?;
 
     debug_log("--- Spawning claude process ---");
-    debug_log(&format!("Command: {}", claude_bin));
+    debug_log("Command: resolved Claude binary");
     debug_log(&format!("Args count: {}", args.len()));
     for (i, arg) in args.iter().enumerate() {
         if arg.len() > 100 {
@@ -2042,15 +2039,11 @@ fn prepare_and_create_claude_tui_session(
     let launch_result = (|| -> Result<std::process::Output, String> {
         let exe =
             std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-        let resolution = resolve_claude_binary();
-        let claude_bin = resolution
-            .resolved_path
-            .clone()
-            .ok_or_else(|| "Claude CLI not found".to_string())?;
+        let (claude_bin, _resolution) = resolve_claude_binary()?;
         let launch_config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
             tmux_session_name: tmux_session_name.to_string(),
             working_dir: working_dir_path.to_path_buf(),
-            claude_bin: std::path::PathBuf::from(claude_bin),
+            claude_bin,
             agentdesk_exe: exe,
             hook_endpoint,
             session_id: resolved_session_id.to_string(),
@@ -2812,11 +2805,7 @@ fn execute_streaming_local_tmux(
     // Get paths
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-    let resolution = resolve_claude_binary();
-    let claude_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Claude CLI not found".to_string())?;
+    let (claude_bin, resolution) = resolve_claude_binary()?;
 
     // Build wrapper command via script file to avoid tmux "command too long" errors.
     // The system prompt in --append-system-prompt can be thousands of chars, exceeding
@@ -2842,6 +2831,8 @@ fn execute_streaming_local_tmux(
         &launch_env,
     );
 
+    let mut escaped_claude_bin = String::new();
+    claude_bin.append_shell_escaped_to(&mut escaped_claude_bin);
     let script_content = format!(
         "#!/bin/bash\n\
         {env}\
@@ -2857,7 +2848,7 @@ fn execute_streaming_local_tmux(
         input_fifo = shell_escape(&input_fifo_path),
         prompt = shell_escape(&prompt_path),
         wd = shell_escape(working_dir),
-        claude_bin = shell_escape(&claude_bin),
+        claude_bin = escaped_claude_bin,
         claude_args = escaped_args.join(" "),
     );
 
@@ -3101,12 +3092,9 @@ pub(crate) fn execute_streaming_local_process(
 
     // Build wrapper args — no shell_escape here because ProcessBackend uses
     // Command::new().args() (direct argv), not a shell script.
-    let resolution = resolve_claude_binary();
-    let claude_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Claude CLI not found".to_string())?;
-    let mut wrapper_args: Vec<String> = vec!["--".to_string(), claude_bin.to_string()];
+    let (claude_bin, resolution) = resolve_claude_binary()?;
+    let mut wrapper_args = Vec::new();
+    claude_bin.append_process_backend_wrapper_args(&mut wrapper_args);
     wrapper_args.extend(args.iter().map(|a| a.to_string()));
 
     let exe =

@@ -134,6 +134,23 @@ mod server;
 // service submodules. The remaining dirty submodules each carry a scoped allow
 // (with a residual count) to be retired subtree-by-subtree.
 mod services;
+
+/// Opaque capability for a resolved Claude executable.
+///
+/// ```compile_fail
+/// use agentdesk::ClaudeBinary;
+/// use std::process::Command;
+///
+/// fn bypass_the_claude_builder(binary: ClaudeBinary) {
+///     let _raw_command = Command::new(binary);
+/// }
+/// ```
+///
+/// `ClaudeBinary` intentionally does not implement `AsRef<OsStr>`, `Deref`,
+/// `Display`, or a public path getter. It can therefore be consumed only through
+/// guarded Claude launch APIs rather than passed directly to `Command::new`.
+pub use services::claude_command::ClaudeBinary;
+
 // Supervisor test hooks are intentionally retained for dispatch/runtime tests.
 pub(crate) mod supervisor;
 mod ui;

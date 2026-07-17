@@ -544,7 +544,7 @@ fn claude_child_command_builder(
     claude_bin: &str,
     launch_env: ClaudeLaunchEnv,
 ) -> ClaudeCommandBuilder {
-    let mut builder = ClaudeCommandBuilder::for_binary_path(claude_bin, launch_env);
+    let mut builder = ClaudeCommandBuilder::for_tmux_wrapper_argv(claude_bin, launch_env);
     builder
         .command_mut()
         .env_remove(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV);
