@@ -279,13 +279,6 @@ pub struct ClaudeTuiLaunchConfig {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub resume: bool,
-    /// #3166: provider-specific auto-compact threshold
-    /// (`context_compact_percent_claude`), resolved by the caller via
-    /// `fetch_context_thresholds`. When `Some(pct)` with `pct > 0` the launch
-    /// script exports `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=pct` so BOTH fresh and
-    /// `--resume` TUI spawns honour the configured override. Mirrors the
-    /// `p > 0` guard used by the non-TUI tmux/process spawn paths.
-    pub compact_percent: Option<u64>,
     pub(crate) launch_env: ClaudeLaunchEnv,
 }
 
@@ -309,6 +302,11 @@ pub fn prepare_claude_tui_launch(
 ) -> Result<ClaudeTuiSessionFiles, String> {
     let files = config.session_files();
     let result = (|| {
+        // A freshly prepared hosted pane must never inherit a disarmed or
+        // ambiguous compact latch from a prior process that used this tmux
+        // name. The next completion establishes its own session/model/window
+        // identity.
+        crate::services::claude_compact_trigger::clear_for_tmux(&config.tmux_session_name);
         crate::services::tui_prompt_dedupe::register_provider_session(
             "claude",
             &config.session_id,
@@ -367,6 +365,13 @@ fn write_launch_script(
     config: &ClaudeTuiLaunchConfig,
     hook_settings_path: &Path,
 ) -> Result<(), String> {
+    // This is the final pre-exec launch artifact. Registering here makes the
+    // exact effective proxy decision available before the pane can receive its
+    // first prompt, and keeps direct script-generation tests on the same path.
+    crate::services::claude_compact_context::register_launch_provenance(
+        &config.tmux_session_name,
+        config.launch_env.gateway_proxy_env(),
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!("create TUI launch script dir {}: {error}", parent.display())
@@ -407,27 +412,24 @@ fn write_launch_script(
     // prompt entirely, the placeholder semantics here should be
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
-    // #3166: export the configured Claude auto-compact override so TUI-hosted
-    // sessions (fresh AND `--resume`) honour `context_compact_percent_claude`.
-    // Gated on `pct > 0`, mirroring the non-TUI spawn paths
-    // (`build_tmux_launch_env_lines` / `execute_streaming_local_process`); a 0
-    // or absent value leaves the var unset so the Claude CLI keeps its default.
-    let compact_export = match config.compact_percent.filter(|&pct| pct > 0) {
-        Some(pct) => format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}\n"),
-        None => String::new(),
-    };
     let mut gateway_exports = String::new();
+    // Chokepoint base: resolved gateway launch env (#4559).
     config.launch_env.append_shell_env(&mut gateway_exports);
+    // Compact-window overlay (#4591): interactive TUI sessions can change model
+    // after launch, so they never inherit an absolute compact window from
+    // dcserver/tmux.
+    crate::services::claude_compact_context::append_auto_compact_window_shell_env(
+        &mut gateway_exports,
+        None,
+    );
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
          export CLAUDE_CODE_RESUME_PROMPT=\"_\"\n\
-         {compact_export}\
          {gateway_exports}\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = shell_escape(&config.claude_bin.display().to_string()),
-        compact_export = compact_export,
         gateway_exports = gateway_exports,
         args = args,
     );
@@ -438,6 +440,10 @@ fn write_launch_script(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context_state_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::services::claude_compact_context::state_test_guard()
+    }
 
     fn sample_config() -> ClaudeTuiLaunchConfig {
         ClaudeTuiLaunchConfig {
@@ -450,7 +456,6 @@ mod tests {
             system_prompt: Some("system prompt".to_string()),
             model: Some("sonnet".to_string()),
             resume: false,
-            compact_percent: None,
             launch_env: ClaudeLaunchEnv::scrub_for_test(),
         }
     }
@@ -502,6 +507,7 @@ mod tests {
 
     #[test]
     fn prepare_launch_writes_settings_and_script() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let config = sample_config();
         let hook_settings_path = dir.path().join("settings.json");
@@ -558,10 +564,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_exports_compact_and_gates_gateway_proxy() {
+    fn launch_script_never_exports_absolute_compact_window_and_gates_gateway_proxy() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
-        config.compact_percent = Some(60);
+        config.model = Some("sonnet".to_string());
         config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let launch_script_path = dir.path().join("launch.sh");
 
@@ -573,18 +580,16 @@ mod tests {
         .unwrap();
 
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
+        assert!(script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(
+            !script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="),
+            "a long-lived interactive Claude TUI must not pin auto-compact to its launch model"
+        );
         assert!(
             script.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
         assert!(script.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
-        let export_pos = script.find("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").unwrap();
-        let exec_pos = script.find("exec ").unwrap();
-        assert!(
-            export_pos < exec_pos,
-            "compact override must be exported before exec"
-        );
 
         config.launch_env = ClaudeLaunchEnv::scrub_for_test();
         write_launch_script(
@@ -594,17 +599,17 @@ mod tests {
         )
         .unwrap();
         let disabled_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(disabled_script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
+        assert!(disabled_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!disabled_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
         assert!(disabled_script.contains("unset ANTHROPIC_BASE_URL\n"));
         assert!(disabled_script.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
     }
 
     #[test]
-    fn launch_script_resume_exports_compact_override() {
+    fn launch_script_model_switch_cannot_leave_a_stale_auto_compact_window() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
-        config.resume = true;
-        config.compact_percent = Some(60);
         let launch_script_path = dir.path().join("launch.sh");
 
         write_launch_script(
@@ -613,30 +618,28 @@ mod tests {
             Path::new("/tmp/settings.json"),
         )
         .unwrap();
+        let sonnet_script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(sonnet_script.contains("'--model' 'sonnet'"));
+        assert!(sonnet_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!sonnet_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
 
-        let script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(script.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60\n"));
-    }
-
-    #[test]
-    fn launch_script_omits_compact_override_when_absent_or_zero() {
-        let dir = tempfile::tempdir().unwrap();
-        for value in [None, Some(0)] {
-            let mut config = sample_config();
-            config.compact_percent = value;
-            let launch_script_path = dir.path().join("launch.sh");
-            write_launch_script(
-                &launch_script_path,
-                &config,
-                Path::new("/tmp/settings.json"),
-            )
-            .unwrap();
-            let script = std::fs::read_to_string(&launch_script_path).unwrap();
-            assert!(
-                !script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
-                "value {value:?} must not export the override, got:\n{script}"
-            );
-        }
+        // `/model` can change the live TUI's model after this script has
+        // launched. Rewriting the artifact with a different launch selector
+        // must still leave the exact-token steering path as the sole compact
+        // authority.
+        config.model = Some("opus".to_string());
+        write_launch_script(
+            &launch_script_path,
+            &config,
+            Path::new("/tmp/settings.json"),
+        )
+        .unwrap();
+        let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(opus_script.contains("'--model' 'opus'"));
+        assert!(!opus_script.contains("'--model' 'sonnet'"));
+        assert!(opus_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!opus_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
+        assert!(!opus_script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
     }
 
     #[test]
@@ -672,6 +675,7 @@ mod tests {
 
     #[test]
     fn continuation_cutover_rewrites_both_artifacts_and_is_idempotent() {
+        let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let old_session_id = uuid::Uuid::new_v4().to_string();
         let new_session_id = uuid::Uuid::new_v4().to_string();

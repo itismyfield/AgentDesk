@@ -555,7 +555,7 @@ async fn inject_native_compact(request: NativeCompactRequest) -> Result<(), Stri
     tokio::task::spawn_blocking(move || {
         #[cfg(unix)]
         {
-            crate::services::claude::with_claude_tui_session_turn_lock(
+            crate::services::claude_tui::composer_lock::with_session_turn_lock(
                 &request.tmux_session_name,
                 || {
                     crate::services::claude_tui::input::send_followup_prompt(

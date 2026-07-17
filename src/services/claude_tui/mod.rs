@@ -1,3 +1,4 @@
+pub(crate) mod composer_lock;
 pub mod hook_bundle;
 pub(crate) mod hook_output_guard;
 #[cfg(test)]

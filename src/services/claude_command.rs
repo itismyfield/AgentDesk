@@ -129,6 +129,19 @@ impl ClaudeLaunchEnv {
         self.gateway.append_shell_env(output);
     }
 
+    /// Borrow the resolved gateway decision this launch env carries.
+    ///
+    /// The `claude_compact_context` launch-provenance / auto-compact-window
+    /// helpers (#4591) read the effective Inject|Scrub decision to record pane
+    /// provenance and derive the immutable launch window. They are pure
+    /// consumers of the *already-resolved* decision (they never launch), so
+    /// exposing it here keeps [`ClaudeLaunchEnv`] the single carrier: those
+    /// sites obtain the gateway env through this chokepoint value rather than
+    /// re-resolving it themselves.
+    pub(crate) fn gateway_proxy_env(&self) -> &ClaudeGatewayProxyEnv {
+        &self.gateway
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_for_test(base_url: &str) -> Self {
         Self {
@@ -239,6 +252,22 @@ impl ClaudeCommandBuilder {
         Self::build(program, Some(resolution), ClaudeLaunchEnv::resolve(intent))
     }
 
+    /// Binary-launch variant of [`for_binary`] that threads in an
+    /// already-resolved launch env instead of resolving it from an intent.
+    ///
+    /// The direct-stream native launch (#4591) resolves the launch env once so
+    /// the same gateway decision drives both the auto-compact-window
+    /// computation and the by-construction gateway guard; resolving twice could
+    /// probe the proxy twice and disagree. Applies the binary-resolution PATH
+    /// plus the supplied launch env through the shared `build` guard arm.
+    pub(crate) fn for_binary_with_env(
+        program: impl AsRef<OsStr>,
+        resolution: &BinaryResolution,
+        launch_env: ClaudeLaunchEnv,
+    ) -> Self {
+        Self::build(program, Some(resolution), launch_env)
+    }
+
     /// Build a command that launches a wrapper program which transitively
     /// spawns Claude (`agentdesk tmux-wrapper …`, `claude-e …`). The gateway env
     /// is applied by construction to the wrapper and the wrapped Claude child
@@ -246,6 +275,23 @@ impl ClaudeCommandBuilder {
     /// caller because the wrapper — not the Claude binary — is the program here.
     pub(crate) fn for_wrapper(program: impl AsRef<OsStr>, intent: ClaudeLaunchIntent) -> Self {
         Self::build(program, None, ClaudeLaunchEnv::resolve(intent))
+    }
+
+    /// Wrapper-launch variant of [`for_wrapper`] that threads in an
+    /// already-resolved launch env instead of resolving it from an intent.
+    ///
+    /// The ProcessBackend `claude-e` launch (#4591) must resolve the launch env
+    /// exactly once up front so the *same* gateway decision drives both the
+    /// auto-compact-window computation and the by-construction gateway guard;
+    /// resolving twice could probe the proxy twice and disagree. As with
+    /// [`for_wrapper`], no binary-resolution PATH is applied (the wrapper — not
+    /// the Claude binary — is the program), and the gateway env is still applied
+    /// through the shared `build` guard arm.
+    pub(crate) fn for_wrapper_with_env(
+        program: impl AsRef<OsStr>,
+        launch_env: ClaudeLaunchEnv,
+    ) -> Self {
+        Self::build(program, None, launch_env)
     }
 
     /// Build a command that launches the Claude binary directly when only its
@@ -490,7 +536,21 @@ mod chokepoint_guard_tests {
 
     /// Files that are permitted to reference the raw gateway primitives / raw
     /// Claude spawns: the gateway definition site and this chokepoint module.
-    const SANCTIONED: &[&str] = &["claude_gateway_proxy.rs", "claude_command.rs"];
+    ///
+    /// `claude_compact_context.rs` (#4591) is also sanctioned: it is a pure
+    /// *consumer* of the already-resolved Inject|Scrub decision (it derives pane
+    /// launch provenance and the immutable auto-compact window from it) and
+    /// never applies launch env to a `Command` / shell — every launch site still
+    /// obtains and applies its gateway env exclusively through
+    /// [`ClaudeLaunchEnv`], including where those sites feed the decision into
+    /// this module via [`ClaudeLaunchEnv::gateway_proxy_env`]. So confining
+    /// launch-env *application* to the chokepoint (the guard's real invariant)
+    /// is preserved.
+    const SANCTIONED: &[&str] = &[
+        "claude_gateway_proxy.rs",
+        "claude_command.rs",
+        "claude_compact_context.rs",
+    ];
 
     /// Substrings whose presence outside the sanctioned files signals a launch
     /// site reaching around the chokepoint. `claude_gateway_proxy::` catches any

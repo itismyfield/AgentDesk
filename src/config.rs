@@ -1506,6 +1506,13 @@ pub struct RuntimeSettingsConfig {
     pub context_compact_percent_codex: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_claude: Option<u64>,
+    /// Minimum token occupancy at which context compaction may be requested.
+    ///
+    /// Unset uses the live consumer default (currently 300_000 tokens for
+    /// Claude). This is deliberately provider-neutral because other providers
+    /// can share the lower-bound policy without inheriting Claude's transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_lower_bound_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub claude_gateway_proxy_enabled: bool,
     #[serde(
@@ -1666,6 +1673,7 @@ impl RuntimeSettingsConfig {
             && self.context_compact_percent.is_none()
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
+            && self.context_compact_lower_bound_tokens.is_none()
             && !self.claude_gateway_proxy_enabled
             && is_default_claude_gateway_proxy_url(&self.claude_gateway_proxy_url)
             && self.dispatch_poll_sec.is_none()

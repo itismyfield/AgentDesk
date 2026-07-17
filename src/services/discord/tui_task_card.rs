@@ -794,26 +794,7 @@ pub(super) fn truncate_chars_ascii(value: &str, limit: usize) -> String {
 /// relay's classifier, the SSH-direct/continuation formatters, and this card
 /// parser all see the same clean text (#3075 consolidated the duplicate).
 pub(super) fn strip_terminal_controls(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if chars.peek().copied() == Some('[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
-            continue;
-        }
-        output.push(ch);
-    }
-    output
+    crate::services::tui_prompt_control::strip_terminal_controls(value)
 }
 
 #[cfg(test)]

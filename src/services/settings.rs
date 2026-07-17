@@ -194,6 +194,13 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "Claude Context Compact Threshold (%)",
         None,
     ),
+    (
+        "context_compact_lower_bound_tokens",
+        "context",
+        "컨텍스트 compact 최소 토큰",
+        "Context Compact Lower Bound (tokens)",
+        Some("300000"),
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -564,6 +571,9 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         }
         "context_compact_percent_claude" => {
             stringified_number(config.runtime.context_compact_percent_claude)
+        }
+        "context_compact_lower_bound_tokens" => {
+            stringified_number(config.runtime.context_compact_lower_bound_tokens)
         }
         _ => None,
     }
