@@ -778,7 +778,9 @@ mod tests {
             let controller = shared.ui.placeholder_controller.clone();
             let key = key.clone();
             let input = input.clone();
-            tokio::spawn(async move { controller.ensure_active(gateway.as_ref(), key, input).await })
+            tokio::spawn(
+                async move { controller.ensure_active(gateway.as_ref(), key, input).await },
+            )
         };
         gateway
             .entered
@@ -801,7 +803,12 @@ mod tests {
                 .await
             })
         };
-        while shared.ui.placeholder_controller.entry_detached_for_test(&key) != Some(true) {
+        while shared
+            .ui
+            .placeholder_controller
+            .entry_detached_for_test(&key)
+            != Some(true)
+        {
             tokio::task::yield_now().await;
         }
         gateway.release.add_permits(1);
@@ -811,7 +818,13 @@ mod tests {
             PlaceholderControllerOutcome::Rejected
         );
         assert!(finalize.await.expect("finalize task joins"));
-        assert_eq!(shared.ui.placeholder_controller.entry_detached_for_test(&key), None);
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .entry_detached_for_test(&key),
+            None
+        );
         assert!(load_inflight_state(&ProviderKind::Codex, 11).is_none());
     }
 
@@ -858,7 +871,10 @@ mod tests {
 
         assert!(!deleted);
         assert_eq!(
-            shared.ui.placeholder_controller.entry_detached_for_test(&key),
+            shared
+                .ui
+                .placeholder_controller
+                .entry_detached_for_test(&key),
             Some(false)
         );
         assert_eq!(
