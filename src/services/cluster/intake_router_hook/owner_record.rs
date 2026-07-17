@@ -148,8 +148,13 @@ pub(crate) enum TransferOutcome {
 /// Result of `adopt_owner_from_session_in_tx` (§3.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AdoptOutcome {
-    Adopted { generation: i64 },
-    AlreadyOwned { owner_instance_id: String, generation: i64 },
+    Adopted {
+        generation: i64,
+    },
+    AlreadyOwned {
+        owner_instance_id: String,
+        generation: i64,
+    },
 }
 
 /// Local vs forwarded admission (§3.5.2). Drives `admission_kind` and the
@@ -299,13 +304,9 @@ where
                 })
             } else {
                 // Stale foreign owner: reclaim by superseding then advancing.
-                let superseded = supersede_active_owner(
-                    tx,
-                    id,
-                    &latest.owner_instance_id,
-                    latest.generation,
-                )
-                .await?;
+                let superseded =
+                    supersede_active_owner(tx, id, &latest.owner_instance_id, latest.generation)
+                        .await?;
                 if superseded != 1 {
                     // Lost the race under the advisory lock's absence — refuse.
                     return Ok(AcquireOutcome::Blocked {
@@ -650,12 +651,10 @@ async fn lookup_outbox_id_by_idempotency_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     idempotency_key: &str,
 ) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM intake_outbox WHERE idempotency_key = $1 LIMIT 1",
-    )
-    .bind(idempotency_key)
-    .fetch_optional(&mut **tx)
-    .await
+    sqlx::query_scalar::<_, i64>("SELECT id FROM intake_outbox WHERE idempotency_key = $1 LIMIT 1")
+        .bind(idempotency_key)
+        .fetch_optional(&mut **tx)
+        .await
 }
 
 async fn lookup_outbox_id_by_attempt_in_tx(
@@ -1163,7 +1162,10 @@ mod tests {
         assert_eq!(out, TransferOutcome::Transferred { new_generation: 1 });
         tx.commit().await.unwrap();
 
-        assert_eq!(active_owner(&pool, "claude", "xfer").await, Some(("node-B".into(), 1)));
+        assert_eq!(
+            active_owner(&pool, "claude", "xfer").await,
+            Some(("node-B".into(), 1))
+        );
         assert_eq!(count_active(&pool, "claude", "xfer").await, 1);
 
         pool.close().await;
@@ -1327,8 +1329,16 @@ mod tests {
         let pool = pg.connect_and_migrate().await;
         // Existing open route: msg-A pending on chanO, target node-A.
         let existing = insert_outbox(
-            &pool, "chanO", "msg-A", "claude", "pending", "forwarded",
-            Some("node-A"), Some(0), None, None,
+            &pool,
+            "chanO",
+            "msg-A",
+            "claude",
+            "pending",
+            "forwarded",
+            Some("node-A"),
+            Some(0),
+            None,
+            None,
         )
         .await;
 
@@ -1382,7 +1392,12 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(out, AdmissionOutcome::SkippedDuplicate { existing_outbox_id: existing });
+            assert_eq!(
+                out,
+                AdmissionOutcome::SkippedDuplicate {
+                    existing_outbox_id: existing
+                }
+            );
             tx.commit().await.unwrap();
         }
 
@@ -1511,8 +1526,16 @@ mod tests {
         let pool = pg.connect_and_migrate().await;
         insert_owner(&pool, "claude", "chanC", "node-W", 0, "active").await;
         let row_id = insert_outbox(
-            &pool, "chanC", "msg-1", "claude", "pending", "forwarded",
-            Some("node-W"), Some(0), None, None,
+            &pool,
+            "chanC",
+            "msg-1",
+            "claude",
+            "pending",
+            "forwarded",
+            Some("node-W"),
+            Some(0),
+            None,
+            None,
         )
         .await;
 
@@ -1536,8 +1559,16 @@ mod tests {
         let pool = pg.connect_and_migrate().await;
         insert_owner(&pool, "claude", "chanL", "node-W", 0, "active").await;
         insert_outbox(
-            &pool, "chanL", "msg-1", "claude", "pending", "local",
-            Some("node-W"), Some(0), None, None,
+            &pool,
+            "chanL",
+            "msg-1",
+            "claude",
+            "pending",
+            "local",
+            Some("node-W"),
+            Some(0),
+            None,
+            None,
         )
         .await;
 
@@ -1566,8 +1597,16 @@ mod tests {
         let pool = pg.connect_and_migrate().await;
         insert_owner(&pool, "claude", "chanRace", "node-W", 0, "active").await;
         let row_id = insert_outbox(
-            &pool, "chanRace", "msg-1", "claude", "pending", "forwarded",
-            Some("node-W"), Some(0), None, None,
+            &pool,
+            "chanRace",
+            "msg-1",
+            "claude",
+            "pending",
+            "forwarded",
+            Some("node-W"),
+            Some(0),
+            None,
+            None,
         )
         .await;
 
@@ -1608,8 +1647,15 @@ mod tests {
             .unwrap();
         claim_tx.commit().await.unwrap();
 
-        assert!(promoted.is_none(), "stale claim must be fenced out after transfer");
-        assert_eq!(outbox_status(&pool, row_id).await, "pending", "row stays pending");
+        assert!(
+            promoted.is_none(),
+            "stale claim must be fenced out after transfer"
+        );
+        assert_eq!(
+            outbox_status(&pool, row_id).await,
+            "pending",
+            "row stays pending"
+        );
 
         pool.close().await;
         pg.drop().await;
@@ -1637,16 +1683,32 @@ mod tests {
         insert_owner(&pool, "codex", "shared", "node-CDX", 0, "active").await;
         // Orphan: claude claimed row on `shared` stamped for a NON-active owner.
         let orphan = insert_outbox(
-            &pool, "shared", "msg-orphan", "claude", "claimed", "forwarded",
-            Some("node-STALE"), Some(0), Some("node-STALE#r1"), Some(3600),
+            &pool,
+            "shared",
+            "msg-orphan",
+            "claude",
+            "claimed",
+            "forwarded",
+            Some("node-STALE"),
+            Some(0),
+            Some("node-STALE#r1"),
+            Some(3600),
         )
         .await;
 
         // Fence-valid claim on a separate channel stamped for its live owner.
         insert_owner(&pool, "claude", "valid-chan", "node-CLD", 0, "active").await;
         let valid = insert_outbox(
-            &pool, "valid-chan", "msg-valid", "claude", "claimed", "forwarded",
-            Some("node-CLD"), Some(0), Some("node-CLD#r1"), Some(3600),
+            &pool,
+            "valid-chan",
+            "msg-valid",
+            "claude",
+            "claimed",
+            "forwarded",
+            Some("node-CLD"),
+            Some(0),
+            Some("node-CLD#r1"),
+            Some(3600),
         )
         .await;
 
@@ -1659,7 +1721,11 @@ mod tests {
             "claimed",
             "cross-provider active owner must NOT resurrect a non-active-owner claim"
         );
-        assert_eq!(outbox_status(&pool, valid).await, "pending", "fence-valid claim re-armed");
+        assert_eq!(
+            outbox_status(&pool, valid).await,
+            "pending",
+            "fence-valid claim re-armed"
+        );
 
         pool.close().await;
         pg.drop().await;
