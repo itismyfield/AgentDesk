@@ -39,8 +39,7 @@ use crate::services::provider::ProviderKind;
 mod abandon_guard;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
-    begin_abandoned_placeholder_detach, finalize_owner_dead_cleanup_if_same_turn,
-    finish_abandoned_placeholder_detach,
+    finalize_owner_dead_cleanup_if_same_turn,
 };
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
@@ -613,7 +612,6 @@ async fn run_placeholder_sweep_pass(
                 {
                     continue;
                 }
-                begin_abandoned_placeholder_detach(shared, &state).await;
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
@@ -637,6 +635,16 @@ async fn run_placeholder_sweep_pass(
                 //      returns PreserveRetry, which keeps both mailbox and row.
                 // `inflight_state_still_same_turn` covers (2) and (3); edit
                 // success covers (1), and the production cleanup plan covers (4).
+                //
+                // Controller-entry pair-detach is NOT done here: it happens
+                // atomically INSIDE `finalize_owner_dead_cleanup_if_same_turn`
+                // (via `finalize_abandoned_placeholder_detach_if_deleted`),
+                // gated on confirmed inflight-state deletion. Detaching
+                // speculatively before that confirmation — or unconditionally
+                // on the failure/revival branch — would strand a revived
+                // turn's placeholder without its `active_snapshot`, so a
+                // later normal completion could not PATCH the Discord card
+                // (#4594 regression; see dual-review Finding 1).
                 if edited
                     && finalize_owner_dead_cleanup_if_same_turn(
                         shared,
@@ -649,8 +657,6 @@ async fn run_placeholder_sweep_pass(
                     .await
                 {
                     report.abandoned += 1;
-                } else {
-                    finish_abandoned_placeholder_detach(shared, &state);
                 }
             }
         }

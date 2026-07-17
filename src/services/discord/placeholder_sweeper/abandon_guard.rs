@@ -332,15 +332,6 @@ pub(super) async fn begin_abandoned_placeholder_detach(
     }
 }
 
-pub(super) fn finish_abandoned_placeholder_detach(
-    shared: &Arc<SharedData>,
-    state: &InflightTurnState,
-) {
-    if let Some(key) = abandoned_placeholder_key(state) {
-        shared.ui.placeholder_controller.finish_detach(&key);
-    }
-}
-
 async fn invalidate_abandoned_placeholder_render_cache(
     shared: &Arc<SharedData>,
     state: &InflightTurnState,
@@ -365,9 +356,18 @@ async fn finalize_abandoned_placeholder_detach_if_deleted(
     state: &InflightTurnState,
     state_deleted: bool,
 ) {
+    // #4594: leave the tombstone (`detached=true`) permanently resident in the
+    // controller map for this key instead of calling `finish_detach` right
+    // back here. `finish_detach` removes the map entry entirely, which lets a
+    // late-arriving `ensure_active`/`ensure_queued` from the same
+    // now-delivered/gone message id re-insert a fresh, non-detached slot and
+    // reactivate a card the probe arm already confirmed is gone — the exact
+    // stale-reactivation window this function exists to close. The
+    // now-permanent tombstone is still bounded: `evict_terminal_entries`
+    // reclaims idle detached entries under capacity pressure (see
+    // `placeholder_controller.rs`), so the map cannot grow without bound.
     if state_deleted {
         begin_abandoned_placeholder_detach(shared, state).await;
-        finish_abandoned_placeholder_detach(shared, state);
     }
 }
 
@@ -451,8 +451,9 @@ mod tests {
         RuntimeActivityEvidence, abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
         abandoned_mailbox_finish_actions, abandoned_tmux_cleanup_decision,
         abandoned_tmux_cleanup_decision_for, decision_for_user_identity,
-        finalize_probe_cleanup_if_same_turn, revived_visible_repair, run_blocking_cleanup_probe,
-        runtime_activity_evidence_from, should_detach_after_cleanup,
+        finalize_owner_dead_cleanup_if_same_turn, finalize_probe_cleanup_if_same_turn,
+        revived_visible_repair, run_blocking_cleanup_probe, runtime_activity_evidence_from,
+        should_detach_after_cleanup,
     };
     use crate::services::discord::formatting::MonitorHandoffReason;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
@@ -965,14 +966,32 @@ mod tests {
             PlaceholderControllerOutcome::Rejected
         );
         assert!(finalize.await.expect("finalize task joins"));
+        // #4594 regression: the tombstone must stay resident (not be
+        // removed) so a stale late-arriving activation for this exact key
+        // keeps being rejected. Removing it here (as the old `finish_detach`
+        // call used to do) would let the next `ensure_active` below
+        // re-insert a fresh, non-detached slot and re-activate a message the
+        // probe arm already confirmed delivered/gone.
         assert_eq!(
             shared
                 .ui
                 .placeholder_controller
                 .entry_detached_for_test(&key),
-            None
+            Some(true)
         );
         assert!(load_inflight_state(&ProviderKind::Codex, 11).is_none());
+
+        // A late-arriving activation from the same (now stale) turn must
+        // still be rejected — this is the revival window #4594 closes.
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .ensure_active(gateway.as_ref(), key, input)
+                .await,
+            PlaceholderControllerOutcome::Rejected
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1032,5 +1051,88 @@ mod tests {
                 .await,
             PlaceholderControllerOutcome::Coalesced
         );
+    }
+
+    #[tokio::test]
+    async fn owner_dead_cleanup_revival_preserves_live_entry_and_active_snapshot() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let shared = make_shared_data_for_tests();
+        let gateway = Arc::new(BlockingGateway::new());
+        // Two PATCHes are expected: the seeding `ensure_active` below, and the
+        // post-revival `ensure_active` at the end of this test. The latter is
+        // forced to issue a real PATCH (not coalesce) because the revival
+        // branch invalidates the render cache (`last_rendered = None`) so a
+        // possibly-clobbered visible card gets repainted.
+        gateway.release.add_permits(2);
+        let key = key(31, 32);
+        let input = input();
+        let mut state = inflight_state(31, 32);
+        // Forces `abandoned_tmux_cleanup_decision_for` to `PreserveRetry`
+        // without touching a real tmux process, exercising the StillPlaceholder
+        // safety-net arm's owner-revival branch deterministically.
+        state.tmux_session_name = None;
+        save_inflight_state(&state).expect("seed inflight row");
+        let snapshot = load_inflight_state(&ProviderKind::Codex, 31).expect("load snapshot");
+
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .ensure_active(gateway.as_ref(), key.clone(), input.clone())
+                .await,
+            PlaceholderControllerOutcome::Edited
+        );
+
+        // StillPlaceholder safety-net arm: owner-death cleanup with the
+        // visible-repair flag enabled must hit the revival branch
+        // (`decision == PreserveRetry && same_turn`) and must NOT strand the
+        // live entry by detaching it (regression guard for dual-review
+        // finding #1: the safety-net arm used to detach unconditionally
+        // before the abort edit was even confirmed).
+        let deleted = finalize_owner_dead_cleanup_if_same_turn(
+            &shared,
+            &ProviderKind::Codex,
+            &snapshot,
+            0,
+            std::time::Instant::now(),
+            true,
+        )
+        .await;
+
+        assert!(!deleted);
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .entry_detached_for_test(&key),
+            Some(false)
+        );
+        // The inflight row itself must survive too — the revival branch must
+        // not authorize a state delete.
+        assert!(load_inflight_state(&ProviderKind::Codex, 31).is_some());
+
+        // The live entry, including its `active_snapshot`, must remain fully
+        // usable for the revived turn's subsequent placeholder edits instead
+        // of being rejected as if the key had been torn down. The outcome is
+        // `Edited` rather than `Coalesced`: the revival branch invalidated
+        // the render cache, so this call cannot coalesce and must actually
+        // issue (and succeed at) a real PATCH — proving the entry is still
+        // live and editable, not detached.
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .ensure_active(gateway.as_ref(), key, input)
+                .await,
+            PlaceholderControllerOutcome::Edited
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
     }
 }

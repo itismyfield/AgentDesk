@@ -311,15 +311,30 @@ impl PlaceholderController {
             .clone()
     }
 
-    /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) or
-    /// `NotCreated` (initial edit failed; nobody committed) so the map cannot
-    /// grow without bound on a long-running process. `Active` entries are
-    /// left in place — they own a live Discord card. Uses `try_lock` to avoid
-    /// blocking on entries the caller is mid-edit on.
+    /// Sweep entries eligible for removal so the map cannot grow without
+    /// bound on a long-running process:
+    /// - detached tombstones (`detached=true`) — #4594's abandoned-placeholder
+    ///   detach path leaves these resident on purpose so a late `ensure_active`
+    ///   from a stale turn is rejected instead of re-inserting a fresh,
+    ///   non-detached slot for an already-delivered/gone message id. Once no
+    ///   caller is mid-edit on one (`begin_edit`'s double-checked `detached`
+    ///   gate guarantees no *new* edit lease can start after detach, so this
+    ///   only guards against a caller that started before detach and hasn't
+    ///   finished its own post-edit detach re-check yet), it carries no live
+    ///   Discord card and is safe to reclaim under capacity pressure.
+    /// - non-detached entries whose state is terminal
+    ///   (Completed/TimedOut/Aborted) or `NotCreated` (initial edit failed;
+    ///   nobody committed).
+    /// `Active` entries are left in place — they own a live Discord card.
+    /// Uses `try_lock` to avoid blocking on / disrupting entries the caller
+    /// is mid-edit on.
     fn evict_terminal_entries(&self) {
         let mut to_remove: Vec<(PlaceholderKey, Arc<PlaceholderEntrySlot>)> = Vec::new();
         for kv in self.entries.iter() {
             if kv.value().detached.load(Ordering::Acquire) {
+                if kv.value().inner.try_lock().is_ok() {
+                    to_remove.push((kv.key().clone(), kv.value().clone()));
+                }
                 continue;
             }
             if let Ok(guard) = kv.value().inner.try_lock()
@@ -611,6 +626,19 @@ impl PlaceholderController {
         let edit_result =
             edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
         drop(edit_lease);
+
+        // Same post-edit detach fence as `ensure_active_inner`/`ensure_queued`:
+        // a concurrent `begin_detach` may have tombstoned this entry while we
+        // held `inner` locked across the awaited PATCH (it only needs the
+        // atomic `detached` flag, not the `inner` lock, then blocks in
+        // `wait_for_edits` until our `edit_lease` above is dropped). Without
+        // this re-check a stale terminal commit could land on an entry a
+        // confirmed-delete probe arm already tombstoned, overwriting Discord
+        // with this call's (possibly stale) terminal card after the
+        // authoritative outcome was already established.
+        if entry.detached.load(Ordering::Acquire) {
+            return PlaceholderControllerOutcome::AlreadyTerminal;
+        }
 
         match edit_result {
             Ok(_) => {
@@ -919,6 +947,142 @@ mod detach_incarnation_tests {
             controller.entry(&key()).inner.lock().await.state,
             PlaceholderLifecycle::Completed
         );
+    }
+
+    /// #4594 Finding 3: `transition()`'s terminal path must re-check
+    /// `detached` after the PATCH lands instead of unconditionally
+    /// committing `guarded.state = target` — otherwise a stale terminal
+    /// edit could resurrect a slot the probe arm already tombstoned while
+    /// the PATCH was in flight.
+    #[tokio::test]
+    async fn transition_after_concurrent_detach_does_not_resurrect_terminal_state() {
+        let gateway = Arc::new(BlockingGateway::new());
+        let controller = Arc::new(PlaceholderController::default());
+        let slot = controller.entry(&key());
+
+        // Phase 1: land a committed `Active` snapshot synchronously (pre-fund
+        // the release semaphore so this call's single edit does not block).
+        gateway.release.add_permits(1);
+        assert_eq!(
+            controller
+                .ensure_active(gateway.as_ref(), key(), input())
+                .await,
+            PlaceholderControllerOutcome::Edited
+        );
+        // Drain the leftover `entered` permit from phase 1 so phase 2's wait
+        // below only unblocks once the *terminal* edit has actually entered.
+        gateway
+            .entered
+            .acquire()
+            .await
+            .expect("gateway entry semaphore remains open")
+            .forget();
+
+        // Phase 2: start the terminal transition; it blocks mid-PATCH.
+        let terminal = {
+            let gateway = gateway.clone();
+            let controller = controller.clone();
+            tokio::spawn(async move {
+                controller
+                    .transition(gateway.as_ref(), key(), PlaceholderLifecycle::Completed)
+                    .await
+            })
+        };
+        gateway
+            .entered
+            .acquire()
+            .await
+            .expect("gateway entry semaphore remains open")
+            .forget();
+
+        // A concurrent detach tombstones the entry while the terminal PATCH
+        // is still in flight.
+        let detach = {
+            let controller = controller.clone();
+            tokio::spawn(async move {
+                controller.begin_detach(&key()).await;
+            })
+        };
+        while !slot.detached.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        gateway.release.add_permits(1);
+
+        assert_eq!(
+            terminal.await.expect("transition task joins"),
+            PlaceholderControllerOutcome::AlreadyTerminal
+        );
+        detach.await.expect("detach task joins");
+        assert_eq!(slot.inner.lock().await.state, PlaceholderLifecycle::Active);
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
+        controller.finish_detach(&key());
+    }
+
+    /// #4594 Finding 2: `evict_terminal_entries()` must reclaim a detached
+    /// tombstone once nobody holds its `inner` lock (otherwise every
+    /// probe-arm confirmed-delete leaks a permanent slot toward
+    /// `PLACEHOLDER_ENTRIES_MAX`), but must never race a caller still mid
+    /// PATCH under that same tombstone (the post-edit detach fence needs
+    /// `inner` to still exist to report its outcome), and must never touch
+    /// a live, non-detached entry.
+    #[tokio::test]
+    async fn evict_terminal_entries_reclaims_idle_detached_tombstones_but_not_locked_ones() {
+        let controller = PlaceholderController::default();
+
+        let idle_key = PlaceholderKey {
+            provider: ProviderKind::Codex,
+            channel_id: ChannelId::new(21),
+            message_id: MessageId::new(22),
+        };
+        let locked_key = PlaceholderKey {
+            provider: ProviderKind::Codex,
+            channel_id: ChannelId::new(23),
+            message_id: MessageId::new(24),
+        };
+        let live_key = key();
+
+        // A #4594 tombstone with nobody mid-edit: safe to reclaim under
+        // capacity pressure.
+        controller.begin_detach(&idle_key).await;
+        assert_eq!(controller.entry_detached_for_test(&idle_key), Some(true));
+
+        // A #4594 tombstone whose caller still holds `inner` locked (e.g. a
+        // post-edit detach-fence check that has not returned yet): eviction's
+        // `try_lock` must fail so it does not race that caller.
+        let locked_entry = controller.entry(&locked_key);
+        locked_entry.detach();
+        let held_guard = locked_entry.inner.lock().await;
+
+        // An ordinary live `Active` entry must never be evicted.
+        let gateway = BlockingGateway::new();
+        gateway.release.add_permits(1);
+        assert_eq!(
+            controller
+                .ensure_active(&gateway, live_key.clone(), input())
+                .await,
+            PlaceholderControllerOutcome::Edited
+        );
+
+        controller.evict_terminal_entries();
+
+        assert_eq!(
+            controller.entry_detached_for_test(&idle_key),
+            None,
+            "idle detached tombstone must be reclaimed once no caller holds its lock"
+        );
+        assert_eq!(
+            controller.entry_detached_for_test(&locked_key),
+            Some(true),
+            "a detached entry whose lock is still held must survive eviction"
+        );
+        assert_eq!(
+            controller.entry_detached_for_test(&live_key),
+            Some(false),
+            "a live Active entry must survive eviction"
+        );
+
+        drop(held_guard);
+        controller.finish_detach(&locked_key);
     }
 }
 
