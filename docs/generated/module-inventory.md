@@ -405,7 +405,7 @@
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2362 | 842 | 1520 |  |
-| `services::cluster::intake_router_hook::owner_record` | `src/services/cluster/intake_router_hook/owner_record.rs` | 1995 | 850 | 1145 |  |
+| `services::cluster::intake_router_hook::owner_record` | `src/services/cluster/intake_router_hook/owner_record.rs` | 2354 | 902 | 1452 |  |
 | `services::cluster::intake_router_hook::session_owner` | `src/services/cluster/intake_router_hook/session_owner.rs` | 134 | 134 | 0 |  |
 | `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
 | `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 456 | 341 | 115 |  |
