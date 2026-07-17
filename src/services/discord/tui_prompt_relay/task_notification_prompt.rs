@@ -110,8 +110,9 @@ pub(super) async fn resolve_gate(
     }
 
     let registry = shared.health_registry();
+    let notify_role = super::super::bot_role::UtilityBotRole::Notify;
     let notify_http = if let Some(registry) = registry.as_ref() {
-        match super::super::health::resolve_bot_http(registry.as_ref(), "notify").await {
+        match super::super::health::resolve_utility_bot_http(registry.as_ref(), notify_role).await {
             Ok(http) => Some(http),
             Err((status, body)) => {
                 tracing::warn!(
@@ -130,7 +131,9 @@ pub(super) async fn resolve_gate(
     let provider_http = shared.serenity_http_or_token_fallback();
     let clients = super::super::task_notification_delivery::CardDeliveryClients::new(
         notify_http
-            .map(|http| super::super::task_notification_delivery::CardBot::new("notify", http))
+            .map(|http| {
+                super::super::task_notification_delivery::CardBot::new(notify_role.alias(), http)
+            })
             .into_iter()
             .chain(provider_http.map(|http| {
                 super::super::task_notification_delivery::CardBot::new(
@@ -204,8 +207,11 @@ async fn legacy_notify_gate(
         );
         return None;
     };
-    let notify_http = match super::super::health::resolve_bot_http(registry.as_ref(), "notify")
-        .await
+    let notify_http = match super::super::health::resolve_utility_bot_http(
+        registry.as_ref(),
+        super::super::bot_role::UtilityBotRole::Notify,
+    )
+    .await
     {
         Ok(http) => http,
         Err((status, body)) => {

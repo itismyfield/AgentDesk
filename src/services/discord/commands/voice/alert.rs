@@ -22,7 +22,9 @@ pub(in crate::services::discord) async fn notify_voice_alert(
     if !voice_notify_should_send(channel_id, kind) {
         return;
     }
-    let Some(token) = crate::credential::read_bot_token("notify") else {
+    let Some(token) = crate::credential::read_bot_token(
+        super::super::super::bot_role::UtilityBotRole::Notify.alias(),
+    ) else {
         tracing::warn!(
             channel_id = channel_id.get(),
             kind,

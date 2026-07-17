@@ -430,7 +430,7 @@ pub async fn dispatch_alert(
         OutboxMessage {
             target: target_channel,
             content: &content,
-            bot: "notify",
+            bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
             source: "quality_regression_alerter",
             reason_code: Some("agent_quality.regression"),
             session_key: Some(&session_key),

@@ -1,6 +1,8 @@
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
 
+use crate::services::discord::bot_role::UtilityBotRole;
+
 // ── Message queue ops ─────────────────────────────────────────────
 // agentdesk.message.queue(target, content, bot?, source?)
 // Enqueues a message for async delivery — avoids self-referential HTTP deadlock (#120)
@@ -24,18 +26,19 @@ pub(super) fn register_message_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>)
     ad.set("message", msg_obj)?;
 
     // JS wrapper: agentdesk.message.queue(target, content, bot?, source?)
-    ctx.eval::<(), _>(
+    let default_bot = UtilityBotRole::Announce.alias();
+    ctx.eval::<(), _>(format!(
         r#"
-        agentdesk.message.queue = function(target, content, bot, source) {
+        agentdesk.message.queue = function(target, content, bot, source) {{
             return JSON.parse(agentdesk.message.__queue_raw(
                 target || "",
                 content || "",
-                bot || "announce",
+                bot || "{default_bot}",
                 source || "system"
             ));
-        };
-        "#,
-    )?;
+        }};
+        "#
+    ))?;
 
     Ok(())
 }

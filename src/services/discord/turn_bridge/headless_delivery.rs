@@ -217,7 +217,7 @@ pub(super) async fn enqueue_headless_delivery(
     let bot = delivery_bot
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("notify");
+        .unwrap_or(super::super::bot_role::UtilityBotRole::Notify.alias());
 
     let outbox_message = crate::services::message_outbox::OutboxMessage {
         target: &target,
@@ -356,7 +356,12 @@ pub(super) async fn enqueue_headless_delivery(
     }
 
     let notify_http = if let Some(registry) = shared.health_registry() {
-        match super::health::resolve_bot_http(registry.as_ref(), "notify").await {
+        match super::health::resolve_utility_bot_http(
+            registry.as_ref(),
+            super::bot_role::UtilityBotRole::Notify,
+        )
+        .await
+        {
             Ok(http) => Some(http),
             Err((status, body)) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");

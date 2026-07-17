@@ -5,6 +5,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use crate::services::discord::outbound::message::{OutboundOperation, OutboundTarget};
@@ -246,7 +247,7 @@ impl RoutineDiscordLogger {
         } else if let Some(target) = self.health_target.as_deref() {
             self.log_to_target(
                 target,
-                "notify",
+                UtilityBotRole::Notify.alias(),
                 "routine_recovery_resumed",
                 &format!(
                     "routine:{}:run:{}:recovery",
@@ -482,7 +483,7 @@ impl RoutineDiscordLogger {
                         return Err(error);
                     }
                 },
-                None => "notify".to_string(),
+                None => UtilityBotRole::Notify.alias().to_string(),
             };
             return Ok(Some(RoutineLogTarget { target, bot }));
         }
@@ -553,7 +554,7 @@ impl RoutineDiscordLogger {
             .strip_prefix("channel:")
             .unwrap_or(target.target.as_str());
         let token = crate::credential::read_bot_token(&target.bot)
-            .or_else(|| crate::credential::read_bot_token("notify"))
+            .or_else(|| crate::credential::read_bot_token(UtilityBotRole::Notify.alias()))
             .ok_or_else(|| {
                 format!(
                     "routine run Discord summary bot token not configured for {}",
@@ -923,7 +924,7 @@ async fn resolve_routine_thread_http(
 ) -> Result<RoutineThreadHttp> {
     let mut errors = Vec::new();
     let mut tried = Vec::new();
-    for bot in [provider_name, agent_id, "notify"] {
+    for bot in [provider_name, agent_id, UtilityBotRole::Notify.alias()] {
         if bot.trim().is_empty() || tried.contains(&bot) {
             continue;
         }
@@ -1105,7 +1106,7 @@ async fn resolve_available_log_bot(
 
 fn routine_log_bot_candidates(provider_bot: Option<&str>, agent_id: Option<&str>) -> Vec<String> {
     let mut candidates = Vec::new();
-    for bot in [provider_bot, agent_id, Some("notify")]
+    for bot in [provider_bot, agent_id, Some(UtilityBotRole::Notify.alias())]
         .into_iter()
         .flatten()
     {
