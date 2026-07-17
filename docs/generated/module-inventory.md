@@ -376,16 +376,16 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4411 | 2965 | 1446 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4416 | 2967 | 1449 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
-| `services::claude_command` | `src/services/claude_command.rs` | 360 | 193 | 167 |  |
+| `services::claude_command` | `src/services/claude_command.rs` | 545 | 290 | 255 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
 | `services::claude_e::process` | `src/services/claude_e/process.rs` | 414 | 371 | 43 |  |
 | `services::claude_e::spawn_queue` | `src/services/claude_e/spawn_queue.rs` | 3 | 3 | 0 |  |
-| `services::claude_gateway_proxy` | `src/services/claude_gateway_proxy.rs` | 333 | 160 | 173 |  |
+| `services::claude_gateway_proxy` | `src/services/claude_gateway_proxy.rs` | 372 | 179 | 193 |  |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 17 | 17 | 0 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1229 | 737 | 492 |  |
 | `services::claude_tui::hook_output_guard` | `src/services/claude_tui/hook_output_guard.rs` | 157 | 157 | 0 |  |
@@ -1069,7 +1069,7 @@
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 2356 | 1311 | 1045 | giant-file |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 276 | 265 | 11 |  |
-| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 803 | 743 | 60 |  |
+| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 815 | 755 | 60 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 286 | 220 | 66 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4421 | 1970 | 2451 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
