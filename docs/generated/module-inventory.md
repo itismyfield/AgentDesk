@@ -376,9 +376,9 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4416 | 2967 | 1449 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4415 | 2966 | 1449 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
-| `services::claude_command` | `src/services/claude_command.rs` | 545 | 290 | 255 |  |
+| `services::claude_command` | `src/services/claude_command.rs` | 615 | 304 | 311 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
@@ -1069,7 +1069,7 @@
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 2356 | 1311 | 1045 | giant-file |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 276 | 265 | 11 |  |
-| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 815 | 755 | 60 |  |
+| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 899 | 788 | 111 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 286 | 220 | 66 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4421 | 1970 | 2451 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
