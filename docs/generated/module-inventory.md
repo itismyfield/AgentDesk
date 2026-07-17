@@ -635,7 +635,7 @@
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 569 | 253 | 316 |  |
 | `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 308 | 187 | 121 |  |
 | `services::discord::relay_owner_observability` | `src/services/discord/relay_owner_observability.rs` | 458 | 343 | 115 |  |
-| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 3491 | 1522 | 1969 | giant-file |
+| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 3533 | 1536 | 1997 | giant-file |
 | `services::discord::relay_recovery::tests::circuit_breaker_apply` | `src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs` | 324 | 0 | 324 |  |
 | `services::discord::relay_recovery_auto_heal_apply` | `src/services/discord/relay_recovery_auto_heal_apply.rs` | 713 | 294 | 419 |  |
 | `services::discord::relay_recovery_auto_heal_attempts` | `src/services/discord/relay_recovery_auto_heal_attempts.rs` | 374 | 220 | 154 |  |

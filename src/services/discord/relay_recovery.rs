@@ -364,7 +364,13 @@ fn eligible_orphan_pending_token_without_admission_grace(snapshot: &RelayHealthS
         && !snapshot.bridge_inflight_present
         && !snapshot.watcher_attached
         && snapshot.tmux_alive != Some(true)
-        && !is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
+        // The AgentDesk-name guard only protects a token whose tmux liveness is
+        // still uncertain (`None`, e.g. a transient probe error) — NOT one the
+        // probe positively confirmed dead. Without the `Some(false)` escape a
+        // genuinely dead `AgentDesk-*` orphan token is protected forever and
+        // wedges the mailbox slot with no reclaim path (#4569 review regression).
+        && (snapshot.tmux_alive == Some(false)
+            || !is_agentdesk_tmux_session(snapshot.tmux_session.as_deref()))
 }
 
 fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot, now_ms: i64) -> bool {
@@ -647,7 +653,15 @@ async fn auto_apply_relay_recovery_for_shared_at(
         })?;
 
     let mut planning_health = snapshot.relay_health.clone();
-    let planning_stall_state = if source == RelayRecoveryApplySource::StallWatchdog {
+    // The watchdog death-evidence exemption only applies when the caller is
+    // requesting orphan-token cleanup. A StallWatchdog caller requesting
+    // ReattachWatcher (relay_dead_reattach) must keep the real snapshot stall
+    // state so `plan_relay_recovery` can return `ReattachWatcher`; forcing
+    // `OrphanPendingToken` here would always mismatch `allowed_action` and
+    // silently disable the relay-dead reattach lane (#4569 review regression).
+    let planning_stall_state = if source == RelayRecoveryApplySource::StallWatchdog
+        && allowed_action == RelayRecoveryActionKind::ClearOrphanPendingToken
+    {
         // The watchdog caller reaches this source only after its independent
         // death-evidence gate authorizes cleanup. Plan against that committed
         // verdict without mutating the real watcher before mailbox reclaim is
@@ -2921,6 +2935,34 @@ mod tests {
             decision.auto_heal.skipped_reason,
             Some("protected_agentdesk_tmux_session")
         );
+    }
+
+    #[test]
+    fn token_only_agentdesk_tmux_confirmed_dead_is_reclaimed_after_grace() {
+        // #4569 review regression guard: the AgentDesk-name protection must NOT
+        // shield a token whose tmux the probe positively confirmed dead. Removing
+        // the `tmux_alive == Some(false)` escape in
+        // `eligible_orphan_pending_token_without_admission_grace` re-protects this
+        // token forever and wedges the mailbox.
+        let decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                mailbox_has_cancel_token: true,
+                mailbox_active_user_msg_id: Some(9001),
+                mailbox_turn_started_at_ms: Some(1_000),
+                tmux_session: Some("AgentDesk-codex-token-only-dead".to_string()),
+                tmux_alive: Some(false),
+                ..snapshot()
+            },
+            RelayStallState::OrphanPendingToken,
+            1_000 + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
+        );
+
+        assert_eq!(
+            decision.action,
+            RelayRecoveryActionKind::ClearOrphanPendingToken
+        );
+        assert!(decision.auto_heal.eligible);
+        assert_eq!(decision.auto_heal.skipped_reason, None);
     }
 
     #[test]
