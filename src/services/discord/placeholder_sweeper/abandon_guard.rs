@@ -30,7 +30,7 @@ impl AbandonedTmuxCleanupDecision {
     }
 }
 
-pub(super) fn abandoned_tmux_cleanup_decision(
+fn abandoned_tmux_cleanup_decision(
     has_usable_session_name: bool,
     pane: PaneLiveness,
     activity: RuntimeActivityEvidence,
@@ -355,8 +355,20 @@ async fn invalidate_abandoned_placeholder_render_cache(
         .await
 }
 
+#[cfg(test)]
 fn should_detach_after_cleanup(same_turn: bool, state_deleted: bool) -> bool {
     same_turn && state_deleted
+}
+
+async fn finalize_abandoned_placeholder_detach_if_deleted(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+    state_deleted: bool,
+) {
+    if state_deleted {
+        begin_abandoned_placeholder_detach(shared, state).await;
+        finish_abandoned_placeholder_detach(shared, state);
+    }
 }
 
 async fn finalize_cleanup_if_same_turn(
@@ -374,9 +386,7 @@ async fn finalize_cleanup_if_same_turn(
         finalize_abandoned_mailbox(shared, provider, state, sweep_started_before, evidence).await;
     let same_turn = super::inflight_state_still_same_turn(provider, state, age_secs);
     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
-    if should_detach_after_cleanup(same_turn, deleted) {
-        finish_abandoned_placeholder_detach(shared, state);
-    }
+    finalize_abandoned_placeholder_detach_if_deleted(shared, state, deleted).await;
     deleted
 }
 
@@ -429,9 +439,7 @@ pub(super) async fn finalize_owner_dead_cleanup_if_same_turn(
         return false;
     }
     let deleted = same_turn && cleanup.delete_state_if_allowed(provider, state);
-    if should_detach_after_cleanup(same_turn, deleted) {
-        finish_abandoned_placeholder_detach(shared, state);
-    }
+    finalize_abandoned_placeholder_detach_if_deleted(shared, state, deleted).await;
     deleted
 }
 
@@ -745,5 +753,121 @@ mod tests {
     async fn blocking_probe_join_failure_preserves_retry() {
         let decision = run_blocking_cleanup_probe(|| panic!("synthetic probe panic")).await;
         assert_eq!(decision, AbandonedTmuxCleanupDecision::PreserveRetry);
+    }
+
+    #[tokio::test]
+    async fn probe_arm_cleanup_detaches_controller_entry_and_rejects_late_commit() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let shared = make_shared_data_for_tests();
+        let gateway = Arc::new(BlockingGateway::new());
+        let key = key(11, 12);
+        let input = input();
+        let state = inflight_state(11, 12);
+        save_inflight_state(&state).expect("seed inflight row");
+        let snapshot = load_inflight_state(&ProviderKind::Codex, 11).expect("load snapshot");
+
+        let ensure = {
+            let gateway = gateway.clone();
+            let controller = shared.ui.placeholder_controller.clone();
+            let key = key.clone();
+            let input = input.clone();
+            tokio::spawn(async move { controller.ensure_active(gateway.as_ref(), key, input).await })
+        };
+        gateway
+            .entered
+            .acquire()
+            .await
+            .expect("gateway entry semaphore remains open")
+            .forget();
+
+        let finalize = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                finalize_probe_cleanup_if_same_turn(
+                    &shared,
+                    &ProviderKind::Codex,
+                    &snapshot,
+                    0,
+                    std::time::Instant::now(),
+                    PlaceholderProbe::AlreadyDelivered,
+                )
+                .await
+            })
+        };
+        while shared.ui.placeholder_controller.entry_detached_for_test(&key) != Some(true) {
+            tokio::task::yield_now().await;
+        }
+        gateway.release.add_permits(1);
+
+        assert_eq!(
+            ensure.await.expect("ensure task joins"),
+            PlaceholderControllerOutcome::Rejected
+        );
+        assert!(finalize.await.expect("finalize task joins"));
+        assert_eq!(shared.ui.placeholder_controller.entry_detached_for_test(&key), None);
+        assert!(load_inflight_state(&ProviderKind::Codex, 11).is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_arm_cleanup_preserves_live_entry_when_same_turn_gate_fails() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let shared = make_shared_data_for_tests();
+        let gateway = Arc::new(BlockingGateway::new());
+        gateway.release.add_permits(1);
+        let key = key(21, 22);
+        let input = input();
+        let state = inflight_state(21, 22);
+        save_inflight_state(&state).expect("seed inflight row");
+        let snapshot = load_inflight_state(&ProviderKind::Codex, 21).expect("load snapshot");
+
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .ensure_active(gateway.as_ref(), key.clone(), input.clone())
+                .await,
+            PlaceholderControllerOutcome::Edited
+        );
+        let mut newer = snapshot.clone();
+        newer.current_msg_id = 23;
+        save_inflight_state(&newer).expect("overwrite inflight row");
+
+        let deleted = finalize_probe_cleanup_if_same_turn(
+            &shared,
+            &ProviderKind::Codex,
+            &snapshot,
+            0,
+            std::time::Instant::now(),
+            PlaceholderProbe::AlreadyDelivered,
+        )
+        .await;
+
+        assert!(!deleted);
+        assert_eq!(
+            shared.ui.placeholder_controller.entry_detached_for_test(&key),
+            Some(false)
+        );
+        assert_eq!(
+            shared
+                .ui
+                .placeholder_controller
+                .ensure_active(gateway.as_ref(), key, input)
+                .await,
+            PlaceholderControllerOutcome::Coalesced
+        );
     }
 }

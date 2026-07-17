@@ -673,6 +673,13 @@ impl PlaceholderController {
             .remove_if(key, |_, current| Arc::ptr_eq(current, &entry));
     }
 
+    #[cfg(test)]
+    pub(super) fn entry_detached_for_test(&self, key: &PlaceholderKey) -> Option<bool> {
+        self.entries
+            .get(key)
+            .map(|entry| entry.detached.load(Ordering::Acquire))
+    }
+
     /// Drop a key from the controller without emitting any Discord PATCH.
     /// Used by rollover paths whose external overwrite already committed.
     pub(super) fn detach(&self, key: &PlaceholderKey) {
