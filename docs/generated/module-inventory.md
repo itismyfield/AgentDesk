@@ -378,7 +378,7 @@
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
 | `services::claude` | `src/services/claude.rs` | 4320 | 2967 | 1353 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
-| `services::claude_command` | `src/services/claude_command.rs` | 675 | 350 | 325 |  |
+| `services::claude_command` | `src/services/claude_command.rs` | 748 | 350 | 398 |  |
 | `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 722 | 369 | 353 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
