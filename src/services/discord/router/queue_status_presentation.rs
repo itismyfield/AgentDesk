@@ -55,7 +55,7 @@ mod tests {
         ));
         assert!(queue_retry_silence.contains(&compact(
             r#"
-                if retry_candidate && !super::super::super::router::queue_status_card_enabled() {
+                retry_candidate && !claude_tui_followup_busy_readiness_timeout && !queue_status_card_enabled
             "#,
         )));
         let terminal_delivery =
@@ -64,6 +64,7 @@ mod tests {
             r#"
                 queue_retry_silence::apply(
                     claude_tui_followup_pre_submit_requeue_candidate,
+                    claude_tui_followup_busy_readiness_timeout,
                     &mut full_response,
                     &mut inflight_state,
                 );

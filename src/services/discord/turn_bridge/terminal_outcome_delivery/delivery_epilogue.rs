@@ -35,6 +35,7 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) recovery_retry: bool,
     pub(super) resume_failure_detected: bool,
     pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
+    pub(super) claude_tui_busy_requeue_pending: bool,
     pub(super) tui_error_classification: TuiErrorClassification,
     #[cfg(unix)]
     pub(super) bridge_tui_gate_outcome_early:
@@ -79,6 +80,7 @@ pub(super) async fn handle_delivery_epilogue(
     let resume_failure_detected = ctx.resume_failure_detected;
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
+    let claude_tui_busy_requeue_pending = ctx.claude_tui_busy_requeue_pending;
     let tui_error_classification = ctx.tui_error_classification;
     #[cfg(unix)]
     let bridge_tui_gate_outcome_early = ctx.bridge_tui_gate_outcome_early;
@@ -321,8 +323,11 @@ pub(super) async fn handle_delivery_epilogue(
                         "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                     );
                 }
-                if claude_tui_followup_pre_submit_requeue_candidate {
-                    followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
+                // Skip only when the busy path already requeued; legacy must still requeue (#4610).
+                if claude_tui_followup_pre_submit_requeue_candidate
+                    && !claude_tui_busy_requeue_pending
+                {
+                    let _ = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
                         &shared_owned,
                         &provider,
                         channel_id,

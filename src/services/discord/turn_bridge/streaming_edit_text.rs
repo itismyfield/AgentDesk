@@ -66,6 +66,7 @@ pub(in crate::services::discord) fn bridge_streaming_edit_gate_open(
 pub(in crate::services::discord) struct TuiErrorClassification {
     pre_submission_prompt_error: bool,
     claude_followup_requeue_prompt_error: bool,
+    claude_followup_busy_readiness_timeout: bool,
     transport_error_should_skip_quiescence: bool,
 }
 
@@ -85,6 +86,8 @@ pub(in crate::services::discord) fn classify_raw_tui_error(
     let claude_followup_requeue_prompt_error = matches!(provider, ProviderKind::Claude)
         && pre_submission_prompt_error
         && error_text.contains("follow-up prompt input readiness");
+    let claude_followup_busy_readiness_timeout = claude_followup_requeue_prompt_error
+        && error_text.contains("previous_tui_turn_still_running=true");
     let transport_error_should_skip_quiescence = match provider {
         ProviderKind::Claude => {
             pre_submission_prompt_error
@@ -103,6 +106,7 @@ pub(in crate::services::discord) fn classify_raw_tui_error(
     TuiErrorClassification {
         pre_submission_prompt_error,
         claude_followup_requeue_prompt_error,
+        claude_followup_busy_readiness_timeout,
         transport_error_should_skip_quiescence,
     }
 }
@@ -147,6 +151,19 @@ pub(in crate::services::discord) fn bridge_pre_submission_tui_prompt_error(
 }
 
 pub(in crate::services::discord) const CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE: &str = "";
+
+pub(in crate::services::discord) fn bridge_claude_tui_followup_busy_readiness_timeout(
+    provider: &ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    classification: TuiErrorClassification,
+) -> bool {
+    matches!(provider, ProviderKind::Claude)
+        && matches!(
+            runtime_kind,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+        )
+        && classification.claude_followup_busy_readiness_timeout
+}
 
 pub(in crate::services::discord) fn bridge_claude_tui_followup_requeue_prompt_error(
     provider: &ProviderKind,
