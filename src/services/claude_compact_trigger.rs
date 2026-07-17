@@ -94,7 +94,7 @@ pub(crate) fn maybe_inject_compact(
         };
         let ticket =
             begin_machine_compact_control("claude", &key.tmux_session_name, &provider_session_id);
-        let outcome = crate::services::claude::with_claude_tui_composer_mutation_lock(
+        let outcome = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
             &key.tmux_session_name,
             || crate::services::claude_tui::input::send_compact_while_busy(&key.tmux_session_name),
         );

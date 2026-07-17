@@ -418,7 +418,7 @@ fn send_prompt_with_readiness(
     // composer lock while doing so. Revalidate only after acquiring that lock so
     // `/compact` and a normal follow-up cannot interleave their key mutations.
     wait_for_prompt_ready(session_name, readiness, cancel_token)?;
-    crate::services::claude::with_claude_tui_composer_mutation_lock(session_name, || {
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
         let snapshot = prompt_readiness_snapshot(session_name);
         if !prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             return Err("claude tui composer changed before follow-up mutation".to_string());
@@ -552,8 +552,9 @@ pub fn send_selector_followup(
     // interval) stays serialized with auto `/compact` so their keys cannot
     // land in one another's editor/overlay.
     wait_for_prompt_ready(session_name, PromptReadinessKind::Followup, cancel_token)?;
-    let result =
-        crate::services::claude::with_claude_tui_composer_mutation_lock(session_name, || {
+    let result = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+        session_name,
+        || {
             let snapshot = prompt_readiness_snapshot(session_name);
             if !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot) {
                 return Err("claude tui composer changed before selector mutation".to_string());
@@ -578,7 +579,8 @@ pub fn send_selector_followup(
             run_actions(session_name, &navigate_actions, cancel_token)?;
             // Phase 4: validate the overlay closed (selection committed).
             confirm_selector_closed(session_name, nav, cancel_token)
-        });
+        },
+    );
     if result.is_err() {
         crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
             "claude",

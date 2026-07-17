@@ -4,11 +4,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 #[cfg(unix)]
-use std::sync::{Arc, LazyLock, Mutex};
-#[cfg(unix)]
 use std::time::Duration;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::claude_compact_context::{
+    claude_model_from_args, launch_auto_compact_window_for_session,
+};
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 #[cfg(unix)]
 use crate::services::claude_tui::hosting::{
@@ -57,146 +58,6 @@ const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs
 const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(unix)]
 const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL: Duration = Duration::from_millis(500);
-
-#[cfg(unix)]
-type ClaudeTuiSessionTurnLock = Arc<Mutex<()>>;
-
-/// Serializes only the short snapshot → key mutation → confirmation critical
-/// section in a Claude composer. This is intentionally distinct from the
-/// turn-lifetime lock: `/compact` may be queued while a hosted turn is busy,
-/// whereas ordinary follow-ups still own the turn lock and readiness wait.
-#[cfg(unix)]
-type ClaudeTuiComposerMutationLock = Arc<Mutex<()>>;
-
-#[cfg(unix)]
-static CLAUDE_TUI_SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, ClaudeTuiSessionTurnLock>> =
-    LazyLock::new(dashmap::DashMap::new);
-
-#[cfg(unix)]
-static CLAUDE_TUI_COMPOSER_MUTATION_LOCKS: LazyLock<
-    dashmap::DashMap<String, ClaudeTuiComposerMutationLock>,
-> = LazyLock::new(dashmap::DashMap::new);
-
-#[cfg(unix)]
-fn claude_tui_session_turn_lock(tmux_session_name: &str) -> ClaudeTuiSessionTurnLock {
-    CLAUDE_TUI_SESSION_TURN_LOCKS
-        .entry(tmux_session_name.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
-}
-
-#[cfg(unix)]
-fn claude_tui_composer_mutation_lock(tmux_session_name: &str) -> ClaudeTuiComposerMutationLock {
-    CLAUDE_TUI_COMPOSER_MUTATION_LOCKS
-        .entry(tmux_session_name.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
-}
-
-/// Run one narrow composer mutation atomically with other mutations for the
-/// same pane. Readiness waits deliberately live outside this helper so a normal
-/// follow-up cannot block a busy-turn `/compact` for 45 seconds.
-#[cfg(unix)]
-pub(crate) fn with_claude_tui_composer_mutation_lock<R>(
-    tmux_session_name: &str,
-    f: impl FnOnce() -> R,
-) -> R {
-    let composer_lock = claude_tui_composer_mutation_lock(tmux_session_name);
-    let _composer_guard = composer_lock
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    f()
-}
-
-#[cfg(not(unix))]
-pub(crate) fn with_claude_tui_composer_mutation_lock<R>(
-    _tmux_session_name: &str,
-    f: impl FnOnce() -> R,
-) -> R {
-    f()
-}
-
-#[cfg(all(test, unix))]
-mod claude_tui_composer_lock_tests {
-    use super::*;
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    #[test]
-    fn compact_composer_lock_proceeds_while_turn_lifetime_lock_is_held() {
-        let session = format!("claude-4591-turn-lock-{}", uuid::Uuid::new_v4());
-        let turn_lock = claude_tui_session_turn_lock(&session);
-        let _turn_guard = turn_lock.lock().unwrap();
-        let (sent, received) = mpsc::channel();
-        let worker_session = session.clone();
-        std::thread::spawn(move || {
-            with_claude_tui_composer_mutation_lock(&worker_session, || {
-                sent.send(()).unwrap();
-            });
-        });
-        received
-            .recv_timeout(Duration::from_millis(250))
-            .expect("composer mutation must not wait on the turn-lifetime lock");
-    }
-
-    #[test]
-    fn composer_mutation_lock_serializes_two_mutations() {
-        let session = format!("claude-4591-composer-lock-{}", uuid::Uuid::new_v4());
-        let (first_entered_tx, first_entered_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let (second_entered_tx, second_entered_rx) = mpsc::channel();
-        let first_session = session.clone();
-        std::thread::spawn(move || {
-            with_claude_tui_composer_mutation_lock(&first_session, || {
-                first_entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            });
-        });
-        first_entered_rx
-            .recv_timeout(Duration::from_millis(250))
-            .unwrap();
-        let second_session = session.clone();
-        std::thread::spawn(move || {
-            with_claude_tui_composer_mutation_lock(&second_session, || {
-                second_entered_tx.send(()).unwrap();
-            });
-        });
-        assert!(
-            second_entered_rx
-                .recv_timeout(Duration::from_millis(40))
-                .is_err(),
-            "a second composer mutation must not interleave before the first releases"
-        );
-        release_tx.send(()).unwrap();
-        second_entered_rx
-            .recv_timeout(Duration::from_millis(250))
-            .expect("second mutation should proceed after the first releases");
-    }
-}
-
-/// #3262: run a blocking TUI-submit closure under the SAME per-session turn lock
-/// that `execute_streaming_local_tui_tmux` (the normal follow-up path) holds.
-///
-/// The auto-`/compact` injection drives `tmux send-keys` into the same live pane
-/// as a normal Discord follow-up; without sharing this serialization the two can
-/// interleave their readiness check + key sends and corrupt composer input
-/// ordering. Routing the auto-inject through this gate guarantees `/compact` and
-/// a user follow-up never run concurrently against one pane.
-///
-/// This is a synchronous helper: the lock is a `std::sync::Mutex` and `f` is the
-/// blocking submit body, so the guard is never held across an `.await`. Callers
-/// must invoke it from a blocking context (e.g. `spawn_blocking`), exactly like
-/// the normal path which holds this lock inside the blocking
-/// `execute_streaming_local_tui_tmux`.
-#[cfg(unix)]
-pub(crate) fn with_claude_tui_session_turn_lock<R>(
-    tmux_session_name: &str,
-    f: impl FnOnce() -> R,
-) -> R {
-    let turn_lock = claude_tui_session_turn_lock(tmux_session_name);
-    let _turn_guard = turn_lock.lock().unwrap_or_else(|error| error.into_inner());
-    f()
-}
 
 const CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV: &str = "AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE";
 
@@ -304,34 +165,6 @@ pub(crate) fn append_claude_fast_mode_arg(args: &mut Vec<String>, fast_mode_enab
 
     args.push("--settings".to_string());
     args.push(format!(r#"{{"fastMode":{enabled}}}"#));
-}
-
-fn claude_model_from_args(args: &[String]) -> Option<&str> {
-    args.windows(2)
-        .find(|pair| pair[0] == "--model")
-        .map(|pair| pair[1].as_str())
-}
-
-fn launch_auto_compact_window_for_session(
-    launch_key: &str,
-    model: Option<&str>,
-    compact_percent: Option<u64>,
-    compact_lower_bound_tokens: u64,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
-) -> Option<u64> {
-    crate::services::claude_compact_context::register_launch_provenance(
-        launch_key,
-        model,
-        gateway_proxy_env,
-    );
-    compact_percent.and_then(|percent| {
-        crate::services::claude_compact_context::launch_auto_compact_window(
-            launch_key,
-            model,
-            percent,
-            compact_lower_bound_tokens,
-        )
-    })
 }
 
 fn build_tmux_launch_env_lines(
@@ -706,66 +539,6 @@ where
                 timeout.as_secs()
             ))
         }
-    }
-}
-
-// #3262: the auto `/compact` injection routes through `with_claude_tui_session_turn_lock`
-// — the SAME per-session turn lock the normal follow-up path holds — so a normal
-// user follow-up and the auto-inject can never interleave their readiness check +
-// tmux send against one live pane.
-#[cfg(all(test, unix))]
-mod claude_tui_turn_lock_3262_tests {
-    use super::{claude_tui_session_turn_lock, with_claude_tui_session_turn_lock};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
-    use std::time::Duration;
-
-    // The same tmux session name maps to the SAME Arc<Mutex>, so two callers
-    // (a normal follow-up and the auto-inject) contend on one gate.
-    #[test]
-    fn same_session_shares_one_turn_lock() {
-        let a = claude_tui_session_turn_lock("session-3262-shared");
-        let b = claude_tui_session_turn_lock("session-3262-shared");
-        assert!(Arc::ptr_eq(&a, &b));
-        let c = claude_tui_session_turn_lock("session-3262-other");
-        assert!(!Arc::ptr_eq(&a, &c));
-    }
-
-    // Two threads contending on the same session's gate cannot be inside the
-    // critical section simultaneously: serialization holds, so a `/compact`
-    // inject and a normal follow-up never overlap their pane sends.
-    #[test]
-    fn turn_lock_serializes_concurrent_submits() {
-        let session = "session-3262-serialize";
-        let inside = Arc::new(AtomicUsize::new(0));
-        let max_concurrent = Arc::new(AtomicUsize::new(0));
-        let barrier = Arc::new(Barrier::new(2));
-
-        let mut handles = Vec::new();
-        for _ in 0..2 {
-            let inside = Arc::clone(&inside);
-            let max_concurrent = Arc::clone(&max_concurrent);
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                for _ in 0..50 {
-                    with_claude_tui_session_turn_lock(session, || {
-                        let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
-                        max_concurrent.fetch_max(now, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_micros(50));
-                        inside.fetch_sub(1, Ordering::SeqCst);
-                    });
-                }
-            }));
-        }
-        for h in handles {
-            h.join().unwrap();
-        }
-        assert_eq!(
-            max_concurrent.load(Ordering::SeqCst),
-            1,
-            "turn lock must serialize: at most one submit body inside the gate at a time"
-        );
     }
 }
 
@@ -1959,7 +1732,8 @@ fn execute_streaming_local_tui_tmux(
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
 
-    let turn_lock = claude_tui_session_turn_lock(tmux_session_name);
+    let turn_lock =
+        crate::services::claude_tui::composer_lock::session_turn_lock(tmux_session_name);
     let _turn_guard = turn_lock.lock().unwrap_or_else(|error| error.into_inner());
     debug_log(&format!(
         "Claude TUI session turn lock acquired: {}",
@@ -4058,51 +3832,6 @@ mod local_tmux_lifecycle_tests {
 
         assert!(error.starts_with("timeout waiting for claude tui transcript file"));
         assert!(crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error));
-    }
-
-    #[test]
-    fn claude_tui_turn_lock_serializes_same_tmux_session() {
-        let session_name = format!("claude-tui-lock-{}", uuid::Uuid::new_v4());
-        let first_lock = claude_tui_session_turn_lock(&session_name);
-        let second_lock = claude_tui_session_turn_lock(&session_name);
-        assert!(
-            Arc::ptr_eq(&first_lock, &second_lock),
-            "same tmux session must share one turn lock"
-        );
-
-        let _guard = first_lock.lock().unwrap_or_else(|error| error.into_inner());
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let session_name_for_thread = session_name.clone();
-        let handle = std::thread::spawn(move || {
-            let lock = claude_tui_session_turn_lock(&session_name_for_thread);
-            let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
-            sender.send(()).unwrap();
-        });
-
-        assert!(
-            receiver
-                .recv_timeout(std::time::Duration::from_millis(50))
-                .is_err(),
-            "concurrent same-session turn entered before the first guard dropped"
-        );
-        drop(_guard);
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("same-session turn should enter after the first guard drops");
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn claude_tui_turn_lock_is_per_tmux_session() {
-        let first =
-            claude_tui_session_turn_lock(&format!("claude-tui-lock-a-{}", uuid::Uuid::new_v4()));
-        let second =
-            claude_tui_session_turn_lock(&format!("claude-tui-lock-b-{}", uuid::Uuid::new_v4()));
-
-        assert!(
-            !Arc::ptr_eq(&first, &second),
-            "different tmux sessions must not share one turn lock"
-        );
     }
 }
 

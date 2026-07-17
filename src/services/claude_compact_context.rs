@@ -223,6 +223,28 @@ pub(crate) fn launch_auto_compact_window(
         .then_some(threshold.effective_tokens)
 }
 
+/// Extract the effective Claude model selector from a launch argv.
+pub(crate) fn claude_model_from_args(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find(|pair| pair[0] == "--model")
+        .map(|pair| pair[1].as_str())
+}
+
+/// Register the launch-bound gateway decision before deriving Claude Code's
+/// optional absolute auto-compact setting for this process launch.
+pub(crate) fn launch_auto_compact_window_for_session(
+    launch_key: &str,
+    model: Option<&str>,
+    compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+) -> Option<u64> {
+    register_launch_provenance(launch_key, model, gateway_proxy_env);
+    compact_percent.and_then(|percent| {
+        launch_auto_compact_window(launch_key, model, percent, compact_lower_bound_tokens)
+    })
+}
+
 pub(crate) fn normalize_model_selector(model: &str) -> Option<String> {
     let model = model.trim();
     let model = model.strip_suffix("[1m]").unwrap_or(model).trim_end();
