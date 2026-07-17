@@ -636,25 +636,20 @@ async fn run_placeholder_sweep_pass(
                 // `inflight_state_still_same_turn` covers (2) and (3); edit
                 // success covers (1), and the production cleanup plan covers (4).
                 //
-                // Controller-entry pair-detach is NOT done here: it happens
-                // atomically INSIDE `finalize_owner_dead_cleanup_if_same_turn`
-                // (via `finalize_abandoned_placeholder_detach_if_deleted`),
-                // gated on confirmed inflight-state deletion. Detaching
-                // speculatively before that confirmation — or unconditionally
-                // on the failure/revival branch — would strand a revived
-                // turn's placeholder without its `active_snapshot`, so a
-                // later normal completion could not PATCH the Discord card
-                // (#4594 regression; see dual-review Finding 1).
-                if edited
-                    && finalize_owner_dead_cleanup_if_same_turn(
-                        shared,
-                        provider,
-                        &state,
-                        age_secs,
-                        sweep_started_before,
-                        true,
-                    )
-                    .await
+                // Controller-entry detach is confined to
+                // `finalize_abandoned_after_abort_edit` (which gates it on a
+                // confirmed inflight-state delete). Never detach speculatively
+                // here — that would strand a revived turn's card (#4594 Finding
+                // 1); see the helper's doc.
+                if abandon_guard::finalize_abandoned_after_abort_edit(
+                    shared,
+                    provider,
+                    &state,
+                    age_secs,
+                    sweep_started_before,
+                    edited,
+                )
+                .await
                 {
                     report.abandoned += 1;
                 }
