@@ -168,6 +168,22 @@ fn tmux_wrapper_gateway(
     }
 }
 
+/// Stamp the managed-launch marker ([`TMUX_WRAPPER_GATEWAY_RESOLVED_ENV`]) that
+/// tells the `agentdesk tmux-wrapper` process the gateway decision now in this
+/// environment was resolved by a config-holding dcserver authority, so the
+/// wrapper reconstructs it rather than re-resolving to a bare Scrub. Shared by
+/// the two managed launch sites (legacy tmux launch script + ProcessBackend) so
+/// the marker literal lives in exactly one place next to the const it uses.
+pub(crate) fn append_managed_launch_marker_shell(output: &mut String) {
+    output.push_str(&format!("export {TMUX_WRAPPER_GATEWAY_RESOLVED_ENV}=1\n"));
+}
+
+/// `Command` counterpart of [`append_managed_launch_marker_shell`] for the
+/// ProcessBackend wrapper launch path.
+pub(crate) fn mark_managed_launch_command(command: &mut Command) {
+    command.env(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV, "1");
+}
+
 /// By-construction builder for a Claude-launching `Command`.
 ///
 /// The binary-resolution PATH (when the program is the Claude binary itself)
@@ -466,7 +482,10 @@ mod chokepoint_guard_tests {
             src_dir.display()
         );
         files.retain(|file| {
-            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let name = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
             !SANCTIONED.contains(&name)
         });
         files
