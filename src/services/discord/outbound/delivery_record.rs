@@ -1013,7 +1013,10 @@ fn recent_delivered_content_matches_at(
         .is_some_and(|record| recent_content_fingerprint_matches(record, &fingerprint, now_ms))
 }
 
-pub(in crate::services::discord::outbound) fn record_delivered_content_fingerprint_for_generation(
+// #4046 S1r-1 P3-2: module-local only — the sole callers are the two fresh-send
+// record sites in this file. Reverted from the transient `pub(in ...::outbound)`
+// widening (no caller outside this module; behavior unchanged).
+fn record_delivered_content_fingerprint_for_generation(
     provider: &ProviderKind,
     channel_id: u64,
     body: &str,
@@ -1699,6 +1702,14 @@ mod tests {
         assert_ne!(DELIVERY_RECORDS_DIR, "discord_inflight");
         assert_ne!(DELIVERY_OWNER_CONTEXT_DIR, "discord_inflight");
         assert_ne!(DELIVERY_OWNER_CONTEXT_DIR, DELIVERY_RECORDS_DIR);
+        // #4046 S1r-1 P3-1: pin the fresh-send sidecar dir out of the reaper's scan set
+        // too. The reaper scans `discord_inflight`; a regression that renamed
+        // `FRESH_SEND_RECORDS_DIR` to `"discord_inflight"` (or collided it with the
+        // delivery-records dir) would make the reaper reap live fresh-send records, and
+        // fresh_send_tests' behavioral isolation does NOT cover the dir-name identity.
+        // This const pin does.
+        assert_ne!(FRESH_SEND_RECORDS_DIR, "discord_inflight");
+        assert_ne!(FRESH_SEND_RECORDS_DIR, DELIVERY_RECORDS_DIR);
     }
 
     // ---- #3089 B1 shadow-write ----------------------------------------------
