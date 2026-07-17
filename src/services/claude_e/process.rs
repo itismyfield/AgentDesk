@@ -8,14 +8,14 @@
 //! or `ProviderSessionDriver::LegacyPrompt` instead.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use serde_json::Value;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
-use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
+use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchIntent};
 use crate::services::process::kill_child_tree;
 use crate::services::provider::{
     CancelToken, ProviderKind, cancel_requested, register_child_pid, spawn_cancel_watchdog,
@@ -24,10 +24,6 @@ use crate::services::session_backend::{
     StreamLineState, emit_status_events_from_stream_json, observe_stream_context,
     parse_assistant_extra_tool_uses, parse_stream_message_with_state,
 };
-
-fn apply_gateway_proxy_env(command: &mut Command, gateway_proxy_env: &ClaudeGatewayProxyEnv) {
-    gateway_proxy_env.apply_to_command(command);
-}
 
 /// Phase 1 entry point. The signature matches the subset of
 /// `claude::execute_command_streaming` parameters that are meaningful
@@ -98,22 +94,26 @@ pub fn execute_streaming(
 
     // claude-e is a fresh per-turn process and its real Claude child inherits
     // these variables, so it uses the same guarded gateway decision as native
-    // fresh launches.
-    let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
-    let mut command = Command::new(&claude_e_bin);
-    crate::services::process::configure_child_process_group(&mut command);
-    command
-        .args(&args)
-        .current_dir(working_dir)
-        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
-        .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
-        .env("BASH_MAX_TIMEOUT_MS", "86400000")
-        .env("CLAUDE_E_SKIP_STAR_PROMPT", "1")
-        .env_remove("CLAUDECODE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_gateway_proxy_env(&mut command, &gateway_proxy_env);
+    // fresh launches. The chokepoint builder applies that decision
+    // by-construction; claude-e is a wrapper program, so no Claude binary
+    // resolution PATH is applied here (claude-e is resolved separately above).
+    let mut builder = ClaudeCommandBuilder::for_wrapper(&claude_e_bin, ClaudeLaunchIntent::Turn);
+    {
+        let command = builder.command_mut();
+        crate::services::process::configure_child_process_group(command);
+        command
+            .args(&args)
+            .current_dir(working_dir)
+            .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
+            .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
+            .env("BASH_MAX_TIMEOUT_MS", "86400000")
+            .env("CLAUDE_E_SKIP_STAR_PROMPT", "1")
+            .env_remove("CLAUDECODE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
+    let mut command = builder.into_command();
 
     let mut child = command
         .spawn()
@@ -372,63 +372,42 @@ pub fn execute_streaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::claude_command::ClaudeLaunchEnv;
+
+    fn wrapper_command_env(
+        launch_env: ClaudeLaunchEnv,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        // Mirror the production claude-e spawn: a wrapper builder (no Claude
+        // binary resolution) that applies the gateway env by construction.
+        ClaudeCommandBuilder::build_for_test("claude-e", None, launch_env)
+            .into_command()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn claude_e_command_receives_authoritative_gateway_env() {
-        let gateway_env = crate::services::claude_gateway_proxy::launch_env_for_test(
-            true,
-            "http://127.0.0.1:10100",
-            true,
-        );
-        let mut command = Command::new("claude-e");
-
-        apply_gateway_proxy_env(&mut command, &gateway_env);
-
-        let envs = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
+        let injected =
+            wrapper_command_env(ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"));
         assert_eq!(
-            envs.get("ANTHROPIC_BASE_URL"),
+            injected.get("ANTHROPIC_BASE_URL"),
             Some(&Some("http://127.0.0.1:10100".to_string()))
         );
         assert_eq!(
-            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            injected.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&Some("1".to_string()))
         );
 
-        let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
-            false,
-            "http://foreign.example",
-            true,
-        );
-        let mut command = Command::new("claude-e");
-        command
-            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
-            .env(
-                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                "foreign-value",
-            );
-
-        apply_gateway_proxy_env(&mut command, &scrub);
-
-        let envs = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(envs.get("ANTHROPIC_BASE_URL"), Some(&None));
+        let scrubbed = wrapper_command_env(ClaudeLaunchEnv::scrub_for_test());
+        assert_eq!(scrubbed.get("ANTHROPIC_BASE_URL"), Some(&None));
         assert_eq!(
-            envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            scrubbed.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&None)
         );
     }

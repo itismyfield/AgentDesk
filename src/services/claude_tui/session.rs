@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
+use crate::services::claude_command::ClaudeLaunchEnv;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
 
@@ -286,7 +286,7 @@ pub struct ClaudeTuiLaunchConfig {
     /// `--resume` TUI spawns honour the configured override. Mirrors the
     /// `p > 0` guard used by the non-TUI tmux/process spawn paths.
     pub compact_percent: Option<u64>,
-    pub(crate) gateway_proxy_env: ClaudeGatewayProxyEnv,
+    pub(crate) launch_env: ClaudeLaunchEnv,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -417,9 +417,7 @@ fn write_launch_script(
         None => String::new(),
     };
     let mut gateway_exports = String::new();
-    config
-        .gateway_proxy_env
-        .append_shell_env(&mut gateway_exports);
+    config.launch_env.append_shell_env(&mut gateway_exports);
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
@@ -453,11 +451,7 @@ mod tests {
             model: Some("sonnet".to_string()),
             resume: false,
             compact_percent: None,
-            gateway_proxy_env: crate::services::claude_gateway_proxy::launch_env_for_test(
-                false,
-                "http://127.0.0.1:10100",
-                true,
-            ),
+            launch_env: ClaudeLaunchEnv::scrub_for_test(),
         }
     }
 
@@ -568,11 +562,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.compact_percent = Some(60);
-        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
-            true,
-            "http://proxy.example/it's-ready",
-            true,
-        );
+        config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let launch_script_path = dir.path().join("launch.sh");
 
         write_launch_script(
@@ -596,11 +586,7 @@ mod tests {
             "compact override must be exported before exec"
         );
 
-        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
-            false,
-            "http://foreign.example",
-            true,
-        );
+        config.launch_env = ClaudeLaunchEnv::scrub_for_test();
         write_launch_script(
             &launch_script_path,
             &config,
