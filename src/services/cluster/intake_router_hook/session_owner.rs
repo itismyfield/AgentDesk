@@ -11,6 +11,10 @@ pub(super) enum SessionOwnerResolution {
         instance_id: String,
         stale_instance_ids: Vec<String>,
     },
+    LiveForeignIncompatible {
+        instance_id: String,
+        stale_instance_ids: Vec<String>,
+    },
     StaleOwners {
         instance_ids: Vec<String>,
     },
@@ -30,6 +34,7 @@ pub(super) async fn resolve_session_owner(
     channel_id: &str,
     local_instance_id: &str,
     worker_lease_ttl_secs: u64,
+    preserve_on_cancel: bool,
 ) -> Result<SessionOwnerResolution, String> {
     let mut instance_ids: Vec<String> = sqlx::query_scalar(
         r#"
@@ -65,27 +70,38 @@ pub(super) async fn resolve_session_owner(
     };
 
     let mut live_instance_ids = Vec::new();
+    let mut incompatible_instance_ids = Vec::new();
     let mut stale_instance_ids = Vec::new();
     for instance_id in &instance_ids {
-        let is_live = if instance_id == local_instance_id {
-            // The gateway process is itself an executable owner even when its
-            // worker-node advertisement has not landed yet.
-            true
-        } else {
-            worker_nodes.iter().any(|node| {
-                node.get("instance_id").and_then(serde_json::Value::as_str)
-                    == Some(instance_id.as_str())
-                    && node
-                        .get("status")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|status| status.eq_ignore_ascii_case("online"))
-                    && crate::services::cluster::node_registry::node_supports_intake_provider(
-                        node, provider,
-                    )
+        let matching_node = (instance_id != local_instance_id)
+            .then(|| {
+                worker_nodes.iter().find(|node| {
+                    node.get("instance_id").and_then(serde_json::Value::as_str)
+                        == Some(instance_id.as_str())
+                        && node
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|status| status.eq_ignore_ascii_case("online"))
+                })
             })
-        };
+            .flatten();
+        let is_live = instance_id == local_instance_id
+            || matching_node.is_some_and(|node| {
+                crate::services::cluster::node_registry::node_supports_intake_provider(
+                    node, provider,
+                )
+            });
         if is_live {
             live_instance_ids.push(instance_id.clone());
+            if matching_node.is_some_and(|node| {
+                !crate::services::cluster::node_registry::node_supports_intake_request(
+                    node,
+                    provider,
+                    preserve_on_cancel,
+                )
+            }) {
+                incompatible_instance_ids.push(instance_id.clone());
+            }
         } else {
             stale_instance_ids.push(instance_id.clone());
         }
@@ -101,7 +117,13 @@ pub(super) async fn resolve_session_owner(
                 stale_instance_ids,
             })
         }
-        [instance_id] => Ok(SessionOwnerResolution::LiveForeign {
+        [instance_id] if incompatible_instance_ids.is_empty() => {
+            Ok(SessionOwnerResolution::LiveForeign {
+                instance_id: instance_id.clone(),
+                stale_instance_ids,
+            })
+        }
+        [instance_id] => Ok(SessionOwnerResolution::LiveForeignIncompatible {
             instance_id: instance_id.clone(),
             stale_instance_ids,
         }),

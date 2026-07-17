@@ -61,6 +61,19 @@ CHANGE_SURFACE_SHORTHAND_RE = re.compile(
     r"`(?P<path>src/[^`]+\.rs)`\s*\(~?(?P<lines>\d+)\)"
 )
 GIANT_FILE_THRESHOLD = 1000
+MIGRATION_0093_PATH = (
+    "migrations/postgres/0093_intake_outbox_preserve_on_cancel.sql"
+)
+MIGRATION_0093_ROLLOUT_MARKERS: tuple[str, ...] = (
+    "migration 0093 is an irreversible binary-floor boundary",
+    "pre-stage and upgrade the entire fleet before applying migration 0093",
+    (
+        "after migration 0093, binaries embedding only migrations 0092 or earlier "
+        "must not restart or roll back"
+    ),
+    "forward-fix",
+    "restore a pre-0093 database backup and roll back the entire fleet together",
+)
 
 
 @dataclass(frozen=True)
@@ -118,7 +131,11 @@ DOC_TOUCH_RULES: tuple[TouchRule, ...] = (
     TouchRule(
         patterns=(
             "src/server/worker_registry.rs",
+            "src/services/cluster/intake_router_hook.rs",
+            "src/services/cluster/intake_router_hook/**",
+            "src/services/cluster/intake_worker_capabilities.rs",
             "src/services/discord/runtime_bootstrap.rs",
+            "migrations/postgres/0093_intake_outbox_preserve_on_cancel.sql",
             "policies/merge-automation.js",
             "src/server/routes/dispatches/outbox.rs",
         ),
@@ -461,6 +478,36 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
     return findings
 
 
+def check_migration_0093_rollout_contract(
+    repo_root: Path, changed_files: set[str]
+) -> list[Finding]:
+    if MIGRATION_0093_PATH not in changed_files:
+        return []
+
+    rel_path = "docs/agent-maintenance/multinode-transition.md"
+    path = repo_root / rel_path
+    if not path.is_file():
+        return [
+            Finding("error", rel_path, "migration 0093 rollout contract is missing")
+        ]
+    normalized = " ".join(path.read_text(encoding="utf-8").lower().split())
+    missing = [
+        marker
+        for marker in MIGRATION_0093_ROLLOUT_MARKERS
+        if marker not in normalized
+    ]
+    if not missing:
+        return []
+    return [
+        Finding(
+            "error",
+            rel_path,
+            "migration 0093 rollout contract is missing required marker(s): "
+            + "; ".join(missing),
+        )
+    ]
+
+
 def github_escape(value: str) -> str:
     return (
         value.replace("%", "%25")
@@ -541,6 +588,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "(#3036 measurement integrity gate)"
         ),
     )
+    parser.add_argument(
+        "--migration-0093-rollout-gate",
+        action="store_true",
+        help=(
+            "hard-fail when the migration 0093 binary-floor rollout contract is "
+            "missing, even under --warning-only"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -564,6 +619,8 @@ def main(argv: list[str] | None = None) -> int:
         changed_files, warning = changed_files_from_git(repo_root, base_ref)
         if warning is not None:
             findings.append(warning)
+    rollout_findings = check_migration_0093_rollout_contract(repo_root, changed_files)
+    findings.extend(rollout_findings)
     findings.extend(check_doc_touch_rules(changed_files))
 
     emit_findings(findings, args.warning_only)
@@ -575,6 +632,10 @@ def main(argv: list[str] | None = None) -> int:
     # regressions must not slip through (#3036).
     if args.line_count_gate and any(
         finding.severity == "error" for finding in line_count_findings
+    ):
+        return 1
+    if args.migration_0093_rollout_gate and any(
+        finding.severity == "error" for finding in rollout_findings
     ):
         return 1
     return 0

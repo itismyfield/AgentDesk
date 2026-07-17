@@ -225,11 +225,12 @@ echo "=== Contract symbol-ref doc<->code sync gate (#4268) ==="
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 
-echo "=== Agent maintenance freshness gate (warn, #1432; LoC hard-gate, #3036) ==="
-# --warning-only keeps the #1432 freshness/touch rollout non-fatal, while
-# --line-count-gate hard-fails on change-surfaces.md production-LoC drift, ghost
-# freeze entries, and decomposition regressions.
-"$PYTHON" scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate
+echo "=== Agent maintenance freshness gate (warn, #1432; targeted hard gates) ==="
+# --warning-only keeps the #1432 freshness/touch rollout non-fatal. The LoC gate
+# remains unconditional; the migration 0093 rollout gate activates only when the
+# migration itself is in the changed-file set.
+"$PYTHON" scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate \
+  --migration-0093-rollout-gate
 
 echo "=== Shell test suites (tests/*.sh) ==="
 # #4255: these suites existed but NOTHING executed them — `tests/**` appears in

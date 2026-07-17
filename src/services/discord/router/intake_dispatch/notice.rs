@@ -50,6 +50,9 @@ pub(super) async fn notify_blocked_intake(
             "여러 live 세션 owner가 충돌합니다: `{}`.",
             instance_ids.join(", ")
         ),
+        IntakeBlockedReason::OwnerProtocolIncompatible { instance_id } => format!(
+            "기존 세션 owner `{instance_id}`가 이 turn의 intake protocol을 지원하지 않습니다."
+        ),
         IntakeBlockedReason::OverrideUnavailable { target_instance_id } => format!(
             "선택한 `/node` 대상 `{target_instance_id}`가 현재 이 provider의 intake를 받을 수 없습니다."
         ),

@@ -754,8 +754,14 @@ pub(in crate::services::discord) async fn handle_event(
                     announce_resolution,
                     notify_resolution,
                 );
-            if let Some(stale) =
-                super::super::stale_dispatch_turn_for_text(data.shared.pg_pool.as_ref(), text).await
+            let preserve_on_cancel =
+                !new_message.author.bot && !author_excluded_from_cancel_preservation;
+            if !preserve_on_cancel
+                && let Some(stale) = super::super::stale_dispatch_turn_for_text(
+                    data.shared.pg_pool.as_ref(),
+                    text,
+                )
+                .await
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
@@ -1554,12 +1560,10 @@ pub(in crate::services::discord) async fn handle_event(
                     has_reply_boundary,
                     dm_hint: Some(is_dm),
                     turn_kind,
-                    preserve_on_cancel: !new_message.author.bot
-                        && !author_excluded_from_cancel_preservation,
+                    preserve_on_cancel,
                 },
                 origin: super::IntakeOrigin::LiveMessage,
-                preserve_on_cancel: !new_message.author.bot
-                    && !author_excluded_from_cancel_preservation,
+                preserve_on_cancel,
                 has_nonportable_uploads: !new_message.attachments.is_empty(),
                 preloaded_uploads,
                 // #3905: carry the gate's already-authorized, non-consuming
@@ -1612,45 +1616,45 @@ mod reply_context_tests {
     }
 }
 
-/// #4247 FIX 1/FIX 4: pins the LIVE (non-queued) intake path's
-/// `preserve_on_cancel` computation on `IntakeSubmission` — the SEPARATE
-/// computation from the queued path's `SoftInterventionSpec::into_intervention`
-/// (already pinned by `intake_queue_transaction.rs`'s `human`/`bot`/`automation`
-/// tests). `handle_event`'s Discord/poise `Context`/`Message` dependencies make
-/// a live end-to-end test impractical here (this module is never invoked with
-/// real Discord data from a unit test anywhere in the codebase), so — matching
-/// this file's/module's established source-order-invariant test convention —
-/// this pins the exact computation by source position instead of merely by
-/// existence of the field, so a mutation to a hardcoded `false`/`true` literal
-/// fails the assertion (not a compile error).
+/// #4247/#4550 pins the live intake ordering contract. The Discord event
+/// dependencies make a unit-level end-to-end test impractical, so this follows
+/// the module's established source-order test convention: classify once, bypass
+/// stale terminal suppression only for positively identified human work, and
+/// pass that same value into both request and submission envelopes.
 #[cfg(test)]
 mod live_intake_preserve_wiring_tests {
     #[test]
-    fn live_intake_preserve_on_cancel_is_computed_from_author_identity_not_hardcoded() {
+    fn live_human_preservation_precedes_stale_dispatch_suppression() {
         let module_src = include_str!("intake_gate.rs");
-        let submission_pos = module_src
+        let computation = "let preserve_on_cancel =\n                !new_message.author.bot && !author_excluded_from_cancel_preservation;";
+        let computation_pos = module_src
+            .find(computation)
+            .expect("live preservation is computed once from author identity");
+        let guard_pos = module_src[computation_pos..]
+            .find("if !preserve_on_cancel")
+            .map(|offset| computation_pos + offset)
+            .expect("stale dispatch suppression is gated by preservation");
+        let stale_lookup_pos = module_src[guard_pos..]
+            .find("stale_dispatch_turn_for_text(")
+            .map(|offset| guard_pos + offset)
+            .expect("stale dispatch lookup remains present for automation");
+        let submission_pos = module_src[stale_lookup_pos..]
             .find("origin: super::IntakeOrigin::LiveMessage,")
+            .map(|offset| stale_lookup_pos + offset)
             .expect("live-message IntakeSubmission construction exists");
-        let preserve_field_pos = module_src[submission_pos..]
-            .find("preserve_on_cancel:")
-            .map(|offset| submission_pos + offset)
-            .expect("live IntakeSubmission sets preserve_on_cancel");
-        let field_end = module_src[preserve_field_pos..]
-            .find(',')
-            .map(|offset| preserve_field_pos + offset)
-            .expect("preserve_on_cancel field has a terminator");
-        let field_src = &module_src[preserve_field_pos..field_end];
+        let request_window = &module_src[stale_lookup_pos..submission_pos];
+        let submission_window = &module_src[submission_pos..];
 
+        assert!(computation_pos < guard_pos && guard_pos < stale_lookup_pos);
         assert!(
-            field_src.contains("!new_message.author.bot"),
-            "live intake must compute preserve_on_cancel from the message \
-             author's bot flag, not a hardcoded literal; got: {field_src:?}"
+            request_window.contains("turn_kind,\n                    preserve_on_cancel,"),
+            "IntakeRequest must reuse the precomputed preservation value"
         );
         assert!(
-            field_src.contains("!author_excluded_from_cancel_preservation"),
-            "live intake preserve_on_cancel must also exclude allowed-automation \
-             / announce-excluded authors from preservation, matching the queued \
-             path's SoftInterventionSpec::into_intervention gate; got: {field_src:?}"
+            submission_window.contains(
+                "origin: super::IntakeOrigin::LiveMessage,\n                preserve_on_cancel,"
+            ),
+            "IntakeSubmission must reuse the precomputed preservation value"
         );
     }
 }
