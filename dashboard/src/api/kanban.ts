@@ -45,30 +45,12 @@ export async function deleteKanbanCard(id: string): Promise<void> {
 }
 
 const nonEmptyStringSchema = z.string().trim().min(1);
-const timestampSchema = z
-  .union([z.string(), z.number()])
-  .transform((value, context) => {
-    const timestamp = typeof value === "number" ? value : Date.parse(value);
-    if (!Number.isFinite(timestamp)) {
-      context.addIssue({ code: "custom", message: "Invalid timestamp" });
-      return z.NEVER;
-    }
-    return timestamp;
-  });
+const timestampSchema = z.string().refine(
+  (value) => Number.isFinite(Date.parse(value)),
+  { message: "Invalid timestamp" },
+);
 const nullableTimestampSchema = timestampSchema.nullable();
-const kanbanCardStatusSchema = z.enum([
-  "backlog",
-  "ready",
-  "requested",
-  "blocked",
-  "in_progress",
-  "review",
-  "done",
-  "qa_pending",
-  "qa_in_progress",
-  "qa_failed",
-]);
-const kanbanCardPrioritySchema = z.enum(["low", "medium", "high", "urgent"]);
+const kanbanCardStatusSchema = z.string().regex(/^[a-z][a-z0-9_]*$/);
 
 const kanbanCardSchema = z.looseObject({
   id: nonEmptyStringSchema,
@@ -82,7 +64,7 @@ const kanbanCardSchema = z.looseObject({
   parent_card_id: z.string().nullable(),
   latest_dispatch_id: z.string().nullable(),
   sort_order: z.number(),
-  priority: kanbanCardPrioritySchema,
+  priority: z.string(),
   depth: z.number(),
   blocked_reason: z.string().nullable(),
   review_notes: z.string().nullable(),

@@ -152,7 +152,7 @@ describe("kanban dispatch mutation responses", () => {
     ).rejects.toThrow(/transition[\s\S]*error/);
   });
 
-  it("returns the full retry contract instead of dropping dispatch fields", async () => {
+  it("returns the full retry contract without changing server timestamps", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       mockJsonResponse({
         card,
@@ -166,10 +166,62 @@ describe("kanban dispatch mutation responses", () => {
     const result = await retryKanbanCard("card-1", { request_now: true });
 
     expect(result.card.id).toBe("card-1");
-    expect(result.card.created_at).toBe(Date.parse(card.created_at));
+    expect(result.card.created_at).toBe(card.created_at);
+    expect(typeof result.card.created_at).toBe("string");
     expect(result.new_dispatch_id).toBe("dispatch-new");
     expect(result.cancelled_dispatch_id).toBeNull();
     expect(result.next_action).toBe("none_required");
+  });
+
+  it.each(["failed", "cancelled"])(
+    "accepts the %s server status and preserves PostgreSQL timestamps",
+    async (status) => {
+      const postgresTimestamp = "2026-07-17 00:00:00+00";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          mockJsonResponse({
+            card: {
+              ...card,
+              status,
+              created_at: postgresTimestamp,
+              updated_at: postgresTimestamp,
+            },
+            new_dispatch_id: null,
+            cancelled_dispatch_id: "dispatch-old",
+            next_action: "none_required",
+          }),
+        ),
+      );
+
+      const result = await retryKanbanCard("card-1");
+
+      expect(result.card.status).toBe(status);
+      expect(result.card.created_at).toBe(postgresTimestamp);
+      expect(typeof result.card.created_at).toBe("string");
+    },
+  );
+
+  it.each([
+    { label: "custom", priority: "critical_path" },
+    { label: "empty", priority: "" },
+    { label: "whitespace-only", priority: "   " },
+  ])("accepts and preserves $label server priority strings", async ({ priority }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockJsonResponse({
+          card: { ...card, priority },
+          new_dispatch_id: null,
+          cancelled_dispatch_id: null,
+          next_action: "none_required",
+        }),
+      ),
+    );
+
+    const result = await retryKanbanCard("card-1");
+
+    expect(result.card.priority).toBe(priority);
   });
 
   it("rejects retry responses with malformed Kanban cards", async () => {
@@ -177,7 +229,7 @@ describe("kanban dispatch mutation responses", () => {
       "fetch",
       vi.fn().mockResolvedValue(
         mockJsonResponse({
-          card: { ...card, status: "unexpected" },
+          card: { ...card, status: "Unexpected status" },
           new_dispatch_id: "dispatch-new",
           cancelled_dispatch_id: null,
           next_action: "none_required",

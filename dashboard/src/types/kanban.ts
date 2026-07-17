@@ -126,19 +126,9 @@ export interface DispatchDeliveryEvent {
   updated_at: string;
 }
 
-export type KanbanCardStatus =
-  | "backlog"
-  | "ready"
-  | "requested"
-  | "blocked"
-  | "in_progress"
-  | "review"
-  | "done"
-  | "qa_pending"
-  | "qa_in_progress"
-  | "qa_failed";
+export type KanbanCardStatus = string;
 
-export type KanbanCardPriority = "low" | "medium" | "high" | "urgent";
+export type KanbanCardPriority = string;
 
 export interface KanbanReviewChecklistItem {
   id: string;
@@ -194,12 +184,12 @@ export interface KanbanCard {
   metadata_json: string | null;
   pipeline_stage_id: string | null;
   review_status: string | null;
-  created_at: number;
-  updated_at: number;
-  started_at: number | null;
-  requested_at: number | null;
-  review_entered_at?: string | number | null;
-  completed_at: number | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  requested_at: string | null;
+  review_entered_at?: string | null;
+  completed_at: string | null;
   latest_dispatch_status?: TaskDispatchStatus | null;
   latest_dispatch_title?: string | null;
   latest_dispatch_type?: string | null;

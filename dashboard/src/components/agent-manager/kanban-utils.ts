@@ -128,9 +128,11 @@ export function isReviewCard(card: KanbanCard): boolean {
   return !!(card.latest_dispatch_type && REVIEW_DISPATCH_TYPES.has(card.latest_dispatch_type));
 }
 
-export function getBoardColumnStatus(status: KanbanCardStatus): KanbanBoardColumnStatus {
+export function getBoardColumnStatus(
+  status: KanbanCardStatus,
+): KanbanCardStatus | KanbanBoardColumnStatus {
   if (status === "ready" || status === "requested") return "requested";
-  if (status === "blocked" || status === "qa_failed") return "failed";
+  if (status === "blocked" || status === "failed" || status === "qa_failed") return "failed";
   return status;
 }
 
@@ -219,6 +221,8 @@ export function priorityLabel(priority: KanbanCardPriority, tr: (ko: string, en:
       return tr("높음", "High");
     case "urgent":
       return tr("긴급", "Urgent");
+    default:
+      return priority;
   }
 }
 

@@ -36,7 +36,7 @@ export interface OfficeAgentState {
 
 const TERMINAL_CARD_STATUSES = new Set<KanbanCardStatus>(["done"]);
 
-const PRIMARY_CARD_PRIORITY: Record<KanbanCardStatus, number> = {
+const PRIMARY_CARD_PRIORITY: Record<string, number> = {
   review: 0,
   in_progress: 1,
   requested: 2,
@@ -49,7 +49,7 @@ const PRIMARY_CARD_PRIORITY: Record<KanbanCardStatus, number> = {
   done: 9,
 };
 
-const ACTIVE_ISSUE_PRIORITY: Record<KanbanCardStatus, number> = {
+const ACTIVE_ISSUE_PRIORITY: Record<string, number> = {
   review: 0,
   in_progress: 1,
   requested: 2,
@@ -75,13 +75,16 @@ function normalizeTimestampMs(value: number | string | null | undefined): number
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-function compareCards(left: KanbanCard, right: KanbanCard, priority: Record<KanbanCardStatus, number>): number {
+function compareCards(left: KanbanCard, right: KanbanCard, priority: Record<string, number>): number {
   const leftPriority = priority[left.status] ?? 99;
   const rightPriority = priority[right.status] ?? 99;
   if (leftPriority !== rightPriority) {
     return leftPriority - rightPriority;
   }
-  return right.updated_at - left.updated_at;
+  return (
+    (normalizeTimestampMs(right.updated_at) ?? 0) -
+    (normalizeTimestampMs(left.updated_at) ?? 0)
+  );
 }
 
 function selectPreferredCard(current: KanbanCard | undefined, next: KanbanCard): KanbanCard {
@@ -153,7 +156,7 @@ export function deriveOfficeAgentState(
           number: card.github_issue_number ?? null,
           url: buildIssueUrl(card),
           startedAt: normalizeTimestampMs(card.started_at),
-          updatedAt: card.updated_at,
+          updatedAt: normalizeTimestampMs(card.updated_at) ?? 0,
         }),
       );
     }
@@ -169,7 +172,7 @@ export function deriveOfficeAgentState(
           reason: hasManualInterventionReason(card) ? card.blocked_reason?.trim() ?? null : null,
           issueNumber: card.github_issue_number ?? null,
           issueUrl: buildIssueUrl(card),
-          updatedAt: card.updated_at,
+          updatedAt: normalizeTimestampMs(card.updated_at) ?? 0,
         }),
       );
     }
