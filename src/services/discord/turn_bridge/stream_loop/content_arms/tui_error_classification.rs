@@ -27,6 +27,7 @@ mod tests {
     use super::*;
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::turn_bridge::streaming_edit_text::{
+        bridge_claude_tui_followup_busy_readiness_timeout,
         bridge_claude_tui_followup_requeue_prompt_error,
         bridge_tui_transport_error_should_skip_quiescence,
         claude_tui_followup_requeue_streaming_aware,
@@ -74,6 +75,32 @@ mod tests {
             requeue_candidate,
             false,
         ));
+        assert!(bridge_claude_tui_followup_busy_readiness_timeout(
+            &provider,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            resolution.tui_error_classification,
+        ));
+        assert!(
+            !bridge_claude_tui_followup_busy_readiness_timeout(
+                &provider,
+                Some(RuntimeHandoffKind::CodexTui),
+                resolution.tui_error_classification,
+            ),
+            "only a hosted Claude TUI follow-up may bypass the resume heuristic"
+        );
+        assert!(
+            !bridge_claude_tui_followup_busy_readiness_timeout(
+                &provider,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                resolve_tui_error(
+                    &provider,
+                    "timeout waiting for claude tui follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=false",
+                    "",
+                )
+                .tui_error_classification,
+            ),
+            "a timeout without an active previous turn must not suppress native resume recovery"
+        );
         assert!(bridge_tui_transport_error_should_skip_quiescence(
             &provider,
             Some(RuntimeHandoffKind::ClaudeTui),

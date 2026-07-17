@@ -13,6 +13,7 @@ use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
 };
+use super::streaming_edit_text::bridge_claude_tui_followup_busy_readiness_timeout;
 use super::{streaming_edit_text::TuiErrorClassification, *};
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
@@ -158,6 +159,13 @@ pub(super) async fn run_terminal_outcome_delivery(
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
     let tui_error_classification = ctx.tui_error_classification;
+    let claude_tui_followup_busy_readiness_timeout =
+        claude_tui_followup_pre_submit_requeue_candidate
+            && bridge_claude_tui_followup_busy_readiness_timeout(
+                &state.provider,
+                state.inflight_state.runtime_kind,
+                tui_error_classification,
+            );
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
@@ -396,6 +404,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 user_text_owned: &user_text_owned,
                 had_prior_session_id_at_turn_start,
                 session_handshake_seen,
+                claude_tui_followup_busy_readiness_timeout,
                 rx_disconnected,
                 turn_start,
                 recovery_retry,

@@ -30,6 +30,7 @@ pub(super) struct EmptyResponseRecoveryContext<'a> {
     pub(super) user_text_owned: &'a String,
     pub(super) had_prior_session_id_at_turn_start: bool,
     pub(super) session_handshake_seen: bool,
+    pub(super) claude_tui_followup_busy_readiness_timeout: bool,
     pub(super) rx_disconnected: bool,
     pub(super) turn_start: std::time::Instant,
     pub(super) recovery_retry: bool,
@@ -53,6 +54,13 @@ pub(super) struct EmptyResponseRecoveryState<'a> {
     pub(super) bridge_skip_holder_owns_inflight: &'a mut bool,
 }
 
+fn skip_resume_heuristic_for_busy_claude_followup(
+    attempted_resume: bool,
+    claude_tui_followup_busy_readiness_timeout: bool,
+) -> bool {
+    attempted_resume && claude_tui_followup_busy_readiness_timeout
+}
+
 #[rustfmt::skip]
 pub(super) async fn handle_empty_response_recovery(
     message: EmptyResponseRecoveryMessage,
@@ -68,6 +76,8 @@ pub(super) async fn handle_empty_response_recovery(
     let user_text_owned = ctx.user_text_owned;
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
+    let claude_tui_followup_busy_readiness_timeout =
+        ctx.claude_tui_followup_busy_readiness_timeout;
     let rx_disconnected = ctx.rx_disconnected;
     let turn_start = ctx.turn_start;
     let recovery_retry = ctx.recovery_retry;
@@ -92,6 +102,9 @@ pub(super) async fn handle_empty_response_recovery(
         EmptyResponseRecoveryMessage::ResumeFailureAlreadyHandled => {}
         EmptyResponseRecoveryMessage::InspectEmptyResponse => {
         if full_response.is_empty() {
+            // The stale-resume output detector remains authoritative. A hosted
+            // Claude TUI timeout proving that a prior turn was still active is
+            // only excluded from the no-handshake fallback below.
             // #2451 H5 graduation: the authoritative resume-failure
             // witness is the absence of `StreamMessage::Init` after a
             // turn that attempted resume. `attempted_resume` is the
@@ -103,13 +116,24 @@ pub(super) async fn handle_empty_response_recovery(
             // emission is unreliable (e.g. gemini may not emit Init
             // on resume success).
             let attempted_resume = had_prior_session_id_at_turn_start;
-            let resume_likely_failed_by_handshake =
-                attempted_resume && !session_handshake_seen && rx_disconnected;
+            let resume_likely_failed_by_handshake = attempted_resume
+                && !session_handshake_seen
+                && rx_disconnected
+                && !skip_resume_heuristic_for_busy_claude_followup(
+                    attempted_resume,
+                    claude_tui_followup_busy_readiness_timeout,
+                );
             // Backstop only — wider threshold to keep false positives
             // away from healthy fast turns.
             let quick_exit_backstop = turn_start.elapsed().as_secs() < 30;
             let quick_empty_resume = resume_likely_failed_by_handshake
-                || (quick_exit_backstop && rx_disconnected && attempted_resume);
+                || (quick_exit_backstop
+                    && rx_disconnected
+                    && attempted_resume
+                    && !skip_resume_heuristic_for_busy_claude_followup(
+                        attempted_resume,
+                        claude_tui_followup_busy_readiness_timeout,
+                    ));
             // Fallback: try to extract response from tmux output file
             if quick_empty_resume {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -224,6 +248,10 @@ pub(super) async fn handle_empty_response_recovery(
                 if !resume_failed
                     && rx_disconnected
                     && attempted_resume
+                    && !skip_resume_heuristic_for_busy_claude_followup(
+                        attempted_resume,
+                        claude_tui_followup_busy_readiness_timeout,
+                    )
                     && (!session_handshake_seen || quick_exit_backstop)
                 {
                     {
@@ -260,7 +288,17 @@ pub(super) async fn handle_empty_response_recovery(
                     }
                 }
                 if !resume_failed {
-                    if rx_disconnected {
+                    if claude_tui_followup_busy_readiness_timeout {
+                        terminal_empty_response_notice = Some(
+                            "⏳ Claude TUI가 이전 턴을 처리 중이라 메시지를 아직 주입하지 못했습니다. 기존 세션은 유지하고 메시지를 큐에 다시 넣어, TUI가 한가해지면 자동으로 처리합니다."
+                                .to_string(),
+                        );
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 📬 Claude TUI follow-up readiness timed out while previous turn was still running; preserving provider session and requeueing (channel {})",
+                            channel_id
+                        );
+                    } else if rx_disconnected {
                         terminal_empty_response_notice =
                             Some(guidance::empty_response_guidance(true).to_string());
                         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -414,5 +452,21 @@ pub(super) async fn handle_empty_response_recovery(
             spoken_delivery_response,
             resume_retry_queued,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skip_resume_heuristic_for_busy_claude_followup;
+
+    #[test]
+    fn busy_claude_followup_timeout_preserves_session() {
+        assert!(skip_resume_heuristic_for_busy_claude_followup(true, true));
+    }
+
+    #[test]
+    fn ordinary_empty_resume_still_uses_fresh_session_recovery() {
+        assert!(!skip_resume_heuristic_for_busy_claude_followup(true, false));
+        assert!(!skip_resume_heuristic_for_busy_claude_followup(false, true));
     }
 }
