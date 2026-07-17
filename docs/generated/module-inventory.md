@@ -766,7 +766,7 @@
 | `services::discord::tmux_watcher::jsonl_rotation` | `src/services/discord/tmux_watcher/jsonl_rotation.rs` | 78 | 78 | 0 |  |
 | `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 697 | 519 | 178 |  |
 | `services::discord::tmux_watcher::loop_poll_prologue` | `src/services/discord/tmux_watcher/loop_poll_prologue.rs` | 609 | 609 | 0 |  |
-| `services::discord::tmux_watcher::no_result_exits` | `src/services/discord/tmux_watcher/no_result_exits.rs` | 816 | 816 | 0 |  |
+| `services::discord::tmux_watcher::no_result_exits` | `src/services/discord/tmux_watcher/no_result_exits.rs` | 814 | 814 | 0 |  |
 | `services::discord::tmux_watcher::orphan_status_panel_cleanup` | `src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs` | 227 | 227 | 0 |  |
 | `services::discord::tmux_watcher::panel_decisions` | `src/services/discord/tmux_watcher/panel_decisions.rs` | 599 | 574 | 25 |  |
 | `services::discord::tmux_watcher::placeholder_reclaim` | `src/services/discord/tmux_watcher/placeholder_reclaim.rs` | 320 | 133 | 187 |  |
