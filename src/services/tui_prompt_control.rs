@@ -2,9 +2,9 @@
 //!
 //! Prompt observation runs below the Discord relay layer, so it must be able to
 //! decide whether a transcript record can create an external-turn lifecycle
-//! without depending on Discord command/rendering modules. Keep the compact
-//! raw/envelope pairing identity here as well: it may collapse two
-//! representations of one submission, but never two same-form human commands.
+//! without depending on Discord command/rendering modules. Local command
+//! records are deliberately never text/time-paired: duplicate notes are safer
+//! than swallowing a later human command.
 
 /// AgentDesk pass-through commands that complete locally in a Claude TUI.
 pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
@@ -13,42 +13,9 @@ pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
 /// Claude-native controls observed from a TUI that also complete locally.
 pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] = ["/model"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LocalOnlySlashControlForm {
-    RawInvocation,
-    CommandEnvelope,
-    LocalCommandStdout,
-    CaveatOnly,
-}
-
-impl LocalOnlySlashControlForm {
-    pub(crate) fn is_raw_invocation(self) -> bool {
-        matches!(self, Self::RawInvocation)
-    }
-
-    pub(crate) fn is_pairable_representation(self) -> bool {
-        matches!(self, Self::RawInvocation | Self::CommandEnvelope)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalOnlySlashControl {
     pub(crate) kind: String,
-    /// Whitespace-normalized command arguments. This is used only to pair a
-    /// raw invocation with its own command envelope, never to dedupe two human
-    /// submissions of the same form.
-    pub(crate) normalized_args: String,
-    pub(crate) form: LocalOnlySlashControlForm,
-}
-
-impl LocalOnlySlashControl {
-    pub(crate) fn is_complementary_representation_of(&self, other: &Self) -> bool {
-        self.form.is_pairable_representation()
-            && other.form.is_pairable_representation()
-            && self.form != other.form
-            && self.kind == other.kind
-            && self.normalized_args == other.normalized_args
-    }
 }
 
 /// Returns the local-only control carried by `prompt`, if it is a complete,
@@ -60,43 +27,29 @@ pub(crate) fn classify_local_only_slash_control(prompt: &str) -> Option<LocalOnl
     if peeled_caveat && normalized.is_empty() {
         return Some(LocalOnlySlashControl {
             kind: "slash".to_string(),
-            normalized_args: String::new(),
-            form: LocalOnlySlashControlForm::CaveatOnly,
         });
     }
 
     if starts_with_compacted_local_command_stdout(&normalized) {
         return Some(LocalOnlySlashControl {
             kind: "/compact".to_string(),
-            normalized_args: String::new(),
-            form: LocalOnlySlashControlForm::LocalCommandStdout,
         });
     }
     if starts_with_complete_local_command_stdout(&normalized) {
         return Some(LocalOnlySlashControl {
             kind: "local-command-stdout".to_string(),
-            normalized_args: String::new(),
-            form: LocalOnlySlashControlForm::LocalCommandStdout,
         });
     }
 
-    if let Some((kind, args)) = command_envelope_invocation(&normalized)
+    if let Some((kind, _args)) = command_envelope_invocation(&normalized)
         && is_local_only_slash_command_kind(&kind)
     {
-        return Some(LocalOnlySlashControl {
-            kind,
-            normalized_args: normalize_args(&args),
-            form: LocalOnlySlashControlForm::CommandEnvelope,
-        });
+        return Some(LocalOnlySlashControl { kind });
     }
-    if let Some((kind, args)) = raw_slash_invocation(&normalized)
+    if let Some((kind, _args)) = raw_slash_invocation(&normalized)
         && is_local_only_slash_command_kind(&kind)
     {
-        return Some(LocalOnlySlashControl {
-            kind,
-            normalized_args: normalize_args(&args),
-            form: LocalOnlySlashControlForm::RawInvocation,
-        });
+        return Some(LocalOnlySlashControl { kind });
     }
     None
 }
@@ -239,10 +192,6 @@ fn raw_slash_invocation(value: &str) -> Option<(String, String)> {
     Some((name.to_ascii_lowercase(), args.trim().to_string()))
 }
 
-fn normalize_args(args: &str) -> String {
-    args.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,15 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_envelope_are_complementary_only_when_kind_and_args_match() {
+    fn recognizes_raw_and_envelope_without_using_them_as_a_dedup_key() {
         let raw = classify_local_only_slash_control("/effort high").unwrap();
         let wrapper = classify_local_only_slash_control(
             "<command-message>effort</command-message><command-name>/effort high</command-name><command-args>high</command-args>",
         )
         .unwrap();
-        let different = classify_local_only_slash_control("/effort low").unwrap();
-        assert!(raw.is_complementary_representation_of(&wrapper));
-        assert!(!raw.is_complementary_representation_of(&different));
-        assert!(raw.form.is_raw_invocation());
+        assert_eq!(raw.kind, "/effort");
+        assert_eq!(wrapper.kind, "/effort");
     }
 }

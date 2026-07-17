@@ -404,20 +404,6 @@ fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
     (!body.is_empty()).then_some(body)
 }
 
-pub(super) fn should_suppress_local_only_kind_note_after_continuation(
-    kind: &str,
-    last_continuation_at: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> bool {
-    if !matches!(kind, "/compact" | "slash") {
-        return false;
-    }
-    last_continuation_at.is_some_and(|rendered_at| {
-        now.checked_duration_since(rendered_at)
-            .is_none_or(|age| age < COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW)
-    })
-}
-
 pub(super) fn format_system_continuation_note(tmux_session_name: &str, prompt: &str) -> String {
     let prompt = strip_terminal_controls(prompt);
     let omitted_chars = format_count_with_commas(prompt.trim().chars().count());

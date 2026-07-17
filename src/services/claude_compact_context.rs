@@ -155,7 +155,7 @@ pub(crate) fn context_window_for_turn(
     let current_model = current_model.and_then(preserve_model_selector)?;
     match launch.provenance {
         ClaudeLaunchProvenance::Inject { base_url } => {
-            catalog_context_window_for_selector(&base_url, &current_model)
+            live_catalog_context_window_for_selector(&base_url, &current_model)
         }
         ClaudeLaunchProvenance::Scrub => None,
     }
@@ -310,6 +310,28 @@ fn catalog_context_window_for_selector(base_url: &str, model: &str) -> Option<u6
         .filter(|window| *window > 0)
 }
 
+/// Resolve a selector reported by a mutable live TUI. Unlike immutable launch
+/// argv, a completion's base selector is ambiguous when the same fresh catalog
+/// also advertises an explicit `[1m]` sibling: the completion can have
+/// canonicalized away the selected 1M suffix. Fail closed instead of arming a
+/// smaller auto-compact threshold for that potentially 1M session.
+fn live_catalog_context_window_for_selector(base_url: &str, model: &str) -> Option<u64> {
+    let selector = preserve_model_selector(model)?;
+    let catalog = cached_catalog_and_schedule_refresh(base_url)?;
+    let window = catalog
+        .get(&selector)
+        .copied()
+        .filter(|window| *window > 0)?;
+    if !is_one_m_model_selector(&selector)
+        && catalog
+            .get(&format!("{selector}[1m]"))
+            .is_some_and(|window| *window > 0)
+    {
+        return None;
+    }
+    Some(window)
+}
+
 /// Classify only exact native selectors known to Claude Code. This deliberately
 /// has no prefix/family fallback: an unrecognized future id must take the
 /// conservative unknown policy instead of inheriting a stale mapping.
@@ -351,13 +373,17 @@ fn native_model_family(model: &str) -> Option<&'static str> {
 
 fn native_context_window(model: Option<&str>) -> Option<u64> {
     let model = model?.trim();
+    // Validate the stripped base against the exact native table first. The
+    // `[1m]` picker suffix changes a known family window; it cannot turn an
+    // arbitrary future/typo selector into a supported native model.
+    native_model_family(model)?;
     // This suffix is emitted by Claude Code's model picker and means the
     // selected model has explicitly opted into the 1M context beta. It must
     // be checked before `normalize_model_selector` erases the suffix.
     if is_one_m_model_selector(model) {
         return Some(ONE_MILLION_CONTEXT_WINDOW_TOKENS);
     }
-    native_model_family(model).map(|_| NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS)
+    Some(NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS)
 }
 
 fn launch_provenance_for_tmux(tmux_session_name: &str) -> Option<LaunchProvenanceEntry> {
@@ -752,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn live_injected_tui_uses_only_an_exact_catalog_match() {
+    fn live_injected_tui_fails_closed_for_a_base_selector_with_a_one_million_sibling() {
         let _guard = state_test_guard();
         let proxy = "http://proxy.test";
         put_catalog_for_test(
@@ -767,6 +793,11 @@ mod tests {
             base_url: proxy.to_string(),
         };
         register_launch_provenance("tmux-a", &gateway);
+        assert_eq!(
+            context_window_for_turn("tmux-a", Some("routed-sonnet")),
+            None,
+            "a mutable base completion is ambiguous while a fresh [1m] sibling exists"
+        );
         assert_eq!(
             context_window_for_turn("tmux-a", Some("routed-sonnet[1m]")),
             Some(1_000_000),
@@ -880,7 +911,13 @@ mod tests {
                 "model {model}"
             );
         }
-        assert_eq!(native_context_window(Some("future-model")), None);
+        for model in ["future-model", "future-model[1m]", "claude-sonnet-typo[1m]"] {
+            assert_eq!(
+                native_context_window(Some(model)),
+                None,
+                "an unknown base must not gain native 1M support through its suffix"
+            );
+        }
     }
 
     #[test]
@@ -915,6 +952,11 @@ mod tests {
             immutable_launch_context_window("future-model", &ClaudeGatewayProxyEnv::Scrub),
             None,
             "an unknown native selector must not invent a conservative launch window"
+        );
+        assert_eq!(
+            immutable_launch_context_window("future-model[1m]", &ClaudeGatewayProxyEnv::Scrub),
+            None,
+            "an unknown native selector must not gain a 1M launch window through its suffix"
         );
     }
 

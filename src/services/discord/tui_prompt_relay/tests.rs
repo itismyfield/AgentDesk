@@ -1763,38 +1763,6 @@ fn local_compact_bypasses_the_two_second_external_slash_control_gate() {
     );
 }
 
-#[test]
-fn compact_replay_kind_note_suppression_is_session_scoped_and_expires() {
-    let now = std::time::Instant::now();
-    let recent = now - Duration::from_secs(29);
-    let expired = now - Duration::from_secs(31);
-
-    assert!(should_suppress_local_only_kind_note_after_continuation(
-        "/compact",
-        Some(recent),
-        now,
-    ));
-    assert!(should_suppress_local_only_kind_note_after_continuation(
-        "slash",
-        Some(recent),
-        now,
-    ));
-    assert!(
-        !should_suppress_local_only_kind_note_after_continuation("/compact", None, now),
-        "a different session with no continuation timestamp must not suppress",
-    );
-    assert!(!should_suppress_local_only_kind_note_after_continuation(
-        "/compact",
-        Some(expired),
-        now,
-    ));
-    assert!(!should_suppress_local_only_kind_note_after_continuation(
-        "/cost",
-        Some(recent),
-        now,
-    ));
-}
-
 // #3178 (codex P2 fix): the kind is the REAL command name, so two distinct
 // unknown `<command-message>` wrappers do NOT collapse into a single "slash"
 // kind (which would wrongly dedupe genuinely different commands).

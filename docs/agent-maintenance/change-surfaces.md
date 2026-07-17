@@ -1124,7 +1124,11 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (2146 lines; +4 from #4295: retain the
+  - `src/services/tui_prompt_dedupe.rs` (2105 lines; -41 from #4591 R4: remove
+    raw/envelope time-pair state so local slash-control representations may
+    duplicate rather than swallowing a later human command; local stable entry
+    IDs are now recorded only after the relay confirms its Discord session note,
+    while generic direct-input identity replay behavior remains eager; +4 from #4295: retain the
     stable provider source-event id on observed TUI prompts so terminal-card
     delivery can reject an exact post-compaction replay durably; +117 from #4423: adopt Claude's
     actual continuation UUID from a hook payload only through the registered

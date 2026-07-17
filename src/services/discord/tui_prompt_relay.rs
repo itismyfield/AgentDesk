@@ -28,7 +28,6 @@ mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
     format_ssh_direct_prompt_notification, format_system_continuation_note,
-    should_suppress_local_only_kind_note_after_continuation,
 };
 #[cfg(test)]
 use self::injected_prompt_policy::{
@@ -210,10 +209,10 @@ static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
 /// kind. They are the two halves of ONE injection and arrive within tens to
 /// hundreds of milliseconds, so a tight 2s window collapses them to a SINGLE
 /// active turn (the duplicate half is dropped BEFORE any lease/anchor is
-/// created). A genuine SECOND `/loop` or `/compact` arrives seconds later, well
-/// outside this window, so it gets its own active turn (no over-suppression).
+/// created). Local `/compact` controls bypass this gate entirely; a genuine
+/// second external `/loop` arrives seconds later, well outside this window,
+/// and gets its own active turn (no over-suppression).
 const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(2);
-const COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW: Duration = Duration::from_secs(30);
 /// #3178: last-seen timestamp per (tmux_session, command_kind) for the
 /// slash-command-control turn, so the two halves of the #3153 double-post create
 /// the active turn only once. Keyed by a stable string built from the REAL
@@ -221,9 +220,6 @@ const COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW: Duration = Duration::from_sec
 /// and the expanded `<command-*>` wrapper for the SAME command collapse to one
 /// entry, while two DIFFERENT commands within the window never collapse together.
 static SLASH_COMMAND_CONTROL_LAST_POSTED: LazyLock<
-    Mutex<std::collections::HashMap<String, std::time::Instant>>,
-> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-static SYSTEM_CONTINUATION_LAST_RENDERED: LazyLock<
     Mutex<std::collections::HashMap<String, std::time::Instant>>,
 > = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
@@ -345,24 +341,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     };
     if let Some(control) = relay_prompt_decision.local_only_control.as_ref() {
         let kind = control.kind.as_str();
-        // A newly typed raw local command is never hidden by a nearby compact
-        // continuation. Only a non-raw replay representation may suppress its
-        // duplicate note after the continuation banner.
-        if !control.form.is_raw_invocation()
-            && local_only_kind_note_suppressed_by_recent_continuation(
-                &prompt.tmux_session_name,
-                kind,
-            )
-        {
-            tracing::info!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                session = %prompt.tmux_session_name,
-                kind = %kind,
-                "suppressed local-only command replay note after recent system continuation"
-            );
-            return;
-        }
         let Some(notify_http) = shared.serenity_http_or_token_fallback() else {
             tracing::warn!(
                 provider = %prompt.provider,
@@ -376,14 +354,19 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         let note =
             format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt);
         match channel_id.say(&*notify_http, note).await {
-            Ok(message) => tracing::info!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                tmux_session_name = %prompt.tmux_session_name,
-                slash_command_kind = %kind,
-                note_message_id = message.id.get(),
-                "rendered local-only slash command without relay lease, anchor, or synthetic lifecycle"
-            ),
+            Ok(message) => {
+                crate::services::tui_prompt_dedupe::record_local_only_entry_id_after_note_delivery(
+                    &prompt,
+                );
+                tracing::info!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    slash_command_kind = %kind,
+                    note_message_id = message.id.get(),
+                    "rendered local-only slash command without relay lease, anchor, or synthetic lifecycle"
+                );
+            }
             Err(error) => tracing::warn!(
                 provider = %prompt.provider,
                 channel_id = channel_id.get(),
@@ -410,8 +393,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     let task_notification =
         task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
     // Only external slash controls enter this broad two-second kind gate. Local
-    // controls were paired at observation by complementary representation, not
-    // by command text/time, so a second human `/compact` stays observable.
+    // controls bypass it entirely: raw and envelope transcript records may each
+    // render a note rather than risking suppression of a later human command.
     if slash_command_control_turn_is_duplicate_external_replay(
         &relay_prompt_decision,
         &prompt.tmux_session_name,
@@ -522,7 +505,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
         match channel_id.say(&*notify_http, note).await {
             Ok(message) => {
-                record_system_continuation_note_rendered(&prompt.tmux_session_name);
                 tracing::info!(
                     provider = %prompt.provider,
                     channel_id = channel_id.get(),
@@ -828,10 +810,9 @@ fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &
     true
 }
 
-/// The old two-second kind gate owns external machine controls such as `/loop`.
-/// Local controls were already paired (raw ↔ envelope only) by prompt
-/// observation, so running them through this broad time gate would collapse a
-/// distinct human `/compact` merely because it arrived nearby.
+/// The two-second kind gate owns external machine controls such as `/loop`.
+/// Local controls deliberately bypass it, so no text/time-only rule can
+/// collapse a nearby human `/compact`.
 fn slash_command_control_turn_is_duplicate_external_replay(
     decision: &RelayObservedPromptInjectionDecision,
     tmux_session_name: &str,
@@ -849,37 +830,6 @@ fn slash_command_control_turn_is_duplicate_external_replay(
         .as_deref()
         .expect("external slash command control decisions carry a kind");
     !slash_command_control_turn_is_first_sighting(tmux_session_name, kind)
-}
-
-fn record_system_continuation_note_rendered(tmux_session_name: &str) {
-    let now = std::time::Instant::now();
-    let mut guard = SYSTEM_CONTINUATION_LAST_RENDERED
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    guard.retain(|_, rendered_at| {
-        now.checked_duration_since(*rendered_at)
-            .is_none_or(|age| age < COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW)
-    });
-    guard.insert(tmux_session_name.to_string(), now);
-}
-
-fn local_only_kind_note_suppressed_by_recent_continuation(
-    tmux_session_name: &str,
-    kind: &str,
-) -> bool {
-    let now = std::time::Instant::now();
-    let mut guard = SYSTEM_CONTINUATION_LAST_RENDERED
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    guard.retain(|_, rendered_at| {
-        now.checked_duration_since(*rendered_at)
-            .is_none_or(|age| age < COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW)
-    });
-    should_suppress_local_only_kind_note_after_continuation(
-        kind,
-        guard.get(tmux_session_name).copied(),
-        now,
-    )
 }
 
 #[cfg(test)]

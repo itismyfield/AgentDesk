@@ -114,16 +114,13 @@ pub(crate) fn maybe_inject_compact(
     // completion observations make at most one worker. This blocking work
     // performs no readiness wait and never acquires the turn-lifetime lock.
     tokio::task::spawn_blocking(move || {
-        let outcome = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
-            &ticket.pane.tmux_session_name,
-            || {
-                crate::services::claude_tui::input::send_compact_while_busy(
-                    &ticket.pane.tmux_session_name,
-                )
-            },
-        );
+        let outcome = submit_ticket_with_composer_lock(&ticket, || {
+            crate::services::claude_tui::input::send_compact_while_busy(
+                &ticket.pane.tmux_session_name,
+            )
+        });
         match outcome {
-            CompactSubmitOutcome::AcceptedOrQueued => {
+            Some(CompactSubmitOutcome::AcceptedOrQueued) => {
                 tracing::info!(
                     tmux_session_name = %ticket.pane.tmux_session_name,
                     provider_session_id = %ticket.identity.provider_session_id,
@@ -133,20 +130,26 @@ pub(crate) fn maybe_inject_compact(
                     "Claude auto compact accepted or queued"
                 );
             }
-            CompactSubmitOutcome::PreMutationRefused => {
+            Some(CompactSubmitOutcome::PreMutationRefused) => {
                 rearm_after_pre_mutation_refusal(&ticket);
                 tracing::debug!(
                     tmux_session_name = %ticket.pane.tmux_session_name,
                     "Claude auto compact refused before mutation; latch re-armed"
                 );
             }
-            CompactSubmitOutcome::AmbiguousAfterMutation => {
+            Some(CompactSubmitOutcome::AmbiguousAfterMutation) => {
                 // Never re-arm here. Retrying could enqueue a second compact.
                 tracing::warn!(
                     tmux_session_name = %ticket.pane.tmux_session_name,
                     "Claude auto compact outcome ambiguous after tmux mutation; leaving latch disarmed without cleanup or retry"
                 );
             }
+            None => tracing::debug!(
+                tmux_session_name = %ticket.pane.tmux_session_name,
+                provider_session_id = %ticket.identity.provider_session_id,
+                model_selector = %ticket.identity.model_selector,
+                "skipping stale Claude auto compact ticket before tmux mutation"
+            ),
         }
     });
 }
@@ -180,6 +183,11 @@ fn observe_and_decide(
     }
     if state.armed && usage_tokens >= threshold.effective_tokens {
         state.armed = false;
+        // Each high-water crossing receives a fresh generation, including a
+        // re-crossing with the same identity after a pre-mutation refusal. An
+        // older worker can therefore never become current merely because the
+        // pane returned to the same model/session/window tuple.
+        state.epoch = NEXT_LATCH_EPOCH.fetch_add(1, Ordering::Relaxed);
         return Some(CompactLatchTicket {
             pane: pane.clone(),
             identity: state.identity.clone(),
@@ -187,6 +195,43 @@ fn observe_and_decide(
         });
     }
     None
+}
+
+/// Keep latch validation and the compact mutation in one composer critical
+/// section. A worker can wait behind another composer mutation, but it never
+/// carries a validation result across that wait.
+fn submit_ticket_with_composer_lock(
+    ticket: &CompactLatchTicket,
+    submit: impl FnOnce() -> CompactSubmitOutcome,
+) -> Option<CompactSubmitOutcome> {
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+        &ticket.pane.tmux_session_name,
+        || submit_ticket_if_current(ticket, submit),
+    )
+}
+
+/// Linearize a queued compact worker with the current latch immediately before
+/// its tmux mutation. The caller holds the composer lock; retaining this latch
+/// guard through `submit` means teardown, policy disable, rearm, or a new
+/// session/model/window cannot replace the ticket between validation and send.
+/// `None` is intentionally side-effect-free: a stale worker must not rearm or
+/// otherwise mutate the newer latch it lost to.
+fn submit_ticket_if_current(
+    ticket: &CompactLatchTicket,
+    submit: impl FnOnce() -> CompactSubmitOutcome,
+) -> Option<CompactSubmitOutcome> {
+    let latches = LATCH_BY_PANE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let current = latches.get(&ticket.pane).is_some_and(|state| {
+        state.epoch == ticket.epoch && state.identity == ticket.identity && !state.armed
+    });
+    if !current {
+        return None;
+    }
+    let outcome = submit();
+    drop(latches);
+    Some(outcome)
 }
 
 fn rearm_after_pre_mutation_refusal(ticket: &CompactLatchTicket) {
@@ -249,6 +294,9 @@ fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     fn pane() -> CompactLatchPaneKey {
         CompactLatchPaneKey {
@@ -363,6 +411,190 @@ mod tests {
                 .get(&pane)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn stale_ticket_never_submits_after_session_model_window_or_policy_replacement() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let (original_identity, original_threshold) =
+            identity("session-a", "claude-sonnet", 1_000_000);
+        let stale =
+            observe_and_decide(&pane, original_identity, 500_000, original_threshold).unwrap();
+        let sends = AtomicUsize::new(0);
+
+        let replacements = [
+            identity("session-b", "claude-sonnet", 1_000_000),
+            identity("session-b", "claude-opus", 1_000_000),
+            identity("session-b", "claude-opus", 1_200_000),
+        ];
+        for (replacement, replacement_threshold) in replacements {
+            let current =
+                observe_and_decide(&pane, replacement.clone(), 700_000, replacement_threshold)
+                    .expect("identity change creates a fresh high-water ticket");
+            assert_eq!(
+                submit_ticket_if_current(&stale, || {
+                    sends.fetch_add(1, Ordering::SeqCst);
+                    CompactSubmitOutcome::AcceptedOrQueued
+                }),
+                None,
+                "a replaced ticket must be rejected before any tmux command"
+            );
+            rearm_after_pre_mutation_refusal(&stale);
+            let state = LATCH_BY_PANE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&pane)
+                .cloned()
+                .expect("replacement latch remains installed");
+            assert_eq!(state.identity, current.identity);
+            assert_eq!(state.epoch, current.epoch);
+            assert!(
+                !state.armed,
+                "a stale refusal cannot rearm the replacement latch"
+            );
+        }
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+
+        // The complete identity includes policy fields, not just session/model/
+        // window. A same-selector policy change must similarly invalidate the
+        // worker that was queued under the prior policy.
+        let mut policy_changed = LATCH_BY_PANE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&pane)
+            .expect("current latch")
+            .identity
+            .clone();
+        policy_changed.compact_percent = 55;
+        let policy_threshold = compact_threshold(
+            policy_changed.actual_window_tokens,
+            policy_changed.compact_percent,
+            policy_changed.lower_bound_tokens,
+        )
+        .expect("valid policy threshold");
+        policy_changed.effective_threshold_tokens = policy_threshold.effective_tokens;
+        policy_changed.rearm_floor_tokens = policy_threshold.rearm_floor_tokens;
+        let policy_ticket = observe_and_decide(&pane, policy_changed, 700_000, policy_threshold)
+            .expect("policy identity change creates a fresh ticket");
+        assert_eq!(
+            submit_ticket_if_current(&stale, || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                CompactSubmitOutcome::AcceptedOrQueued
+            }),
+            None
+        );
+        assert_ne!(stale.epoch, policy_ticket.epoch);
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stale_ticket_never_submits_after_rearm_disable_or_teardown() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let (identity, threshold) = identity("session-a", "claude-sonnet", 1_000_000);
+        let sends = AtomicUsize::new(0);
+
+        let first = observe_and_decide(&pane, identity.clone(), 500_000, threshold).unwrap();
+        rearm_after_pre_mutation_refusal(&first);
+        assert_eq!(
+            submit_ticket_if_current(&first, || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                CompactSubmitOutcome::AcceptedOrQueued
+            }),
+            None,
+            "an armed latch means the prior ticket is no longer current"
+        );
+        let second = observe_and_decide(&pane, identity.clone(), 700_000, threshold)
+            .expect("rearmed latch crosses high water again");
+        assert_ne!(first.epoch, second.epoch);
+        assert_eq!(
+            submit_ticket_if_current(&first, || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                CompactSubmitOutcome::AcceptedOrQueued
+            }),
+            None,
+            "a same-identity re-crossing uses a new epoch"
+        );
+
+        maybe_inject_compact(
+            pane.channel_id,
+            &pane.tmux_session_name,
+            &ProviderKind::Claude,
+            None,
+            None,
+            0,
+            None,
+            0,
+            300_000,
+        );
+        assert_eq!(
+            submit_ticket_if_current(&second, || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                CompactSubmitOutcome::AcceptedOrQueued
+            }),
+            None,
+            "zero policy disable clears a queued ticket before send"
+        );
+
+        let third = observe_and_decide(&pane, identity, 500_000, threshold).unwrap();
+        clear_for_tmux(&pane.tmux_session_name);
+        assert_eq!(
+            submit_ticket_if_current(&third, || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                CompactSubmitOutcome::AcceptedOrQueued
+            }),
+            None,
+            "teardown clears every queued ticket for the physical pane"
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_worker_revalidates_inside_the_composer_lock_before_send() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let (identity, threshold) = identity("session-a", "claude-sonnet", 1_000_000);
+        let ticket = observe_and_decide(&pane, identity, 500_000, threshold).unwrap();
+        let sends = Arc::new(AtomicUsize::new(0));
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let worker_ticket = ticket.clone();
+        let worker_sends = Arc::clone(&sends);
+
+        crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+            &pane.tmux_session_name,
+            || {
+                let worker = std::thread::spawn(move || {
+                    queued_tx.send(()).expect("signal queued compact worker");
+                    let outcome = submit_ticket_with_composer_lock(&worker_ticket, || {
+                        worker_sends.fetch_add(1, Ordering::SeqCst);
+                        CompactSubmitOutcome::AcceptedOrQueued
+                    });
+                    outcome_tx.send(outcome).expect("return compact outcome");
+                });
+                queued_rx
+                    .recv_timeout(Duration::from_millis(250))
+                    .expect("worker must queue behind the held composer lock");
+                assert!(
+                    outcome_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+                    "the queued worker must not validate or send before the composer lock releases"
+                );
+                clear_for_tmux(&pane.tmux_session_name);
+                worker
+            },
+        )
+        .join()
+        .expect("compact worker thread");
+
+        assert_eq!(
+            outcome_rx
+                .recv_timeout(Duration::from_millis(250))
+                .expect("worker outcome"),
+            None
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
     }
 
     #[test]

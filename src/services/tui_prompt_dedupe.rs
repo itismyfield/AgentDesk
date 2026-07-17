@@ -7,9 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::tui_prompt_control::{
-    LocalOnlySlashControl, classify_local_only_slash_control,
-};
+use crate::services::tui_prompt_control::classify_local_only_slash_control;
 use chrono::{DateTime, Utc};
 
 mod synthetic_prompt;
@@ -20,10 +18,6 @@ use self::synthetic_prompt::{
 
 const PENDING_PROMPT_TTL: Duration = Duration::from_secs(10);
 const RECENT_OBSERVED_TTL: Duration = Duration::from_secs(30);
-/// Only pairs a raw local invocation with its matching `<command-*>` echo.
-/// It never compares two same-form commands, so a second human `/compact` is
-/// always observable even within this window.
-const LOCAL_ONLY_CONTROL_PAIR_TTL: Duration = Duration::from_secs(2);
 const SESSION_MAPPING_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const PROMPT_ANCHOR_TTL: Duration = Duration::from_secs(30 * 60);
 // #3885 follow-up: the per-`(provider, tmux)` PROMPT ANCHOR must outlive the
@@ -210,11 +204,6 @@ struct TimedValue<T> {
 struct TuiPromptDedupeState {
     pending_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<String>>>,
     recent_observed_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<String>>>,
-    // A raw local command and Claude's XML command envelope are two
-    // representations of one physical submit. Pair only complementary forms;
-    // never suppress a second raw/raw or envelope/envelope human submission.
-    local_only_control_pairs_by_tmux:
-        HashMap<PromptKey, VecDeque<TimedValue<LocalOnlySlashControl>>>,
     tmux_by_provider_session: HashMap<PromptKey, TimedValue<String>>,
     channel_by_tmux: HashMap<String, TimedValue<u64>>,
     runtime_by_tmux: HashMap<String, TimedValue<TuiRuntimeBinding>>,
@@ -1186,11 +1175,7 @@ fn observe_prompt_candidates_by_tmux_inner(
     let local_only_control = candidates
         .first()
         .and_then(|prompt| classify_local_only_slash_control(prompt));
-    if let Some(control) = local_only_control.as_ref() {
-        if take_or_record_local_only_control_representation(&provider, tmux_session_name, control) {
-            return PromptObservation::SuppressedLocalControlRepresentation;
-        }
-    } else {
+    if local_only_control.is_none() {
         for prompt in &candidates {
             if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
                 return PromptObservation::SuppressedDiscordDuplicate;
@@ -1202,13 +1187,14 @@ fn observe_prompt_candidates_by_tmux_inner(
             }
         }
     }
-    // #3540: this candidate cleared the pending + recent dedup, so it is about to
-    // be relayed for real — record its stable entry id NOW (not earlier, so a
-    // candidate that was dedup-suppressed above is never recorded as "relayed").
-    // A future watermark-reset re-encounter of this exact uuid is then
-    // suppressed at the identity check above.
-    if let Some(entry_id) = entry_id {
-        record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+    // Generic direct input keeps the #3540 eager identity record: it is a real
+    // relay at this point. A local-only note has no durable side effect until
+    // Discord accepts its note, so its id is recorded only by the successful
+    // delivery branch in `tui_prompt_relay`.
+    if local_only_control.is_none() {
+        if let Some(entry_id) = entry_id {
+            record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+        }
     }
     if effect == PromptObservationEffect::RelayLeaseOnly {
         if local_only_control.is_none() {
@@ -1804,11 +1790,6 @@ pub enum PromptObservation {
     PublishedSshDirect,
     SuppressedDiscordDuplicate,
     SuppressedRecentDuplicate,
-    /// A raw local-only command and its matching `<command-*>` representation
-    /// were observed as one physical submit. This is intentionally narrower
-    /// than content dedupe: two raw or two envelope submissions are never
-    /// suppressed here.
-    SuppressedLocalControlRepresentation,
     /// #3540: the observed prompt's stable JSONL entry `uuid` was ALREADY relayed
     /// for this `(provider, tmux)` pair. Distinct from
     /// [`Self::SuppressedRecentDuplicate`]: that is a content match bounded by the
@@ -1872,38 +1853,6 @@ fn take_or_record_recent_observed_prompt(
     false
 }
 
-/// Pair only complementary representations of one local command submission.
-/// A raw `/compact` followed by another raw `/compact` deliberately records two
-/// entries and both publish; only a raw/envelope or envelope/raw pair with the
-/// same command+arguments consumes one another.
-fn take_or_record_local_only_control_representation(
-    provider: &str,
-    tmux_session_name: &str,
-    control: &LocalOnlySlashControl,
-) -> bool {
-    if !control.form.is_pairable_representation() {
-        return false;
-    }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    let queue = state
-        .local_only_control_pairs_by_tmux
-        .entry(PromptKey::new(provider, tmux_session_name))
-        .or_default();
-    if let Some(index) = queue
-        .iter()
-        .position(|seen| seen.value.is_complementary_representation_of(control))
-    {
-        queue.remove(index);
-        return true;
-    }
-    queue.push_back(TimedValue {
-        value: control.clone(),
-        recorded_at: Instant::now(),
-    });
-    false
-}
-
 /// #3540: `true` iff `entry_id` is in the already-relayed ledger for this
 /// `(provider, tmux)` pair (and not yet purged). Read-only — recording happens
 /// separately in [`record_relayed_entry_id`] at the actual relay point.
@@ -1940,6 +1889,24 @@ fn record_relayed_entry_id(provider: &str, tmux_session_name: &str, entry_id: &s
     while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
         queue.pop_front();
     }
+}
+
+/// Mark a local-only entry as replayed only after its Discord session note was
+/// accepted. No subscriber, lagged receiver, missing route/http, or failed send
+/// calls this helper, so those paths cannot lose a later exact replay.
+pub(crate) fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
+    if classify_local_only_slash_control(&prompt.prompt).is_none() {
+        return;
+    }
+    let Some(entry_id) = prompt
+        .source_event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|entry_id| !entry_id.is_empty())
+    else {
+        return;
+    };
+    record_relayed_entry_id(&prompt.provider, &prompt.tmux_session_name, entry_id);
 }
 
 pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
@@ -2092,14 +2059,6 @@ impl TuiPromptDedupeState {
                 .front()
                 .is_some_and(|entry| now.duration_since(entry.recorded_at) > RECENT_OBSERVED_TTL)
             {
-                queue.pop_front();
-            }
-            !queue.is_empty()
-        });
-        self.local_only_control_pairs_by_tmux.retain(|_, queue| {
-            while queue.front().is_some_and(|entry| {
-                now.duration_since(entry.recorded_at) > LOCAL_ONLY_CONTROL_PAIR_TTL
-            }) {
                 queue.pop_front();
             }
             !queue.is_empty()
@@ -3555,10 +3514,9 @@ No response requested.\n\
     }
 
     #[test]
-    fn distinct_local_compact_entries_bypass_content_dedup_but_exact_replay_stays_deduped() {
+    fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
-        let mut observed = subscribe_observed_prompts();
         let now = Utc::now();
 
         assert_eq!(
@@ -3571,17 +3529,31 @@ No response requested.\n\
             ),
             PromptObservation::PublishedSshDirect,
         );
+        // This test deliberately has no subscriber. A broadcast miss, absent
+        // owner/channel/http, or Discord send error never calls the delivery
+        // acknowledgement helper, so an exact later replay must still publish.
         assert_eq!(
             observe_prompt_by_tmux_with_entry_id_at(
                 "claude",
                 "tmux-local-compact",
                 "/compact",
-                Some("compact-entry-2"),
+                Some("compact-entry-1"),
                 now,
             ),
             PromptObservation::PublishedSshDirect,
-            "a second human /compact inside the normal 30-second content window is distinct"
+            "without a confirmed note delivery, an exact local entry replay is not suppressed"
         );
+
+        // The relay calls this only from the successful `channel.say` branch.
+        record_local_only_entry_id_after_note_delivery(&ObservedTuiPrompt {
+            provider: "claude".to_string(),
+            tmux_session_name: "tmux-local-compact".to_string(),
+            prompt: "/compact".to_string(),
+            source_event_id: Some("compact-entry-1".to_string()),
+            observed_at: now,
+            external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        });
         assert_eq!(
             observe_prompt_by_tmux_with_entry_id_at(
                 "claude",
@@ -3591,27 +3563,8 @@ No response requested.\n\
                 now,
             ),
             PromptObservation::SuppressedReplayedEntry,
-            "only the exact stable entry identity is replay-deduped"
+            "only a successfully delivered note records the exact local entry identity"
         );
-
-        let first = observed
-            .try_recv()
-            .expect("first local compact observation");
-        let second = observed
-            .try_recv()
-            .expect("second local compact observation");
-        assert_eq!(first.source_event_id.as_deref(), Some("compact-entry-1"));
-        assert_eq!(second.source_event_id.as_deref(), Some("compact-entry-2"));
-        for event in [first, second] {
-            assert_eq!(
-                event.external_input_lease_generation,
-                EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED
-            );
-            assert_eq!(
-                event.ssh_direct_observation_generation,
-                SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED
-            );
-        }
         assert!(!external_input_relay_lease_present(
             "claude",
             "tmux-local-compact",
@@ -3624,7 +3577,7 @@ No response requested.\n\
     }
 
     #[test]
-    fn local_control_only_pairs_complementary_raw_and_envelope_representations() {
+    fn local_compact_raw_and_envelope_each_publish_without_time_pairing() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
         let wrapper = "<command-message>compact</command-message>\n\
@@ -3637,13 +3590,42 @@ No response requested.\n\
         );
         assert_eq!(
             observe_prompt_by_tmux("claude", "tmux-local-pair", wrapper),
-            PromptObservation::SuppressedLocalControlRepresentation,
-            "the transcript envelope is the same physical raw submit"
+            PromptObservation::PublishedSshDirect,
+            "the transcript envelope is allowed to duplicate the raw local note"
         );
         assert_eq!(
             observe_prompt_by_tmux("claude", "tmux-local-pair", "/compact"),
             PromptObservation::PublishedSshDirect,
-            "a second raw human /compact is never collapsed by the pair window"
+            "a later human /compact is never collapsed by a text/time pair window"
+        );
+    }
+
+    #[test]
+    fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let now = Utc::now();
+        let nonlocal = ObservedTuiPrompt {
+            provider: "claude".to_string(),
+            tmux_session_name: "tmux-local-ack-scope".to_string(),
+            prompt: "normal human prompt".to_string(),
+            source_event_id: Some("nonlocal-entry".to_string()),
+            observed_at: now,
+            external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        };
+
+        record_local_only_entry_id_after_note_delivery(&nonlocal);
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-local-ack-scope",
+                "normal human prompt",
+                Some("nonlocal-entry"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "the local-delivery acknowledgement path cannot alter generic entry-id semantics"
         );
     }
 
