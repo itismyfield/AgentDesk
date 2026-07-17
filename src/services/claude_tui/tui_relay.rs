@@ -210,7 +210,24 @@ async fn handle_send(
     State(backend): State<Arc<dyn SendBackend>>,
     Json(req): Json<SendRequest>,
 ) -> (StatusCode, Json<Value>) {
-    handle_send_with_backend(req, backend.as_ref())
+    // P3 #4616: `handle_send_with_backend` acquires the per-pane composer mutation
+    // lock (a `std::sync::Mutex`) and holds it across the blocking tmux paste +
+    // Enter, which can wait several seconds behind a busy-pane auto `/compact`.
+    // Blocking a tokio worker thread on a std Mutex starves the async runtime, so
+    // run the whole blocking section on a blocking thread — matching the other
+    // composer holders, which already offload via `spawn_blocking`
+    // (`claude_stop_delivery`, `claude_compact_trigger`).
+    let outcome =
+        tokio::task::spawn_blocking(move || handle_send_with_backend(req, backend.as_ref())).await;
+    match outcome {
+        Ok(response) => response,
+        Err(join_error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(error_json(&format!(
+                "tui send worker join error: {join_error}"
+            ))),
+        ),
+    }
 }
 
 fn handle_send_with_backend(
@@ -753,6 +770,86 @@ mod tests {
         paste_rx
             .recv_timeout(Duration::from_millis(250))
             .expect("/tui/send paste proceeds once the composer lock releases");
+    }
+
+    /// P3 #4616 regression: the async `handle_send` must offload its blocking
+    /// composer-lock wait (`handle_send_with_backend` holds a `std::sync::Mutex`
+    /// across the tmux paste + Enter) onto a blocking thread via `spawn_blocking`,
+    /// so it never blocks a tokio runtime worker. On a current-thread runtime, a
+    /// concurrently-spawned canary task must still make progress WHILE the handler
+    /// is parked on a composer lock held elsewhere.
+    ///
+    /// Guard removal: reverting `handle_send` to call `handle_send_with_backend`
+    /// directly (no `spawn_blocking`) blocks the single runtime worker on the std
+    /// Mutex for the whole composer hold, so the canary cannot be polled until the
+    /// lock releases — the observer samples `false` and this test fails. The
+    /// composer hold is time-bounded on an independent std thread, so the pre-fix
+    /// behaviour fails cleanly rather than hanging.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_send_offloads_blocking_composer_wait_off_the_runtime_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const HOLD_MS: u64 = 200;
+
+        let session = format!("adk-tui-send-p3-{}", uuid::Uuid::new_v4());
+
+        // A busy-pane `/compact` holds the composer lock for `HOLD_MS`, released on
+        // an independent std timer so the pre-fix path fails cleanly (never hangs).
+        let (holding_tx, holding_rx) = mpsc::channel();
+        let lock_session = session.clone();
+        std::thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &lock_session,
+                || {
+                    holding_tx.send(()).expect("signal compact holding composer");
+                    std::thread::sleep(Duration::from_millis(HOLD_MS));
+                },
+            );
+        });
+        holding_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("compact must acquire the composer lock first");
+
+        // Canary task: flips the flag the moment the runtime worker polls it.
+        let canary = std::sync::Arc::new(AtomicBool::new(false));
+        let canary_task = std::sync::Arc::clone(&canary);
+        tokio::spawn(async move {
+            canary_task.store(true, Ordering::SeqCst);
+        });
+
+        // Observer runs OFF the runtime: it samples the canary mid-hold-window, so
+        // it can witness worker starvation the starved runtime could not report.
+        let observer_canary = std::sync::Arc::clone(&canary);
+        let (observed_tx, observed_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(HOLD_MS / 2));
+            observed_tx
+                .send(observer_canary.load(Ordering::SeqCst))
+                .expect("report mid-window canary sample");
+        });
+
+        // Drive the async handler; awaiting it must free the worker (fix) so the
+        // runtime can poll the canary while the blocking paste waits off-worker.
+        let backend: Arc<dyn SendBackend> = Arc::new(FakeSendBackend);
+        let req = SendRequest {
+            session_name: session.clone(),
+            text: "hello".to_string(),
+            submit: true,
+        };
+        let (status, body) = handle_send(State(backend), Json(req)).await;
+
+        let observed_mid_window = observed_rx
+            .recv()
+            .expect("observer must report the mid-window canary sample");
+        assert!(
+            observed_mid_window,
+            "the current-thread runtime worker must stay free to poll other tasks while /tui/send is parked on the composer lock"
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["ok"], true);
     }
 
     fn make_event(provider: &str, sid: &str, kind: HookEventKind, payload: Value) -> HookEvent {
