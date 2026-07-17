@@ -304,6 +304,11 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
         has_reply_boundary: row.has_reply_boundary,
         dm_hint: row.dm_hint,
         turn_kind,
+        // NULL is the pre-0093/older-producer shape: the durable row has no
+        // author-classification proof, so fail safe to the historical
+        // drop-on-cancel behavior instead of guessing human intent. New
+        // leaders always persist Some(true/false).
+        preserve_on_cancel: row.preserve_on_cancel.unwrap_or(false),
     })
 }
 
@@ -343,6 +348,7 @@ mod tests {
             reply_to_user_message: false,
             defer_watcher_resume: false,
             wait_for_completion: false,
+            preserve_on_cancel: None,
             agent_id: "agent-x".to_string(),
             status: "claimed".to_string(),
             claim_owner: Some("worker-1.local".to_string()),
@@ -362,6 +368,38 @@ mod tests {
         assert_eq!(req.request_owner_name, "Tester");
         assert_eq!(req.user_text, "hello");
         assert_eq!(req.turn_kind, TurnKind::Foreground);
+    }
+
+    #[test]
+    fn intake_request_from_row_restores_preservation_and_fails_safe_for_null() {
+        for (stored, expected) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let mut row = fake_row();
+            row.preserve_on_cancel = stored;
+            let request = intake_request_from_row(&row).expect("convert preservation");
+            assert_eq!(request.preserve_on_cancel, expected);
+        }
+    }
+
+    #[test]
+    fn worker_executor_forwards_restored_preservation_instead_of_literal_false() {
+        let executor_source = include_str!("../discord/router/message_handler/intake_turn.rs");
+        let start = executor_source
+            .find("pub(crate) async fn execute_intake_turn_core(")
+            .expect("worker executor exists");
+        let end = executor_source[start..]
+            .find("pub(super) async fn handle_text_message(")
+            .map(|offset| start + offset)
+            .expect("worker executor has a bounded body");
+        let executor = &executor_source[start..end];
+
+        assert!(
+            executor.contains("request.preserve_on_cancel,"),
+            "worker executor must pass the preservation bit restored from the durable row"
+        );
+        assert!(
+            !executor.contains("request.turn_kind,\n        false,"),
+            "worker executor must not restore the historical hardcoded false"
+        );
     }
 
     #[test]
@@ -411,7 +449,7 @@ mod tests {
 // pre-execute branches we DO want to pin are already
 // covered at the helper level:
 //   - lost-claim race (sweep wins between claim and accept):
-//     `db::intake_outbox::helper_tests::mark_accepted_returns_false_when_sweep_already_reset_the_claim`
+//     `db::intake_outbox::postgres_tests::mark_accepted_returns_false_when_sweep_already_reset_the_claim`
 //   - 23505 classification, claim ordering, sweep correctness:
 //     same module's other 13 tests.
 // Phase 4 (leader hook integration) will re-add tick-level integration

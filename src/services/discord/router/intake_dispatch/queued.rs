@@ -45,6 +45,7 @@ pub(crate) async fn admit_queued_intake(
             has_reply_boundary: intervention.has_reply_boundary,
             dm_hint: None,
             turn_kind: super::super::TurnKind::Foreground,
+            preserve_on_cancel: intervention.preserve_on_cancel(),
         },
         origin: IntakeOrigin::QueuedDrain,
         preserve_on_cancel: intervention.preserve_on_cancel(),

@@ -237,6 +237,7 @@ pub(crate) enum IntakeBlockedReason {
     OwnerLookupFailed { detail: String },
     StaleSessionOwners { instance_ids: Vec<String> },
     ConflictingLiveSessionOwners { instance_ids: Vec<String> },
+    OwnerProtocolIncompatible { instance_id: String },
     OverrideUnavailable { target_instance_id: String },
     NonPortableAttachment { owner_instance_id: String },
     RoutingDependencyFailed { detail: String },
@@ -303,6 +304,7 @@ pub(crate) struct IntakeRouterContext<'a> {
     pub reply_to_user_message: bool,
     pub defer_watcher_resume: bool,
     pub wait_for_completion: bool,
+    pub preserve_on_cancel: bool,
     pub node_override_instance_id: Option<&'a str>,
     pub has_nonportable_uploads: bool,
 }
@@ -366,6 +368,7 @@ pub(crate) async fn try_route_intake(
         ctx.channel_id,
         ctx.leader_instance_id,
         worker_heartbeat_lease_secs(),
+        ctx.preserve_on_cancel,
     )
     .await
     {
@@ -396,6 +399,13 @@ pub(crate) async fn try_route_intake(
                 },
             };
         }
+        SessionOwnerResolution::LiveForeignIncompatible { instance_id, .. } => {
+            return IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OwnerProtocolIncompatible {
+                    instance_id: instance_id.clone(),
+                },
+            };
+        }
         SessionOwnerResolution::LiveForeign { instance_id, .. } if ctx.has_nonportable_uploads => {
             return IntakeRouterDecision::Blocked {
                 reason: IntakeBlockedReason::NonPortableAttachment {
@@ -406,6 +416,9 @@ pub(crate) async fn try_route_intake(
         SessionOwnerResolution::NoOwner
         | SessionOwnerResolution::LiveLocal { .. }
         | SessionOwnerResolution::LiveForeign { .. } => {}
+        SessionOwnerResolution::LiveForeignIncompatible { .. } => {
+            unreachable!("incompatible live owner returns before the open-route fence")
+        }
     }
 
     // The durable single-open-route fence surrounds every placement branch,
@@ -456,7 +469,8 @@ pub(crate) async fn try_route_intake(
             route_to_instance(pool, ctx, &instance_id, &[], &agent_id).await
         }
         SessionOwnerResolution::StaleOwners { .. }
-        | SessionOwnerResolution::ConflictingLiveOwners { .. } => {
+        | SessionOwnerResolution::ConflictingLiveOwners { .. }
+        | SessionOwnerResolution::LiveForeignIncompatible { .. } => {
             unreachable!("owner fail-safe outcomes return before the open-route fence")
         }
         SessionOwnerResolution::NoOwner => {
@@ -544,9 +558,10 @@ async fn route_by_preferred_labels(
             let eligible_nodes: Vec<_> = nodes
                 .into_iter()
                 .filter(|node| {
-                    crate::services::cluster::node_registry::node_supports_intake_provider(
+                    crate::services::cluster::node_registry::node_supports_intake_request(
                         node,
                         ctx.provider,
+                        ctx.preserve_on_cancel,
                     )
                 })
                 .collect();
@@ -639,9 +654,10 @@ async fn route_node_override_without_owner(
                 .get("status")
                 .and_then(|value| value.as_str())
                 .is_some_and(|status| status.eq_ignore_ascii_case("online"))
-            && crate::services::cluster::node_registry::node_supports_intake_provider(
+            && crate::services::cluster::node_registry::node_supports_intake_request(
                 node,
                 ctx.provider,
+                ctx.preserve_on_cancel,
             )
     });
     if !target_online {
@@ -773,6 +789,7 @@ fn build_payload_for_insert(
         reply_to_user_message: ctx.reply_to_user_message,
         defer_watcher_resume: ctx.defer_watcher_resume,
         wait_for_completion: ctx.wait_for_completion,
+        preserve_on_cancel: ctx.preserve_on_cancel,
         agent_id: agent_id.to_string(),
     }
 }
@@ -887,6 +904,7 @@ mod pg_tests {
             reply_to_user_message: false,
             defer_watcher_resume: false,
             wait_for_completion: false,
+            preserve_on_cancel: false,
             node_override_instance_id: None,
             has_nonportable_uploads: false,
         }
@@ -926,6 +944,7 @@ mod pg_tests {
                 "intake_worker": {
                     "enabled": true,
                     "providers": ["claude"],
+                    "features": ["preserve_on_cancel_v1"],
                 },
             }),
         )
@@ -1093,11 +1112,9 @@ mod pg_tests {
         )
         .await;
 
-        let decision = try_route_intake(
-            &pool,
-            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-enforce"),
-        )
-        .await;
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-enforce");
+        ctx.preserve_on_cancel = true;
+        let decision = try_route_intake(&pool, &ctx).await;
         let outbox_id = match decision {
             IntakeRouterDecision::Forwarded {
                 target_instance_id,
@@ -1109,9 +1126,10 @@ mod pg_tests {
             other => panic!("expected Forwarded, got {other:?}"),
         };
 
-        let row: (String, String, String, String, String, i32) = sqlx::query_as(
+        let row: (String, String, String, String, String, i32, Option<bool>) = sqlx::query_as(
             "SELECT target_instance_id, channel_id, user_msg_id, agent_id,
-             status, attempt_no FROM intake_outbox WHERE id = $1",
+                        status, attempt_no, preserve_on_cancel
+                 FROM intake_outbox WHERE id = $1",
         )
         .bind(outbox_id)
         .fetch_one(&pool)
@@ -1123,6 +1141,90 @@ mod pg_tests {
         assert_eq!(row.3, "agent-enforce");
         assert_eq!(row.4, "pending");
         assert_eq!(row.5, 1);
+        assert_eq!(row.6, Some(true));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preserving_request_skips_legacy_preferred_worker_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-mixed-preferred",
+            "ch-mixed-preferred",
+            serde_json::json!(["preferred"]),
+        )
+        .await;
+        seed_worker_node_with_capabilities(
+            &pool,
+            "worker-legacy",
+            serde_json::json!(["preferred"]),
+            "online",
+            serde_json::json!({
+                "intake_worker": { "enabled": true, "providers": ["claude"] }
+            }),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-capable",
+            serde_json::json!(["preferred"]),
+            "online",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-mixed-preferred");
+        ctx.preserve_on_cancel = true;
+        let decision = try_route_intake(&pool, &ctx).await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                ..
+            } if target_instance_id == "worker-capable"
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_preserving_request_allows_legacy_preferred_worker_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-legacy-preferred",
+            "ch-legacy-preferred",
+            serde_json::json!(["legacy"]),
+        )
+        .await;
+        seed_worker_node_with_capabilities(
+            &pool,
+            "worker-legacy",
+            serde_json::json!(["legacy"]),
+            "online",
+            serde_json::json!({
+                "intake_worker": { "enabled": true, "providers": ["claude"] }
+            }),
+        )
+        .await;
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-legacy-preferred"),
+        )
+        .await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                ..
+            } if target_instance_id == "worker-legacy"
+        ));
 
         pool.close().await;
         pg_db.drop().await;
@@ -1311,6 +1413,80 @@ mod pg_tests {
                 target_instance_id,
                 ..
             } if target_instance_id == "worker-one"
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preserving_request_blocks_legacy_live_owner_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node_with_capabilities(
+            &pool,
+            "worker-legacy-owner",
+            serde_json::json!([]),
+            "online",
+            serde_json::json!({
+                "intake_worker": { "enabled": true, "providers": ["claude"] }
+            }),
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "claude:legacy-owner",
+            "claude",
+            "ch-legacy-owner",
+            "worker-legacy-owner",
+            "turn_active",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-legacy-owner");
+        ctx.preserve_on_cancel = true;
+        assert_eq!(
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OwnerProtocolIncompatible {
+                    instance_id: "worker-legacy-owner".to_string(),
+                }
+            }
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preserving_request_forwards_to_capable_live_owner_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node(
+            &pool,
+            "worker-capable-owner",
+            serde_json::json!([]),
+            "online",
+        )
+        .await;
+        seed_session_owner(
+            &pool,
+            "claude:capable-owner",
+            "claude",
+            "ch-capable-owner",
+            "worker-capable-owner",
+            "turn_active",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-capable-owner");
+        ctx.preserve_on_cancel = true;
+        assert!(matches!(
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                ..
+            } if target_instance_id == "worker-capable-owner"
         ));
 
         pool.close().await;
@@ -1836,6 +2012,37 @@ mod pg_tests {
         assert_eq!(row.0, "worker-selected");
         assert_eq!(row.1, serde_json::json!([]));
         assert_eq!(row.2, "agent-node-override");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preserving_node_override_rejects_legacy_worker_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node_with_capabilities(
+            &pool,
+            "worker-legacy-selected",
+            serde_json::json!([]),
+            "online",
+            serde_json::json!({
+                "intake_worker": { "enabled": true, "providers": ["claude"] }
+            }),
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-legacy-override");
+        ctx.node_override_instance_id = Some("worker-legacy-selected");
+        ctx.preserve_on_cancel = true;
+        assert_eq!(
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OverrideUnavailable {
+                    target_instance_id: "worker-legacy-selected".to_string(),
+                }
+            }
+        );
 
         pool.close().await;
         pg_db.drop().await;

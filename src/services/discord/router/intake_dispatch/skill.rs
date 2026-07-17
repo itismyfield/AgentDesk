@@ -33,6 +33,7 @@ pub(crate) async fn dispatch_skill_intake(
                 has_reply_boundary: false,
                 dm_hint: None,
                 turn_kind: super::super::TurnKind::Foreground,
+                preserve_on_cancel: false,
             },
             origin,
             preserve_on_cancel: false,

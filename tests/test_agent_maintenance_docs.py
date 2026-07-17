@@ -174,6 +174,24 @@ class DocTouchRulesTest(unittest.TestCase):
             "docs/agent-maintenance/multinode-transition.md",
         )
 
+    def test_cluster_intake_change_requires_multinode_doc_touch(self) -> None:
+        findings = CHECKER.check_doc_touch_rules(
+            {"src/services/cluster/intake_worker_capabilities.rs"}
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(
+            findings[0].path,
+            "docs/agent-maintenance/multinode-transition.md",
+        )
+
+    def test_migration_0093_change_requires_multinode_doc_touch(self) -> None:
+        findings = CHECKER.check_doc_touch_rules({CHECKER.MIGRATION_0093_PATH})
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(
+            findings[0].path,
+            "docs/agent-maintenance/multinode-transition.md",
+        )
+
     def test_multinode_doc_touch_satisfies_rule(self) -> None:
         findings = CHECKER.check_doc_touch_rules(
             {
@@ -182,6 +200,89 @@ class DocTouchRulesTest(unittest.TestCase):
             }
         )
         self.assertEqual(findings, [])
+
+
+class Migration0093RolloutContractTest(unittest.TestCase):
+    _DOC_PATH = "docs/agent-maintenance/multinode-transition.md"
+
+    @staticmethod
+    def _contract_text() -> str:
+        return "\n".join(CHECKER.MIGRATION_0093_ROLLOUT_MARKERS)
+
+    def test_ignores_missing_contract_when_migration_is_unchanged(self) -> None:
+        with TemporaryDirectory() as tmp:
+            findings = CHECKER.check_migration_0093_rollout_contract(Path(tmp), set())
+
+        self.assertEqual(findings, [])
+
+    def test_accepts_complete_contract_when_migration_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, self._DOC_PATH, self._contract_text())
+            findings = CHECKER.check_migration_0093_rollout_contract(
+                root, {CHECKER.MIGRATION_0093_PATH}
+            )
+
+        self.assertEqual(findings, [])
+
+    def test_rejects_incomplete_contract_when_migration_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, self._DOC_PATH, CHECKER.MIGRATION_0093_ROLLOUT_MARKERS[0])
+            findings = CHECKER.check_migration_0093_rollout_contract(
+                root, {CHECKER.MIGRATION_0093_PATH}
+            )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "error")
+        self.assertIn("missing required marker", findings[0].message)
+
+    def test_warning_only_hard_fails_targeted_migration_gate(self) -> None:
+        rollout_error = CHECKER.Finding(
+            "error", self._DOC_PATH, "migration 0093 rollout contract is missing"
+        )
+        with TemporaryDirectory() as tmp, patch.object(
+            CHECKER, "check_doc_headers", return_value=[]
+        ), patch.object(
+            CHECKER, "check_change_surface_line_counts", return_value=[]
+        ), patch.object(
+            CHECKER, "check_migration_0093_rollout_contract", return_value=[rollout_error]
+        ), patch.object(
+            CHECKER, "check_doc_touch_rules", return_value=[]
+        ):
+            result = CHECKER.main(
+                [
+                    "--repo-root",
+                    tmp,
+                    "--changed-file",
+                    CHECKER.MIGRATION_0093_PATH,
+                    "--warning-only",
+                    "--migration-0093-rollout-gate",
+                ]
+            )
+
+        self.assertEqual(result, 1)
+
+    def test_warning_only_does_not_activate_gate_for_unrelated_change(self) -> None:
+        with TemporaryDirectory() as tmp, patch.object(
+            CHECKER, "check_doc_headers", return_value=[]
+        ), patch.object(
+            CHECKER, "check_change_surface_line_counts", return_value=[]
+        ), patch.object(
+            CHECKER, "check_doc_touch_rules", return_value=[]
+        ):
+            result = CHECKER.main(
+                [
+                    "--repo-root",
+                    tmp,
+                    "--changed-file",
+                    "src/lib.rs",
+                    "--warning-only",
+                    "--migration-0093-rollout-gate",
+                ]
+            )
+
+        self.assertEqual(result, 0)
 
 
 class ChangeSurfaceLineCountTest(unittest.TestCase):

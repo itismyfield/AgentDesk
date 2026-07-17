@@ -108,6 +108,7 @@ pub(crate) async fn admit_text_intake(
         reply_to_user_message: request.reply_to_user_message,
         defer_watcher_resume: request.defer_watcher_resume,
         wait_for_completion: request.wait_for_completion,
+        preserve_on_cancel: submission.preserve_on_cancel,
         node_override_instance_id: node_override.as_deref(),
         has_nonportable_uploads: submission.has_nonportable_uploads
             || !submission.preloaded_uploads.is_empty(),

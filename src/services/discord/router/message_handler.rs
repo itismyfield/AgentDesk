@@ -179,6 +179,7 @@ pub(super) async fn finish_admitted_local(
         has_reply_boundary,
         dm_hint,
         turn_kind,
+        preserve_on_cancel: _,
     } = request;
     intake_turn::handle_text_message(
         deps,

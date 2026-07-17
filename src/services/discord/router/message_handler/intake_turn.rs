@@ -65,6 +65,7 @@ pub(crate) struct IntakeRequest {
     pub has_reply_boundary: bool,
     pub dm_hint: Option<bool>,
     pub turn_kind: TurnKind,
+    pub preserve_on_cancel: bool,
 }
 
 /// Worker-callable entry point for executing an intake turn. Phase 2-pre.3
@@ -105,9 +106,7 @@ pub(crate) async fn execute_intake_turn_core(
         request.has_reply_boundary,
         request.dm_hint,
         request.turn_kind,
-        // The durable worker payload has no author/utility classification.
-        // Preserve fail-safe default-drop instead of guessing that it is human.
-        false,
+        request.preserve_on_cancel,
         Vec::new(),
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
         // the durable announcement row for its `user_msg_id` (#3905).

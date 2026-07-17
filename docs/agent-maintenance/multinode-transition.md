@@ -373,6 +373,14 @@
   `src/services/discord/router/message_handler.rs:1420`; MCP capability checks
   are local in `src/services/mcp_config.rs:34`; tmux watcher state is in-process
   at `src/services/discord/mod.rs:538`.
+- `intake_worker.features` advertises versioned request protocols. A preserving
+  request (`preserve_on_cancel=true`) requires `preserve_on_cancel_v1`; a
+  non-preserving request may still use a legacy provider-capable worker. The same
+  request-aware eligibility check applies to preferred-label selection, explicit
+  `/node` routing, and durable foreign session owners. A live foreign owner that
+  lacks the request protocol remains live but is fenced as incompatible rather
+  than being reclassified as stale. New workers continue decoding a legacy
+  producer's nullable preservation field as false.
 - Enablement condition: #876/#879 add worker heartbeats, capability rows, and a
   dispatcher path that rejects stale workers.
 
@@ -437,6 +445,21 @@
 
 ### Audited touches
 
+- #4550/#4604 intake preservation rolling-deploy contract: worker heartbeats
+  advertise `preserve_on_cancel_v1`, and all three routing authorities
+  (durable foreign session owner, explicit `/node`, and preferred labels) use the
+  same request-aware capability check. Human-authored terminal-shaped text is
+  preserved before stale-dispatch suppression; known automation and unavailable
+  utility-bot identity lookups retain the fail-safe stale drop.
+- Migration 0093 is an irreversible binary-floor boundary because binaries that
+  embed only migrations 0092 or earlier fail SQLx startup validation after 0093
+  exists in the database. Pre-stage and upgrade the entire fleet before applying
+  migration 0093. After migration 0093, binaries embedding only migrations 0092
+  or earlier must not restart or roll back. Rollback requires either a
+  forward-fix, or operators must Restore a pre-0093 database backup and roll back
+  the entire fleet together. The migration-specific CI gate is activated only
+  when the migration 0093 SQL file is in the changed-file set, so unrelated PRs
+  and the pre-0093 main branch are not gated by this boundary.
 - #4248/#4329 (queue reaction/card UX): keeps ownership **node-local to the
   Discord gateway/runtime**. Queue acceptance and retry requeue states are
   rendered only by the existing persisted `turn_view_reconciler` identity;
