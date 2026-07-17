@@ -379,9 +379,10 @@ async fn fetch_catalog(proxy_url: &str) -> Result<HashMap<String, u64>, String> 
     parse_context_window_catalog(&body).map_err(|error| format!("parse {endpoint}: {error}"))
 }
 
-/// Parses both OCX's map-shaped catalog and its array-shaped compatibility
-/// response. Only positive numeric values are admitted; one malformed model
-/// must not poison the conservative unknown-model fallback.
+/// Parses both OCX's `contextWindows` map and array/object compatibility
+/// entries. Keyed numeric values are accepted only inside `contextWindows`;
+/// compatibility entries must name a model and its context-window field so
+/// root response metadata cannot poison the conservative unknown-model fallback.
 pub(crate) fn parse_context_window_catalog(body: &str) -> Result<HashMap<String, u64>, String> {
     let value: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
     let mut windows = HashMap::new();
@@ -391,34 +392,64 @@ pub(crate) fn parse_context_window_catalog(body: &str) -> Result<HashMap<String,
 
 fn collect_catalog_windows(value: &Value, windows: &mut HashMap<String, u64>) {
     match value {
+        Value::Array(_) => collect_compatibility_entries(value, windows),
+        Value::Object(object) => collect_compatibility_entry(object, windows),
+        _ => {}
+    }
+}
+
+/// OCX's canonical catalog shape: `contextWindows` is a model-keyed map. This
+/// is the sole location where a key may stand in for a model selector.
+fn collect_context_window_map(value: &Value, windows: &mut HashMap<String, u64>) {
+    let Some(entries) = value.as_object() else {
+        return;
+    };
+    for (model, value) in entries {
+        if let Some(model) = normalize_model_selector(model)
+            && let Some(window) = value_context_window(value)
+        {
+            windows.insert(model, window);
+        }
+    }
+}
+
+/// Compatibility responses may contain arrays or wrapper objects under these
+/// explicit container keys. Their entries must carry their own model id/name;
+/// arbitrary object keys (such as response metadata) are never treated as
+/// model selectors.
+fn collect_compatibility_entries(value: &Value, windows: &mut HashMap<String, u64>) {
+    match value {
         Value::Array(entries) => {
             for entry in entries {
-                collect_catalog_windows(entry, windows);
+                collect_compatibility_entries(entry, windows);
             }
         }
-        Value::Object(object) => {
-            if let Some(model) = object
-                .get("model")
-                .or_else(|| object.get("id"))
-                .or_else(|| object.get("name"))
-                .and_then(Value::as_str)
-                .and_then(normalize_model_selector)
-                && let Some(window) = object_context_window(object)
-            {
-                windows.insert(model, window);
-            }
-            for (key, child) in object {
-                if let Some(model) = normalize_model_selector(key)
-                    && let Some(window) = value_context_window(child)
-                {
-                    windows.insert(model, window);
-                }
-                if matches!(key.as_str(), "contextWindows" | "models" | "data" | "items") {
-                    collect_catalog_windows(child, windows);
-                }
-            }
-        }
+        Value::Object(object) => collect_compatibility_entry(object, windows),
         _ => {}
+    }
+}
+
+fn collect_compatibility_entry(
+    object: &serde_json::Map<String, Value>,
+    windows: &mut HashMap<String, u64>,
+) {
+    if let Some(model) = object
+        .get("model")
+        .or_else(|| object.get("id"))
+        .or_else(|| object.get("name"))
+        .and_then(Value::as_str)
+        .and_then(normalize_model_selector)
+        && let Some(window) = object_context_window(object)
+    {
+        windows.insert(model, window);
+    }
+    if let Some(context_windows) = object.get("contextWindows") {
+        collect_context_window_map(context_windows, windows);
+    }
+    for key in ["models", "data", "items"] {
+        if let Some(entries) = object.get(key) {
+            collect_compatibility_entries(entries, windows);
+        }
     }
 }
 
@@ -529,6 +560,15 @@ mod tests {
         assert_eq!(parsed.get("routed-sonnet"), Some(&372_000));
         assert_eq!(parsed.get("claude-haiku-4-5"), Some(&200_000));
         assert!(!parsed.contains_key("bad"));
+    }
+
+    #[test]
+    fn parser_rejects_root_metadata_as_context_window() {
+        let parsed = parse_context_window_catalog(
+            r#"{"port":10100,"autoCompactWindow":350000,"contextWindows":{"gpt":372000}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed, HashMap::from([("gpt".to_string(), 372_000)]));
     }
 
     #[test]
