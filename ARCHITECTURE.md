@@ -433,10 +433,10 @@ src/
 │   │   └── warm_followup.rs
 │   ├── discord/
 │   │   ├── catch_up/
+│   │   │   ├── checkpoint_prune.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── phase2.rs
-│   │   │   ├── settled_frontier.rs
 │   │   │   └── too_old_notice.rs
 │   │   ├── commands/
 │   │   │   ├── diagnostics/

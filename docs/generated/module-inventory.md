@@ -436,10 +436,10 @@
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1079 | 652 | 427 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1079 | 978 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
-| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 3187 | 1792 | 1395 | giant-file |
+| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 3178 | 1789 | 1389 | giant-file |
+| `services::discord::catch_up::checkpoint_prune` | `src/services/discord/catch_up/checkpoint_prune.rs` | 134 | 41 | 93 |  |
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 291 | 291 | 0 |  |
 | `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 97 | 97 | 0 |  |
-| `services::discord::catch_up::settled_frontier` | `src/services/discord/catch_up/settled_frontier.rs` | 161 | 110 | 51 |  |
 | `services::discord::catch_up::too_old_notice` | `src/services/discord/catch_up/too_old_notice.rs` | 195 | 106 | 89 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 249 | 190 | 59 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 221 | 209 | 12 |  |

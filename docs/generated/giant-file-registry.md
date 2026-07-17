@@ -15,7 +15,7 @@
 | `src/server/maintenance.rs` | 1119 | server-runtime | 2026-10-31 | #3909 |
 | `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
-| `src/services/discord/catch_up.rs` | 1792 | discord-relay | 2026-10-31 | #3405 |
+| `src/services/discord/catch_up.rs` | 1789 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2557 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1375 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/delivery_record.rs` | 1276 | discord-relay | 2026-10-31 | #3405 |
