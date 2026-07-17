@@ -23,15 +23,16 @@ use delivery_epilogue::{
     DeliveryEpilogueContext, DeliveryEpilogueMessage, DeliveryEpilogueState,
     handle_delivery_epilogue,
 };
+use busy_followup_retry::handle_empty_response_and_busy_requeue;
 use empty_response_recovery::{
-    EmptyResponseRecoveryContext, EmptyResponseRecoveryMessage, EmptyResponseRecoveryOutcome,
-    EmptyResponseRecoveryState, handle_empty_response_recovery,
+    EmptyResponseRecoveryContext, EmptyResponseRecoveryMessage, EmptyResponseRecoveryState,
 };
 use recovery_retry::{
     RecoveryRetryContext, RecoveryRetryMessage, RecoveryRetryOutcome, RecoveryRetryState,
     handle_recovery_retry,
 };
 
+mod busy_followup_retry;
 mod cancel_prompt_replace;
 mod delivery_epilogue;
 mod empty_response_recovery;
@@ -393,7 +394,12 @@ pub(super) async fn run_terminal_outcome_delivery(
             full_response = String::new(); // Suppress error message to user
         }
 
-        let outcome = handle_empty_response_recovery(
+        let (
+            mut delivery_response,
+            spoken_delivery_response,
+            resume_retry_queued,
+            silent_turn_handled,
+        ) = handle_empty_response_and_busy_requeue(
             empty_response_recovery_message,
             EmptyResponseRecoveryContext {
                 shared_owned: &shared_owned,
@@ -428,61 +434,17 @@ pub(super) async fn run_terminal_outcome_delivery(
                 bridge_skip_holder_owns_inflight: &mut bridge_skip_holder_owns_inflight,
                 claude_tui_busy_requeue_pending: &mut claude_tui_busy_requeue_pending,
             },
+            &mut claude_tui_busy_requeue_pending,
+            &mut preserve_inflight_for_cleanup_retry,
+            &shared_owned,
+            &provider,
+            channel_id,
+            &inflight_state,
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            turn_id.as_str(),
         )
         .await;
-        let (
-            mut delivery_response,
-            spoken_delivery_response,
-            resume_retry_queued,
-            silent_turn_handled,
-        ) = match outcome {
-            EmptyResponseRecoveryOutcome::ContinueDelivery {
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-            } => (
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-                false,
-            ),
-            EmptyResponseRecoveryOutcome::SilentTurnHandled {
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-            } => (
-                delivery_response,
-                spoken_delivery_response,
-                resume_retry_queued,
-                true,
-            ),
-        };
-        if claude_tui_busy_requeue_pending {
-            let requeued = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
-                &shared_owned,
-                &provider,
-                channel_id,
-                &inflight_state,
-                dispatch_id.as_deref(),
-                adk_session_key.as_deref(),
-                turn_id.as_str(),
-            )
-            .await;
-            if requeued {
-                delivery_response = "⏳ Claude TUI가 이전 턴을 처리 중이라 메시지를 아직 주입하지 못했습니다. 기존 세션은 유지하고 메시지를 큐에 다시 넣어, TUI가 한가해지면 자동으로 처리합니다."
-                    .to_string();
-            } else {
-                preserve_inflight_for_cleanup_retry = true;
-                delivery_response = "⚠ Claude TUI가 이전 턴을 처리 중이라 메시지 재큐에 실패했습니다. 기존 세션은 유지했으니 잠시 후 다시 보내 주세요."
-                    .to_string();
-                tracing::warn!(
-                    provider = %provider.as_str(),
-                    channel_id = channel_id.get(),
-                    user_msg_id = inflight_state.user_msg_id,
-                    "Claude TUI busy follow-up requeue failed; preserving inflight instead of reporting success"
-                );
-            }
-        }
         if silent_turn_handled {
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
