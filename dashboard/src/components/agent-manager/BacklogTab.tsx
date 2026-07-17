@@ -8,6 +8,7 @@ import {
 } from "../common/SurfacePrimitives";
 import AgentAvatar from "../AgentAvatar";
 import {
+  coerceTimestampMs,
   formatAgeLabel,
   getCardStateEnteredAt,
   labelForStatus,
@@ -119,7 +120,9 @@ function compareCards(
   }
 
   if (result === 0) {
-    result = right.updated_at - left.updated_at;
+    result =
+      (coerceTimestampMs(right.updated_at) ?? 0) -
+      (coerceTimestampMs(left.updated_at) ?? 0);
   }
   return direction === "asc" ? result : -result;
 }

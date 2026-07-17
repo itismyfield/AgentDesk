@@ -388,6 +388,7 @@ src/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
+│   │   ├── composer_lock.rs
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
 │   │   ├── hook_output_guard_tests.rs
@@ -784,6 +785,7 @@ src/
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── launch_script.rs
+│   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── rehydration.rs
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
@@ -900,6 +902,7 @@ src/
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
+│   │   ├── bot_role.rs
 │   │   ├── catch_up.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
@@ -1144,6 +1147,8 @@ src/
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
 │   ├── claude.rs
+│   ├── claude_command.rs
+│   ├── claude_compact_context.rs
 │   ├── claude_compact_trigger.rs
 │   ├── claude_gateway_proxy.rs
 │   ├── codex.rs
@@ -1208,6 +1213,7 @@ src/
 │   ├── tmux_diagnostics.rs
 │   ├── tmux_wrapper.rs
 │   ├── tool_output_guard.rs
+│   ├── tui_prompt_control.rs
 │   ├── tui_prompt_dedupe.rs
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs

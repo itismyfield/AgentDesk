@@ -7,6 +7,8 @@ pub mod auto_queue;
 pub mod automation_candidate_contract;
 pub mod automation_candidate_materializer;
 pub mod claude;
+pub(crate) mod claude_command;
+pub mod claude_compact_context;
 pub mod claude_compact_trigger;
 pub mod claude_e;
 pub(crate) mod claude_gateway_proxy;
@@ -126,6 +128,7 @@ pub mod tmux_wrapper;
 pub mod tool_output_guard;
 // #3034: 4 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during tui_prompt_dedupe dead-code cleanup.
+pub(crate) mod tui_prompt_control;
 #[allow(dead_code)]
 pub(crate) mod tui_prompt_dedupe;
 pub(crate) mod tui_turn_state;

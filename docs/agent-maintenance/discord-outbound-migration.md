@@ -594,3 +594,5 @@ changing runtime behavior.
 > Last refreshed: 2026-07-08 (#4218 — tracing log field key rename only across outbound (`channel =` -> `channel_id =` / shorthand); no delivery verb / API / callsite coverage change.)
 
 > Last refreshed: 2026-07-13 (#4225 S2 — routed `send` target grammar is shared by CLI help, resolver failures, and API errors; unsupported colon-prefixed targets are rejected before alias lookup. No outbound delivery verb, transport, or callsite coverage change.)
+
+> Last refreshed: 2026-07-18 (#4486 — outbound send-bot identity is now typed via the extracted `discord::bot_role::UtilityBotRole` enum ({Announce, Notify} with `alias()`/`from_alias()`); `outbound/manual_delivery.rs`, `send_api.rs`, `send_gate.rs`, and `send_to_agent.rs` swap raw announce/notify bot alias strings for `UtilityBotRole::_.alias()`. This is a pure identifier-typing refactor — no delivery verb, transport, dedup identity, target grammar, or callsite coverage change; the production callsite coverage map is unchanged.)

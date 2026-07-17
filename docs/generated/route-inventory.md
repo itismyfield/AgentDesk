@@ -75,8 +75,8 @@
 | `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:110` | `src/server/routes/domains/admin.rs:42` |
 | `GET` | `/api/discord/bindings` | `discord::list_bindings` | `src/server/routes/discord.rs:18` | `src/server/routes/domains/integrations.rs:42` |
 | `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1591` | `src/server/routes/domains/ops.rs:42` |
-| `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:311` | `src/server/routes/domains/integrations.rs:47` |
-| `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:183` | `src/server/routes/domains/integrations.rs:43` |
+| `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:315` | `src/server/routes/domains/integrations.rs:47` |
+| `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:185` | `src/server/routes/domains/integrations.rs:43` |
 | `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1541` | `src/server/routes/domains/ops.rs:41` |
 | `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1730` | `src/server/routes/domains/ops.rs:50` |
 | `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1690` | `src/server/routes/domains/ops.rs:46` |
@@ -125,7 +125,7 @@
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:42` | `src/server/routes/domains/integrations.rs:50` |
 | `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1656` | `src/server/routes/domains/ops.rs:51` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:68` | `src/server/routes/domains/ops.rs:127` |
-| `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1370` | `src/server/routes/domains/admin.rs:72` |
+| `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1373` | `src/server/routes/domains/admin.rs:72` |
 | `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:44` | `src/server/routes/domains/ops.rs:123` |
 | `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:115` | `src/server/routes/domains/ops.rs:128` |
 | `GET` | `/api/kanban-cards` | `kanban::list_cards` | `src/server/routes/kanban.rs:272` | `src/server/routes/domains/kanban.rs:15` |
@@ -159,9 +159,9 @@
 | `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:231` | `src/server/routes/domains/agents.rs:54` |
 | `POST` | `/api/memory/recall` | `memory_api::memory_recall` | `src/server/routes/memory_api.rs:107` | `src/server/routes/domains/agents.rs:52` |
 | `POST` | `/api/memory/remember` | `memory_api::memory_remember` | `src/server/routes/memory_api.rs:136` | `src/server/routes/domains/agents.rs:53` |
-| `GET` | `/api/message-outbox/failed` | `message_outbox::list_failed` | `src/server/routes/message_outbox.rs:194` | `src/server/routes/domains/ops.rs:28` |
-| `POST` | `/api/message-outbox/failed/redrive` | `message_outbox::redrive_failed` | `src/server/routes/message_outbox.rs:229` | `src/server/routes/domains/ops.rs:33` |
-| `POST` | `/api/message-outbox/monitor-alerts` | `message_outbox::enqueue_monitor_alert` | `src/server/routes/message_outbox.rs:137` | `src/server/routes/domains/ops.rs:29` |
+| `GET` | `/api/message-outbox/failed` | `message_outbox::list_failed` | `src/server/routes/message_outbox.rs:200` | `src/server/routes/domains/ops.rs:28` |
+| `POST` | `/api/message-outbox/failed/redrive` | `message_outbox::redrive_failed` | `src/server/routes/message_outbox.rs:235` | `src/server/routes/domains/ops.rs:33` |
+| `POST` | `/api/message-outbox/monitor-alerts` | `message_outbox::enqueue_monitor_alert` | `src/server/routes/message_outbox.rs:143` | `src/server/routes/domains/ops.rs:29` |
 | `GET` | `/api/messages` | `messages::list_messages` | `src/server/routes/messages.rs:41` | `src/server/routes/domains/ops.rs:221` |
 | `POST` | `/api/messages` | `messages::create_message` | `src/server/routes/messages.rs:61` | `src/server/routes/domains/ops.rs:221` |
 | `GET` | `/api/offices` | `offices::list_offices` | `src/server/routes/offices.rs:58` | `src/server/routes/domains/admin.rs:16` |
@@ -271,8 +271,8 @@
 | `PUT` | `/api/settings` | `settings::put_settings` | `src/server/routes/settings.rs:38` | `src/server/routes/domains/admin.rs:48` |
 | `GET` | `/api/settings/config` | `settings::get_config_entries` | `src/server/routes/settings.rs:51` | `src/server/routes/domains/admin.rs:52` |
 | `PATCH` | `/api/settings/config` | `settings::patch_config_entries` | `src/server/routes/settings.rs:61` | `src/server/routes/domains/admin.rs:52` |
-| `GET` | `/api/settings/escalation` | `escalation::get_escalation_settings` | `src/server/routes/escalation.rs:1285` | `src/server/routes/domains/admin.rs:64` |
-| `PUT` | `/api/settings/escalation` | `escalation::put_escalation_settings` | `src/server/routes/escalation.rs:1313` | `src/server/routes/domains/admin.rs:64` |
+| `GET` | `/api/settings/escalation` | `escalation::get_escalation_settings` | `src/server/routes/escalation.rs:1288` | `src/server/routes/domains/admin.rs:64` |
+| `PUT` | `/api/settings/escalation` | `escalation::put_escalation_settings` | `src/server/routes/escalation.rs:1316` | `src/server/routes/domains/admin.rs:64` |
 | `GET` | `/api/settings/operator-connectors` | `settings::get_operator_connectors` | `src/server/routes/settings.rs:80` | `src/server/routes/domains/admin.rs:60` |
 | `GET` | `/api/settings/runtime-config` | `settings::get_runtime_config` | `src/server/routes/settings.rs:72` | `src/server/routes/domains/admin.rs:56` |
 | `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:87` | `src/server/routes/domains/admin.rs:56` |

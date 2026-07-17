@@ -174,6 +174,7 @@ pub async fn execute_structured_with_context(
                     model_ref,
                     None,
                     None,
+                    crate::services::claude_compact_context::DEFAULT_CONTEXT_COMPACT_LOWER_BOUND_TOKENS,
                     None,
                     None,
                 ),

@@ -919,6 +919,31 @@ pub fn set_option(session_name: &str, key: &str, value: &str) {
         .output();
 }
 
+/// Read one tmux session option without treating a missing session/option as a
+/// fatal condition. Callers that rehydrate best-effort runtime metadata should
+/// use this instead of shelling out themselves: malformed targets, absent tmux,
+/// and non-success responses all resolve to `None`.
+pub fn get_option(session_name: &str, key: &str) -> Option<String> {
+    if is_blank_session_name(session_name) || key.trim().is_empty() {
+        return None;
+    }
+    let output = tmux_command()
+        .args([
+            "show-options",
+            "-qv",
+            "-t",
+            &exact_target(session_name),
+            key,
+        ])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod target_safety_tests {
     use super::*;
@@ -926,6 +951,7 @@ mod target_safety_tests {
     #[test]
     fn blank_session_name_is_not_a_valid_target() {
         assert!(!has_session(""));
+        assert_eq!(get_option("", "@agentdesk_claude_compact_provenance"), None);
         assert!(
             kill_session_output_internal_with_timeout(
                 "",

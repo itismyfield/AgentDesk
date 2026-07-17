@@ -3,12 +3,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
+use super::bot_role::UtilityBotRole;
 use super::health::{self, HealthRegistry};
 use super::router::{HeadlessTurnStartError, HeadlessTurnStartOutcome};
 use crate::db::agents::AgentChannelBindings;
 use crate::services::provider::ProviderKind;
-
-const ANNOUNCE_BOT: &str = "announce";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AgentHandoffChannelKind {
@@ -345,7 +344,7 @@ pub(crate) async fn send_agent_handoff(
         &target,
         &content,
         from_agent_id,
-        ANNOUNCE_BOT,
+        UtilityBotRole::Announce.alias(),
         None,
     )
     .await;
@@ -366,7 +365,7 @@ pub(crate) async fn send_agent_handoff(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        bot: ANNOUNCE_BOT,
+        bot: UtilityBotRole::Announce.alias(),
         prefixed: prefix,
     })
 }

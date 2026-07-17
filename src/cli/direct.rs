@@ -288,7 +288,7 @@ pub(crate) async fn cmd_send(
             target,
             content,
             source.unwrap_or("system"),
-            bot.unwrap_or("announce"),
+            bot.unwrap_or(crate::services::discord::bot_role::UtilityBotRole::Announce.alias()),
             None,
         )
         .await;

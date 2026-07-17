@@ -8,6 +8,10 @@ export const SLOW_MUTATION_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 2;
 const INITIAL_BACKOFF_MS = 500;
 
+export interface Parser<T> {
+  parse(value: unknown): T;
+}
+
 // ── GET deduplication ──
 const inflightGets = new Map<string, Promise<unknown>>();
 export interface CachedGetEntry<T = unknown> {
@@ -144,7 +148,11 @@ export function readCachedSnapshot<T>(url: string): CachedApiSnapshot<T> | null 
   };
 }
 
-export async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
+export async function request<T>(
+  url: string,
+  opts?: RequestOptions,
+  parser?: Parser<T>,
+): Promise<T> {
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
   const shouldDedupe = isGet && !opts?.signal;
@@ -206,9 +214,10 @@ export async function request<T>(url: string, opts?: RequestOptions): Promise<T>
           }
           throw error;
         }
-        const payload = await res.json();
+        const rawPayload: unknown = await res.json();
+        const payload = parser ? parser.parse(rawPayload) : (rawPayload as T);
         if (isGet) {
-          // #2050 P3 finding 12/17 — bounded cache + fresh=1 normalization.
+          // Only validated payloads reach this cache when a parser is supplied.
           storeCachedGet(url, payload);
         }
         return payload;

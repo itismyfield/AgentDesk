@@ -1966,6 +1966,10 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                     prompt: record.prompt_text.clone(),
                     source_event_id: None,
                     observed_at: chrono::Utc::now(),
+                    external_input_lease_generation:
+                        crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+                    ssh_direct_observation_generation:
+                        crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                 };
                 let spawned = maybe_spawn_claude_idle_response_tail(
                     shared.clone(),

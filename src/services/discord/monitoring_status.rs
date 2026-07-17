@@ -241,10 +241,12 @@ async fn render_channel_monitoring_from_registry(
 async fn resolve_status_http(
     registry: &Arc<health::HealthRegistry>,
 ) -> Result<Arc<serenity::Http>, String> {
-    if let Ok(http) = health::resolve_bot_http(registry, "notify").await {
+    use super::bot_role::UtilityBotRole;
+
+    if let Ok(http) = health::resolve_utility_bot_http(registry, UtilityBotRole::Notify).await {
         return Ok(http);
     }
-    health::resolve_bot_http(registry, "announce")
+    health::resolve_utility_bot_http(registry, UtilityBotRole::Announce)
         .await
         .map_err(|(_, body)| body)
 }

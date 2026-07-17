@@ -312,7 +312,7 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         }
     }
 
-    // Select bot: "announce" (default, agents respond) or "notify" (info-only, agents ignore)
+    // Utility bot aliases resolve through UtilityBotRole before provider lookup.
     let http = match resolve_bot_http(registry, bot).await {
         Ok(h) => h,
         Err(resp) => return resp,

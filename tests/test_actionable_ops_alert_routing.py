@@ -4,6 +4,12 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ANNOUNCE = "crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT"
+NOTIFY = "crate::services::discord::bot_role::UtilityBotRole::Notify.alias()"
+
+
+def collapse(text: str) -> str:
+    """Normalize whitespace so rustfmt line-wrapping does not affect matching."""
+    return " ".join(text.split())
 
 
 class ActionableOpsAlertRoutingContract(unittest.TestCase):
@@ -69,8 +75,23 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
         route = self.source("src/server/routes/message_outbox.rs")
         self.assertIn('(\"alert\", \"STUCK\")', route)
         self.assertIn('(\"alert\", \"ANOMALY\")', route)
-        self.assertIn('(\"alert\", \"REVIEW_LONG\") => (\"auto_queue.monitor_review_long\", \"notify\")', route)
-        self.assertIn('(\"recovery\", _) => (\"auto_queue.monitor_recovery\", \"notify\")', route)
+
+        # #4486 moved the bot alias from a "notify" literal to a typed
+        # UtilityBotRole::Notify.alias() call and rustfmt reflowed each match
+        # arm across multiple lines. Collapse whitespace on both sides so the
+        # match-arm key, reason code, and bot stay coupled in one assertion
+        # regardless of exact line wrapping.
+        collapsed_route = collapse(route)
+        self.assertIn(
+            collapse(
+                f'("alert", "REVIEW_LONG") => ( "auto_queue.monitor_review_long", {NOTIFY}, ),'
+            ),
+            collapsed_route,
+        )
+        self.assertIn(
+            collapse(f'("recovery", _) => ( "auto_queue.monitor_recovery", {NOTIFY}, ),'),
+            collapsed_route,
+        )
 
         monitor = self.source("scripts/auto-queue-monitor.sh")
         self.assertIn("--arg kind", monitor)
@@ -82,7 +103,16 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
         delivery = self.source("src/server/outbox_actionable_delivery.rs")
         self.assertIn("is_actionable_ops_alert", delivery)
         self.assertIn("ACTIONABLE_OPS_ALERT_BOT", delivery)
-        self.assertIn('deliver_with_bot(registry, pg_pool, row, \"notify\")', delivery)
+
+        # Same rustfmt multi-line reflow as above: the fallback call's
+        # deliver_with_bot(..., Notify.alias()) arguments now span several
+        # lines, so collapse whitespace before matching the tight call-site
+        # coupling (fallback path specifically calls Notify, not the primary
+        # bot).
+        self.assertIn(
+            collapse(f"deliver_with_bot( registry, pg_pool, row, {NOTIFY}, )"),
+            collapse(delivery),
+        )
         self.assertIn('status != \"200 OK\"', delivery)
 
 

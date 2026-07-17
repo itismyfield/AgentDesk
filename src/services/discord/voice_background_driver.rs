@@ -158,7 +158,7 @@ impl VoiceBackgroundTurnDriver for AnnounceBotTranscriptDriver {
                 &target,
                 request.message_content,
                 "voice",
-                "announce",
+                super::bot_role::UtilityBotRole::Announce.alias(),
                 Some("voice transcript"),
                 delivery_id.as_ref().map(VoiceAnnounceDeliveryId::as_manual),
             )

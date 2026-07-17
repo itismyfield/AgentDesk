@@ -33,6 +33,7 @@ import {
   formatDiscordSummary,
 } from "../agent-manager/discord-routing";
 import { getAgentLevel, getAgentTitle } from "../agent-manager/agentProgress";
+import { coerceTimestampMs } from "../agent-manager/kanban-utils";
 import type { OfficeManualIntervention } from "./officeAgentState";
 import {
   buildCardIssueUrl,
@@ -41,7 +42,6 @@ import {
   formatDateTime,
   formatElapsed,
   hydrateSession,
-  normalizeTimestampMs,
   sessionSortValue,
   t,
   type OfficeSkillRow,
@@ -181,7 +181,7 @@ export default function OfficeAgentDrawer({
   const level = getAgentLevel(agent.stats_xp);
   const levelTitle = getAgentTitle(agent.stats_xp, isKo);
   const currentTaskStartedAt = useMemo(
-    () => normalizeTimestampMs(currentCard?.started_at ?? currentCard?.requested_at ?? null),
+    () => coerceTimestampMs(currentCard?.started_at ?? currentCard?.requested_at ?? null),
     [currentCard],
   );
   const currentTaskIssueUrl = currentCard ? buildCardIssueUrl(currentCard) : null;
