@@ -2292,6 +2292,11 @@ fn prepare_and_create_claude_tui_session(
         let _ = std::fs::remove_file(&owner_path);
         return Err(format!("tmux error: {}", stderr));
     }
+    crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
+        tmux_session_name,
+        model_override,
+        gateway_proxy_env,
+    );
     Ok(owner_path)
 }
 
@@ -3084,6 +3089,12 @@ fn execute_streaming_local_tmux(
         let _ = std::fs::remove_file(&script_path);
         return Err(format!("tmux error: {}", stderr));
     }
+
+    crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
+        tmux_session_name,
+        claude_model_from_args(args),
+        &gateway_proxy_env,
+    );
 
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");

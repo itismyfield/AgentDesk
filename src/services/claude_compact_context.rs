@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
@@ -21,6 +22,7 @@ const CATALOG_TTL: Duration = Duration::from_secs(5 * 60);
 const LAUNCH_PROVENANCE_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 const MAX_CATALOGS: usize = 32;
 const MAX_LAUNCH_PROVENANCE: usize = 512;
+const TMUX_LAUNCH_PROVENANCE_OPTION: &str = "@agentdesk_claude_compact_provenance";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ClaudeLaunchProvenance {
@@ -44,6 +46,15 @@ struct LaunchProvenanceEntry {
     provenance: ClaudeLaunchProvenance,
     launch_model: Option<String>,
     recorded_at: Instant,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedLaunchProvenance {
+    mode: String,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    launch_model: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +107,34 @@ pub(crate) fn register_launch_provenance(
         },
     );
     trim_oldest_launch_provenance(&mut entries);
+}
+
+/// Persist the effective launch decision only after tmux has successfully
+/// created the pane. A dcserver restart can then rehydrate warm panes without
+/// consulting current live gateway settings.
+pub(crate) fn persist_launch_provenance_to_tmux(
+    tmux_session_name: &str,
+    launch_model: Option<&str>,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+) {
+    let provenance = ClaudeLaunchProvenance::from(gateway_proxy_env);
+    let (mode, base_url) = match provenance {
+        ClaudeLaunchProvenance::Inject { base_url } => ("inject", Some(base_url)),
+        ClaudeLaunchProvenance::Scrub => ("scrub", None),
+    };
+    let payload = PersistedLaunchProvenance {
+        mode: mode.to_string(),
+        base_url,
+        launch_model: launch_model.and_then(normalize_model_selector),
+    };
+    let Ok(serialized) = serde_json::to_string(&payload) else {
+        return;
+    };
+    crate::services::platform::tmux::set_option(
+        tmux_session_name,
+        TMUX_LAUNCH_PROVENANCE_OPTION,
+        &serialized,
+    );
 }
 
 pub(crate) fn clear_launch_provenance_for_tmux(tmux_session_name: &str) {
@@ -199,15 +238,70 @@ fn native_context_window(model: Option<&str>) -> Option<u64> {
 }
 
 fn launch_provenance_for_tmux(tmux_session_name: &str) -> Option<LaunchProvenanceEntry> {
+    let tmux_session_name = tmux_session_name.trim();
+    if tmux_session_name.is_empty() {
+        return None;
+    }
+    let cached = {
+        let mut entries = LAUNCH_PROVENANCE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        purge_launch_provenance(&mut entries);
+        entries.get(tmux_session_name).cloned()
+    };
+    cached.or_else(|| rehydrate_launch_provenance_from_tmux(tmux_session_name))
+}
+
+fn rehydrate_launch_provenance_from_tmux(tmux_session_name: &str) -> Option<LaunchProvenanceEntry> {
+    let raw = crate::services::platform::tmux::get_option(
+        tmux_session_name,
+        TMUX_LAUNCH_PROVENANCE_OPTION,
+    )?;
+    let (provenance, launch_model) = parse_persisted_launch_provenance(&raw)?;
+    let entry = LaunchProvenanceEntry {
+        provenance,
+        launch_model,
+        recorded_at: Instant::now(),
+    };
     let mut entries = LAUNCH_PROVENANCE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     purge_launch_provenance(&mut entries);
-    entries.get(tmux_session_name.trim()).cloned()
+    entries.insert(tmux_session_name.to_string(), entry.clone());
+    trim_oldest_launch_provenance(&mut entries);
+    Some(entry)
+}
+
+fn parse_persisted_launch_provenance(
+    raw: &str,
+) -> Option<(ClaudeLaunchProvenance, Option<String>)> {
+    let payload: PersistedLaunchProvenance = serde_json::from_str(raw).ok()?;
+    let provenance = match payload.mode.as_str() {
+        "scrub" => ClaudeLaunchProvenance::Scrub,
+        "inject" => {
+            let base_url = normalize_proxy_url(payload.base_url?.as_str());
+            if base_url.is_empty() {
+                return None;
+            }
+            ClaudeLaunchProvenance::Inject { base_url }
+        }
+        _ => return None,
+    };
+    Some((
+        provenance,
+        payload
+            .launch_model
+            .and_then(|model| normalize_model_selector(&model)),
+    ))
 }
 
 fn normalize_proxy_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn catalog_endpoint(proxy_url: &str) -> Option<String> {
+    let proxy_url = normalize_proxy_url(proxy_url);
+    (!proxy_url.is_empty()).then(|| format!("{proxy_url}/api/claude-code"))
 }
 
 fn cached_catalog_and_schedule_refresh(proxy_url: &str) -> Option<HashMap<String, u64>> {
@@ -263,7 +357,8 @@ fn spawn_catalog_refresh(proxy_url: String) {
 }
 
 async fn fetch_catalog(proxy_url: &str) -> Result<HashMap<String, u64>, String> {
-    let endpoint = format!("{proxy_url}/api/claude-code.contextWindows");
+    let endpoint = catalog_endpoint(proxy_url)
+        .ok_or_else(|| "Claude context-window proxy URL is empty".to_string())?;
     let client = CONTEXT_WINDOW_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -434,6 +529,47 @@ mod tests {
         assert_eq!(parsed.get("routed-sonnet"), Some(&372_000));
         assert_eq!(parsed.get("claude-haiku-4-5"), Some(&200_000));
         assert!(!parsed.contains_key("bad"));
+    }
+
+    #[test]
+    fn catalog_endpoint_uses_the_ocx_claude_code_catalog_contract() {
+        assert_eq!(
+            catalog_endpoint(" http://proxy.test/ "),
+            Some("http://proxy.test/api/claude-code".to_string())
+        );
+        assert_eq!(catalog_endpoint("   "), None);
+    }
+
+    #[test]
+    fn persisted_tmux_launch_provenance_option_rehydrates_only_valid_launch_data() {
+        assert_eq!(
+            parse_persisted_launch_provenance(
+                r#"{"mode":"inject","base_url":" http://proxy.test/ ","launch_model":"routed-sonnet[1m]"}"#,
+            ),
+            Some((
+                ClaudeLaunchProvenance::Inject {
+                    base_url: "http://proxy.test".to_string(),
+                },
+                Some("routed-sonnet".to_string()),
+            ))
+        );
+        assert_eq!(
+            parse_persisted_launch_provenance(
+                r#"{"mode":"scrub","launch_model":"claude-haiku-4-5"}"#
+            ),
+            Some((
+                ClaudeLaunchProvenance::Scrub,
+                Some("claude-haiku-4-5".to_string()),
+            ))
+        );
+        assert_eq!(
+            parse_persisted_launch_provenance(r#"{"mode":"inject","base_url":"   "}"#),
+            None
+        );
+        assert_eq!(
+            parse_persisted_launch_provenance(r#"{"mode":"unknown"}"#),
+            None
+        );
     }
 
     #[test]

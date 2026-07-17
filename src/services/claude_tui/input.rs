@@ -547,29 +547,38 @@ pub fn send_selector_followup(
 ) -> Result<(), String> {
     let open_actions = plan_selector_open(nav)?;
     let navigate_actions = plan_selector_navigation(nav)?;
+    // The potentially long readiness wait remains outside the narrow composer
+    // lock. Once ready, every selector mutation (including the open→confirm
+    // interval) stays serialized with auto `/compact` so their keys cannot
+    // land in one another's editor/overlay.
     wait_for_prompt_ready(session_name, PromptReadinessKind::Followup, cancel_token)?;
-    // The slash command is typed into Claude as a real composer entry, so the
-    // transcript relay would otherwise classify it as SSH-direct input and
-    // lease a spurious external turn. Record it as Discord-originated (same as
-    // send_prompt_with_readiness) and drop the record if the drive fails.
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        "claude",
-        session_name,
-        nav.slash_command,
-    );
-    let result = (|| {
-        // Phase 1: open the slider overlay.
-        run_actions(session_name, &open_actions, cancel_token)?;
-        // Phase 2: confirm the overlay actually mounted before sending any
-        // navigation keys. On a fresh/slow pane the selector is not focused
-        // immediately after Enter; sending Left/Right too early drops the keys
-        // into the composer and leaves the effort unchanged.
-        wait_for_selector_open(session_name, nav, cancel_token)?;
-        // Phase 3: home + move to the requested stop + Enter to confirm.
-        run_actions(session_name, &navigate_actions, cancel_token)?;
-        // Phase 4: validate the overlay closed (selection committed).
-        confirm_selector_closed(session_name, nav, cancel_token)
-    })();
+    let result =
+        crate::services::claude::with_claude_tui_composer_mutation_lock(session_name, || {
+            let snapshot = prompt_readiness_snapshot(session_name);
+            if !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot) {
+                return Err("claude tui composer changed before selector mutation".to_string());
+            }
+            // The slash command is typed into Claude as a real composer entry,
+            // so the transcript relay would otherwise classify it as SSH-direct
+            // input and lease a spurious external turn. Record it under the same
+            // lock that protects the ensuing mutation.
+            crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+                "claude",
+                session_name,
+                nav.slash_command,
+            );
+            // Phase 1: open the slider overlay.
+            run_actions(session_name, &open_actions, cancel_token)?;
+            // Phase 2: confirm the overlay actually mounted before sending any
+            // navigation keys. On a fresh/slow pane the selector is not focused
+            // immediately after Enter; sending Left/Right too early drops the keys
+            // into the composer and leaves the effort unchanged.
+            wait_for_selector_open(session_name, nav, cancel_token)?;
+            // Phase 3: home + move to the requested stop + Enter to confirm.
+            run_actions(session_name, &navigate_actions, cancel_token)?;
+            // Phase 4: validate the overlay closed (selection committed).
+            confirm_selector_closed(session_name, nav, cancel_token)
+        });
     if result.is_err() {
         crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
             "claude",

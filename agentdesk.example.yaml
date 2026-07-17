@@ -380,6 +380,8 @@ runtime:
   context_compact_percent: 60
   context_compact_percent_codex: 75
   context_compact_percent_claude: 70
+  # Minimum context occupancy (tokens) before model-aware compaction is requested.
+  context_compact_lower_bound_tokens: 300000
   # Global Claude gateway-proxy routing toggle. Default: false (off).
   claude_gateway_proxy_enabled: false
   # Proxy base URL used only when the toggle is on. Default: http://127.0.0.1:10100
