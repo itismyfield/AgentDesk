@@ -1002,7 +1002,9 @@ mod tests {
             assert!(result.is_ok(), "escape send closure returns Ok");
         });
         assert!(
-            escape_ran_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            escape_ran_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
             "the stop Escape must wait behind the /compact composer lock"
         );
         release_tx.send(()).expect("release compact");

@@ -127,7 +127,10 @@ fn observe_and_decide(
     // Record the freshest occupancy and read the armed bit; the entry borrow ends
     // with this block so the generation counter can be mutated below.
     let armed = {
-        let entry = state.panes.entry(pane.clone()).or_insert_with(PaneArmState::fresh);
+        let entry = state
+            .panes
+            .entry(pane.clone())
+            .or_insert_with(PaneArmState::fresh);
         entry.last_occupied = occupied;
         entry.armed
     };
@@ -514,7 +517,11 @@ mod tests {
             "a recreated pane's crossing must get a fresh generation"
         );
         // The stale worker must NOT send for the new pane's crossing...
-        assert!(!pane_still_disarmed_for_send(&pane, old_generation, threshold));
+        assert!(!pane_still_disarmed_for_send(
+            &pane,
+            old_generation,
+            threshold
+        ));
         // ...and its late re-arm must NOT clobber the new crossing's consumed flag.
         rearm_for_retry(&pane, old_generation);
         assert_eq!(
@@ -523,7 +530,11 @@ mod tests {
             "a stale-generation re-arm must be a no-op for a newer crossing"
         );
         // The current-generation worker remains valid.
-        assert!(pane_still_disarmed_for_send(&pane, new_generation, threshold));
+        assert!(pane_still_disarmed_for_send(
+            &pane,
+            new_generation,
+            threshold
+        ));
     }
 
     /// Mutation guard: the `None` (teardown) arm of `pane_still_disarmed_for_send`.

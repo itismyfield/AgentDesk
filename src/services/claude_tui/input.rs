@@ -552,9 +552,7 @@ pub(crate) fn compact_steering_decision(
 /// `detect_claude_startup_dialog`, `tmux_capture_indicates_claude_tui_interactive_modal`)
 /// that are the single authority for "is a modal mounted", so the two boundaries
 /// can never disagree about what counts as a dialog.
-fn compact_pre_enter_modal_guard(
-    snapshot: &PromptReadinessSnapshot,
-) -> Result<(), &'static str> {
+fn compact_pre_enter_modal_guard(snapshot: &PromptReadinessSnapshot) -> Result<(), &'static str> {
     if !snapshot.tmux_pane_alive {
         return Err("pane dead");
     }
@@ -3894,8 +3892,7 @@ line 13";
         // The `/compact` literal has been typed: composer non-empty, draft shown.
         // The pre-Enter guard allows the confirming Enter even though the FULL
         // steering decision would now refuse the same frame (non-empty composer).
-        let mut typed_compact =
-            compact_snapshot("✻ Working (12s · esc to interrupt)\n❯ /compact");
+        let mut typed_compact = compact_snapshot("✻ Working (12s · esc to interrupt)\n❯ /compact");
         typed_compact.prompt_draft_detected = true;
         assert_eq!(compact_pre_enter_modal_guard(&typed_compact), Ok(()));
         assert!(

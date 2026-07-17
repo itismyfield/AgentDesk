@@ -379,7 +379,7 @@
 | `services::claude` | `src/services/claude.rs` | 4289 | 2953 | 1336 | giant-file |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
-| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 549 | 268 | 281 |  |
+| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 722 | 369 | 353 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
@@ -397,13 +397,13 @@
 | `services::claude_tui::hook_server::relay_receipts` | `src/services/claude_tui/hook_server/relay_receipts.rs` | 346 | 290 | 56 |  |
 | `services::claude_tui::hosting` | `src/services/claude_tui/hosting/mod.rs` | 13 | 13 | 0 |  |
 | `services::claude_tui::hosting::followup_support` | `src/services/claude_tui/hosting/followup_support.rs` | 519 | 402 | 117 |  |
-| `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 749 | 692 | 57 |  |
-| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3806 | 2112 | 1694 | giant-file |
+| `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 769 | 712 | 57 |  |
+| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3989 | 2187 | 1802 | giant-file |
 | `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 1566 | 863 | 703 |  |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 840 | 439 | 401 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 651 | 328 | 323 |  |
-| `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1129 | 587 | 542 |  |
+| `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1224 | 601 | 623 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2361 | 841 | 1520 |  |
@@ -874,7 +874,7 @@
 | `services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry` | `src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs` | 103 | 103 | 0 |  |
 | `services::discord::turn_bridge::thinking` | `src/services/discord/turn_bridge/thinking.rs` | 87 | 21 | 66 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1174 | 890 | 284 |  |
-| `services::discord::turn_bridge::tmux_runtime::claude_stop_delivery` | `src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs` | 934 | 528 | 406 |  |
+| `services::discord::turn_bridge::tmux_runtime::claude_stop_delivery` | `src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs` | 1015 | 556 | 459 |  |
 | `services::discord::turn_bridge::tmux_runtime::interrupt_policy` | `src/services/discord/turn_bridge/tmux_runtime/interrupt_policy.rs` | 374 | 225 | 149 |  |
 | `services::discord::turn_bridge::tmux_runtime::pid_exit` | `src/services/discord/turn_bridge/tmux_runtime/pid_exit.rs` | 282 | 176 | 106 |  |
 | `services::discord::turn_bridge::tmux_runtime::process_backend_cancel` | `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs` | 156 | 156 | 0 |  |

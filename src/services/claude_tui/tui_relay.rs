@@ -248,9 +248,9 @@ fn handle_send_with_backend(
         || -> Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)> {
             if !req.text.is_empty() {
                 let buffer_name = allocate_buffer_name();
-                backend.load_buffer(&buffer_name, &req.text).map_err(|error| {
-                    ok_error_json(&format!("tmux load-buffer failed: {error}"))
-                })?;
+                backend
+                    .load_buffer(&buffer_name, &req.text)
+                    .map_err(|error| ok_error_json(&format!("tmux load-buffer failed: {error}")))?;
 
                 // `paste-buffer -p -r -d` pastes in bracketed-paste mode (so the
                 // TUI recognises it as a paste, not many tiny keystrokes),
