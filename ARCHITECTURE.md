@@ -488,6 +488,8 @@ src/
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   └── watchdog_decisions.rs
+│   │   │   ├── stall_liveness/
+│   │   │   │   └── redrive_grace.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── provider_probe.rs
