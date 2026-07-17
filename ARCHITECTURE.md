@@ -901,6 +901,7 @@ src/
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
+│   │   ├── bot_role.rs
 │   │   ├── catch_up.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
