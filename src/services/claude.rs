@@ -9,7 +9,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
-use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchEnv, ClaudeLaunchIntent};
+use crate::services::claude_command::{
+    ClaudeCommandBuilder, ClaudeLaunchEnv, ClaudeLaunchIntent, TMUX_WRAPPER_GATEWAY_RESOLVED_ENV,
+};
 #[cfg(unix)]
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, emit_claude_tui_zero_harvest, try_claude_tui_warm_followup,
@@ -245,13 +247,17 @@ fn build_tmux_launch_env_lines(
         env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
     }
     launch_env.append_shell_env(&mut env_lines);
+    // Mark this as a managed launch so the `agentdesk tmux-wrapper` process
+    // (which has no config of its own) reconstructs THIS authoritative gateway
+    // decision from its inherited env instead of re-resolving to a bare Scrub.
+    env_lines.push_str(&format!("export {TMUX_WRAPPER_GATEWAY_RESOLVED_ENV}=1\n"));
 
     env_lines
 }
 
 #[cfg(test)]
 mod launch_env_tests {
-    use super::build_tmux_launch_env_lines;
+    use super::{TMUX_WRAPPER_GATEWAY_RESOLVED_ENV, build_tmux_launch_env_lines};
     use crate::services::claude_command::ClaudeLaunchEnv;
 
     #[test]
@@ -259,6 +265,9 @@ mod launch_env_tests {
         let gateway_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let enabled = build_tmux_launch_env_lines(None, None, None, Some(70), &gateway_env);
         assert!(enabled.contains("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70\n"));
+        // Managed launches always mark the wrapper env so it reconstructs this
+        // decision rather than re-resolving to a bare Scrub.
+        assert!(enabled.contains(&format!("export {TMUX_WRAPPER_GATEWAY_RESOLVED_ENV}=1\n")));
         assert!(
             enabled.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
@@ -3191,6 +3200,10 @@ pub(crate) fn execute_streaming_local_process(
     let backend = ProcessBackend::new();
     let handle = backend.create_session_with_command_env(&config, |command| {
         launch_env.apply_to_command(command);
+        // Mark this as a managed launch (see build_tmux_launch_env_lines) so the
+        // wrapper process reconstructs this authoritative decision rather than
+        // re-resolving to a bare Scrub.
+        command.env(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV, "1");
     })?;
 
     // Store child PID in cancel token

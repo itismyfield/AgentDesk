@@ -45,11 +45,25 @@ pub(crate) enum ClaudeLaunchIntent {
     VersionProbe,
 }
 
+/// Marker env var that managed dcserver callers (the legacy tmux-wrapper launch
+/// script and the ProcessBackend wrapper) set on the `agentdesk tmux-wrapper`
+/// process. The wrapper runs as a separate process with no installed config, so
+/// it cannot itself run the config-gated [`ClaudeLaunchEnv::resolve`]. Its
+/// managed parent — which *does* have config — resolves the gateway decision and
+/// applies it to the wrapper's environment; this marker tells the wrapper that
+/// an authority already decided, so it reconstructs that decision from the
+/// inherited env instead of re-resolving (which, config-less, would collapse to
+/// Scrub and strip a managed Inject). A direct public-CLI invocation carries no
+/// marker, so the wrapper resolves fresh (Scrub without config — the safe native
+/// default that also strips any stale gateway env from the operator's shell).
+pub(crate) const TMUX_WRAPPER_GATEWAY_RESOLVED_ENV: &str = "AGENTDESK_CLAUDE_GATEWAY_RESOLVED";
+
 /// Resolved launch environment for a single Claude spawn.
 ///
 /// This is the only value that carries the gateway Inject|Scrub decision to a
-/// launch site. It is produced solely by [`ClaudeLaunchEnv::resolve`] (or the
-/// test-only constructors) so the resolution policy is centralised.
+/// launch site. It is produced solely by [`ClaudeLaunchEnv::resolve`] /
+/// [`ClaudeLaunchEnv::for_tmux_wrapper`] (or the test-only constructors) so the
+/// resolution policy is centralised.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClaudeLaunchEnv {
     gateway: ClaudeGatewayProxyEnv,
@@ -59,11 +73,31 @@ impl ClaudeLaunchEnv {
     /// Resolve the gateway launch env for the given intent. This is the single
     /// place that maps a launch intent onto the gateway Inject|Scrub decision.
     pub(crate) fn resolve(intent: ClaudeLaunchIntent) -> Self {
-        let gateway = match intent {
-            ClaudeLaunchIntent::Turn => crate::services::claude_gateway_proxy::resolve_for_launch(),
-            ClaudeLaunchIntent::VersionProbe => ClaudeGatewayProxyEnv::Scrub,
-        };
-        Self { gateway }
+        Self {
+            gateway: resolve_gateway(
+                intent,
+                crate::services::claude_gateway_proxy::resolve_for_launch,
+            ),
+        }
+    }
+
+    /// Launch env for the `agentdesk tmux-wrapper` process's own Claude spawn.
+    ///
+    /// The wrapper is a config-less separate process, so the decision authority
+    /// depends on who launched it:
+    ///   * managed caller (marker present) — the parent resolved with config and
+    ///     applied the decision to this process's env; reconstruct and re-apply
+    ///     it (idempotent: Inject with the inherited base URL, or Scrub).
+    ///   * public CLI (no marker) — resolve fresh as a `Turn`; with no installed
+    ///     config that is Scrub, stripping any stale gateway env.
+    pub(crate) fn for_tmux_wrapper() -> Self {
+        Self {
+            gateway: tmux_wrapper_gateway(
+                std::env::var_os(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV).is_some(),
+                crate::services::claude_gateway_proxy::reconstruct_launch_env_from_process,
+                crate::services::claude_gateway_proxy::resolve_for_launch,
+            ),
+        }
     }
 
     /// Apply the resolved gateway env to a `Command` (Inject sets the proxy
@@ -99,6 +133,38 @@ impl ClaudeLaunchEnv {
                 true,
             ),
         }
+    }
+}
+
+/// Map a launch intent onto a gateway decision. `turn_gateway` supplies the
+/// config-gated `Turn` decision (production: `resolve_for_launch`). Factored out
+/// of [`ClaudeLaunchEnv::resolve`] so the `VersionProbe => Scrub` arm can be
+/// mutation-tested against a *distinguishable* `Turn` decision without touching
+/// process-global config (in unit tests `resolve_for_launch` collapses to Scrub,
+/// which would otherwise hide a flip of the probe arm).
+fn resolve_gateway(
+    intent: ClaudeLaunchIntent,
+    turn_gateway: impl FnOnce() -> ClaudeGatewayProxyEnv,
+) -> ClaudeGatewayProxyEnv {
+    match intent {
+        ClaudeLaunchIntent::Turn => turn_gateway(),
+        ClaudeLaunchIntent::VersionProbe => ClaudeGatewayProxyEnv::Scrub,
+    }
+}
+
+/// Choose the tmux-wrapper's gateway decision. Factored out of
+/// [`ClaudeLaunchEnv::for_tmux_wrapper`] so the managed-vs-public branch is
+/// testable without mutating the process environment: a managed marker means an
+/// upstream authority already decided (reconstruct it), otherwise resolve fresh.
+fn tmux_wrapper_gateway(
+    managed_marker_present: bool,
+    reconstruct: impl FnOnce() -> ClaudeGatewayProxyEnv,
+    resolve_fresh: impl FnOnce() -> ClaudeGatewayProxyEnv,
+) -> ClaudeGatewayProxyEnv {
+    if managed_marker_present {
+        reconstruct()
+    } else {
+        resolve_fresh()
     }
 }
 
@@ -150,6 +216,21 @@ impl ClaudeCommandBuilder {
     /// caller because the wrapper — not the Claude binary — is the program here.
     pub(crate) fn for_wrapper(program: impl AsRef<OsStr>, intent: ClaudeLaunchIntent) -> Self {
         Self::build(program, None, ClaudeLaunchEnv::resolve(intent))
+    }
+
+    /// Build a command that launches the Claude binary directly when only its
+    /// path (not a full [`BinaryResolution`]) is known — the tmux-wrapper case,
+    /// where the Claude command line arrives as argv. Applies the exec-path PATH
+    /// derived from the binary path plus the supplied (already-resolved) launch
+    /// env, both by construction. The launch env is threaded in (rather than
+    /// re-resolved) so the wrapper can honour its managed-vs-public decision from
+    /// [`ClaudeLaunchEnv::for_tmux_wrapper`]; the gateway env is still applied
+    /// through the shared `build` guard arm.
+    pub(crate) fn for_binary_path(program: impl AsRef<OsStr>, launch_env: ClaudeLaunchEnv) -> Self {
+        let program = program.as_ref();
+        let mut builder = Self::build(program, None, launch_env);
+        crate::services::platform::augment_exec_path(builder.command_mut(), program);
+        builder
     }
 
     /// Test-only constructor that injects a pre-resolved launch env, letting a
@@ -267,19 +348,63 @@ mod chokepoint_gateway_mutation_tests {
     }
 
     #[test]
-    fn version_probe_intent_always_scrubs() {
-        // The probe policy lives in one place (`ClaudeLaunchEnv::resolve`).
-        // Removing the `VersionProbe => Scrub` arm would flip this to Inject
-        // (or read live config) and break the assertion.
-        let env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::VersionProbe);
-        let mut command = Command::new("claude");
-        command
-            .env(BASE_URL_ENV, "http://inherited.example:9999")
-            .env(DISCOVERY_ENV, "inherited-value");
-        env.apply_to_command(&mut command);
-        let envs = command_env_map(&command);
-        assert_eq!(envs.get(BASE_URL_ENV), Some(&None));
-        assert_eq!(envs.get(DISCOVERY_ENV), Some(&None));
+    fn for_binary_path_applies_launch_env_by_construction() {
+        // The tmux-wrapper constructor: gateway env applied through the shared
+        // `build` guard arm (removing it fails this), PATH added on top.
+        let builder = ClaudeCommandBuilder::for_binary_path(
+            "/opt/claude/bin/claude",
+            ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
+        );
+        let envs = command_env_map(&builder.into_command());
+        assert_eq!(
+            envs.get(BASE_URL_ENV),
+            Some(&Some("http://127.0.0.1:10100".to_string()))
+        );
+        assert_eq!(envs.get(DISCOVERY_ENV), Some(&Some("1".to_string())));
+        // exec-path PATH is derived from the binary path (augment_exec_path).
+        assert!(envs.get("PATH").is_some());
+    }
+
+    fn inject(url: &str) -> ClaudeGatewayProxyEnv {
+        ClaudeGatewayProxyEnv::Inject {
+            base_url: url.to_string(),
+        }
+    }
+
+    fn scrub() -> ClaudeGatewayProxyEnv {
+        ClaudeGatewayProxyEnv::Scrub
+    }
+
+    #[test]
+    fn version_probe_arm_ignores_the_turn_gateway_decision() {
+        // Real mutation coverage for `resolve_gateway`'s probe arm: feed a Turn
+        // gateway that is DISTINGUISHABLE from Scrub (Inject) so flipping
+        // `VersionProbe => Scrub` to `=> turn_gateway()` is detectable — unlike
+        // the config-less unit-test `resolve_for_launch`, which is itself Scrub.
+        let turn_gateway = || inject("http://turn.example/");
+        let probe = resolve_gateway(ClaudeLaunchIntent::VersionProbe, turn_gateway);
+        assert_eq!(probe, scrub());
+
+        let turn_gateway = || inject("http://turn.example/");
+        let turn = resolve_gateway(ClaudeLaunchIntent::Turn, turn_gateway);
+        assert_eq!(turn, inject("http://turn.example/"));
+    }
+
+    #[test]
+    fn tmux_wrapper_marker_present_reconstructs_managed_decision() {
+        // Managed marker present → reconstruct the authority's decision
+        // (idempotent), and IGNORE the fresh-resolve path. Inverting the branch
+        // in `tmux_wrapper_gateway` would return Scrub here.
+        let decision = tmux_wrapper_gateway(true, || inject("http://managed/"), scrub);
+        assert_eq!(decision, inject("http://managed/"));
+    }
+
+    #[test]
+    fn tmux_wrapper_without_marker_resolves_fresh_and_ignores_stale() {
+        // Public CLI (no marker) → resolve fresh; the (stale) reconstruct path
+        // is IGNORED so a stale inherited ANTHROPIC_BASE_URL cannot leak through.
+        let decision = tmux_wrapper_gateway(false, || inject("http://stale/"), scrub);
+        assert_eq!(decision, scrub());
     }
 }
 
@@ -287,18 +412,30 @@ mod chokepoint_gateway_mutation_tests {
 mod chokepoint_guard_tests {
     use std::path::{Path, PathBuf};
 
-    /// Files that are permitted to reference the raw gateway primitives: the
-    /// definition site and this chokepoint module.
+    /// Files that are permitted to reference the raw gateway primitives / raw
+    /// Claude spawns: the gateway definition site and this chokepoint module.
     const SANCTIONED: &[&str] = &["claude_gateway_proxy.rs", "claude_command.rs"];
 
     /// Substrings whose presence outside the sanctioned files signals a launch
     /// site reaching around the chokepoint. `claude_gateway_proxy::` catches any
     /// module-path access (including `launch_env_for_test`), while the type and
     /// `resolve_for_launch` catch re-exported / directly-named usage.
-    const FORBIDDEN: &[&str] = &[
+    const FORBIDDEN_PRIMITIVES: &[&str] = &[
         "ClaudeGatewayProxyEnv",
         "resolve_for_launch",
         "claude_gateway_proxy::",
+    ];
+
+    /// Raw `Command::new(<claude binary var>)` idioms. These are exactly the
+    /// bypass class #4559 R-B flagged (tmux_wrapper spawning Claude directly):
+    /// a Claude/claude-e binary spawned as a `Command` without going through
+    /// `ClaudeCommandBuilder`. Every such spawn now routes through the builder,
+    /// so any reappearance of these idioms is a regression that fails the build.
+    const FORBIDDEN_RAW_SPAWN: &[&str] = &[
+        "Command::new(claude_bin",
+        "Command::new(&claude_bin",
+        "Command::new(claude_e_bin",
+        "Command::new(&claude_e_bin",
     ];
 
     fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -315,6 +452,26 @@ mod chokepoint_guard_tests {
         }
     }
 
+    /// All `.rs` files under the crate's `src/` tree, minus the sanctioned two.
+    /// Scans the WHOLE crate (not just `src/services`) because the gateway
+    /// primitives are `pub(crate)` and reachable from `src/cli` / `src/server`
+    /// too — R-B's bypass was invoked via a public CLI subcommand in `src/cli`.
+    fn non_sanctioned_sources() -> Vec<PathBuf> {
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_dir, &mut files);
+        assert!(
+            !files.is_empty(),
+            "guard scan found no source files under {}",
+            src_dir.display()
+        );
+        files.retain(|file| {
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            !SANCTIONED.contains(&name)
+        });
+        files
+    }
+
     /// By-construction guard. Fails if any module other than the sanctioned two
     /// references the raw gateway launch primitives, forcing every Claude spawn
     /// site through `ClaudeCommandBuilder` / `ClaudeLaunchEnv`. This is the
@@ -322,28 +479,12 @@ mod chokepoint_guard_tests {
     /// instead of at review time so the class stays closed as new sites land.
     #[test]
     fn gateway_primitives_are_confined_to_the_chokepoint() {
-        let services_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services");
-        let mut files = Vec::new();
-        collect_rs_files(&services_dir, &mut files);
-        assert!(
-            !files.is_empty(),
-            "guard scan found no source files under {}",
-            services_dir.display()
-        );
-
         let mut violations = Vec::new();
-        for file in files {
-            let file_name = file
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if SANCTIONED.contains(&file_name) {
-                continue;
-            }
+        for file in non_sanctioned_sources() {
             let Ok(contents) = std::fs::read_to_string(&file) else {
                 continue;
             };
-            for needle in FORBIDDEN {
+            for needle in FORBIDDEN_PRIMITIVES {
                 if contents.contains(needle) {
                     violations.push(format!("{} references `{}`", file.display(), needle));
                 }
@@ -354,6 +495,31 @@ mod chokepoint_guard_tests {
             violations.is_empty(),
             "gateway launch primitives leaked outside the chokepoint \
              (route these through claude_command::ClaudeCommandBuilder / ClaudeLaunchEnv):\n{}",
+            violations.join("\n")
+        );
+    }
+
+    /// Guards the specific bypass class R-B found: a raw `Command::new(claude…)`
+    /// that launches Claude/claude-e without the chokepoint. Removing the
+    /// tmux_wrapper builder wiring (reintroducing the raw spawn) fails here.
+    #[test]
+    fn claude_binaries_are_not_raw_spawned_outside_the_chokepoint() {
+        let mut violations = Vec::new();
+        for file in non_sanctioned_sources() {
+            let Ok(contents) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for needle in FORBIDDEN_RAW_SPAWN {
+                if contents.contains(needle) {
+                    violations.push(format!("{} raw-spawns via `{}…)`", file.display(), needle));
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "Claude/claude-e binary raw-spawned outside the chokepoint \
+             (build it with claude_command::ClaudeCommandBuilder instead):\n{}",
             violations.join("\n")
         );
     }

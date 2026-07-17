@@ -19,10 +19,11 @@
 //! 2. **Pipe input thread**: Reads from process stdin → writes to Claude stdin (pre-formatted)
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchEnv};
 use crate::utils::format::safe_prefix;
 
 #[cfg(unix)]
@@ -118,22 +119,33 @@ pub fn run(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| working_dir.to_string());
 
-    // Spawn Claude with piped stdin (kept open for multi-turn)
-    let mut claude_command = Command::new(claude_bin);
-    crate::services::platform::augment_exec_path(&mut claude_command, claude_bin);
-    crate::services::process::configure_child_process_group(&mut claude_command);
-    let mut child = match claude_command
-        .args(claude_args)
-        .current_dir(&expanded_dir)
-        .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
-        .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
-        .env("BASH_MAX_TIMEOUT_MS", "86400000")
-        .env_remove("CLAUDECODE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    // Spawn Claude with piped stdin (kept open for multi-turn). Route the spawn
+    // through the single chokepoint so the gateway launch env is applied
+    // by-construction — even on the public `agentdesk tmux-wrapper` CLI path,
+    // which no managed dcserver caller resolved. `for_tmux_wrapper` keeps this
+    // idempotent with managed callers (they mark the env; the wrapper
+    // reconstructs their exact decision) and safe on the public path (resolve
+    // fresh → Scrub, stripping any stale gateway env from the operator's shell).
+    // The builder also applies the exec-path PATH derived from the binary path,
+    // replacing the former explicit `augment_exec_path` call.
+    let mut builder =
+        ClaudeCommandBuilder::for_binary_path(claude_bin, ClaudeLaunchEnv::for_tmux_wrapper());
     {
+        let claude_command = builder.command_mut();
+        crate::services::process::configure_child_process_group(claude_command);
+        claude_command
+            .args(claude_args)
+            .current_dir(&expanded_dir)
+            .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
+            .env("BASH_DEFAULT_TIMEOUT_MS", "86400000")
+            .env("BASH_MAX_TIMEOUT_MS", "86400000")
+            .env_remove("CLAUDECODE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
+    let mut claude_command = builder.into_command();
+    let mut child = match claude_command.spawn() {
         Ok(c) => c,
         Err(e) => {
             redacted_eprintln!("\x1b[31mFailed to start Claude: {}\x1b[0m", e);
