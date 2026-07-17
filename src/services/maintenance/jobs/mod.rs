@@ -98,7 +98,11 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
     register_maintenance_job(
         "storage.tmp_pipeline_sweep",
         Duration::from_secs(24 * 60 * 60),
-        || Box::pin(tmp_pipeline_sweep::run(tmp_pipeline_sweep::Config::default_runtime())),
+        || {
+            Box::pin(async {
+                tmp_pipeline_sweep::run(tmp_pipeline_sweep::Config::default_runtime()).await
+            })
+        },
     );
 
     // Weekly hang dump cleanup.

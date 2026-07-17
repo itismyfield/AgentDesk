@@ -83,7 +83,25 @@ pub(crate) fn should_remove(candidate: bool, stale: bool, has_live_owner: bool) 
 
 /// Sweep stale, unowned pipeline directories from the direct children of
 /// `config.tmp_root`. A failed tmux query leaves every directory untouched.
-pub async fn run(config: Config) -> Result<SweepReport> {
+pub async fn run(config: Config) -> Result<()> {
+    let report = run_inner(&config).await?;
+    tracing::info!(
+        target: "maintenance",
+        job = "storage.tmp_pipeline_sweep",
+        tmp_root = %config.tmp_root.display(),
+        scanned = report.scanned,
+        keep_active = report.keep_active,
+        keep_fresh = report.keep_fresh,
+        keep_non_matching = report.keep_non_matching,
+        removed = report.removed,
+        errors = report.errors,
+        dry_run = config.dry_run,
+        "tmp_pipeline_sweep completed"
+    );
+    Ok(())
+}
+
+async fn run_inner(config: &Config) -> Result<SweepReport> {
     let mut report = SweepReport::default();
 
     // Fail closed before inspecting candidates: an unavailable tmux probe means
