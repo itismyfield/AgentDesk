@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::tui_prompt_control::classify_local_only_slash_control;
 use chrono::{DateTime, Utc};
 
 mod synthetic_prompt;
@@ -78,12 +79,20 @@ static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
 /// Starts at 1 so that 0 stays a reserved "not yet recorded" sentinel.
 static EXTERNAL_INPUT_RELAY_LEASE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// Process-global identity for the short SSH-direct observation marker.
+static SSH_DIRECT_OBSERVATION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 /// `generation` sentinel for a freshly constructed lease that has NOT yet been
 /// recorded (and therefore not yet stamped with a unique generation).
 pub(crate) const EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED: u64 = 0;
+pub(crate) const SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED: u64 = 0;
 
 fn next_external_input_relay_lease_generation() -> u64 {
     EXTERNAL_INPUT_RELAY_LEASE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_ssh_direct_observation_generation() -> u64 {
+    SSH_DIRECT_OBSERVATION_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +104,11 @@ pub struct ObservedTuiPrompt {
     /// Unlike byte offsets this survives compaction and head rotation.
     pub source_event_id: Option<String>,
     pub observed_at: DateTime<Utc>,
+    /// Exact side effects created before this event was published. Local-only
+    /// controls carry the unrecorded sentinel for both fields because they
+    /// publish no lease/SSH state at all.
+    pub(crate) external_input_lease_generation: u64,
+    pub(crate) ssh_direct_observation_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,7 +211,7 @@ struct TuiPromptDedupeState {
     // Short-lived marker set the moment an SSH-direct prompt is observed,
     // closing the window before `record_prompt_anchor` runs (the latter has
     // to wait for the Discord notify await to land).
-    ssh_direct_observation_by_tmux: HashMap<PromptKey, TimedValue<()>>,
+    ssh_direct_observation_by_tmux: HashMap<PromptKey, TimedValue<u64>>,
     // Longer-lived response relay lease set as soon as a direct tmux prompt
     // is observed. Unlike the Discord prompt anchor this survives notify-bot
     // failures; watchers use it to keep post-terminal suppression from eating
@@ -267,15 +281,17 @@ pub fn register_provider_session(
     if provider_session_id.is_empty() || tmux_session_name.is_empty() {
         return;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    state.tmux_by_provider_session.insert(
-        PromptKey::new(provider, provider_session_id),
-        TimedValue {
-            value: tmux_session_name.to_string(),
-            recorded_at: Instant::now(),
-        },
-    );
+    {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.purge_expired();
+        state.tmux_by_provider_session.insert(
+            PromptKey::new(provider, provider_session_id),
+            TimedValue {
+                value: tmux_session_name.to_string(),
+                recorded_at: Instant::now(),
+            },
+        );
+    }
 }
 
 /// Reverse lookup: resolve the provider session id that maps to `tmux_session_name`
@@ -880,12 +896,17 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     if tmux_session_name.is_empty() {
         return false;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
-    let removed_provider_sessions =
-        state.remove_provider_session_mappings_for_tmux(tmux_session_name);
-    removed_runtime || removed_provider_sessions
+    let removed = {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.purge_expired();
+        let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        let removed_provider_sessions =
+            state.remove_provider_session_mappings_for_tmux(tmux_session_name);
+        removed_runtime || removed_provider_sessions
+    };
+    crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
+    crate::services::claude_compact_trigger::clear_for_tmux(tmux_session_name);
+    removed
 }
 
 /// #3105 (codex P1 sub-case B): tombstone-evict every mirror mapping for a tmux
@@ -907,13 +928,18 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     if tmux_session_name.is_empty() {
         return false;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
-    let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
-    let removed_provider_sessions =
-        state.remove_provider_session_mappings_for_tmux(tmux_session_name);
-    removed_runtime || removed_channel || removed_provider_sessions
+    let removed = {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.purge_expired();
+        let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
+        let removed_provider_sessions =
+            state.remove_provider_session_mappings_for_tmux(tmux_session_name);
+        removed_runtime || removed_channel || removed_provider_sessions
+    };
+    crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
+    crate::services::claude_compact_trigger::clear_for_tmux(tmux_session_name);
+    removed
 }
 
 pub(crate) fn runtime_bindings_for_kind(
@@ -1146,29 +1172,57 @@ fn observe_prompt_candidates_by_tmux_inner(
             return PromptObservation::SuppressedReplayedEntry;
         }
     }
-    for prompt in &candidates {
-        if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
-            return PromptObservation::SuppressedDiscordDuplicate;
+    let local_only_control = candidates
+        .first()
+        .and_then(|prompt| classify_local_only_slash_control(prompt));
+    if local_only_control.is_none() {
+        for prompt in &candidates {
+            if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
+                return PromptObservation::SuppressedDiscordDuplicate;
+            }
+        }
+        for prompt in &candidates {
+            if take_or_record_recent_observed_prompt(&provider, tmux_session_name, prompt) {
+                return PromptObservation::SuppressedRecentDuplicate;
+            }
         }
     }
-    for prompt in &candidates {
-        if take_or_record_recent_observed_prompt(&provider, tmux_session_name, prompt) {
-            return PromptObservation::SuppressedRecentDuplicate;
+    // Generic direct input keeps the #3540 eager identity record: it is a real
+    // relay at this point. A local-only note has no durable side effect until
+    // Discord accepts its note, so its id is recorded only by the successful
+    // delivery branch in `tui_prompt_relay`.
+    if local_only_control.is_none() {
+        if let Some(entry_id) = entry_id {
+            record_relayed_entry_id(&provider, tmux_session_name, entry_id);
         }
     }
-    // #3540: this candidate cleared the pending + recent dedup, so it is about to
-    // be relayed for real — record its stable entry id NOW (not earlier, so a
-    // candidate that was dedup-suppressed above is never recorded as "relayed").
-    // A future watermark-reset re-encounter of this exact uuid is then
-    // suppressed at the identity check above.
-    if let Some(entry_id) = entry_id {
-        record_relayed_entry_id(&provider, tmux_session_name, entry_id);
-    }
-    record_external_input_relay_lease(&provider, tmux_session_name, None);
     if effect == PromptObservationEffect::RelayLeaseOnly {
+        if local_only_control.is_none() {
+            record_external_input_turn_lease(
+                &provider,
+                tmux_session_name,
+                ExternalInputRelayLease::unassigned(None),
+            );
+        }
         return PromptObservation::PublishedSshDirect;
     }
-    mark_ssh_direct_observation_pending(&provider, tmux_session_name);
+    let (external_input_lease_generation, ssh_direct_observation_generation) =
+        if local_only_control.is_some() {
+            (
+                EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+                SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+            )
+        } else {
+            let external_input_lease = record_external_input_turn_lease(
+                &provider,
+                tmux_session_name,
+                ExternalInputRelayLease::unassigned(None),
+            );
+            (
+                external_input_lease.generation,
+                mark_ssh_direct_observation_pending(&provider, tmux_session_name),
+            )
+        };
     let prompt = candidates
         .first()
         .expect("non-empty candidates")
@@ -1179,6 +1233,8 @@ fn observe_prompt_candidates_by_tmux_inner(
         prompt,
         source_event_id: entry_id.map(str::to_string),
         observed_at,
+        external_input_lease_generation,
+        ssh_direct_observation_generation,
     };
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect
@@ -1361,20 +1417,54 @@ pub(crate) fn clear_external_input_relay_lease_if_generation_matches(
     true
 }
 
-fn mark_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) {
+/// Compare-and-clear an external-input lease by generation without requiring a
+/// channel binding. Direct prompt observation records an initially unassigned
+/// lease before relay ownership has been resolved, so a consumed machine
+/// control needs this exact unscoped cleanup path.
+fn clear_external_input_relay_lease_if_generation_matches_unscoped(
+    provider: &str,
+    tmux_session_name: &str,
+    expected_generation: u64,
+) -> bool {
+    if expected_generation == EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED {
+        return false;
+    }
+    let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     if provider.is_empty() || tmux_session_name.is_empty() {
-        return;
+        return false;
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    if state
+        .external_input_relay_lease_by_tmux
+        .get(&key)
+        .is_none_or(|entry| entry.value.generation != expected_generation)
+    {
+        return false;
+    }
+    state.external_input_relay_lease_by_tmux.remove(&key);
+    true
+}
+
+fn mark_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) -> u64 {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() {
+        return SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED;
+    }
+    let generation = next_ssh_direct_observation_generation();
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
     state.ssh_direct_observation_by_tmux.insert(
-        PromptKey::new(provider, tmux_session_name),
+        PromptKey::new(&provider, tmux_session_name),
         TimedValue {
-            value: (),
+            value: generation,
             recorded_at: Instant::now(),
         },
     );
+    generation
 }
 
 /// True when an SSH-direct prompt has been observed for this
@@ -1405,6 +1495,33 @@ fn clear_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str)
     state
         .ssh_direct_observation_by_tmux
         .remove(&PromptKey::new(&provider, tmux_session_name));
+}
+
+fn clear_ssh_direct_observation_pending_if_generation_matches(
+    provider: &str,
+    tmux_session_name: &str,
+    expected_generation: u64,
+) -> bool {
+    if expected_generation == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
+        return false;
+    }
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    if state
+        .ssh_direct_observation_by_tmux
+        .get(&key)
+        .is_none_or(|entry| entry.value != expected_generation)
+    {
+        return false;
+    }
+    state.ssh_direct_observation_by_tmux.remove(&key);
+    true
 }
 
 pub(crate) fn record_suppressed_discord_origin_prompt(
@@ -1772,6 +1889,24 @@ fn record_relayed_entry_id(provider: &str, tmux_session_name: &str, entry_id: &s
     while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
         queue.pop_front();
     }
+}
+
+/// Mark a local-only entry as replayed only after its Discord session note was
+/// accepted. No subscriber, lagged receiver, missing route/http, or failed send
+/// calls this helper, so those paths cannot lose a later exact replay.
+pub(crate) fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
+    if classify_local_only_slash_control(&prompt.prompt).is_none() {
+        return;
+    }
+    let Some(entry_id) = prompt
+        .source_event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|entry_id| !entry_id.is_empty())
+    else {
+        return;
+    };
+    record_relayed_entry_id(&prompt.provider, &prompt.tmux_session_name, entry_id);
 }
 
 pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
@@ -3346,6 +3481,152 @@ No response requested.\n\
         );
         assert!(clear_external_input_relay_lease("claude", "tmux-a", 42));
         assert!(!external_input_relay_lease_present("claude", "tmux-a", 42));
+    }
+
+    #[test]
+    fn local_only_control_creates_no_external_turn_effects_without_a_subscriber() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-effect-generation", "/compact"),
+            PromptObservation::PublishedSshDirect
+        );
+        assert!(!external_input_relay_lease_present(
+            "claude",
+            "tmux-effect-generation",
+            42
+        ));
+        assert!(!is_ssh_direct_observation_pending(
+            "claude",
+            "tmux-effect-generation"
+        ));
+        let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        let key = PromptKey::new("claude", "tmux-effect-generation");
+        assert!(
+            !state.recent_observed_by_tmux.contains_key(&key),
+            "local controls must bypass the 30-second direct-input tombstone"
+        );
+        assert!(
+            !state.pending_by_tmux.contains_key(&key),
+            "local controls must not create a Discord-originated pending entry"
+        );
+    }
+
+    #[test]
+    fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let now = Utc::now();
+
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-local-compact",
+                "/compact",
+                Some("compact-entry-1"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+        );
+        // This test deliberately has no subscriber. A broadcast miss, absent
+        // owner/channel/http, or Discord send error never calls the delivery
+        // acknowledgement helper, so an exact later replay must still publish.
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-local-compact",
+                "/compact",
+                Some("compact-entry-1"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "without a confirmed note delivery, an exact local entry replay is not suppressed"
+        );
+
+        // The relay calls this only from the successful `channel.say` branch.
+        record_local_only_entry_id_after_note_delivery(&ObservedTuiPrompt {
+            provider: "claude".to_string(),
+            tmux_session_name: "tmux-local-compact".to_string(),
+            prompt: "/compact".to_string(),
+            source_event_id: Some("compact-entry-1".to_string()),
+            observed_at: now,
+            external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        });
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-local-compact",
+                "/compact",
+                Some("compact-entry-1"),
+                now,
+            ),
+            PromptObservation::SuppressedReplayedEntry,
+            "only a successfully delivered note records the exact local entry identity"
+        );
+        assert!(!external_input_relay_lease_present(
+            "claude",
+            "tmux-local-compact",
+            42
+        ));
+        assert!(!is_ssh_direct_observation_pending(
+            "claude",
+            "tmux-local-compact"
+        ));
+    }
+
+    #[test]
+    fn local_compact_raw_and_envelope_each_publish_without_time_pairing() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let wrapper = "<command-message>compact</command-message>\n\
+                       <command-name>/compact</command-name>\n\
+                       <command-args></command-args>";
+
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-local-pair", "/compact"),
+            PromptObservation::PublishedSshDirect
+        );
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-local-pair", wrapper),
+            PromptObservation::PublishedSshDirect,
+            "the transcript envelope is allowed to duplicate the raw local note"
+        );
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-local-pair", "/compact"),
+            PromptObservation::PublishedSshDirect,
+            "a later human /compact is never collapsed by a text/time pair window"
+        );
+    }
+
+    #[test]
+    fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let now = Utc::now();
+        let nonlocal = ObservedTuiPrompt {
+            provider: "claude".to_string(),
+            tmux_session_name: "tmux-local-ack-scope".to_string(),
+            prompt: "normal human prompt".to_string(),
+            source_event_id: Some("nonlocal-entry".to_string()),
+            observed_at: now,
+            external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        };
+
+        record_local_only_entry_id_after_note_delivery(&nonlocal);
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-local-ack-scope",
+                "normal human prompt",
+                Some("nonlocal-entry"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "the local-delivery acknowledgement path cannot alter generic entry-id semantics"
+        );
     }
 
     #[test]

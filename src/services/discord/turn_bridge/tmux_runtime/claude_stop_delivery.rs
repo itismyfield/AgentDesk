@@ -139,6 +139,69 @@ where
     delivery_guard.commit_success(write())
 }
 
+/// F1: run the interactive-TUI Escape delivery under the SAME per-pane composer
+/// mutation lock `/compact` steering (and every normal composer mutation) holds,
+/// so a user stop-Escape and a busy-pane auto `/compact` can never interleave —
+/// an Escape landing between the `/compact` literal and its Enter would swallow
+/// the user's stop, or the auto-Enter would falsely confirm a `/compact` the
+/// operator meant to cancel.
+///
+/// Lock order (P2 #4616): the composer lock is taken OUTSIDE (before) the global
+/// interrupt-registry delivery guard — `deliver_claimed_claude_stop` acquires the
+/// registry guard *inside* the closure passed here. The acquisition order is
+/// therefore composer-lock → interrupt-registry-lock. This is the deliberate
+/// reversal of the earlier registry-first order: parking on the per-pane composer
+/// lock (up to `SELECTOR_OPEN_TIMEOUT` + confirm, ~seconds) while holding the
+/// GLOBAL registry lock froze every pane's turn-start bind and every other stop
+/// delivery. Composer-first keeps the global registry lock held only for the
+/// brief generation check + tmux send.
+///
+/// No cycle: the interrupt-registry lock is a sink in the lock graph — apart from
+/// this path only `bind_claude_tmux_session` takes it, and bind acquires no lock
+/// that leads back to the composer or session-turn locks (it only touches the
+/// token-local `tmux_session` leaf mutex). So no path runs interrupt-registry →
+/// composer, and composer → interrupt-registry stays strictly one-directional.
+/// Generic over the delivery so the lock routing is unit-testable without a live
+/// tmux pane.
+fn deliver_tui_escape_under_composer_lock(
+    session_name: &str,
+    run_under_composer: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+        session_name,
+        run_under_composer,
+    )
+}
+
+/// Route the claimed stop delivery under the correct lock order for its mechanism.
+///
+/// The interactive Escape holds the per-pane composer lock across the WHOLE
+/// claimed delivery (`deliver_claimed_claude_stop`: session-generation check +
+/// tmux send), acquiring it before the global interrupt-registry guard so the
+/// registry lock is never held while parked on the composer lock (P2 #4616). The
+/// wrapper FIFO control request needs no composer lock. Either way the generation
+/// fence stays atomic: the generation check and the provider write both run under
+/// the registry guard held inside `deliver_claimed_claude_stop`, so no newer turn
+/// can publish its generation between the check and the write.
+fn deliver_claimed_claude_stop_under_lock_order(
+    token: &CancelToken,
+    session_name: &str,
+    delivery: ClaudeTurnInterruptDelivery,
+    transcript_identity: Option<&ClaudeStopTurnIdentity>,
+    write: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match delivery {
+        ClaudeTurnInterruptDelivery::TuiEscape => {
+            deliver_tui_escape_under_composer_lock(session_name, || {
+                deliver_claimed_claude_stop(token, session_name, transcript_identity, write)
+            })
+        }
+        ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
+            deliver_claimed_claude_stop(token, session_name, transcript_identity, write)
+        }
+    }
+}
+
 struct ClaudeStopDeliveryReservation<'a> {
     token: &'a CancelToken,
 }
@@ -442,13 +505,20 @@ pub(super) async fn interrupt_claude_turn_session_preserving(
     // between the check and the Escape/FIFO write. Transcript identity is
     // supplemental only: when the turn-start entry has fallen outside the bounded
     // tail window, fail open after the authoritative session-generation check.
+    //
+    // P2 #4616: `deliver_claimed_claude_stop_under_lock_order` takes the per-pane
+    // composer lock OUTSIDE this registry guard for the interactive Escape, so we
+    // never hold the GLOBAL interrupt-registry lock while parked on the composer
+    // lock (which can wait up to `SELECTOR_OPEN_TIMEOUT` + confirm). The `write`
+    // closure below is provider I/O only — it acquires no composer lock.
     let session_for_task = session_name.clone();
     let token_for_task = Arc::clone(token);
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
     let delivery_result = tokio::task::spawn_blocking(move || {
-        deliver_claimed_claude_stop(
+        deliver_claimed_claude_stop_under_lock_order(
             token_for_task.as_ref(),
             &session_for_task,
+            delivery,
             turn_identity.as_ref(),
             || match delivery {
                 ClaudeTurnInterruptDelivery::TuiEscape => {
@@ -929,6 +999,169 @@ mod tests {
                 true,
             ),
             ClaudeStopDeliveryDecision::SkipDuplicate
+        );
+    }
+
+    /// F1 mutation guard: `deliver_tui_escape_under_composer_lock` must acquire
+    /// the SAME per-pane composer mutation lock `/compact` steering holds, so a
+    /// user stop-Escape cannot interleave its key send with a busy-pane auto
+    /// `/compact`. While a simulated `/compact` holds the composer lock, the
+    /// Escape send must NOT run; it proceeds only once the lock releases.
+    /// Reverting the routing (sending the Escape without the composer lock) lets
+    /// it run immediately, failing the `recv_timeout(..).is_err()` assertion.
+    #[cfg(unix)]
+    #[test]
+    fn tui_escape_delivery_serializes_with_compact_composer_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let session = format!("claude-4591-stop-escape-{}", uuid::Uuid::new_v4());
+        let (holding_tx, holding_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (escape_ran_tx, escape_ran_rx) = mpsc::channel();
+
+        // Simulate `/compact` steering holding the composer lock for this session.
+        let lock_session = session.clone();
+        thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &lock_session,
+                || {
+                    holding_tx.send(()).expect("signal compact holding lock");
+                    release_rx.recv().expect("await release");
+                },
+            );
+        });
+        holding_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("compact must acquire the composer lock first");
+
+        let escape_session = session.clone();
+        thread::spawn(move || {
+            let result = deliver_tui_escape_under_composer_lock(&escape_session, || {
+                escape_ran_tx.send(()).expect("signal escape send ran");
+                Ok::<(), String>(())
+            });
+            assert!(result.is_ok(), "escape send closure returns Ok");
+        });
+        assert!(
+            escape_ran_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "the stop Escape must wait behind the /compact composer lock"
+        );
+        release_tx.send(()).expect("release compact");
+        escape_ran_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("the stop Escape proceeds once the composer lock releases");
+    }
+
+    /// P2 #4616 regression: the interactive stop-Escape must NOT hold the GLOBAL
+    /// interrupt-registry lock (`ACTIVE_GENERATION_BY_TMUX`) while it is parked on
+    /// the per-pane composer lock. `deliver_claimed_claude_stop_under_lock_order`
+    /// (the exact routing production uses) takes the composer lock OUTSIDE the
+    /// registry delivery guard, so while a busy-pane `/compact` holds the composer
+    /// lock for one pane, a *different* pane's turn-start bind — and every other
+    /// registry op — still proceeds immediately.
+    ///
+    /// Guard removal: reverting to the registry-first order (acquiring the registry
+    /// delivery guard before waiting on the composer lock, as the pre-#4616 rework
+    /// did via `deliver_claimed_claude_stop(.., || deliver_tui_escape_under_composer_lock(..))`)
+    /// would hold the global registry lock across the multi-second composer wait,
+    /// and the other-session `bind_claude_tmux_session` below would block until
+    /// `/compact` released — failing the `recv_timeout(..)` this test expects to
+    /// succeed promptly.
+    #[cfg(unix)]
+    #[test]
+    fn stop_escape_never_holds_interrupt_registry_while_parked_on_composer_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let session = format!("claude-4616-p2-stall-{}", uuid::Uuid::new_v4());
+        let other_session = format!("claude-4616-p2-other-{}", uuid::Uuid::new_v4());
+
+        // Publish a live generation for `session` and reserve the delivery so the
+        // stop path can acquire the interrupt-registry guard once it holds composer.
+        let token = Arc::new(CancelToken::new());
+        token.bind_claude_tmux_session(&session);
+        assert!(token.claim_claude_interrupt());
+
+        let (compact_holding_tx, compact_holding_rx) = mpsc::channel();
+        let (release_compact_tx, release_compact_rx) = mpsc::channel();
+        let (delivery_done_tx, delivery_done_rx) = mpsc::channel();
+
+        // A busy-pane `/compact` holds the composer lock for `session`.
+        let compact_session = session.clone();
+        thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &compact_session,
+                || {
+                    compact_holding_tx
+                        .send(())
+                        .expect("signal compact holding composer");
+                    release_compact_rx.recv().expect("await compact release");
+                },
+            );
+        });
+        compact_holding_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("compact must acquire the composer lock first");
+
+        // Drive the production stop routing for `session`. It must block on the
+        // composer lock (held by `/compact`) BEFORE it can touch the registry.
+        let stop_session = session.clone();
+        let stop_token = Arc::clone(&token);
+        thread::spawn(move || {
+            let result = deliver_claimed_claude_stop_under_lock_order(
+                stop_token.as_ref(),
+                &stop_session,
+                ClaudeTurnInterruptDelivery::TuiEscape,
+                None,
+                || Ok::<(), String>(()),
+            );
+            delivery_done_tx.send(result).expect("signal delivery done");
+        });
+        assert!(
+            delivery_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "the stop Escape must wait behind the /compact composer lock"
+        );
+
+        // CRITICAL: while the stop is parked on the per-pane composer lock, the
+        // GLOBAL interrupt-registry must be free — a different pane's turn-start
+        // bind proceeds without waiting for `/compact` to release. This is the
+        // property the pre-#4616 registry-first order violated.
+        let (bind_done_tx, bind_done_rx) = mpsc::channel();
+        let bind_session = other_session.clone();
+        thread::spawn(move || {
+            let other = CancelToken::new();
+            other.bind_claude_tmux_session(&bind_session);
+            // A fresh generation must also be able to acquire its own delivery
+            // guard, proving the global registry lock is fully released — not
+            // merely available for the `bind` insert half.
+            assert!(other.claim_claude_interrupt());
+            assert!(
+                other
+                    .lock_current_claude_interrupt_session(&bind_session)
+                    .is_some()
+            );
+            bind_done_tx
+                .send(())
+                .expect("signal other-session bind done");
+        });
+        bind_done_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("a different pane's registry op must not block on the parked composer wait");
+
+        // Release `/compact`; the parked stop now proceeds and commits the fence.
+        release_compact_tx.send(()).expect("release compact");
+        let delivered = delivery_done_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("the stop Escape proceeds once the composer lock releases");
+        assert_eq!(delivered, Ok(()));
+        assert!(
+            !token.claim_claude_interrupt(),
+            "a committed fence refuses a second claim"
         );
     }
 }

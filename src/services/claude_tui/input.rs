@@ -32,6 +32,9 @@ const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(120);
 const PROMPT_SUBMIT_RETRY_SETTLE: Duration = Duration::from_millis(350);
 const PROMPT_SUBMIT_CONFIRM_RETRIES: usize = 2;
+/// The busy-turn `/compact` path gets exactly one passive confirmation capture.
+/// It intentionally never follows generic submit retry/cleanup behavior.
+const COMPACT_SUBMIT_PASSIVE_SETTLE: Duration = Duration::from_millis(120);
 const PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN: Option<&CancelToken> = None;
 /// Upper bound for how long we wait for an interactive selector overlay (e.g.
 /// `/effort`) to mount after submitting the slash command, before giving up and
@@ -191,6 +194,15 @@ pub struct PromptReadinessSnapshot {
     pub tmux_pane_alive: bool,
     pub capture_available: bool,
     pub pane_tail: String,
+}
+
+/// Outcome of the compact-specific steering path. Once a tmux mutation starts,
+/// an error is necessarily ambiguous: a retry could enqueue a duplicate compact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactSubmitOutcome {
+    PreMutationRefused,
+    AcceptedOrQueued,
+    AmbiguousAfterMutation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -402,23 +414,174 @@ fn send_prompt_with_readiness(
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
+    // Readiness can wait for a busy prior turn, but it must not hold the narrow
+    // composer lock while doing so. Revalidate only after acquiring that lock so
+    // `/compact` and a normal follow-up cannot interleave their key mutations.
     wait_for_prompt_ready(session_name, readiness, cancel_token)?;
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        "claude",
-        session_name,
-        prompt,
-    );
-    match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                "claude",
-                session_name,
-                prompt,
-            );
-            Err(error)
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        let snapshot = prompt_readiness_snapshot(session_name);
+        if !prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
+            return Err("claude tui composer changed before follow-up mutation".to_string());
         }
+        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+            "claude",
+            session_name,
+            prompt,
+        );
+        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                    "claude",
+                    session_name,
+                    prompt,
+                );
+                Err(error)
+            }
+        }
+    })
+}
+
+/// Submit `/compact` into a busy Claude pane without the generic readiness wait.
+/// This function deliberately contains no retry Enter, Escape, or Ctrl-U cleanup:
+/// after the first tmux mutation starts, every uncertainty stays disarmed.
+pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
+    let snapshot = prompt_readiness_snapshot(session_name);
+    if compact_steering_decision(&snapshot).is_err() {
+        return CompactSubmitOutcome::PreMutationRefused;
     }
+
+    // The first call begins the mutation boundary. Even a transport/result error
+    // can mean tmux partially typed the control, so nothing after this point is
+    // retryable by this path.
+    let literal = match crate::services::platform::tmux::send_literal(session_name, "/compact") {
+        Ok(output) => output,
+        Err(_) => return CompactSubmitOutcome::AmbiguousAfterMutation,
+    };
+    if ensure_tmux_success(literal, &TuiInputAction::Literal("/compact".to_string())).is_err() {
+        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    }
+    std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
+
+    // F4 (security-adjacent): re-check modal state under the composer lock we are
+    // already holding, IMMEDIATELY before the confirming Enter. The busy pane may
+    // have mounted a permission / plan / startup dialog during the settle window;
+    // pressing Enter would confirm its default selection (e.g. approve an
+    // unapproved tool in ask/plan mode). If a dialog is now on screen, abort
+    // WITHOUT Enter and report ambiguous so the trigger re-arms and a later idle
+    // turn retries once the dialog is gone. We deliberately do NOT send cleanup
+    // keys here: a stray Escape/Ctrl-U while a modal is focused could itself
+    // dismiss the operator's dialog, so the `/compact` literal is left as a draft
+    // (the next steering attempt refuses on the non-empty composer rather than
+    // stacking a second `/compact`).
+    let pre_enter = prompt_readiness_snapshot(session_name);
+    if compact_pre_enter_modal_guard(&pre_enter).is_err() {
+        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    }
+
+    let enter = match crate::services::platform::tmux::send_keys(session_name, &["Enter"]) {
+        Ok(output) => output,
+        Err(_) => return CompactSubmitOutcome::AmbiguousAfterMutation,
+    };
+    if ensure_tmux_success(enter, &TuiInputAction::Enter).is_err() {
+        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    }
+    std::thread::sleep(COMPACT_SUBMIT_PASSIVE_SETTLE);
+
+    let confirmation = prompt_readiness_snapshot(session_name);
+    if !confirmation.tmux_pane_alive || !confirmation.capture_available {
+        return CompactSubmitOutcome::AmbiguousAfterMutation;
+    }
+    if crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(
+        &confirmation.pane_tail,
+    ) || compact_queued_message_hint(&confirmation.pane_tail)
+    {
+        CompactSubmitOutcome::AcceptedOrQueued
+    } else {
+        CompactSubmitOutcome::AmbiguousAfterMutation
+    }
+}
+
+/// Strict pre-mutation steering policy. A regular busy frame is permitted only
+/// when its bottom composer is provably empty; every modal/draft/auth/blind
+/// capture is a refusal rather than a best-effort recovery opportunity.
+pub(crate) fn compact_steering_decision(
+    snapshot: &PromptReadinessSnapshot,
+) -> Result<(), &'static str> {
+    if !snapshot.tmux_pane_alive {
+        return Err("pane dead");
+    }
+    if !snapshot.capture_available {
+        return Err("pane capture unavailable");
+    }
+    if snapshot.prompt_draft_detected {
+        return Err("composer draft");
+    }
+    if snapshot_indicates_mcp_auth_block(snapshot) {
+        return Err("MCP authentication block");
+    }
+    if crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog(
+        &snapshot.pane_tail,
+    )
+    .is_some()
+    {
+        return Err("startup dialog");
+    }
+    if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
+        &snapshot.pane_tail,
+    ) {
+        return Err("interactive modal");
+    }
+    if !crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(
+        &snapshot.pane_tail,
+    ) {
+        return Err("exact empty composer unavailable");
+    }
+    Ok(())
+}
+
+/// F4: the modal / dialog subset of [`compact_steering_decision`], applied a
+/// SECOND time immediately before the confirming Enter of `send_compact_while_busy`.
+///
+/// The full steering decision cannot be reused at the pre-Enter boundary because
+/// by then the `/compact` literal has been typed, so the composer is
+/// intentionally non-empty and the empty-composer gate would always fail. This
+/// guard therefore checks ONLY the "a dialog is swallowing input" conditions
+/// whose default-confirm an auto Enter must never trigger — it shares the exact
+/// same detection primitives (`snapshot_indicates_mcp_auth_block`,
+/// `detect_claude_startup_dialog`, `tmux_capture_indicates_claude_tui_interactive_modal`)
+/// that are the single authority for "is a modal mounted", so the two boundaries
+/// can never disagree about what counts as a dialog.
+fn compact_pre_enter_modal_guard(snapshot: &PromptReadinessSnapshot) -> Result<(), &'static str> {
+    if !snapshot.tmux_pane_alive {
+        return Err("pane dead");
+    }
+    if !snapshot.capture_available {
+        return Err("pane capture unavailable");
+    }
+    if snapshot_indicates_mcp_auth_block(snapshot) {
+        return Err("MCP authentication block");
+    }
+    if crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog(
+        &snapshot.pane_tail,
+    )
+    .is_some()
+    {
+        return Err("startup dialog");
+    }
+    if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
+        &snapshot.pane_tail,
+    ) {
+        return Err("interactive modal");
+    }
+    Ok(())
+}
+
+fn compact_queued_message_hint(pane_tail: &str) -> bool {
+    let lower = pane_tail.to_ascii_lowercase();
+    lower.contains("queued message")
+        || (lower.contains("queued")
+            && (lower.contains("after current") || lower.contains("will be sent")))
 }
 
 /// Drive an interactive Claude TUI selector (e.g. `/effort <level>`) to a
@@ -437,29 +600,40 @@ pub fn send_selector_followup(
 ) -> Result<(), String> {
     let open_actions = plan_selector_open(nav)?;
     let navigate_actions = plan_selector_navigation(nav)?;
+    // The potentially long readiness wait remains outside the narrow composer
+    // lock. Once ready, every selector mutation (including the open→confirm
+    // interval) stays serialized with auto `/compact` so their keys cannot
+    // land in one another's editor/overlay.
     wait_for_prompt_ready(session_name, PromptReadinessKind::Followup, cancel_token)?;
-    // The slash command is typed into Claude as a real composer entry, so the
-    // transcript relay would otherwise classify it as SSH-direct input and
-    // lease a spurious external turn. Record it as Discord-originated (same as
-    // send_prompt_with_readiness) and drop the record if the drive fails.
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        "claude",
+    let result = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         session_name,
-        nav.slash_command,
+        || {
+            let snapshot = prompt_readiness_snapshot(session_name);
+            if !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot) {
+                return Err("claude tui composer changed before selector mutation".to_string());
+            }
+            // The slash command is typed into Claude as a real composer entry,
+            // so the transcript relay would otherwise classify it as SSH-direct
+            // input and lease a spurious external turn. Record it under the same
+            // lock that protects the ensuing mutation.
+            crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+                "claude",
+                session_name,
+                nav.slash_command,
+            );
+            // Phase 1: open the slider overlay.
+            run_actions(session_name, &open_actions, cancel_token)?;
+            // Phase 2: confirm the overlay actually mounted before sending any
+            // navigation keys. On a fresh/slow pane the selector is not focused
+            // immediately after Enter; sending Left/Right too early drops the keys
+            // into the composer and leaves the effort unchanged.
+            wait_for_selector_open(session_name, nav, cancel_token)?;
+            // Phase 3: home + move to the requested stop + Enter to confirm.
+            run_actions(session_name, &navigate_actions, cancel_token)?;
+            // Phase 4: validate the overlay closed (selection committed).
+            confirm_selector_closed(session_name, nav, cancel_token)
+        },
     );
-    let result = (|| {
-        // Phase 1: open the slider overlay.
-        run_actions(session_name, &open_actions, cancel_token)?;
-        // Phase 2: confirm the overlay actually mounted before sending any
-        // navigation keys. On a fresh/slow pane the selector is not focused
-        // immediately after Enter; sending Left/Right too early drops the keys
-        // into the composer and leaves the effort unchanged.
-        wait_for_selector_open(session_name, nav, cancel_token)?;
-        // Phase 3: home + move to the requested stop + Enter to confirm.
-        run_actions(session_name, &navigate_actions, cancel_token)?;
-        // Phase 4: validate the overlay closed (selection committed).
-        confirm_selector_closed(session_name, nav, cancel_token)
-    })();
     if result.is_err() {
         crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
             "claude",
@@ -871,6 +1045,22 @@ fn clear_prompt_draft_before_error(session_name: &str) {
     }
 }
 
+/// F1 single authority: run an out-of-turn composer cleanup through the SAME
+/// `with_composer_mutation_lock` that `/compact` steering and every normal
+/// prompt submit hold, so a stranded-draft clear and an auto `/compact` can never
+/// interleave their key sends.
+///
+/// Both out-of-turn stranded-draft clearers funnel here: the readiness-timeout
+/// cleanup below (which runs OUTSIDE the send's composer critical section, unlike
+/// the in-send cleanup in `run_actions_with_submission_confirmation` that is
+/// already lock-held), and the warm-followup stranded-draft clear in
+/// `hosting::followup_support`. Callers MUST NOT already hold the composer lock —
+/// every readiness/warm-followup wait acquires it only AFTER the wait returns,
+/// so this is the outermost composer acquisition on those paths (no re-entry).
+pub(crate) fn with_composer_cleanup_lock<R>(session_name: &str, cleanup: impl FnOnce() -> R) -> R {
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, cleanup)
+}
+
 fn prompt_draft_cleanup_actions(snapshot: &PromptReadinessSnapshot) -> Vec<TuiInputAction> {
     let mut actions = vec![
         TuiInputAction::CtrlU,
@@ -952,28 +1142,39 @@ pub fn send_followup_prompt_or_idle_transcript(
     transcript_path: &std::path::Path,
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
+    // The potentially long warm-follow-up readiness wait must not hold the
+    // narrow composer lock: a busy-pane `/compact` still needs to steer while
+    // this path waits for the prior turn. Once readiness returns, however,
+    // re-check the live composer and keep the dedupe record plus the entire
+    // submit/confirmation sequence serialized with every other mutation.
     wait_for_prompt_ready_or_idle_transcript(
         session_name,
         PromptReadinessKind::ProvenWarmFollowup,
         cancel_token,
         transcript_path,
     )?;
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        "claude",
-        session_name,
-        prompt,
-    );
-    match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                "claude",
-                session_name,
-                prompt,
-            );
-            Err(error)
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        let snapshot = prompt_readiness_snapshot(session_name);
+        if !proven_warm_followup_revalidates_prompt_ready(&snapshot, transcript_path) {
+            return Err("claude tui composer changed before follow-up mutation".to_string());
         }
-    }
+        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+            "claude",
+            session_name,
+            prompt,
+        );
+        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                    "claude",
+                    session_name,
+                    prompt,
+                );
+                Err(error)
+            }
+        }
+    })
 }
 
 fn wait_for_prompt_ready_inner(
@@ -1473,7 +1674,13 @@ fn wait_for_prompt_ready_polling(
                     readiness = readiness.label(),
                     "claude_tui clearing stranded follow-up prompt draft after readiness timeout so retry can re-inject cleanly"
                 );
-                clear_prompt_draft_before_error(session_name);
+                // F1: this cleanup runs OUTSIDE the send's composer critical
+                // section (the readiness wait completed with a timeout, so no
+                // submit lock is held). Route it through the shared composer lock
+                // so it is mutually exclusive with a busy-pane auto `/compact`.
+                with_composer_cleanup_lock(session_name, || {
+                    clear_prompt_draft_before_error(session_name);
+                });
             }
             return Err(format!(
                 "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason={}; previous_tui_turn_still_running={}; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
@@ -1562,6 +1769,25 @@ fn prompt_marker_confirms_prompt_ready(
     snapshot.prompt_marker_detected
         && !snapshot.prompt_draft_detected
         && snapshot_allows_prompt_readiness(readiness, snapshot)
+}
+
+/// Revalidate a hosted warm follow-up after it acquires the narrow composer
+/// lock. The earlier readiness wait may validly have returned through the
+/// transcript-idle fallback before a pane capture showed the `❯` marker, so a
+/// marker-only recheck would incorrectly reject an otherwise ready warm pane.
+///
+/// This mirrors the snapshot-based success condition in
+/// `wait_for_prompt_ready_inner`: the normal prompt marker is sufficient, or a
+/// live, non-busy snapshot plus an idle transcript is sufficient for the
+/// recorded-turn warm-reuse path.
+fn proven_warm_followup_revalidates_prompt_ready(
+    snapshot: &PromptReadinessSnapshot,
+    transcript_path: &std::path::Path,
+) -> bool {
+    let readiness = PromptReadinessKind::ProvenWarmFollowup;
+    prompt_marker_confirms_prompt_ready(readiness, snapshot)
+        || (snapshot_allows_prompt_readiness(readiness, snapshot)
+            && transcript_idle_confirms_prompt_ready(snapshot, Some(transcript_path)))
 }
 
 /// #3889/#4528: an MCP-auth warning blocks readiness unless the caller proves
@@ -2159,6 +2385,43 @@ mod tests {
             TuiTurnState::Idle
         );
         assert!(transcript_has_recorded_turn(&recorded_idle));
+    }
+
+    #[test]
+    fn warm_followup_lock_revalidation_keeps_idle_transcript_fallback() {
+        // The warm hosted path can become ready through the transcript-idle
+        // fallback before a concurrent pane capture observes the prompt marker.
+        // Acquiring the composer lock must revalidate that same valid state,
+        // rather than narrowing it to a marker-only condition.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("recorded-idle.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+             {\"type\":\"user\"}\n\
+             {\"type\":\"assistant\"}\n\
+             {\"type\":\"result\"}\n",
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "completed warm turn; prompt chrome not yet captured".to_string(),
+        };
+
+        assert!(
+            !prompt_marker_confirms_prompt_ready(
+                PromptReadinessKind::ProvenWarmFollowup,
+                &snapshot
+            ),
+            "fixture must exercise the markerless transcript fallback"
+        );
+        assert!(proven_warm_followup_revalidates_prompt_ready(
+            &snapshot,
+            &transcript,
+        ));
     }
 
     #[test]
@@ -3546,5 +3809,181 @@ line 13";
             }
         }
         assert_eq!(reassembled, prompt);
+    }
+
+    fn compact_snapshot(pane_tail: &str) -> PromptReadinessSnapshot {
+        PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: pane_tail.to_string(),
+        }
+    }
+
+    #[test]
+    fn compact_steering_allows_idle_and_busy_empty_composers_only() {
+        let idle = compact_snapshot("Ready for input (type message + Enter)\n❯");
+        let busy = compact_snapshot("✻ Working (12s · esc to interrupt)\n❯");
+        assert_eq!(compact_steering_decision(&idle), Ok(()));
+        assert_eq!(compact_steering_decision(&busy), Ok(()));
+
+        let mut draft = compact_snapshot("✻ Working\n❯ operator draft");
+        draft.prompt_draft_detected = true;
+        assert_eq!(compact_steering_decision(&draft), Err("composer draft"));
+    }
+
+    #[test]
+    fn compact_steering_rejects_auth_modals_dead_and_blind_panes() {
+        let auth = compact_snapshot("⚠ 1 MCP server needs authentication · run /mcp\n❯");
+        assert_eq!(
+            compact_steering_decision(&auth),
+            Err("MCP authentication block")
+        );
+
+        let resume = compact_snapshot("Resume from summary\nEnter to confirm\n❯");
+        assert_eq!(compact_steering_decision(&resume), Err("startup dialog"));
+
+        let permission = compact_snapshot("Allow\nDeny\nEnter to confirm\n❯");
+        assert_eq!(
+            compact_steering_decision(&permission),
+            Err("interactive modal")
+        );
+
+        let selector = compact_snapshot("Effort\n←/→ to adjust\n❯");
+        assert_eq!(
+            compact_steering_decision(&selector),
+            Err("interactive modal")
+        );
+
+        let mut dead = compact_snapshot("❯");
+        dead.tmux_pane_alive = false;
+        assert_eq!(compact_steering_decision(&dead), Err("pane dead"));
+
+        let mut blind = compact_snapshot("❯");
+        blind.capture_available = false;
+        assert_eq!(
+            compact_steering_decision(&blind),
+            Err("pane capture unavailable")
+        );
+    }
+
+    #[test]
+    fn compact_passive_confirmation_accepts_only_clear_or_queued_hint() {
+        assert!(compact_queued_message_hint(
+            "Your queued message will be sent after current"
+        ));
+        assert!(compact_queued_message_hint("Queued message"));
+        assert!(!compact_queued_message_hint(
+            "assistant mentioned a queue in prose"
+        ));
+    }
+
+    /// F4 mutation guard: the pre-Enter modal re-check
+    /// (`compact_pre_enter_modal_guard`). After `/compact` is typed the composer
+    /// is intentionally non-empty, so the guard must still ALLOW the confirming
+    /// Enter for a plain busy pane, yet REJECT a permission / plan / startup /
+    /// MCP-auth dialog that mounted during the settle window (pressing Enter
+    /// would confirm its default selection). Reverting the modal checks (or
+    /// making the guard always `Ok`) makes the dialog asserts below fail — the
+    /// Enter would auto-confirm the modal.
+    #[test]
+    fn pre_enter_modal_guard_blocks_dialogs_but_allows_the_typed_compact_draft() {
+        // The `/compact` literal has been typed: composer non-empty, draft shown.
+        // The pre-Enter guard allows the confirming Enter even though the FULL
+        // steering decision would now refuse the same frame (non-empty composer).
+        let mut typed_compact = compact_snapshot("✻ Working (12s · esc to interrupt)\n❯ /compact");
+        typed_compact.prompt_draft_detected = true;
+        assert_eq!(compact_pre_enter_modal_guard(&typed_compact), Ok(()));
+        assert!(
+            compact_steering_decision(&typed_compact).is_err(),
+            "the full steering decision must refuse the non-empty composer the pre-Enter guard tolerates"
+        );
+
+        // A dialog that mounted during the settle window must block the Enter.
+        let permission = compact_snapshot("Allow\nDeny\nEnter to confirm\n❯");
+        assert_eq!(
+            compact_pre_enter_modal_guard(&permission),
+            Err("interactive modal")
+        );
+        let selector = compact_snapshot("Effort\n←/→ to adjust\n❯");
+        assert_eq!(
+            compact_pre_enter_modal_guard(&selector),
+            Err("interactive modal")
+        );
+        let auth = compact_snapshot("⚠ 1 MCP server needs authentication · run /mcp\n❯");
+        assert_eq!(
+            compact_pre_enter_modal_guard(&auth),
+            Err("MCP authentication block")
+        );
+        let resume = compact_snapshot("Resume from summary\nEnter to confirm\n❯");
+        assert_eq!(
+            compact_pre_enter_modal_guard(&resume),
+            Err("startup dialog")
+        );
+        let mut dead = compact_snapshot("❯");
+        dead.tmux_pane_alive = false;
+        assert_eq!(compact_pre_enter_modal_guard(&dead), Err("pane dead"));
+        let mut blind = compact_snapshot("❯");
+        blind.capture_available = false;
+        assert_eq!(
+            compact_pre_enter_modal_guard(&blind),
+            Err("pane capture unavailable")
+        );
+    }
+
+    /// F1 mutation guard: `with_composer_cleanup_lock` must acquire the SAME
+    /// per-pane composer mutation lock `/compact` steering holds, so an
+    /// out-of-turn stranded-draft cleanup cannot interleave its key sends with a
+    /// busy-pane auto `/compact`. While a simulated `/compact` holds the composer
+    /// lock, the cleanup must NOT enter its critical section; it proceeds only
+    /// once the lock releases. Reverting the routing (running the cleanup without
+    /// the lock) lets it enter immediately, failing the `recv_timeout(..).is_err()`
+    /// assertion.
+    #[cfg(unix)]
+    #[test]
+    fn composer_cleanup_serializes_with_compact_composer_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let session = format!("claude-4591-cleanup-{}", uuid::Uuid::new_v4());
+        let (compact_holding_tx, compact_holding_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (cleanup_entered_tx, cleanup_entered_rx) = mpsc::channel();
+
+        let compact_session = session.clone();
+        std::thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &compact_session,
+                || {
+                    compact_holding_tx
+                        .send(())
+                        .expect("signal compact holding composer lock");
+                    release_rx.recv().expect("await release");
+                },
+            );
+        });
+        compact_holding_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("compact must acquire the composer lock");
+
+        let cleanup_session = session.clone();
+        std::thread::spawn(move || {
+            with_composer_cleanup_lock(&cleanup_session, || {
+                cleanup_entered_tx
+                    .send(())
+                    .expect("signal cleanup entered critical section");
+            });
+        });
+        assert!(
+            cleanup_entered_rx
+                .recv_timeout(Duration::from_millis(40))
+                .is_err(),
+            "an out-of-turn composer cleanup must wait behind the /compact composer lock"
+        );
+        release_tx.send(()).expect("release compact");
+        cleanup_entered_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("cleanup proceeds once /compact releases the composer lock");
     }
 }

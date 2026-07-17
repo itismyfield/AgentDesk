@@ -1179,6 +1179,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     let compact_percent = ctx_thresholds.compact_pct_for(&provider);
     let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
     let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
+    let compact_lower_bound_tokens = ctx_thresholds.compact_lower_bound_tokens;
     let compact_token_limit_for_codex = {
         let cli_config = provider.compact_cli_config(compact_percent, model_context_window);
         cli_config
@@ -1227,6 +1228,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             model_for_turn.as_deref(),
                             native_fast_mode_override,
                             compact_percent_for_claude,
+                            compact_lower_bound_tokens,
                             cache_ttl_minutes,
                             None,
                         ),

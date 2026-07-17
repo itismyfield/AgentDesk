@@ -15,6 +15,9 @@ use std::sync::mpsc::Sender;
 use serde_json::Value;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
+use crate::services::claude_compact_context::{
+    apply_auto_compact_window_to_command, launch_auto_compact_window,
+};
 use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::process::kill_child_tree;
 use crate::services::provider::{
@@ -25,7 +28,15 @@ use crate::services::session_backend::{
     parse_assistant_extra_tool_uses, parse_stream_message_with_state,
 };
 
-fn apply_gateway_proxy_env(command: &mut Command, gateway_proxy_env: &ClaudeGatewayProxyEnv) {
+fn apply_launch_env(
+    command: &mut Command,
+    gateway_proxy_env: &ClaudeGatewayProxyEnv,
+    auto_compact_window: Option<u64>,
+) {
+    // `claude-e` is a wrapper, but its real Claude child inherits this exact
+    // environment. Always remove a parent value before optionally setting the
+    // freshly resolved immutable-launch threshold.
+    apply_auto_compact_window_to_command(command, auto_compact_window);
     gateway_proxy_env.apply_to_command(command);
 }
 
@@ -45,6 +56,8 @@ pub fn execute_streaming(
     _report_provider: Option<ProviderKind>,
     model_override: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    compact_percent: Option<u64>,
+    compact_lower_bound_tokens: u64,
     _cache_ttl_minutes: Option<u32>,
     dispatch_type: Option<&str>,
 ) -> Result<(), String> {
@@ -100,6 +113,14 @@ pub fn execute_streaming(
     // these variables, so it uses the same guarded gateway decision as native
     // fresh launches.
     let gateway_proxy_env = crate::services::claude_gateway_proxy::resolve_for_launch();
+    let auto_compact_window = compact_percent.and_then(|percent| {
+        launch_auto_compact_window(
+            model_override,
+            percent,
+            compact_lower_bound_tokens,
+            &gateway_proxy_env,
+        )
+    });
     let mut command = Command::new(&claude_e_bin);
     crate::services::process::configure_child_process_group(&mut command);
     command
@@ -113,7 +134,7 @@ pub fn execute_streaming(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    apply_gateway_proxy_env(&mut command, &gateway_proxy_env);
+    apply_launch_env(&mut command, &gateway_proxy_env, auto_compact_window);
 
     let mut child = command
         .spawn()
@@ -374,7 +395,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_e_command_receives_authoritative_gateway_env() {
+    fn claude_e_command_receives_authoritative_launch_env() {
         let gateway_env = crate::services::claude_gateway_proxy::launch_env_for_test(
             true,
             "http://127.0.0.1:10100",
@@ -382,7 +403,7 @@ mod tests {
         );
         let mut command = Command::new("claude-e");
 
-        apply_gateway_proxy_env(&mut command, &gateway_env);
+        apply_launch_env(&mut command, &gateway_env, Some(700_000));
 
         let envs = command
             .get_envs()
@@ -401,6 +422,10 @@ mod tests {
             envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&Some("1".to_string()))
         );
+        assert_eq!(
+            envs.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            Some(&Some("700000".to_string()))
+        );
 
         let scrub = crate::services::claude_gateway_proxy::launch_env_for_test(
             false,
@@ -413,9 +438,10 @@ mod tests {
             .env(
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
                 "foreign-value",
-            );
+            )
+            .env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "stale-window");
 
-        apply_gateway_proxy_env(&mut command, &scrub);
+        apply_launch_env(&mut command, &scrub, None);
 
         let envs = command
             .get_envs()
@@ -431,5 +457,6 @@ mod tests {
             envs.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some(&None)
         );
+        assert_eq!(envs.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(&None));
     }
 }

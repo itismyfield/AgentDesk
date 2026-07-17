@@ -24,6 +24,52 @@ pub(crate) fn tmux_line_is_claude_tui_ready_prompt(line: &str) -> bool {
     trim_prompt_line(line) == CLAUDE_TUI_PROMPT_MARKER
 }
 
+/// Conservatively identify the currently editable, completely empty Claude
+/// composer. Unlike the general readiness predicate this remains true while a
+/// prior turn is busy: busy-turn steering needs the empty bottom composer, not
+/// an idle transcript. The bottom-most prompt marker must be exactly `❯`; a
+/// historical prompt, ghost text, or editable draft never qualifies.
+pub(crate) fn tmux_capture_indicates_claude_tui_exact_empty_composer(capture: &str) -> bool {
+    capture
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(CLAUDE_TUI_DRAFT_SCAN_LINES)
+        .find(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
+        .is_some_and(|line| tmux_line_is_claude_tui_ready_prompt(line))
+}
+
+/// Strict modal veto for machine steering. Normal busy chrome (including
+/// `esc to interrupt` and the persistent `bypass permissions` footer) is not a
+/// modal. Permission approval cards, startup/resume selectors, and generic
+/// confirmation selectors are rejected before any machine key is sent.
+pub(crate) fn tmux_capture_indicates_claude_tui_interactive_modal(capture: &str) -> bool {
+    if tmux_capture_indicates_claude_tui_selector_open(capture) {
+        return true;
+    }
+    let recent = capture
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(CLAUDE_TUI_DRAFT_SCAN_LINES)
+        .map(trim_prompt_line)
+        .collect::<Vec<_>>();
+    let lower = recent
+        .iter()
+        .map(|line| line.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let has_confirm_footer = lower.iter().any(|line| {
+        line.contains("enter to confirm")
+            || line.contains("esc to cancel")
+            || (line.contains("enter") && line.contains("select"))
+    });
+    let has_permission_choices = lower.iter().any(|line| line.contains("allow"))
+        && lower
+            .iter()
+            .any(|line| line.contains("deny") || line.contains("reject"));
+    has_confirm_footer || has_permission_choices
+}
+
 fn tmux_line_is_claude_tui_prompt_draft(line: &str) -> bool {
     let Some(rest) = trim_prompt_line(line).strip_prefix(CLAUDE_TUI_PROMPT_MARKER) else {
         return false;

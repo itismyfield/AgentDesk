@@ -113,11 +113,31 @@ fn recover_claude_tui_stranded_prompt_draft(
                 tmux_session_name,
                 transcript_path_string
             ));
-            let clear_result = if allow_recreate {
-                clear_claude_tui_stranded_prompt_draft(tmux_session_name, cancel_token.as_deref())
-            } else {
-                gently_clear_claude_tui_prompt_draft(tmux_session_name, cancel_token.as_deref())
-            };
+            // F1: route the stranded-draft clear through the SAME composer
+            // mutation lock `/compact` steering holds, so this clear and a
+            // busy-pane auto `/compact` can never interleave their key sends
+            // (the race that let a draft-clear mistake a just-typed `/compact`
+            // literal for a stranded draft and soak it up). This runs on the
+            // warm-followup recovery path, OUTSIDE any composer critical section
+            // (the submit lock is acquired later, inside
+            // `send_followup_prompt_or_idle_transcript`), so it is the outermost
+            // composer acquisition here — no re-entry, no deadlock.
+            let clear_result = crate::services::claude_tui::input::with_composer_cleanup_lock(
+                tmux_session_name,
+                || {
+                    if allow_recreate {
+                        clear_claude_tui_stranded_prompt_draft(
+                            tmux_session_name,
+                            cancel_token.as_deref(),
+                        )
+                    } else {
+                        gently_clear_claude_tui_prompt_draft(
+                            tmux_session_name,
+                            cancel_token.as_deref(),
+                        )
+                    }
+                },
+            );
             match clear_result {
                 Ok(post_clear_snapshot)
                     if post_clear_snapshot.tmux_pane_alive
