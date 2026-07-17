@@ -212,8 +212,9 @@ mod tests {
 
         let ops = shared.turn_view_reconciler.ops();
         assert!(
-            ops.iter()
-                .any(|op| { op.target.message_id == message_id && op.add && op.emoji == '⏳' })
+            !ops.iter()
+                .any(|op| { op.target.message_id == message_id && op.add && op.emoji == '⏳' }),
+            "queued retry must publish only its queue-kind marker"
         );
         assert!(ops.iter().any(|op| {
             op.target.message_id == message_id
