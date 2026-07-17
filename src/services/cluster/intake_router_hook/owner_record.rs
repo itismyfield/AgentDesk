@@ -1746,7 +1746,11 @@ mod tests {
             .await
             .unwrap();
         let candidate_id = candidate.map(|c| c.id);
-        assert_eq!(candidate_id, Some(row_id), "candidate SELECT passes the fence");
+        assert_eq!(
+            candidate_id,
+            Some(row_id),
+            "candidate SELECT passes the fence"
+        );
 
         // Concurrently: transfer node-W@0 → node-V@1 (touches only the owner
         // table, so it does not block on the outbox row lock).
