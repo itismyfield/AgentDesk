@@ -150,4 +150,21 @@ describe("deriveOfficeAgentState", () => {
 
     expect(state.manualInterventionByAgent.has(agent.id)).toBe(false);
   });
+
+  it("does not select a cancelled card as the agent primary card", () => {
+    const agent = makeAgent();
+
+    const state = deriveOfficeAgentState([agent], [
+      makeCard({
+        id: "card-cancelled",
+        status: "cancelled",
+        blocked_reason: "maintainer approval required before deploy",
+        review_status: "dilemma_pending",
+      }),
+    ]);
+
+    // Mutation guard: removing "cancelled" from TERMINAL_CARD_STATUSES makes both assertions fail.
+    expect(state.primaryCardByAgent.has(agent.id)).toBe(false);
+    expect(state.manualInterventionByAgent.has(agent.id)).toBe(false);
+  });
 });

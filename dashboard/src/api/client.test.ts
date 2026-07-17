@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import {
   assignKanbanIssue,
   getDispatchDeliveryEvents,
   getSkillRanking,
   onApiError,
+  readCachedGet,
   redispatchKanbanCard,
   request,
   retryKanbanCard,
@@ -13,8 +15,29 @@ import {
 const card = {
   id: "card-1",
   title: "Contract card",
+  description: null,
   status: "requested",
+  github_repo: "itismyfield/AgentDesk",
+  owner_agent_id: null,
+  requester_agent_id: null,
+  assignee_agent_id: "agent-1",
+  parent_card_id: null,
+  latest_dispatch_id: null,
+  sort_order: 0,
   priority: "medium",
+  depth: 0,
+  blocked_reason: null,
+  review_notes: null,
+  github_issue_number: 1733,
+  github_issue_url: "https://github.com/itismyfield/AgentDesk/issues/1733",
+  metadata_json: null,
+  pipeline_stage_id: null,
+  review_status: null,
+  created_at: "2026-07-17T00:00:00Z",
+  updated_at: "2026-07-17T00:00:00Z",
+  started_at: null,
+  requested_at: null,
+  completed_at: null,
 };
 
 function mockJsonResponse(body: unknown): Response {
@@ -36,6 +59,34 @@ function mockErrorResponse(status: number, body: unknown): Response {
 afterEach(() => {
   onApiError(null);
   vi.unstubAllGlobals();
+});
+
+describe("runtime response parsing", () => {
+  it("returns and caches the parser output instead of the raw GET payload", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(mockJsonResponse({ value: "42" })),
+    );
+    const endpoint = "/api/parser-output";
+    const schema = z.object({ value: z.coerce.number() });
+
+    const result = await request(endpoint, undefined, schema);
+
+    expect(result).toEqual({ value: 42 });
+    expect(readCachedGet(endpoint)?.data).toEqual({ value: 42 });
+  });
+
+  it("rejects invalid GET payloads before they reach the response cache", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(mockJsonResponse({ value: "invalid" })),
+    );
+    const endpoint = "/api/parser-rejection";
+    const schema = z.object({ value: z.number() });
+
+    await expect(request(endpoint, undefined, schema)).rejects.toThrow();
+    expect(readCachedGet(endpoint)).toBeNull();
+  });
 });
 
 describe("global API error reporting", () => {
@@ -98,10 +149,10 @@ describe("kanban dispatch mutation responses", () => {
         title: "Contract card",
         assignee_agent_id: "agent-1",
       }),
-    ).rejects.toThrow("missing required field 'error'");
+    ).rejects.toThrow(/transition[\s\S]*error/);
   });
 
-  it("returns the full retry contract instead of dropping dispatch fields", async () => {
+  it("returns the full retry contract without changing server timestamps", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       mockJsonResponse({
         card,
@@ -115,9 +166,78 @@ describe("kanban dispatch mutation responses", () => {
     const result = await retryKanbanCard("card-1", { request_now: true });
 
     expect(result.card.id).toBe("card-1");
+    expect(result.card.created_at).toBe(card.created_at);
+    expect(typeof result.card.created_at).toBe("string");
     expect(result.new_dispatch_id).toBe("dispatch-new");
     expect(result.cancelled_dispatch_id).toBeNull();
     expect(result.next_action).toBe("none_required");
+  });
+
+  it.each(["failed", "cancelled"])(
+    "accepts the %s server status and preserves PostgreSQL timestamps",
+    async (status) => {
+      const postgresTimestamp = "2026-07-17 00:00:00.123456+00";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          mockJsonResponse({
+            card: {
+              ...card,
+              status,
+              created_at: postgresTimestamp,
+              updated_at: postgresTimestamp,
+            },
+            new_dispatch_id: null,
+            cancelled_dispatch_id: "dispatch-old",
+            next_action: "none_required",
+          }),
+        ),
+      );
+
+      const result = await retryKanbanCard("card-1");
+
+      expect(result.card.status).toBe(status);
+      expect(result.card.created_at).toBe(postgresTimestamp);
+      expect(typeof result.card.created_at).toBe("string");
+    },
+  );
+
+  it.each([
+    { label: "custom", priority: "critical_path" },
+    { label: "empty", priority: "" },
+    { label: "whitespace-only", priority: "   " },
+  ])("accepts and preserves $label server priority strings", async ({ priority }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockJsonResponse({
+          card: { ...card, priority },
+          new_dispatch_id: null,
+          cancelled_dispatch_id: null,
+          next_action: "none_required",
+        }),
+      ),
+    );
+
+    const result = await retryKanbanCard("card-1");
+
+    expect(result.card.priority).toBe(priority);
+  });
+
+  it("rejects retry responses with malformed Kanban cards", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockJsonResponse({
+          card: { ...card, status: "Unexpected status" },
+          new_dispatch_id: "dispatch-new",
+          cancelled_dispatch_id: null,
+          next_action: "none_required",
+        }),
+      ),
+    );
+
+    await expect(retryKanbanCard("card-1")).rejects.toThrow(/card[\s\S]*status/);
   });
 
   it("rejects redispatch responses that omit required contract fields", async () => {
@@ -133,7 +253,7 @@ describe("kanban dispatch mutation responses", () => {
     );
 
     await expect(redispatchKanbanCard("card-1")).rejects.toThrow(
-      "missing required field 'next_action'",
+      /next_action/,
     );
   });
 });

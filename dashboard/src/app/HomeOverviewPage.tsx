@@ -17,6 +17,7 @@ import { HomeSortableWidget } from "./HomeOverviewWidgets";
 import { buildHomeWidgetSpecs } from "./HomeWidgetSpecs";
 import { StatusBadge } from "../components/common/StatusBadge";
 import { FreshnessIndicator } from "../components/common/FreshnessIndicator";
+import { coerceTimestampMs } from "../components/agent-manager/kanban-utils";
 
 export default function HomeOverviewPage({
   isMobileViewport,
@@ -104,8 +105,16 @@ export default function HomeOverviewPage({
   const recentDoneCards = useMemo(() => {
     const cutoff = Date.now() - KANBAN_DONE_RECENT_WINDOW_MS;
     return kanbanCards
-      .filter((card) => card.status === "done" && (card.completed_at ?? 0) >= cutoff)
-      .sort((a, b) => (b.completed_at ?? 0) - (a.completed_at ?? 0));
+      .filter(
+        (card) =>
+          card.status === "done" &&
+          (coerceTimestampMs(card.completed_at) ?? 0) >= cutoff,
+      )
+      .sort(
+        (a, b) =>
+          (coerceTimestampMs(b.completed_at) ?? 0) -
+          (coerceTimestampMs(a.completed_at) ?? 0),
+      );
   }, [kanbanCards]);
   const recentDoneCount = recentDoneCards.length;
   const blockedCards = kanbanCards.filter((card) => card.status === "blocked").length;

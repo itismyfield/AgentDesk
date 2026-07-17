@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import type { Agent, KanbanCard } from "../../types";
 import {
+  coerceTimestampMs,
   getBoardColumnStatus,
   isManualInterventionCard,
   isReviewCard,
@@ -144,8 +145,11 @@ export function filterKanbanCards({
   });
 }
 
-function isStaleInProgress(startedAt: number | null | undefined, nowMs: number, staleInProgressMs: number): boolean {
-  if (!startedAt) return false;
-  const startedAtMs = startedAt < 1e12 ? startedAt * 1000 : startedAt;
-  return nowMs - startedAtMs > staleInProgressMs;
+function isStaleInProgress(
+  startedAt: string | number | null | undefined,
+  nowMs: number,
+  staleInProgressMs: number,
+): boolean {
+  const startedAtMs = coerceTimestampMs(startedAt);
+  return startedAtMs != null && nowMs - startedAtMs > staleInProgressMs;
 }

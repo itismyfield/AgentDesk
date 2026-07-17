@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
+use crate::services::claude_command::ClaudeLaunchEnv;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
 
@@ -279,7 +279,7 @@ pub struct ClaudeTuiLaunchConfig {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub resume: bool,
-    pub(crate) gateway_proxy_env: ClaudeGatewayProxyEnv,
+    pub(crate) launch_env: ClaudeLaunchEnv,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -370,7 +370,7 @@ fn write_launch_script(
     // first prompt, and keeps direct script-generation tests on the same path.
     crate::services::claude_compact_context::register_launch_provenance(
         &config.tmux_session_name,
-        &config.gateway_proxy_env,
+        config.launch_env.gateway_proxy_env(),
     );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -413,15 +413,15 @@ fn write_launch_script(
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
     let mut gateway_exports = String::new();
-    // Interactive TUI sessions can change model after launch, so they never
-    // inherit an absolute compact window from dcserver/tmux.
+    // Chokepoint base: resolved gateway launch env (#4559).
+    config.launch_env.append_shell_env(&mut gateway_exports);
+    // Compact-window overlay (#4591): interactive TUI sessions can change model
+    // after launch, so they never inherit an absolute compact window from
+    // dcserver/tmux.
     crate::services::claude_compact_context::append_auto_compact_window_shell_env(
         &mut gateway_exports,
         None,
     );
-    config
-        .gateway_proxy_env
-        .append_shell_env(&mut gateway_exports);
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
@@ -456,11 +456,7 @@ mod tests {
             system_prompt: Some("system prompt".to_string()),
             model: Some("sonnet".to_string()),
             resume: false,
-            gateway_proxy_env: crate::services::claude_gateway_proxy::launch_env_for_test(
-                false,
-                "http://127.0.0.1:10100",
-                true,
-            ),
+            launch_env: ClaudeLaunchEnv::scrub_for_test(),
         }
     }
 
@@ -573,11 +569,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.model = Some("sonnet".to_string());
-        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
-            true,
-            "http://proxy.example/it's-ready",
-            true,
-        );
+        config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let launch_script_path = dir.path().join("launch.sh");
 
         write_launch_script(
@@ -599,11 +591,7 @@ mod tests {
         assert!(script.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
 
-        config.gateway_proxy_env = crate::services::claude_gateway_proxy::launch_env_for_test(
-            false,
-            "http://foreign.example",
-            true,
-        );
+        config.launch_env = ClaudeLaunchEnv::scrub_for_test();
         write_launch_script(
             &launch_script_path,
             &config,
