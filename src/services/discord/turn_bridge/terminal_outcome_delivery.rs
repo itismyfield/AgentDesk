@@ -15,7 +15,7 @@ use super::stream_tick::{
 };
 use super::streaming_edit_text::bridge_claude_tui_followup_busy_readiness_timeout;
 use super::{streaming_edit_text::TuiErrorClassification, *};
-use busy_followup_retry::handle_empty_response_and_busy_requeue;
+use busy_followup_retry::{apply_busy_requeue_if_pending, handle_empty_response_and_busy_requeue};
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
     CancelPromptReplaceState, handle_cancel_prompt_replace,
@@ -434,8 +434,13 @@ pub(super) async fn run_terminal_outcome_delivery(
                 bridge_skip_holder_owns_inflight: &mut bridge_skip_holder_owns_inflight,
                 claude_tui_busy_requeue_pending: &mut claude_tui_busy_requeue_pending,
             },
-            &mut claude_tui_busy_requeue_pending,
-            &mut preserve_inflight_for_cleanup_retry,
+        )
+        .await;
+        // Recovery wrote `claude_tui_busy_requeue_pending` back through its state
+        // borrow (now released), so the requeue re-borrows the shared locals here
+        // sequentially — never aliased with the recovery call above.
+        apply_busy_requeue_if_pending(
+            claude_tui_busy_requeue_pending,
             &shared_owned,
             &provider,
             channel_id,
@@ -443,6 +448,8 @@ pub(super) async fn run_terminal_outcome_delivery(
             dispatch_id.as_deref(),
             adk_session_key.as_deref(),
             turn_id.as_str(),
+            &mut delivery_response,
+            &mut preserve_inflight_for_cleanup_retry,
         )
         .await;
         if silent_turn_handled {

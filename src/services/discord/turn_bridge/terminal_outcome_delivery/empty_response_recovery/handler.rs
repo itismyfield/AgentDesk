@@ -4,12 +4,14 @@ use std::sync::Arc;
 use super::super::*;
 use super::guidance;
 
-pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) enum EmptyResponseRecoveryMessage {
+pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) enum EmptyResponseRecoveryMessage
+{
     ResumeFailureAlreadyHandled,
     InspectEmptyResponse,
 }
 
-pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) enum EmptyResponseRecoveryOutcome {
+pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) enum EmptyResponseRecoveryOutcome
+{
     ContinueDelivery {
         delivery_response: String,
         spoken_delivery_response: String,
@@ -22,39 +24,69 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) enum Em
     },
 }
 
-pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct EmptyResponseRecoveryContext<'a> {
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) shared_owned: &'a Arc<SharedData>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) gateway: &'a Arc<dyn TurnGateway>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) cancel_token: &'a Arc<crate::services::provider::CancelToken>,
+pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct EmptyResponseRecoveryContext<
+    'a,
+> {
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) shared_owned:
+        &'a Arc<SharedData>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) gateway:
+        &'a Arc<dyn TurnGateway>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) cancel_token:
+        &'a Arc<crate::services::provider::CancelToken>,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) channel_id: ChannelId,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) user_msg_id: Option<MessageId>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) adk_session_key: &'a Option<String>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) user_text_owned: &'a String,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) had_prior_session_id_at_turn_start: bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) session_handshake_seen: bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) claude_tui_followup_busy_readiness_timeout: bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) user_msg_id:
+        Option<MessageId>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) adk_session_key:
+        &'a Option<String>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) user_text_owned:
+        &'a String,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) had_prior_session_id_at_turn_start:
+        bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) session_handshake_seen:
+        bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) claude_tui_followup_busy_readiness_timeout:
+        bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) rx_disconnected: bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) turn_start: std::time::Instant,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) turn_start:
+        std::time::Instant,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) recovery_retry: bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) review_dispatch_warning: &'a Option<String>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) watcher_owner_channel_id: ChannelId,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) tmux_last_offset: Option<u64>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) review_dispatch_warning:
+        &'a Option<String>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) watcher_owner_channel_id:
+        ChannelId,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) tmux_last_offset:
+        Option<u64>,
 }
 
-pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct EmptyResponseRecoveryState<'a> {
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) full_response: &'a mut String,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) new_session_id: &'a mut Option<String>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) new_raw_provider_session_id: &'a mut Option<String>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) inflight_state: &'a mut InflightTurnState,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) api_friction_reports: &'a mut Vec<crate::services::api_friction::ApiFrictionReport>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) terminal_empty_response_notice: &'a mut Option<String>,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) resume_failure_detected: &'a mut bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) response_sent_offset: &'a mut usize,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) terminal_delivery_committed: &'a mut bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) terminal_body_visible: &'a mut bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) preserve_inflight_for_cleanup_retry: &'a mut bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) bridge_skip_holder_owns_inflight: &'a mut bool,
-    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) claude_tui_busy_requeue_pending: &'a mut bool,
+pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct EmptyResponseRecoveryState<
+    'a,
+> {
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) full_response:
+        &'a mut String,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) new_session_id:
+        &'a mut Option<String>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) new_raw_provider_session_id:
+        &'a mut Option<String>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) inflight_state:
+        &'a mut InflightTurnState,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) api_friction_reports:
+        &'a mut Vec<crate::services::api_friction::ApiFrictionReport>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) terminal_empty_response_notice:
+        &'a mut Option<String>,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) resume_failure_detected:
+        &'a mut bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) response_sent_offset:
+        &'a mut usize,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) terminal_delivery_committed:
+        &'a mut bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) terminal_body_visible:
+        &'a mut bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) preserve_inflight_for_cleanup_retry:
+        &'a mut bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) bridge_skip_holder_owns_inflight:
+        &'a mut bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) claude_tui_busy_requeue_pending:
+        &'a mut bool,
 }
 
 fn preserve_busy_claude_followup(claude_tui_followup_busy_readiness_timeout: bool) -> bool {
