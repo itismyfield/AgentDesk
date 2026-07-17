@@ -5,18 +5,16 @@
 //! derived-status activity label and the store-facing time-line builder live here
 //! with their tests.
 //!
-//! The footer header is a fixed two-line block:
-//! - line 1 is the derived-status ACTIVITY label alone (`🟢 진행 중` /
-//!   `🔧 도구 실행 중 (…)` / `✅ 완료`). The spinner
-//!   merge (`single_message_panel::merged_footer_header_line`) swaps the leading
-//!   status emoji for the animated spinner, so the marker set there must stay in
-//!   sync with the emojis this label can start with.
-//! - line 2 is the TIME line (`마지막 업데이트 : MM-DD HH:MM:SS (<t:last:R>) /
-//!   턴 시작 : MM-DD HH:MM:SS (<t:start:R>)`). The fixed KST absolute times keep
-//!   mobile clients readable when they do not refresh Discord's relative token.
-//!   It replaces the pre-#3983 confidence line + `진행 중 — provider` header; the
-//!   freshness class is now absorbed into the line-1 emoji (item B), and the
-//!   provider moved off the footer entirely.
+//! The footer header starts with the derived-status ACTIVITY label (`🟢 진행 중` /
+//! `🔧 도구 실행 중 (…)` / `✅ 완료`). The spinner merge
+//! (`single_message_panel::merged_footer_header_line`) swaps the leading status
+//! emoji for the animated spinner, so the marker set there must stay in sync with
+//! the emojis this label can start with. The request anchor follows the activity
+//! line, then the stable TIME lines render one field per line in turn-start / last-
+//! update order. The fixed KST absolute times keep mobile clients readable when
+//! they do not refresh Discord's relative token. This replaces the pre-#3983
+//! confidence line + `진행 중 — provider` header; the freshness class is absorbed
+//! into the activity emoji, and the provider moved off the footer entirely.
 //!
 //! Both times derive from STABLE store stamps (never "now"), so the footer text
 //! stays byte-identical across heartbeat ticks — the message is not needlessly
@@ -52,17 +50,18 @@ fn render_kst_time(unix: i64) -> String {
         .to_string()
 }
 
-/// #4572: renders the footer's fixed KST and relative time line.
-/// `last_activity_unix` is the store's STABLE per-channel last-live-content
-/// arrival stamp; it falls back to the turn start when no live content has
-/// arrived yet. The injected stamps keep the text identical across heartbeat
-/// ticks (never re-edited) while Discord can still show the localized relative age.
+/// #4572/#4601: renders the footer's fixed KST and relative time fields on
+/// separate lines, with turn start before last update. `last_activity_unix` is
+/// the store's STABLE per-channel last-live-content arrival stamp; it falls back
+/// to the turn start when no live content has arrived yet. The injected stamps
+/// keep the text identical across heartbeat ticks (never re-edited) while
+/// Discord can still show the localized relative age.
 pub(super) fn render_time_line(last_activity_unix: Option<i64>, started_at_unix: i64) -> String {
     let last = last_activity_unix.unwrap_or(started_at_unix);
     format!(
-        "마지막 업데이트 : {} (<t:{last}:R>) / 턴 시작 : {} (<t:{started_at_unix}:R>)",
-        render_kst_time(last),
+        "턴 시작 : {} (<t:{started_at_unix}:R>)\n마지막 업데이트 : {} (<t:{last}:R>)",
         render_kst_time(started_at_unix),
+        render_kst_time(last),
     )
 }
 
@@ -175,10 +174,10 @@ mod tests {
     // ---- render_time_line: anchor selection + heartbeat stability ---------
 
     #[test]
-    fn time_line_anchors_update_to_last_activity_and_start() {
+    fn time_line_renders_start_then_update_on_separate_lines() {
         assert_eq!(
             render_time_line(Some(LAST_ACTIVITY), STARTED_AT),
-            "마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)"
+            "턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"
         );
     }
 
@@ -186,8 +185,9 @@ mod tests {
     fn time_line_includes_fixed_kst_and_discord_relative_tokens() {
         let line = render_time_line(Some(LAST_ACTIVITY), STARTED_AT);
 
-        assert!(line.contains("마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"));
         assert!(line.contains("턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)"));
+        assert!(line.contains("마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"));
+        assert!(!line.contains(" / "), "time fields must not share one line");
     }
 
     #[test]
@@ -195,7 +195,7 @@ mod tests {
         // No live content yet → the update age anchors to the turn start.
         assert_eq!(
             render_time_line(None, STARTED_AT),
-            "마지막 업데이트 : 11-15 07:13:20 (<t:1700000000:R>) / 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)"
+            "턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:13:20 (<t:1700000000:R>)"
         );
     }
 
