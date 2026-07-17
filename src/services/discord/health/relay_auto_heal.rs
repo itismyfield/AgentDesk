@@ -509,13 +509,22 @@ fn should_redrive_undelivered_backlog(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
 ) -> bool {
+    // #4181 item-2: the no-progress grace runs on a MONOTONIC clock owned by
+    // `stall_liveness::redrive_grace`; production passes no wall-clock input (a
+    // forward NTP jump must neither fire a redrive early nor evict a fresh
+    // observation). `now_unix_secs` is discarded in production; in test builds it
+    // drives the injected monotonic clock through this deep call chain so the
+    // redrive integration tests keep exercising the real grace.
+    #[cfg(test)]
+    {
+        stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
+    }
+    #[cfg(not(test))]
+    {
+        let _ = now_unix_secs;
+    }
     has_live_undelivered_backlog(snapshot)
-        && stall_liveness::stalled_undelivered_backlog_for_redrive(
-            provider,
-            channel_id,
-            snapshot,
-            now_unix_secs,
-        )
+        && stall_liveness::stalled_undelivered_backlog_for_redrive(provider, channel_id, snapshot)
 }
 
 fn live_relay_frontier_advanced_since_snapshot(

@@ -14,6 +14,10 @@ mod redrive_grace;
 // #4181 item-2: the redrive no-progress grace lives in the `redrive_grace`
 // child module (monotonic clock, kept off this file's production line count).
 pub(super) use redrive_grace::stalled_undelivered_backlog_for_redrive;
+// #4181 item-2 F2: test-only injection of the monotonic clock for redrive
+// integration tests that drive the grace through the deep call chain.
+#[cfg(test)]
+pub(super) use redrive_grace::set_redrive_grace_test_clock;
 
 pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
 /// Historical deferral-budget field for force-clean deferrals while positive
@@ -464,7 +468,10 @@ pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     });
     CAPTURE_OFFSET_WATCHDOG_STATE
         .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
-    redrive_grace::gc(now_unix_secs);
+    // #4181 item-2 P2: redrive's no-progress TTL GC is monotonic (its own clock),
+    // independent of this wall-clock `now_unix_secs`, so a forward wall jump
+    // cannot evict a monotonically-recent redrive observation.
+    redrive_grace::gc();
 }
 
 fn stall_watchdog_liveness_state_is_healthy(snapshot: &WatcherStateSnapshot) -> bool {
