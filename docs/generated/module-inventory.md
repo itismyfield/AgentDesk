@@ -597,9 +597,9 @@
 | `services::discord::prompt_builder::section_dedupe` | `src/services/discord/prompt_builder/section_dedupe.rs` | 159 | 105 | 54 |  |
 | `services::discord::queue_dispatch` | `src/services/discord/queue_dispatch.rs` | 50 | 50 | 0 |  |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 2310 | 751 | 1559 |  |
-| `services::discord::queue_marker` | `src/services/discord/queue_marker.rs` | 646 | 223 | 423 |  |
+| `services::discord::queue_marker` | `src/services/discord/queue_marker.rs` | 643 | 223 | 420 |  |
 | `services::discord::queue_overflow_dlq` | `src/services/discord/queue_overflow_dlq.rs` | 210 | 127 | 83 |  |
-| `services::discord::queue_reactions` | `src/services/discord/queue_reactions.rs` | 35 | 25 | 10 |  |
+| `services::discord::queue_reactions` | `src/services/discord/queue_reactions.rs` | 37 | 25 | 12 |  |
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 251 | 251 | 0 |  |
 | `services::discord::reaction_cleanup` | `src/services/discord/reaction_cleanup.rs` | 49 | 24 | 25 |  |
 | `services::discord::reaction_lifecycle` | `src/services/discord/reaction_lifecycle.rs` | 363 | 321 | 42 |  |
@@ -669,7 +669,7 @@
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 313 | 222 | 91 |  |
 | `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1734 | 1381 | 353 | giant-file |
 | `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3081 | 2727 | 354 | giant-file |
-| `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 699 | 604 | 95 |  |
+| `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 698 | 603 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction` | `src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs` | 65 | 65 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 256 | 256 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::voice_intake` | `src/services/discord/router/message_handler/intake_turn/voice_intake.rs` | 155 | 155 | 0 |  |
@@ -831,7 +831,7 @@
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 169 | 100 | 69 |  |
 | `services::discord::turn_bridge::early_tui_completion` | `src/services/discord/turn_bridge/early_tui_completion.rs` | 62 | 62 | 0 |  |
 | `services::discord::turn_bridge::finalize_epilogue` | `src/services/discord/turn_bridge/finalize_epilogue.rs` | 306 | 156 | 150 |  |
-| `services::discord::turn_bridge::followup_requeue` | `src/services/discord/turn_bridge/followup_requeue.rs` | 237 | 122 | 115 |  |
+| `services::discord::turn_bridge::followup_requeue` | `src/services/discord/turn_bridge/followup_requeue.rs` | 238 | 122 | 116 |  |
 | `services::discord::turn_bridge::guards` | `src/services/discord/turn_bridge/guards.rs` | 76 | 76 | 0 |  |
 | `services::discord::turn_bridge::headless_delivery` | `src/services/discord/turn_bridge/headless_delivery.rs` | 518 | 442 | 76 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 411 | 303 | 108 |  |
@@ -889,7 +889,7 @@
 | `services::discord::turn_finalizer::finalize_context` | `src/services/discord/turn_finalizer/finalize_context.rs` | 179 | 148 | 31 |  |
 | `services::discord::turn_finalizer::reconcile` | `src/services/discord/turn_finalizer/reconcile.rs` | 221 | 221 | 0 |  |
 | `services::discord::turn_finalizer::watcher_backstop` | `src/services/discord/turn_finalizer/watcher_backstop.rs` | 273 | 210 | 63 |  |
-| `services::discord::turn_view_reconciler` | `src/services/discord/turn_view_reconciler.rs` | 2301 | 2301 | 0 | giant-file |
+| `services::discord::turn_view_reconciler` | `src/services/discord/turn_view_reconciler.rs` | 2358 | 2358 | 0 | giant-file |
 | `services::discord::turn_view_reconciler::orphan_sweep` | `src/services/discord/turn_view_reconciler/orphan_sweep.rs` | 611 | 321 | 290 |  |
 | `services::discord::turn_view_reconciler::queue_repair` | `src/services/discord/turn_view_reconciler/queue_repair.rs` | 31 | 31 | 0 |  |
 | `services::discord::turn_view_reconciler::reaction_set` | `src/services/discord/turn_view_reconciler/reaction_set.rs` | 23 | 23 | 0 |  |

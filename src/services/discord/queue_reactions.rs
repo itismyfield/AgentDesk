@@ -26,10 +26,12 @@ pub(in crate::services::discord) fn drain_reactions_for_queue_exit(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn drain_sets_include_reconcile_marker() {
+    fn drain_sets_include_only_queue_markers() {
         assert!(super::QUEUE_PENDING_REACTION_EMOJIS.contains(&'🔄'));
         assert!(super::QUEUE_STANDALONE_DRAIN_REACTION_EMOJIS.contains(&'🔄'));
         assert!(super::drain_reactions_for_queue_exit(true).contains(&'🔄'));
         assert!(super::drain_reactions_for_queue_exit(false).contains(&'🔄'));
+        assert!(!super::drain_reactions_for_queue_exit(true).contains(&'⏳'));
+        assert!(!super::drain_reactions_for_queue_exit(false).contains(&'⏳'));
     }
 }

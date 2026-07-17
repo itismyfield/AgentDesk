@@ -1488,11 +1488,11 @@
     `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
     `turn_finalizer/reconcile.rs` 221 prod LoC, and
     `turn_finalizer/cleanup.rs` 565 prod LoC. No PG lease/schema change.
-  - `src/services/discord/turn_view_reconciler.rs` (2257 prod lines; +45 from #4248/#4329 review hardening: queued-state schema v2 invalidates v1 queue records while keeping v1 pending-anchor recovery compatible, and multi-reaction transitions compensate already-applied operations on partial failure; #4248 moves
+  - `src/services/discord/turn_view_reconciler.rs` (2356 prod lines; +55 from #4606 migrating queued-state persistence to schema v3, converging legacy v2 marker+hourglass records, and making queued user-message views marker-only while `Queued*` → `Pending` adds a fresh `⏳` through the target-set diff; +45 from #4248/#4329 review hardening: queued-state schema v2 invalidates v1 queue records while keeping v1 pending-anchor recovery compatible, and multi-reaction transitions compensate already-applied operations on partial failure; #4248 moves
     the derived reaction mapping into `turn_view_reconciler/reaction_set.rs` and
-    makes queued user-message views include an immediate `⏳` alongside their
-    queue-kind marker; promotion removes only the queue-kind marker and terminal
-    completion converges to `✅` through the same persisted adder identity; +104 from
+    originally made queued user-message views include an immediate `⏳` alongside
+    their queue-kind marker; #4606 supersedes that queue presentation while
+    terminal completion still converges to `✅` through the same persisted adder identity; +104 from
     #4049 S4-a2 round-9 adding an attempt-scoped clear API/current-generation
     shim so race-loss stale attempt-1 clears cannot wipe a same-generation
     attempt-2 Pending marker; #4049 S4-a2 extends the S4-a1 reaction reconciler

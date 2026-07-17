@@ -27,7 +27,8 @@ pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_react
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 const PERSISTED_STATE_VERSION: u32 = 1;
-const QUEUED_HOURGLASS_STATE_VERSION: u32 = 2;
+const LEGACY_QUEUED_HOURGLASS_STATE_VERSION: u32 = 2;
+const QUEUED_MARKER_ONLY_STATE_VERSION: u32 = 3;
 const RECENTLY_FINALIZED_TARGET_MAX: usize = 1024;
 const RECENTLY_FINALIZED_TARGET_TTL: time::Duration = time::Duration::from_secs(10 * 60);
 
@@ -263,7 +264,7 @@ struct AppliedTarget {
     applied: TurnViewState,
     identity: ResolvedIdentity,
     start_attempt: Option<TurnStartAttempt>,
-    legacy_queue_marker: Option<char>,
+    legacy_queue_reactions: Vec<char>,
 }
 
 #[derive(Clone, Copy)]
@@ -410,7 +411,7 @@ impl TurnViewReconciler {
             start_attempt: (applied == TurnViewState::Pending)
                 .then_some(start_attempt)
                 .flatten(),
-            legacy_queue_marker: None,
+            legacy_queue_reactions: Vec::new(),
         }
     }
 
@@ -429,7 +430,7 @@ impl TurnViewReconciler {
             applied: TurnViewState::Pending,
             identity: current.identity.clone(),
             start_attempt: Some(start_attempt),
-            legacy_queue_marker: current.legacy_queue_marker,
+            legacy_queue_reactions: current.legacy_queue_reactions.clone(),
         };
         self.targets.insert(target, updated.clone());
         self.persist_target(target, &updated, shared, source);
@@ -857,10 +858,16 @@ impl TurnViewReconciler {
         if let Some(current) = current.as_ref() {
             if desired == TurnViewState::None
                 && clear_start_attempt.is_none()
-                && let Some(emoji) = current.legacy_queue_marker
+                && !current.legacy_queue_reactions.is_empty()
             {
                 let delivery = self
-                    .apply_reaction(shared, target, emoji, false, &current.identity, source)
+                    .remove_legacy_queue_reactions(
+                        shared,
+                        target,
+                        &current.legacy_queue_reactions,
+                        &current.identity,
+                        source,
+                    )
                     .await;
                 if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
                     self.discard_target_locked(target, source, &target_lock);
@@ -1021,7 +1028,10 @@ impl TurnViewReconciler {
                 applied,
                 desired,
                 current.is_none(),
-                current.as_ref().and_then(|entry| entry.legacy_queue_marker),
+                current
+                    .as_ref()
+                    .map(|entry| entry.legacy_queue_reactions.as_slice())
+                    .unwrap_or_default(),
                 &resolved_identity,
                 source,
             )
@@ -1110,9 +1120,15 @@ impl TurnViewReconciler {
         };
 
         if current.applied != expected_state {
-            if current.owner == owner && current.legacy_queue_marker == Some(emoji) {
+            if current.owner == owner && current.legacy_queue_reactions.contains(&emoji) {
                 let delivery = self
-                    .apply_reaction(shared, target, emoji, false, &current.identity, source)
+                    .remove_legacy_queue_reactions(
+                        shared,
+                        target,
+                        &current.legacy_queue_reactions,
+                        &current.identity,
+                        source,
+                    )
                     .await;
                 if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
                     self.discard_target_locked(target, source, &target_lock);
@@ -1416,7 +1432,9 @@ impl TurnViewReconciler {
         };
         if !matches!(
             record.version,
-            PERSISTED_STATE_VERSION | QUEUED_HOURGLASS_STATE_VERSION
+            PERSISTED_STATE_VERSION
+                | LEGACY_QUEUED_HOURGLASS_STATE_VERSION
+                | QUEUED_MARKER_ONLY_STATE_VERSION
         ) || record.provider != shared.provider.as_str()
             || TurnViewTargetKind::from_str(&record.kind) != Some(target.kind)
             || record.channel_id != target.channel_id.get()
@@ -1450,13 +1468,20 @@ impl TurnViewReconciler {
             return None;
         }
         let identity = self.resolve_persisted_identity(&record, shared, source)?;
-        let legacy_queue_marker = (record.version == PERSISTED_STATE_VERSION
-            && recorded_applied.is_queue_marker())
-        .then(|| reaction_set::for_state(recorded_applied)[0]);
-        let applied = if legacy_queue_marker.is_some() {
-            TurnViewState::None
-        } else {
+        let legacy_queue_reactions = match record.version {
+            PERSISTED_STATE_VERSION if recorded_applied.is_queue_marker() => {
+                vec![reaction_set::for_state(recorded_applied)[0]]
+            }
+            LEGACY_QUEUED_HOURGLASS_STATE_VERSION if recorded_applied.is_queue_marker() => vec![
+                reaction_set::for_state(recorded_applied)[0],
+                reaction_set::for_state(TurnViewState::Pending)[0],
+            ],
+            _ => Vec::new(),
+        };
+        let applied = if legacy_queue_reactions.is_empty() {
             recorded_applied
+        } else {
+            TurnViewState::None
         };
         let mut target = Self::applied_target(
             TurnViewOwner::new(record.owner_generation, record.owner_turn_id),
@@ -1464,7 +1489,7 @@ impl TurnViewReconciler {
             identity,
             record.start_attempt_id.map(TurnStartAttempt),
         );
-        target.legacy_queue_marker = legacy_queue_marker;
+        target.legacy_queue_reactions = legacy_queue_reactions;
         Some(target)
     }
 
@@ -1475,7 +1500,7 @@ impl TurnViewReconciler {
         shared: &SharedData,
         source: &'static str,
     ) {
-        if applied.applied == TurnViewState::None && applied.legacy_queue_marker.is_none() {
+        if applied.applied == TurnViewState::None && applied.legacy_queue_reactions.is_empty() {
             self.delete_persisted_target(target, source);
             return;
         }
@@ -1483,12 +1508,15 @@ impl TurnViewReconciler {
             return;
         };
         let applied_state = applied
-            .legacy_queue_marker
-            .and_then(TurnViewState::from_queue_marker_emoji)
+            .legacy_queue_reactions
+            .iter()
+            .find_map(|emoji| TurnViewState::from_queue_marker_emoji(*emoji))
             .unwrap_or(applied.applied);
         let record = PersistedTargetState {
-            version: if applied.applied.is_queue_marker() || applied.legacy_queue_marker.is_some() {
-                QUEUED_HOURGLASS_STATE_VERSION
+            version: if applied.applied.is_queue_marker()
+                || !applied.legacy_queue_reactions.is_empty()
+            {
+                QUEUED_MARKER_ONLY_STATE_VERSION
             } else {
                 PERSISTED_STATE_VERSION
             },
@@ -1539,7 +1567,7 @@ impl TurnViewReconciler {
         applied: TurnViewState,
         desired: TurnViewState,
         cold: bool,
-        legacy_queue_marker: Option<char>,
+        legacy_queue_reactions: &[char],
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
@@ -1563,9 +1591,15 @@ impl TurnViewReconciler {
             return delivery;
         }
 
-        if let Some(emoji) = legacy_queue_marker {
+        if !legacy_queue_reactions.is_empty() {
             let delivery = self
-                .apply_reaction(shared, target, emoji, false, identity, source)
+                .remove_legacy_queue_reactions(
+                    shared,
+                    target,
+                    legacy_queue_reactions,
+                    identity,
+                    source,
+                )
                 .await;
             if !delivery.delivered() {
                 return delivery;
@@ -1573,6 +1607,29 @@ impl TurnViewReconciler {
         }
         self.apply_diff(shared, target, applied, desired, identity, source)
             .await
+    }
+
+    async fn remove_legacy_queue_reactions(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        reactions: &[char],
+        identity: &ResolvedIdentity,
+        source: &'static str,
+    ) -> TurnViewDelivery {
+        let mut removed = Vec::new();
+        for emoji in reactions {
+            let delivery = self
+                .apply_reaction(shared, target, *emoji, false, identity, source)
+                .await;
+            if !delivery.delivered() {
+                self.compensate_reaction_ops(shared, target, identity, source, &removed)
+                    .await;
+                return delivery;
+            }
+            removed.push((*emoji, false));
+        }
+        TurnViewDelivery::Delivered
     }
 
     async fn apply_diff(

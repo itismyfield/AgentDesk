@@ -31,7 +31,7 @@
 | `src/services/discord/tui_direct_pending_start.rs` | 1495 | discord-relay | 2026-08-31 | #3540 |
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1079 | discord-relay | 2026-10-31 | #4019 |
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
-| `src/services/discord/turn_view_reconciler.rs` | 2301 | discord-relay | 2026-08-31 | #4049 |
+| `src/services/discord/turn_view_reconciler.rs` | 2358 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2887 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2077 | discord-relay | 2026-10-31 | #3840 |
 | `src/services/tmux_common.rs` | 1311 | discord-relay | 2026-10-31 | #3924 |
