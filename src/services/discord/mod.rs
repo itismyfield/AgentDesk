@@ -3984,6 +3984,23 @@ async fn mailbox_cancel_soft_intervention(
     result.removed
 }
 
+async fn mailbox_cancel_queued_primary_message(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> Option<Intervention> {
+    let result: CancelQueuedMessageResult = shared
+        .mailbox(channel_id)
+        .cancel_queued_primary_message(
+            message_id,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    result.removed
+}
+
 async fn mailbox_clear_channel(
     shared: &SharedData,
     provider: &ProviderKind,

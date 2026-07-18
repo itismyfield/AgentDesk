@@ -489,13 +489,31 @@ pub(crate) fn cancel_soft_intervention_by_message_id(
     queue: &mut Vec<Intervention>,
     message_id: MessageId,
 ) -> CancelQueuedMessageResult {
+    cancel_soft_intervention_matching(queue, message_id, |item| {
+        item.message_id == message_id || item.source_message_ids.contains(&message_id)
+    })
+}
+
+/// Remove only a queued intervention whose primary message id exactly matches.
+///
+/// Explicit user controls must not treat merged source-message aliases as a
+/// destructive target; legacy reaction-era callers retain alias semantics above.
+pub(crate) fn cancel_soft_intervention_by_primary_message_id(
+    queue: &mut Vec<Intervention>,
+    message_id: MessageId,
+) -> CancelQueuedMessageResult {
+    cancel_soft_intervention_matching(queue, message_id, |item| item.message_id == message_id)
+}
+
+fn cancel_soft_intervention_matching(
+    queue: &mut Vec<Intervention>,
+    message_id: MessageId,
+    matches: impl Fn(&Intervention) -> bool,
+) -> CancelQueuedMessageResult {
     let mut queue_exit_events = prune_interventions(queue);
     let removed = queue
         .iter()
-        .position(|item| {
-            item.mode == InterventionMode::Soft
-                && (item.message_id == message_id || item.source_message_ids.contains(&message_id))
-        })
+        .position(|item| item.mode == InterventionMode::Soft && matches(item))
         .map(|index| queue.remove(index));
     if let Some(ref intervention) = removed {
         queue_exit_events.push(QueueExitEvent::new(
@@ -1229,6 +1247,26 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    pub(crate) async fn cancel_queued_primary_message(
+        &self,
+        message_id: MessageId,
+        persistence: QueuePersistenceContext,
+    ) -> CancelQueuedMessageResult {
+        self.request(
+            |reply| ChannelMailboxMsg::CancelQueuedPrimaryMessage {
+                message_id,
+                persistence,
+                reply,
+            },
+            CancelQueuedMessageResult {
+                removed: None,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn finish_turn(
         &self,
         persistence: QueuePersistenceContext,
@@ -1859,6 +1897,11 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<()>,
     },
     CancelQueuedMessage {
+        message_id: MessageId,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<CancelQueuedMessageResult>,
+    },
+    CancelQueuedPrimaryMessage {
         message_id: MessageId,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<CancelQueuedMessageResult>,
@@ -2917,6 +2960,36 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             &persistence,
                             previous_queue,
                             "cancel_queued_message",
+                        ) {
+                            cancel_result = CancelQueuedMessageResult {
+                                removed: None,
+                                queue_exit_events: Vec::new(),
+                                persistence_error: Some(error),
+                            };
+                        }
+                    }
+                    let _ = reply.send(cancel_result);
+                }
+                ChannelMailboxMsg::CancelQueuedPrimaryMessage {
+                    message_id,
+                    persistence,
+                    reply,
+                } => {
+                    state.last_persistence = Some(persistence.clone());
+                    let previous_queue = state.intervention_queue.clone();
+                    let mut cancel_result = cancel_soft_intervention_by_primary_message_id(
+                        &mut state.intervention_queue,
+                        message_id,
+                    );
+                    if cancel_result.removed.is_some()
+                        || !cancel_result.queue_exit_events.is_empty()
+                    {
+                        if let Err(error) = persist_queue_or_restore(
+                            &mut state,
+                            channel_id,
+                            &persistence,
+                            previous_queue,
+                            "cancel_queued_primary_message",
                         ) {
                             cancel_result = CancelQueuedMessageResult {
                                 removed: None,
@@ -5427,6 +5500,35 @@ mod no_ttl_evict_tests {
                 .all(|e| e.kind == QueueExitKind::Cancelled),
             "user cancel must stay Cancelled"
         );
+    }
+
+    #[test]
+    fn explicit_queue_cancel_matches_only_primary_message_id() {
+        let now = Instant::now();
+        let mut merged = intervention_at(10, now);
+        merged.source_message_ids.push(MessageId::new(11));
+        let mut queue = vec![merged];
+
+        let alias_result =
+            cancel_soft_intervention_by_primary_message_id(&mut queue, MessageId::new(11));
+        assert!(
+            alias_result.removed.is_none(),
+            "source aliases are not controls"
+        );
+        assert_eq!(queue.len(), 1, "alias cancel must not mutate the queue");
+
+        let stale_result =
+            cancel_soft_intervention_by_primary_message_id(&mut queue, MessageId::new(12));
+        assert!(stale_result.removed.is_none(), "stale ids are no-ops");
+        assert_eq!(queue.len(), 1, "stale cancel must not mutate the queue");
+
+        let primary_result =
+            cancel_soft_intervention_by_primary_message_id(&mut queue, MessageId::new(10));
+        assert_eq!(
+            primary_result.removed.as_ref().map(|item| item.message_id),
+            Some(MessageId::new(10))
+        );
+        assert!(queue.is_empty(), "primary cancel removes exactly one item");
     }
 }
 

@@ -11,7 +11,8 @@ use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::stop_active_turn;
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn,
-    mailbox_cancel_soft_intervention, mailbox_clear_channel, saturating_decrement_global_active,
+    mailbox_cancel_queued_primary_message, mailbox_clear_channel,
+    saturating_decrement_global_active,
 };
 use super::config::{
     clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_channel,
@@ -567,7 +568,7 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
         return Ok(());
     };
 
-    let removed = mailbox_cancel_soft_intervention(
+    let removed = mailbox_cancel_queued_primary_message(
         &ctx.data().shared,
         &ctx.data().provider,
         ctx.channel_id(),
@@ -621,9 +622,11 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
 
 #[cfg(test)]
 mod soft_clear_notify_tests {
+    use poise::serenity_prelude::MessageId;
+
     use super::{
         SOFT_CLEAR_REASON_CODE, SoftClearNotifyMode, choose_clear_session_key,
-        soft_clear_lifecycle_notify_row,
+        parse_queued_message_id, soft_clear_lifecycle_notify_row,
     };
 
     #[test]

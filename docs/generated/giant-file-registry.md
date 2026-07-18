@@ -89,7 +89,7 @@
 | `src/services/discord/commands/text_commands.rs` | 1482 |
 | `src/services/discord/formatting.rs` | 2566 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4169 |
+| `src/services/discord/mod.rs` | 4186 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1391 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1815 |
@@ -107,5 +107,5 @@
 | `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1112 |
 | `src/services/tui_prompt_dedupe.rs` | 2134 |
-| `src/services/turn_orchestrator.rs` | 3288 |
+| `src/services/turn_orchestrator.rs` | 3361 |
 | `src/voice/receiver.rs` | 1108 |
