@@ -84,7 +84,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
             } else {
                 super::super::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
             };
-            super::super::queue_marker::note_added_queued_generation(
+            let delivered = super::super::queue_marker::note_added_queued_generation(
                 shared_owned,
                 &http,
                 channel_id,
@@ -92,6 +92,14 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
                 queue_marker,
                 queued_generation,
                 "claude_tui_followup_requeue_inflight",
+            )
+            .await;
+            super::super::outbound::reaction_control::ensure_queue_reaction_or_fallback_http(
+                &http,
+                channel_id,
+                shared_owned,
+                message_id,
+                delivered,
             )
             .await;
             let still_queued = super::super::mailbox_snapshot(shared_owned, channel_id)
@@ -204,6 +212,50 @@ mod tests {
         assert!(
             !retry_present_or_accepted(&outcome),
             "a failed queue write must preserve inflight rather than report requeue success"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_submit_retry_reaction_failure_emits_exactly_one_referenced_fallback() {
+        let _root = scoped_runtime_root();
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared)
+            .expect("fresh shared data")
+            .turn_view_reconciler =
+            crate::services::discord::turn_view_reconciler::TurnViewReconciler::with_test_deliveries(
+                vec![crate::services::discord::turn_view_reconciler::TurnViewDelivery::Failed],
+            );
+        shared
+            .http
+            .cached_bot_token
+            .set("Bot test-token".to_string())
+            .expect("test bot token");
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_004_248_003);
+        let message_id = MessageId::new(100_000_004_248_004);
+        let inflight = inflight(channel_id, message_id);
+        assert!(
+            crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
+                .is_empty()
+        );
+
+        assert!(
+            requeue_claude_tui_followup_pre_submit_timeout(
+                &shared,
+                &provider,
+                channel_id,
+                &inflight,
+                None,
+                None,
+                "turn-4248-reaction-failure",
+            )
+            .await
+        );
+
+        assert_eq!(
+            crate::services::discord::outbound::reaction_control::take_test_reply_deliveries(),
+            vec![crate::services::discord::outbound::reaction_control::ReactionControlReplyReason::QueueReactionFailed],
+            "failed follow-up requeue reaction must emit exactly one referenced fallback"
         );
     }
 
