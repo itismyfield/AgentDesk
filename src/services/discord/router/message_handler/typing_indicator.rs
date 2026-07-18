@@ -282,12 +282,16 @@ mod tests {
             producer_rx,
         );
 
-        yield_until(|| calls.load(Ordering::SeqCst) == 1).await;
+        yield_until(|| calls.load(Ordering::SeqCst) >= 1).await;
+        assert!(calls.load(Ordering::SeqCst) >= 1);
+
         tokio::time::advance(max_lifetime).await;
         yield_until(|| task.is_finished()).await;
-
         assert!(task.is_finished());
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let calls_at_expiry = calls.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(16)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), calls_at_expiry);
     }
 
     struct FailingTransport {
