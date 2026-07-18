@@ -2211,6 +2211,7 @@ pub(super) async fn handle_text_message(
                 enqueue_outcome.refusal_reason,
             )
             .await;
+            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
         }
         let queue_kickoff_scheduled =
             queue_kickoff_scheduled_by_release || enqueue_outcome.enqueued;
