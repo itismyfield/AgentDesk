@@ -74,8 +74,12 @@ pub fn process_stream_line(
 
     if msg_type == "assistant" {
         if let Some(message) = json.get("message") {
-            if let Some(model) = message.get("model").and_then(|value| value.as_str()) {
-                state.last_model = Some(model.to_string());
+            let current_model = message
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            if let Some(model) = current_model.as_ref() {
+                state.last_model = Some(model.clone());
             }
             if let Some(usage) = message.get("usage") {
                 // #1918: input/cache_read/cache_create replace so persisted
@@ -114,7 +118,7 @@ pub fn process_stream_line(
                     && cache_read.is_some()
                     && sender
                         .send(StreamMessage::StatusUpdate {
-                            model: state.last_model.clone(),
+                            model: current_model,
                             cost_usd: None,
                             total_cost_usd: None,
                             duration_ms: None,
@@ -657,6 +661,46 @@ mod tests {
                 .any(|message| matches!(message, StreamMessage::Done { .. })),
             "the active usage observation must not depend on a terminal boundary"
         );
+    }
+
+    /// #4649: active compact eligibility requires model provenance from the
+    /// current assistant record. A later usage record without its own model
+    /// must fail closed rather than inherit the prior record's model selector.
+    #[test]
+    fn assistant_usage_without_model_does_not_inherit_prior_model_provenance() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"routed-sonnet[1m]","usage":{"input_tokens":560000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":17},"content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":570000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":19},"content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(messages.len(), 2, "each complete usage record must be observed");
+        assert!(matches!(
+            &messages[0],
+            StreamMessage::StatusUpdate { model, .. }
+                if model.as_deref() == Some("routed-sonnet[1m]")
+        ));
+        assert!(matches!(
+            &messages[1],
+            StreamMessage::StatusUpdate {
+                model: None,
+                input_tokens: Some(570_000),
+                cache_create_tokens: Some(0),
+                cache_read_tokens: Some(0),
+                output_tokens: Some(36),
+                ..
+            }
+        ));
+        assert_eq!(state.last_model.as_deref(), Some("routed-sonnet[1m]"));
     }
 
     #[test]
