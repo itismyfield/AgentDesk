@@ -797,9 +797,60 @@ fn classify_injected_prompt_human_direct_input() {
     assert!(classify_injected_prompt("hi").is_human_active_turn());
 }
 
-// #3099: a `<task-notification>` auto-turn is a real provider turn (it earns
-// a `⏳`) but is not human-driven; its completion cleanup is anchored on the
-// injected message id, so it is classified distinctly from human input.
+// #4567: a `<task-notification>` is a status/card event, not positive
+// human-input provenance; it must not claim an external user-turn lifecycle.
+#[test]
+fn task_notification_lifecycle_is_not_an_external_turn() {
+    let decision = relay_observed_prompt_injected_prompt_decision(
+        "<task-notification><status>killed</status></task-notification>",
+    );
+    assert_eq!(
+        decision.injected_class,
+        InjectedPromptClass::TaskNotificationEvent
+    );
+    assert!(
+        !decision.starts_external_turn_lifecycle(),
+        "killed task status must not claim synthetic ownership"
+    );
+}
+
+#[tokio::test]
+async fn task_notification_status_only_preserves_existing_turn_request_anchor() {
+    let shared = super::super::make_shared_data_for_tests();
+    let channel_id = ChannelId::new(940_000_000_004_567);
+    let existing_anchor = 940_000_000_004_568;
+    let tmux = "AgentDesk-claude-4567-status-only-anchor";
+    shared
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(tmux, channel_id);
+    shared
+        .ui
+        .placeholder_live_events
+        .set_turn_request_anchor(channel_id, Some(existing_anchor));
+    let prompt = ObservedTuiPrompt {
+        provider: ProviderKind::Claude.as_str().to_string(),
+        tmux_session_name: tmux.to_string(),
+        prompt: "<task-notification><status>killed</status></task-notification>".to_string(),
+        source_event_id: None,
+        observed_at: chrono::Utc::now(),
+        external_input_lease_generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        ssh_direct_observation_generation:
+            crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+    };
+
+    relay_observed_prompt(&shared, prompt).await;
+
+    assert_eq!(
+        shared
+            .ui
+            .placeholder_live_events
+            .request_user_msg_id_for_test(channel_id),
+        Some(existing_anchor),
+        "status-only task notifications must not clear or replace the existing Discord turn request anchor",
+    );
+}
+
 #[test]
 fn classify_injected_prompt_task_notification_event() {
     let bare = "<task-notification><status>completed</status><task_id>codex-background-event</task_id></task-notification>";
@@ -1844,18 +1895,20 @@ fn system_continuation_suppresses_external_turn_lifecycle() {
     assert!(!subagent.still_delivers_assistant_output());
     assert!(!subagent.is_human_active_turn());
 
-    // Human + task-notification turns keep their user-turn lifecycle AND deliver
-    // output.
-    for active in [
-        InjectedPromptClass::HumanTuiDirect,
-        InjectedPromptClass::TaskNotificationEvent,
-    ] {
-        assert!(
-            !active.suppresses_user_turn_lifecycle(),
-            "{active:?} must keep its user-turn lifecycle"
-        );
-        assert!(active.still_delivers_assistant_output());
-    }
+    let human = InjectedPromptClass::HumanTuiDirect;
+    assert!(!human.suppresses_user_turn_lifecycle());
+    assert!(human.still_delivers_assistant_output());
+
+    let task = InjectedPromptClass::TaskNotificationEvent;
+    assert!(
+        task.suppresses_user_turn_lifecycle(),
+        "task lifecycle records must never claim a user-turn lifecycle"
+    );
+    assert!(
+        !task.still_delivers_assistant_output(),
+        "task lifecycle records must not spawn an output bridge tail"
+    );
+    assert!(!task.is_human_active_turn());
 }
 
 // #3100 codex re-review (P2): a human message that merely *quotes* the
