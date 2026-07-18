@@ -967,7 +967,7 @@
 | `services::maintenance::jobs::hang_dump_cleanup` | `src/services/maintenance/jobs/hang_dump_cleanup.rs` | 125 | 125 | 0 |  |
 | `services::maintenance::jobs::memento_consolidation` | `src/services/maintenance/jobs/memento_consolidation.rs` | 301 | 301 | 0 |  |
 | `services::maintenance::jobs::target_sweep` | `src/services/maintenance/jobs/target_sweep.rs` | 200 | 200 | 0 |  |
-| `services::maintenance::jobs::tmp_pipeline_sweep` | `src/services/maintenance/jobs/tmp_pipeline_sweep.rs` | 404 | 305 | 99 |  |
+| `services::maintenance::jobs::tmp_pipeline_sweep` | `src/services/maintenance/jobs/tmp_pipeline_sweep.rs` | 629 | 402 | 227 |  |
 | `services::maintenance::jobs::voice_cache_sweep` | `src/services/maintenance/jobs/voice_cache_sweep.rs` | 218 | 104 | 114 |  |
 | `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 1977 | 975 | 1002 |  |
 | `services::mcp_config` | `src/services/mcp_config.rs` | 893 | 793 | 100 |  |

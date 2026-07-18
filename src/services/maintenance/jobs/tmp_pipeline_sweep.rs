@@ -19,6 +19,8 @@ const ALLOWED_TMP_BASE: &str = "/private/tmp";
 const APPROVED_NAME_PREFIXES: &[&str] = &["adk-", "agentdesk-"];
 const DEFAULT_MIN_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const MINIMUM_MIN_AGE: Duration = Duration::from_secs(60 * 60);
+const MAX_ACTIVITY_WALK_DEPTH: usize = 8;
+const MAX_ACTIVITY_WALK_ENTRIES: usize = 1_024;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -237,8 +239,8 @@ async fn run_inner(config: &Config) -> Result<SweepReport> {
         let dir = entry.path();
         report.scanned = report.scanned.saturating_add(1);
 
-        let last_activity = match direct_child_last_activity(&dir) {
-            Ok(last_activity) => last_activity,
+        let activity = match bounded_recursive_last_activity(&dir) {
+            Ok(activity) => activity,
             Err(error) => {
                 tracing::warn!(
                     target: "maintenance",
@@ -251,7 +253,17 @@ async fn run_inner(config: &Config) -> Result<SweepReport> {
                 continue;
             }
         };
-        let stale = is_stale(last_activity, now, min_age);
+        if activity.traversal_errors > 0 {
+            tracing::warn!(
+                target: "maintenance",
+                job = "storage.tmp_pipeline_sweep",
+                path = %dir.display(),
+                traversal_errors = activity.traversal_errors,
+                "failed to inspect part of tmp pipeline candidate activity; keeping"
+            );
+            report.errors = report.errors.saturating_add(activity.traversal_errors);
+        }
+        let stale = is_stale(activity.last_activity, now, min_age);
         if !stale {
             report.keep_fresh = report.keep_fresh.saturating_add(1);
             continue;
@@ -287,31 +299,122 @@ async fn run_inner(config: &Config) -> Result<SweepReport> {
     Ok(report)
 }
 
-/// Return the latest modification time among the directory itself and each of
-/// its direct children. Any unreadable time fails closed at the caller.
-fn direct_child_last_activity(dir: &Path) -> std::io::Result<SystemTime> {
-    let mut latest = std::fs::metadata(dir)?.modified()?;
-    for child in std::fs::read_dir(dir)? {
-        let child = child?;
-        // Do not follow a child symlink while deriving activity; only the direct
-        // entry's timestamp belongs to this candidate directory.
-        let modified = std::fs::symlink_metadata(child.path())?.modified()?;
-        if modified > latest {
-            latest = modified;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActivityWalk {
+    last_activity: SystemTime,
+    traversal_errors: u64,
+}
+
+/// Identify recursion targets from the uncached lstat metadata result.
+fn is_real_directory(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_dir()
+}
+
+/// Return the latest modification time in a bounded, non-symlink-following
+/// walk of `dir`. Exceeding either bound returns a fresh timestamp so the
+/// caller keeps the candidate rather than deleting it.
+fn bounded_recursive_last_activity(dir: &Path) -> std::io::Result<ActivityWalk> {
+    bounded_recursive_last_activity_with_limits(
+        dir,
+        MAX_ACTIVITY_WALK_DEPTH,
+        MAX_ACTIVITY_WALK_ENTRIES,
+    )
+}
+
+fn bounded_recursive_last_activity_with_limits(
+    dir: &Path,
+    max_depth: usize,
+    max_entries: usize,
+) -> std::io::Result<ActivityWalk> {
+    let mut latest = std::fs::symlink_metadata(dir)?.modified()?;
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    let mut visited_entries = 0usize;
+    let mut traversal_errors = 0u64;
+
+    while let Some((current_dir, depth)) = pending.pop() {
+        let entries = match std::fs::read_dir(&current_dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                latest = SystemTime::now();
+                traversal_errors = traversal_errors.saturating_add(1);
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    latest = SystemTime::now();
+                    traversal_errors = traversal_errors.saturating_add(1);
+                    continue;
+                }
+            };
+            visited_entries = visited_entries.saturating_add(1);
+            if visited_entries > max_entries {
+                return Ok(ActivityWalk {
+                    last_activity: SystemTime::now(),
+                    traversal_errors,
+                });
+            }
+
+            let metadata = match std::fs::symlink_metadata(entry.path()) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    latest = SystemTime::now();
+                    traversal_errors = traversal_errors.saturating_add(1);
+                    continue;
+                }
+            };
+            let modified = match metadata.modified() {
+                Ok(modified) => modified,
+                Err(_) => {
+                    latest = SystemTime::now();
+                    traversal_errors = traversal_errors.saturating_add(1);
+                    continue;
+                }
+            };
+            if modified > latest {
+                latest = modified;
+            }
+
+            // Recurse only when this lstat result identifies a real directory;
+            // never use a cached DirEntry type for that decision. A path can
+            // still change between lstat and read_dir, but the remaining window
+            // is bounded and read-only; deletion remains candidate-root-only.
+            if is_real_directory(&metadata) {
+                if depth >= max_depth {
+                    return Ok(ActivityWalk {
+                        last_activity: SystemTime::now(),
+                        traversal_errors,
+                    });
+                }
+                pending.push((entry.path(), depth + 1));
+            }
         }
     }
-    Ok(latest)
+
+    Ok(ActivityWalk {
+        last_activity: latest,
+        traversal_errors,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
+    use filetime::{FileTime, set_file_mtime};
+
     use super::{
-        APPROVED_NAME_PREFIXES, MINIMUM_MIN_AGE, effective_min_age, is_stale, is_sweep_candidate,
-        should_remove, tmp_root_within_allowed_base,
+        APPROVED_NAME_PREFIXES, MINIMUM_MIN_AGE, bounded_recursive_last_activity,
+        bounded_recursive_last_activity_with_limits, effective_min_age, is_real_directory,
+        is_stale, is_sweep_candidate, should_remove, tmp_root_within_allowed_base,
     };
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
 
@@ -400,5 +503,127 @@ mod tests {
             "a nested live pane must own its candidate directory"
         );
         assert!(!should_remove(true, true, has_owner));
+    }
+
+    #[test]
+    fn deep_recent_activity_keeps_an_old_candidate_fresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("adk-candidate");
+        let nested = candidate.join("src/deep");
+        fs::create_dir_all(&nested).unwrap();
+        let active_file = nested.join("active.rs");
+        fs::write(&active_file, "recent activity").unwrap();
+
+        let now = SystemTime::now();
+        let old = now.checked_sub(Duration::from_secs(2 * 60 * 60)).unwrap();
+        let recent = now.checked_sub(Duration::from_secs(60)).unwrap();
+        set_mtime(&candidate, old);
+        set_mtime(candidate.join("src"), old);
+        set_mtime(&nested, old);
+        set_mtime(&active_file, recent);
+
+        let activity = bounded_recursive_last_activity(&candidate).unwrap();
+
+        assert!(
+            !is_stale(activity.last_activity, now, Duration::from_secs(60 * 60)),
+            "recent depth-two file activity must prevent stale removal even when directory mtimes are old"
+        );
+    }
+
+    #[test]
+    fn depth_limit_fails_closed_with_fresh_activity() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("adk-candidate");
+        let child = candidate.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        let now = SystemTime::now();
+        let old = now.checked_sub(Duration::from_secs(2 * 60 * 60)).unwrap();
+        set_mtime(&candidate, old);
+        set_mtime(&child, old);
+
+        let activity = bounded_recursive_last_activity_with_limits(&candidate, 0, 10).unwrap();
+
+        assert!(
+            !is_stale(activity.last_activity, now, Duration::from_secs(60 * 60)),
+            "reaching the depth limit must keep the candidate rather than authorize removal"
+        );
+    }
+
+    #[test]
+    fn entry_limit_fails_closed_with_fresh_activity() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("adk-candidate");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::write(candidate.join("first"), "one").unwrap();
+        fs::write(candidate.join("second"), "two").unwrap();
+
+        let now = SystemTime::now();
+        let old = now.checked_sub(Duration::from_secs(2 * 60 * 60)).unwrap();
+        set_mtime(&candidate, old);
+        for child in [candidate.join("first"), candidate.join("second")] {
+            set_mtime(child, old);
+        }
+
+        let activity = bounded_recursive_last_activity_with_limits(&candidate, 8, 1).unwrap();
+
+        assert!(
+            !is_stale(activity.last_activity, now, Duration::from_secs(60 * 60)),
+            "reaching the entry limit must keep the candidate rather than authorize removal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lstat_type_rejects_a_directory_symlink_for_recursion() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("linked-target");
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let metadata = fs::symlink_metadata(&link).unwrap();
+
+        assert!(metadata.file_type().is_symlink());
+        assert!(
+            !is_real_directory(&metadata),
+            "recursion eligibility must use lstat metadata, which rejects a directory symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_subtrees_do_not_contribute_activity() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("adk-candidate");
+        let target = temp.path().join("external-target");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let recent_file = target.join("recent.rs");
+        fs::write(&recent_file, "recent activity outside candidate").unwrap();
+        symlink(&target, candidate.join("linked-target")).unwrap();
+
+        let now = SystemTime::now();
+        let old = now.checked_sub(Duration::from_secs(2 * 60 * 60)).unwrap();
+        set_mtime(&candidate, old);
+        set_symlink_mtime(candidate.join("linked-target"), old);
+        set_mtime(&recent_file, now);
+
+        let activity = bounded_recursive_last_activity(&candidate).unwrap();
+
+        assert!(
+            is_stale(activity.last_activity, now, Duration::from_secs(60 * 60)),
+            "recent activity below a symlink target must not make the candidate fresh"
+        );
+    }
+
+    fn set_mtime(path: impl AsRef<Path>, modified: SystemTime) {
+        set_file_mtime(path, FileTime::from_system_time(modified)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn set_symlink_mtime(path: impl AsRef<Path>, modified: SystemTime) {
+        let modified = FileTime::from_system_time(modified);
+        filetime::set_symlink_file_times(path, modified, modified).unwrap();
     }
 }
