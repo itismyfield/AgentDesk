@@ -396,6 +396,8 @@ impl HealthRegistry {
         channel_id: ChannelId,
         now_unix_secs: i64,
     ) -> Result<bool, RelayRecoveryError> {
+        #[cfg(test)]
+        stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
         let Some(snapshot) = self
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
             .await

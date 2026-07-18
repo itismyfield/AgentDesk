@@ -168,10 +168,9 @@ fn relay_offset_stalled_past_grace(
 /// destructive trigger is eligible to fire. The production path measures time
 /// with the process `MonotonicRedriveClock`.
 ///
-/// `live_committed_offset` is the current authoritative `confirmed_end_offset`
-/// (`SharedData::committed_relay_offset`), passed alongside the snapshot's
-/// possibly-stale copy so a JSONL-rotation coordinate reset can be told apart
-/// from a stale lagging snapshot (see `relay_offset_stalled_past_grace`).
+/// `token` carries the current authoritative `confirmed_end_offset` together
+/// with its reset incarnation, so a JSONL-rotation coordinate reset can be told
+/// apart from a stale lagging snapshot (see `relay_offset_stalled_past_grace`).
 pub(in crate::services::discord::health) fn stalled_undelivered_backlog_for_redrive(
     provider: &ProviderKind,
     channel_id: ChannelId,
