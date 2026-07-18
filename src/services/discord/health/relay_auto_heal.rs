@@ -559,7 +559,6 @@ fn nudge_existing_watcher_for_backlog(
 ) -> bool {
     #[cfg(test)]
     stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
-    let token = shared.relay_frontier_token(channel_id);
     if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token)
         || !shared.relay_frontier_token_is_current(channel_id, token)
     {
@@ -1063,6 +1062,10 @@ mod tests {
         let capture_offset = 301_613;
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .store(snapshot.last_relay_offset, Ordering::Release);
         // Prime the stall observation, then mark a relay emission in-flight
         // (non-zero `relay_slot`) while the committed frontier stays frozen.
         assert!(!nudge_existing_watcher_for_backlog(
@@ -1228,6 +1231,10 @@ mod tests {
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
 
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .store(snapshot.last_relay_offset, Ordering::Release);
         let base = 1_800_000_000;
         assert_eq!(
             gated_nudge(
@@ -1698,6 +1705,10 @@ mod tests {
         REDRIVE_PLACEHOLDER_SHIELDS.remove(&shared.redrive_key(&provider, owner_channel_id));
 
         let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .store(snapshot.last_relay_offset, Ordering::Release);
         snapshot.watcher_owner_channel_id = Some(owner_channel_id.get());
         snapshot.relay_health.watcher_owner_channel_id = Some(owner_channel_id.get());
         let stale_snapshot_owner = ChannelId::new(4_299_007);

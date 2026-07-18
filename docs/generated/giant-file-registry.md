@@ -89,7 +89,7 @@
 | `src/services/discord/commands/text_commands.rs` | 1482 |
 | `src/services/discord/formatting.rs` | 2566 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4236 |
+| `src/services/discord/mod.rs` | 4168 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1391 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1815 |

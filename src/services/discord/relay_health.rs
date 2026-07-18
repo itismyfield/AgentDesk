@@ -6,6 +6,9 @@
 
 use serde::Serialize;
 
+mod frontier;
+pub(in crate::services::discord) use frontier::RelayFrontierToken;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::services::discord) enum RelayActiveTurn {
