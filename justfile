@@ -36,6 +36,8 @@ test-non-pg:
     cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
+    cargo test --lib delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
     cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
