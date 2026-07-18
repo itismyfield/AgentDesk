@@ -305,6 +305,11 @@ struct ActivityWalk {
     traversal_errors: u64,
 }
 
+/// Identify recursion targets from the uncached lstat metadata result.
+fn is_real_directory(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_dir()
+}
+
 /// Return the latest modification time in a bounded, non-symlink-following
 /// walk of `dir`. Exceeding either bound returns a fresh timestamp so the
 /// caller keeps the candidate rather than deleting it.
@@ -353,14 +358,6 @@ fn bounded_recursive_last_activity_with_limits(
                 });
             }
 
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => {
-                    latest = SystemTime::now();
-                    traversal_errors = traversal_errors.saturating_add(1);
-                    continue;
-                }
-            };
             let metadata = match std::fs::symlink_metadata(entry.path()) {
                 Ok(metadata) => metadata,
                 Err(_) => {
@@ -381,9 +378,11 @@ fn bounded_recursive_last_activity_with_limits(
                 latest = modified;
             }
 
-            // `DirEntry::file_type` reports a symlink without resolving it, so
-            // only real directories can enter the walk.
-            if file_type.is_dir() {
+            // Recurse only when this lstat result identifies a real directory;
+            // never use a cached DirEntry type for that decision. A path can
+            // still change between lstat and read_dir, but the remaining window
+            // is bounded and read-only; deletion remains candidate-root-only.
+            if is_real_directory(&metadata) {
                 if depth >= max_depth {
                     return Ok(ActivityWalk {
                         last_activity: SystemTime::now(),
@@ -414,8 +413,8 @@ mod tests {
 
     use super::{
         APPROVED_NAME_PREFIXES, MINIMUM_MIN_AGE, bounded_recursive_last_activity,
-        bounded_recursive_last_activity_with_limits, effective_min_age, is_stale,
-        is_sweep_candidate, should_remove, tmp_root_within_allowed_base,
+        bounded_recursive_last_activity_with_limits, effective_min_age, is_real_directory,
+        is_stale, is_sweep_candidate, should_remove, tmp_root_within_allowed_base,
     };
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
 
@@ -571,6 +570,24 @@ mod tests {
         assert!(
             !is_stale(activity.last_activity, now, Duration::from_secs(60 * 60)),
             "reaching the entry limit must keep the candidate rather than authorize removal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lstat_type_rejects_a_directory_symlink_for_recursion() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("linked-target");
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let metadata = fs::symlink_metadata(&link).unwrap();
+
+        assert!(metadata.file_type().is_symlink());
+        assert!(
+            !is_real_directory(&metadata),
+            "recursion eligibility must use lstat metadata, which rejects a directory symlink"
         );
     }
 
