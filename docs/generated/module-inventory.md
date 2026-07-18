@@ -322,7 +322,7 @@
 | `server::routes::tests::preflight_harness::validation` | `src/server/routes/tests/preflight_harness/validation.rs` | 260 | 0 | 260 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | 1857 | 0 | giant-file |
 | `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 463 | 393 | 70 |  |
-| `server::startup_preflight` | `src/server/startup_preflight.rs` | 24 | 24 | 0 |  |
+| `server::startup_preflight` | `src/server/startup_preflight.rs` | 72 | 36 | 36 |  |
 | `server::state` | `src/server/state.rs` | 11 | 11 | 0 |  |
 | `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1039 | 359 | 680 |  |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 | 400 | 26 |  |
