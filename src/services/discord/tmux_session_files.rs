@@ -307,16 +307,7 @@ pub(in crate::services::discord) fn reset_relay_watermark_on_generation_change(
     if watermark == 0 {
         return false;
     }
-    if relay_coord
-        .confirmed_end_offset
-        .compare_exchange(
-            watermark,
-            0,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        )
-        .is_ok()
-    {
+    if relay_coord.reset_confirmed_frontier(watermark, 0) {
         relay_coord
             .confirmed_end_generation_mtime_ns
             .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
@@ -358,34 +349,29 @@ pub(in crate::services::discord) fn reset_stale_relay_watermark_if_output_regres
             observed_output_end,
         );
 
-        match relay_coord.confirmed_end_offset.compare_exchange(
-            confirmed,
-            new_watermark,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                relay_coord
-                    .last_relay_ts_ms
-                    .store(0, std::sync::atomic::Ordering::Release);
-                relay_coord
-                    .confirmed_end_generation_mtime_ns
-                    .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] 👁 Reset stale tmux relay watermark for {} (channel {}, context={}, observed_output_end={}, stale_confirmed_end={}, new_watermark={}, generation_mtime_changed={})",
-                    tmux_session_name,
-                    channel_id.get(),
-                    context,
-                    observed_output_end,
-                    confirmed,
-                    new_watermark,
-                    stored_gen_mtime_ns != current_gen_mtime_ns
-                );
-                return true;
-            }
-            Err(observed) => confirmed = observed,
+        if relay_coord.reset_confirmed_frontier(confirmed, new_watermark) {
+            relay_coord
+                .last_relay_ts_ms
+                .store(0, std::sync::atomic::Ordering::Release);
+            relay_coord
+                .confirmed_end_generation_mtime_ns
+                .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] 👁 Reset stale tmux relay watermark for {} (channel {}, context={}, observed_output_end={}, stale_confirmed_end={}, new_watermark={}, generation_mtime_changed={})",
+                tmux_session_name,
+                channel_id.get(),
+                context,
+                observed_output_end,
+                confirmed,
+                new_watermark,
+                stored_gen_mtime_ns != current_gen_mtime_ns
+            );
+            return true;
         }
+        confirmed = relay_coord
+            .confirmed_end_offset
+            .load(std::sync::atomic::Ordering::Acquire);
     }
 
     false

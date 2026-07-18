@@ -5,12 +5,12 @@ use poise::serenity_prelude::ChannelId;
 
 use super::snapshot::WatcherStateSnapshot;
 use super::{HealthRegistry, stall_liveness};
-use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::relay_health::RelayStallState;
 use crate::services::discord::relay_recovery::{
     self, RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryError,
 };
+use crate::services::discord::{RelayFrontierToken, SharedData};
 use crate::services::provider::ProviderKind;
 
 // Delay after each admitted attempt. The sixth (960s) is the terminal capped
@@ -397,10 +397,13 @@ impl HealthRegistry {
             return Ok(false);
         };
 
-        if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, now_unix_secs) {
+        let token = shared.tmux_relay_coord(channel_id).frontier_token();
+        if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, token) {
             return Ok(false);
         }
-        if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
+        if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot)
+            || !shared.relay_frontier_token_is_current(channel_id, token)
+        {
             return Ok(false);
         }
         let attempt =
@@ -416,10 +419,13 @@ impl HealthRegistry {
             &snapshot,
             channel_id,
             now_unix_secs,
+            token,
         ) {
             (true, false, None)
         } else {
-            if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
+            if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot)
+                || !shared.relay_frontier_token_is_current(channel_id, token)
+            {
                 return Ok(false);
             }
             let response = relay_recovery::auto_apply_relay_recovery_for_shared(
@@ -438,6 +444,9 @@ impl HealthRegistry {
             )
         };
         if applied {
+            if !shared.relay_frontier_token_is_current(channel_id, token) {
+                return Ok(false);
+            }
             let shield_channel_id =
                 redrive_shield_channel_for_action(&shared, &snapshot, channel_id, reattached);
             let committed = shared.commit_redrive_success(
@@ -507,14 +516,11 @@ fn should_redrive_undelivered_backlog(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
-    now_unix_secs: i64,
+    token: RelayFrontierToken,
 ) -> bool {
     has_live_undelivered_backlog(snapshot)
         && stall_liveness::stalled_undelivered_backlog_for_redrive(
-            provider,
-            channel_id,
-            snapshot,
-            now_unix_secs,
+            provider, channel_id, snapshot, token,
         )
 }
 
@@ -549,8 +555,14 @@ fn nudge_existing_watcher_for_backlog(
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
     now_unix_secs: i64,
+    token: RelayFrontierToken,
 ) -> bool {
-    if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, now_unix_secs) {
+    #[cfg(test)]
+    stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
+    let token = shared.relay_frontier_token(channel_id);
+    if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token)
+        || !shared.relay_frontier_token_is_current(channel_id, token)
+    {
         return false;
     }
 
@@ -567,7 +579,7 @@ fn nudge_existing_watcher_for_backlog(
     if snapshot.inflight_output_path.as_deref() != Some(watcher.output_path.as_str()) {
         return false;
     }
-    if !nudge_watcher_handle_for_backlog(shared, snapshot, watcher.value(), channel_id) {
+    if !nudge_watcher_handle_for_backlog(shared, snapshot, watcher.value(), channel_id, token) {
         return false;
     }
 
@@ -589,6 +601,7 @@ fn nudge_watcher_handle_for_backlog(
     snapshot: &WatcherStateSnapshot,
     watcher: &crate::services::discord::TmuxWatcherHandle,
     channel_id: ChannelId,
+    token: RelayFrontierToken,
 ) -> bool {
     if watcher.cancel.load(Ordering::Relaxed)
         || watcher.heartbeat_stale()
@@ -599,7 +612,9 @@ fn nudge_watcher_handle_for_backlog(
     let Ok(mut resume_offset) = watcher.resume_offset.lock() else {
         return false;
     };
-    if redrive_should_yield_to_live_relay(shared, channel_id, snapshot) {
+    if redrive_should_yield_to_live_relay(shared, channel_id, snapshot)
+        || !shared.relay_frontier_token_is_current(channel_id, token)
+    {
         return false;
     }
     *resume_offset = Some(snapshot.last_relay_offset);
@@ -836,7 +851,12 @@ mod tests {
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
         assert!(!nudge_existing_watcher_for_backlog(
-            &shared, &provider, &snapshot, channel_id, now,
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now,
+            shared.relay_frontier_token(channel_id),
         ));
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
@@ -849,6 +869,7 @@ mod tests {
             &advanced_snapshot,
             channel_id,
             now + 30,
+            shared.relay_frontier_token(channel_id),
         ));
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
@@ -893,7 +914,12 @@ mod tests {
             capture_offset,
         );
         assert!(!nudge_existing_watcher_for_backlog(
-            &shared, &provider, &snapshot, channel_id, now,
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now,
+            shared.relay_frontier_token(channel_id),
         ));
         assert!(!nudge_existing_watcher_for_backlog(
             &shared,
@@ -901,6 +927,7 @@ mod tests {
             &snapshot,
             channel_id,
             now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+            shared.relay_frontier_token(channel_id),
         ));
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
@@ -938,7 +965,12 @@ mod tests {
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
         assert!(!nudge_existing_watcher_for_backlog(
-            &shared, &provider, &snapshot, channel_id, now,
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now,
+            shared.relay_frontier_token(channel_id),
         ));
         shared
             .tmux_relay_coord(channel_id)
@@ -951,6 +983,7 @@ mod tests {
             &snapshot,
             channel_id,
             now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+            shared.relay_frontier_token(channel_id),
         ));
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
@@ -966,6 +999,45 @@ mod tests {
     // freezes the committed offset without the turn being stalled; redrive must
     // yield to it and NOT rewind the watcher over the in-flight range (which
     // would double-send the bytes that POST is about to commit).
+    #[test]
+    fn redrive_stale_frontier_token_cannot_nudge_after_reset_4181() {
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_181_002);
+        let tmux_session = "AgentDesk-codex-4181-reset-token";
+        let output_path = "/tmp/agentdesk-4181-reset-token.jsonl";
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let resume_offset = Arc::new(Mutex::new(None));
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        shared.tmux_watchers.insert(
+            channel_id,
+            watcher_handle(
+                tmux_session,
+                output_path,
+                resume_offset.clone(),
+                turn_delivered.clone(),
+            ),
+        );
+        let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 100, 301_613);
+        let coord = shared.tmux_relay_coord(channel_id);
+        coord.confirmed_end_offset.store(100, Ordering::Release);
+        let high_token = shared.relay_frontier_token(channel_id);
+
+        assert!(coord.reset_confirmed_frontier(100, 0));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                1_800_000_000,
+                high_token,
+            ),
+            "a reset between admission and nudge must veto the stale-H redrive"
+        );
+        assert_eq!(*resume_offset.lock().unwrap(), None);
+        assert!(turn_delivered.load(Ordering::Acquire));
+    }
+
     #[test]
     fn redrive_nudge_yields_while_relay_emission_in_flight() {
         let provider = ProviderKind::Codex;
@@ -994,7 +1066,12 @@ mod tests {
         // Prime the stall observation, then mark a relay emission in-flight
         // (non-zero `relay_slot`) while the committed frontier stays frozen.
         assert!(!nudge_existing_watcher_for_backlog(
-            &shared, &provider, &snapshot, channel_id, now,
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now,
+            shared.relay_frontier_token(channel_id),
         ));
         shared
             .tmux_relay_coord(channel_id)
@@ -1009,6 +1086,7 @@ mod tests {
             &snapshot,
             channel_id,
             now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+            shared.relay_frontier_token(channel_id),
         ));
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
@@ -1025,6 +1103,7 @@ mod tests {
             &snapshot,
             channel_id,
             now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+            shared.relay_frontier_token(channel_id),
         ));
         assert_eq!(
             *resume_offset.lock().unwrap(),
@@ -1096,7 +1175,11 @@ mod tests {
         channel_id: ChannelId,
         now: i64,
     ) -> (bool, Option<u8>) {
-        if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, now) {
+        stall_liveness::set_redrive_grace_test_clock(now);
+        let token = shared.relay_frontier_token(channel_id);
+        if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token)
+            || !shared.relay_frontier_token_is_current(channel_id, token)
+        {
             return (false, None);
         }
         let decision = shared.redrive_attempt_decision(provider, channel_id, snapshot, now);
@@ -1104,8 +1187,14 @@ mod tests {
         let Some(reserved_attempt) = decision.attempt else {
             return (false, None);
         };
-        let nudged =
-            nudge_existing_watcher_for_backlog(shared, provider, snapshot, channel_id, now);
+        let nudged = nudge_existing_watcher_for_backlog(
+            shared,
+            provider,
+            snapshot,
+            channel_id,
+            now,
+            shared.relay_frontier_token(channel_id),
+        );
         if nudged {
             let shield_channel_id = snapshot
                 .watcher_owner_channel_id

@@ -9,6 +9,11 @@ use crate::services::provider::ProviderKind;
 
 use super::{snapshot::WatcherStateSnapshot, stall_verdict};
 
+mod redrive_grace;
+#[cfg(test)]
+pub(super) use redrive_grace::set_redrive_grace_test_clock;
+pub(super) use redrive_grace::stalled_undelivered_backlog_for_redrive;
+
 pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
 /// Historical deferral-budget field for force-clean deferrals while positive
 /// liveness keeps being observed. A deferral only ever fires when
@@ -437,6 +442,7 @@ pub(super) fn clear_stall_watchdog_liveness_state(
     let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
     OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
     CAPTURE_OFFSET_WATCHDOG_STATE.retain(|key, _| !key.matches_session(&probe));
+    redrive_grace::clear_for_session(&probe);
 }
 
 pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
@@ -451,28 +457,13 @@ pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
     true
 }
 
-pub(super) fn stalled_undelivered_backlog_for_redrive(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    snapshot: &WatcherStateSnapshot,
-    now_unix_secs: i64,
-) -> bool {
-    if !live_undelivered_backlog(snapshot) {
-        return false;
-    }
-
-    let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
-    let relay_observation = observe_relay_offset(&key, snapshot.last_relay_offset, now_unix_secs);
-    !relay_offset_advanced_this_tick(snapshot, &relay_observation)
-        && relay_offset_unchanged_past_backlog_grace(&relay_observation)
-}
-
 pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
     });
     CAPTURE_OFFSET_WATCHDOG_STATE
         .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
+    redrive_grace::gc();
 }
 
 fn stall_watchdog_liveness_state_is_healthy(snapshot: &WatcherStateSnapshot) -> bool {

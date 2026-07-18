@@ -1463,7 +1463,20 @@ mod tmux_watcher_registry_restore_tests {
 /// Scope: intra-process only. Persisted dedupe across dcserver restarts is
 /// still handled by `InflightTurnState::last_watcher_relayed_offset` in the
 /// inflight JSON.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::services::discord) struct RelayFrontierToken {
+    pub(in crate::services::discord) reset_incarnation: u64,
+    pub(in crate::services::discord) committed_offset: u64,
+}
+
 pub(super) struct TmuxRelayCoord {
+    /// Serializes downward watermark resets. Offset advances remain lock-free;
+    /// a reset publishes the new offset before it increments the incarnation.
+    reset_lock: std::sync::Mutex<()>,
+    /// Incremented after every committed-frontier decrease. Consumers pair this
+    /// with `confirmed_end_offset` through `frontier_token` so a stale coordinate
+    /// cannot be mistaken for the current JSONL incarnation.
+    reset_incarnation: std::sync::atomic::AtomicU64,
     /// Non-zero while some watcher instance is actively emitting a relay for
     /// this channel. Holds the `data_start_offset` of the in-progress emission.
     /// Acquired via `compare_exchange(0, offset)` — only one watcher can
@@ -1526,6 +1539,8 @@ pub(super) struct TmuxRelayCoord {
 impl TmuxRelayCoord {
     pub(super) fn new(channel_id: ChannelId) -> Self {
         Self {
+            reset_lock: std::sync::Mutex::new(()),
+            reset_incarnation: std::sync::atomic::AtomicU64::new(0),
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -1537,6 +1552,43 @@ impl TmuxRelayCoord {
 
     pub(super) fn note_relay_progress_heartbeat(&self, now_ms: i64) {
         self.last_relay_ts_ms.store(now_ms, Ordering::Release);
+    }
+
+    pub(in crate::services::discord) fn frontier_token(&self) -> RelayFrontierToken {
+        let _reset = self
+            .reset_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        RelayFrontierToken {
+            reset_incarnation: self.reset_incarnation.load(Ordering::Acquire),
+            committed_offset: self.confirmed_end_offset.load(Ordering::Acquire),
+        }
+    }
+
+    pub(in crate::services::discord) fn reset_confirmed_frontier(
+        &self,
+        expected_offset: u64,
+        new_offset: u64,
+    ) -> bool {
+        debug_assert!(new_offset < expected_offset);
+        let _reset = self
+            .reset_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self
+            .confirmed_end_offset
+            .compare_exchange(
+                expected_offset,
+                new_offset,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        self.reset_incarnation.fetch_add(1, Ordering::AcqRel);
+        true
     }
 }
 
@@ -1554,6 +1606,20 @@ mod relay_coord_tests {
         coord.note_relay_progress_heartbeat(1_500);
         assert_eq!(coord.last_relay_ts_ms.load(Ordering::Acquire), 1_500);
         assert_eq!(coord.confirmed_end_offset.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn reset_frontier_publishes_a_new_incarnation_token() {
+        let coord = TmuxRelayCoord::new(ChannelId::new(4_181));
+        coord.confirmed_end_offset.store(100, Ordering::Release);
+        let high = coord.frontier_token();
+        assert!(coord.reset_confirmed_frontier(100, 40));
+        let low = coord.frontier_token();
+
+        assert_eq!(high.committed_offset, 100);
+        assert_eq!(low.committed_offset, 40);
+        assert!(low.reset_incarnation > high.reset_incarnation);
+        assert_ne!(high, low, "a reset must invalidate stale redrive tokens");
     }
 }
 
@@ -2389,6 +2455,21 @@ impl SharedData {
         self.tmux_relay_coord(channel_id)
             .confirmed_end_offset
             .load(Ordering::Acquire)
+    }
+
+    pub(in crate::services::discord) fn relay_frontier_token(
+        &self,
+        channel_id: ChannelId,
+    ) -> RelayFrontierToken {
+        self.tmux_relay_coord(channel_id).frontier_token()
+    }
+
+    pub(in crate::services::discord) fn relay_frontier_token_is_current(
+        &self,
+        channel_id: ChannelId,
+        token: RelayFrontierToken,
+    ) -> bool {
+        self.relay_frontier_token(channel_id) == token
     }
 
     /// #4181: `true` while some watcher is actively emitting a relay for this
