@@ -3,7 +3,7 @@ mod dispatch_trigger;
 mod intake_dispatch;
 mod intake_gate;
 mod intake_queue_transaction;
-mod message_handler;
+pub(in crate::services::discord) mod message_handler;
 mod queue_status_presentation;
 mod response_format;
 mod thread_binding;

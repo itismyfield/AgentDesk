@@ -100,7 +100,6 @@ mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
 mod turn_completion_events;
-mod typing_indicator;
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::write_spawn_nonce;

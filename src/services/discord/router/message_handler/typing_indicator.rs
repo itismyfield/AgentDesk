@@ -6,9 +6,9 @@ use serenity::ChannelId;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, MissedTickBehavior};
 
-use super::inflight::InflightSignal;
-use super::turn_completion_events::TurnCompletionEvent;
-use super::SharedData;
+use super::super::super::inflight::InflightSignal;
+use super::super::super::turn_completion_events::TurnCompletionEvent;
+use super::super::super::SharedData;
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 
@@ -36,7 +36,8 @@ pub(super) fn spawn_native_typing_indicator(
     http: Arc<serenity::Http>,
     channel_id: ChannelId,
 ) {
-    let finalize_rx = super::turn_completion_events::subscribe_turn_completion_events(shared);
+    let finalize_rx =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(shared);
     let producer_rx = shared.inflight_signals.subscribe();
     spawn_typing_indicator_task(
         SerenityTypingTransport { http },
@@ -55,7 +56,7 @@ fn spawn_typing_indicator_task<T>(
 where
     T: TypingTransport + 'static,
 {
-    super::task_supervisor::spawn_observed(
+    super::super::super::task_supervisor::spawn_observed(
         "discord_native_typing_indicator",
         run_native_typing_indicator(transport, channel_id, finalize_rx, producer_rx),
     )
