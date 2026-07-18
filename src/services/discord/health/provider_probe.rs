@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 
-use super::{HealthStatus, ProviderEntry};
+use super::{HealthStatus, ProviderEntry, ProviderRuntimeRole};
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 
 #[derive(Debug, Serialize)]
@@ -96,6 +96,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
 
     let classification = classify_provider(
         &entry.name,
+        entry.role,
         ProviderProbeSignals {
             connected,
             restart_pending,
@@ -130,13 +131,14 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
 
 fn classify_provider(
     provider_name: &str,
+    role: ProviderRuntimeRole,
     signals: ProviderProbeSignals,
 ) -> ProviderHealthClassification {
     let mut status = HealthStatus::Healthy;
     let mut fully_recovered = true;
     let mut degraded_reasons = Vec::new();
 
-    if !signals.connected {
+    if role.requires_gateway_connection() && !signals.connected {
         status = status.worsen(HealthStatus::Unhealthy);
         degraded_reasons.push(format!("provider:{provider_name}:disconnected"));
     }
@@ -195,13 +197,26 @@ fn recovery_duration_secs(shared: &super::super::SharedData) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+
     use super::{ProviderProbeSignals, classify_provider};
-    use crate::services::discord::health::HealthStatus;
+    use crate::services::discord::health::{
+        HealthRegistry, HealthStatus, ProviderRuntimeRole, build_health_snapshot,
+    };
+    use crate::services::provider::CancelToken;
+
+    static NEXT_STANDBY_TEST_CHANNEL: AtomicU64 = AtomicU64::new(9_700_000_000);
 
     #[test]
     fn classifier_preserves_healthy_provider() {
         let result = classify_provider(
             "codex",
+            ProviderRuntimeRole::Gateway,
             ProviderProbeSignals {
                 connected: true,
                 restart_pending: false,
@@ -221,6 +236,7 @@ mod tests {
     fn classifier_reports_probe_degradation_reasons() {
         let result = classify_provider(
             "codex",
+            ProviderRuntimeRole::Gateway,
             ProviderProbeSignals {
                 connected: false,
                 restart_pending: true,
@@ -237,6 +253,89 @@ mod tests {
             result.degraded_reasons,
             [
                 "provider:codex:disconnected",
+                "provider:codex:restart_pending",
+                "provider:codex:reconcile_in_progress",
+                "provider:codex:deferred_hooks_backlog:2",
+                "provider:codex:pending_queue_depth:3",
+                "provider:codex:recovering_channels:1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_idle_standby_is_healthy_and_http_ready() {
+        let registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry
+            .register_standby("codex".to_string(), shared)
+            .await;
+
+        let snapshot = build_health_snapshot(&registry).await;
+
+        assert_eq!(snapshot.status(), HealthStatus::Healthy);
+        assert!(snapshot.status().is_http_ready());
+        assert!(registry.has_standby_provider().await);
+        let json = serde_json::to_value(snapshot).expect("serialize standby health");
+        assert_eq!(json["providers"][0]["connected"], false);
+        assert_eq!(json["providers"][0]["runtime_state_complete"], true);
+        assert_eq!(json["degraded_reasons"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart() {
+        let registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry
+            .register_standby("codex".to_string(), shared.clone())
+            .await;
+
+        let channel = ChannelId::new(NEXT_STANDBY_TEST_CHANNEL.fetch_add(1, Ordering::Relaxed));
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                shared.as_ref(),
+                channel,
+                Arc::new(CancelToken::new()),
+                UserId::new(1),
+                MessageId::new(2),
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        shared
+            .restart
+            .global_finalizing
+            .store(1, Ordering::Relaxed);
+
+        let json = serde_json::to_value(build_health_snapshot(&registry).await)
+            .expect("serialize active standby health");
+
+        assert_eq!(json["global_active"], 1);
+        assert_eq!(json["global_finalizing"], 1);
+        assert_eq!(json["providers"][0]["active_turns"], 1);
+        assert_eq!(json["providers"][0]["runtime_state_complete"], true);
+        assert_eq!(json["mailboxes"][0]["has_cancel_token"], true);
+    }
+
+    #[test]
+    fn standby_role_only_ignores_gateway_disconnect_and_masks_no_other_axis() {
+        let result = classify_provider(
+            "codex",
+            ProviderRuntimeRole::Standby,
+            ProviderProbeSignals {
+                connected: false,
+                restart_pending: true,
+                reconcile_done: false,
+                deferred_hooks: 2,
+                queue_depth: 3,
+                recovering_channels: 1,
+            },
+        );
+
+        assert_eq!(result.status, HealthStatus::Unhealthy);
+        assert!(!result.fully_recovered);
+        assert_eq!(
+            result.degraded_reasons,
+            [
                 "provider:codex:restart_pending",
                 "provider:codex:reconcile_in_progress",
                 "provider:codex:deferred_hooks_backlog:2",

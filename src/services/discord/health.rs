@@ -86,6 +86,19 @@ pub use snapshot::{
 pub(super) struct ProviderEntry {
     pub(super) name: String,
     pub(super) shared: Arc<SharedData>,
+    pub(super) role: ProviderRuntimeRole,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProviderRuntimeRole {
+    Gateway,
+    Standby,
+}
+
+impl ProviderRuntimeRole {
+    pub(super) fn requires_gateway_connection(self) -> bool {
+        matches!(self, Self::Gateway)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -174,10 +187,6 @@ pub fn bot_token_reload_scopes() -> BotTokenReloadScopes {
 /// Also holds Discord HTTP clients for agent-to-agent message routing.
 pub struct HealthRegistry {
     providers: tokio::sync::Mutex<Vec<ProviderEntry>>,
-    /// Providers whose gateway lease is confirmed to be held by another node.
-    /// This is distinct from an empty gateway registry: standby intake workers
-    /// register SharedData here so restart health can observe their live turns.
-    standby_providers: tokio::sync::Mutex<Vec<String>>,
     started_at: Instant,
     /// Wall-clock (Unix seconds) at which this dcserver process booted.
     /// `started_at` is a monotonic `Instant` and cannot be compared against
@@ -240,7 +249,6 @@ impl HealthRegistry {
     pub fn new() -> Self {
         Self {
             providers: tokio::sync::Mutex::new(Vec::new()),
-            standby_providers: tokio::sync::Mutex::new(Vec::new()),
             started_at: Instant::now(),
             started_at_unix: chrono::Utc::now().timestamp(),
             discord_http: tokio::sync::Mutex::new(Vec::new()),
@@ -278,21 +286,32 @@ impl HealthRegistry {
         name: String,
         shared: Arc<SharedData>,
     ) {
-        self.register(name.clone(), shared).await;
-        let mut standby_providers = self.standby_providers.lock().await;
-        if !standby_providers.iter().any(|provider| provider == &name) {
-            standby_providers.push(name);
-        }
+        self.register_with_role(name, shared, ProviderRuntimeRole::Standby)
+            .await;
     }
 
     pub(crate) async fn has_standby_provider(&self) -> bool {
-        !self.standby_providers.lock().await.is_empty()
+        self.providers
+            .lock()
+            .await
+            .iter()
+            .any(|entry| entry.role == ProviderRuntimeRole::Standby)
     }
 
     pub(in crate::services::discord) async fn register(
         &self,
         name: String,
         shared: Arc<SharedData>,
+    ) {
+        self.register_with_role(name, shared, ProviderRuntimeRole::Gateway)
+            .await;
+    }
+
+    async fn register_with_role(
+        &self,
+        name: String,
+        shared: Arc<SharedData>,
+        role: ProviderRuntimeRole,
     ) {
         let mut providers = self.providers.lock().await;
         if providers
@@ -313,7 +332,7 @@ impl HealthRegistry {
                 name
             );
         }
-        providers.push(ProviderEntry { name, shared });
+        providers.push(ProviderEntry { name, shared, role });
     }
 
     pub(in crate::services::discord) async fn dm_default_agent_authorizes_private_channel(
