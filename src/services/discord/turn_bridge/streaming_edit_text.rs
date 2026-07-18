@@ -86,8 +86,27 @@ pub(in crate::services::discord) fn classify_raw_tui_error(
     let claude_followup_requeue_prompt_error = matches!(provider, ProviderKind::Claude)
         && pre_submission_prompt_error
         && error_text.contains("follow-up prompt input readiness");
+    // A follow-up readiness timeout only reaches this classifier when the tmux
+    // pane is still alive (the capture that produced the timeout proves the pane
+    // exists). The producer derives its two witnesses from that same pane
+    // snapshot:
+    //   previous_tui_turn_still_running = tmux_pane_alive && !prompt_marker_detected
+    //   prompt_marker_detected          = tmux_pane_alive && REPL idle at a prompt
+    // They are mutually exclusive and each implies tmux_pane_alive, so their
+    // union is exactly "pane-alive readiness timeout". A live pane means the
+    // resumed provider session is intact — the follow-up input simply failed to
+    // confirm in time — so the empty-response no-handshake fallback must NOT kill
+    // it for a fresh retry (that would drop the resumed session and start over,
+    // violating the restart live-turn-preservation contract). #4605 covered only
+    // the first witness (pane busy, no marker); the second (pane idle at a ready
+    // prompt — a *more* certain "session alive" signal, and the exact restart
+    // follow-up case) leaked through to fresh-session (#4640). A genuinely failed
+    // resume surfaces a stale session_id error in the output file, which
+    // output_file_has_stale_resume_error_after_offset detects and retries ahead
+    // of this preserve path, so widening here cannot mask a real resume failure.
     let claude_followup_busy_readiness_timeout = claude_followup_requeue_prompt_error
-        && error_text.contains("previous_tui_turn_still_running=true");
+        && (error_text.contains("previous_tui_turn_still_running=true")
+            || error_text.contains("prompt_marker_detected=true"));
     let transport_error_should_skip_quiescence = match provider {
         ProviderKind::Claude => {
             pre_submission_prompt_error
