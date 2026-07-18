@@ -565,8 +565,9 @@ fn build_queue_report_sync(
                 let age = now.duration_since(item.created_at).as_secs();
                 let preview = truncate_str(&item.text, 60);
                 lines.push(format!(
-                    "    {}. `<@{}>` {}s ago: {}",
+                    "    {}. message_id `{}` — `<@{}>` {}s ago: {}",
                     i + 1,
+                    item.message_id,
                     item.author_id,
                     age,
                     preview
@@ -662,6 +663,53 @@ fn build_queue_report_sync(
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod queue_report_tests {
+    use super::*;
+    use crate::services::turn_orchestrator::{InterventionMode, SourceMessageQueuedGeneration};
+    use poise::serenity_prelude::{MessageId, UserId};
+
+    fn queued_intervention(message_id: u64) -> Intervention {
+        Intervention {
+            author_id: UserId::new(2),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            queued_generation: 1,
+            source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: vec![SourceMessageQueuedGeneration::new(
+                MessageId::new(message_id),
+                1,
+            )],
+            source_text_segments: Vec::new(),
+            text: "queued prompt".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    #[test]
+    fn queue_report_exposes_primary_message_id_for_cancel_queued() {
+        let channel_id = ChannelId::new(7);
+        let mut queues = std::collections::HashMap::new();
+        queues.insert(channel_id, vec![queued_intervention(42)]);
+
+        let report = build_queue_report_sync(
+            &queues,
+            &ProviderKind::Claude,
+            "test-token",
+            channel_id,
+            false,
+        );
+
+        assert!(report.contains("message_id `42`"));
+    }
 }
 
 pub(in crate::services::discord) async fn build_queue_report(

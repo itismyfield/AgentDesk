@@ -489,7 +489,7 @@ pub(crate) fn cancel_soft_intervention_by_message_id(
     queue: &mut Vec<Intervention>,
     message_id: MessageId,
 ) -> CancelQueuedMessageResult {
-    cancel_soft_intervention_matching(queue, message_id, |item| {
+    cancel_soft_intervention_matching(queue, |item| {
         item.message_id == message_id || item.source_message_ids.contains(&message_id)
     })
 }
@@ -502,12 +502,11 @@ pub(crate) fn cancel_soft_intervention_by_primary_message_id(
     queue: &mut Vec<Intervention>,
     message_id: MessageId,
 ) -> CancelQueuedMessageResult {
-    cancel_soft_intervention_matching(queue, message_id, |item| item.message_id == message_id)
+    cancel_soft_intervention_matching(queue, |item| item.message_id == message_id)
 }
 
 fn cancel_soft_intervention_matching(
     queue: &mut Vec<Intervention>,
-    message_id: MessageId,
     matches: impl Fn(&Intervention) -> bool,
 ) -> CancelQueuedMessageResult {
     let mut queue_exit_events = prune_interventions(queue);

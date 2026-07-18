@@ -452,7 +452,7 @@
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 909 | 842 | 67 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics/mod.rs` | 389 | 389 | 0 |  |
-| `services::discord::commands::diagnostics::reports` | `src/services/discord/commands/diagnostics/reports.rs` | 681 | 655 | 26 |  |
+| `services::discord::commands::diagnostics::reports` | `src/services/discord/commands/diagnostics/reports.rs` | 729 | 657 | 72 |  |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 82 | 82 | 0 |  |
 | `services::discord::commands::goals` | `src/services/discord/commands/goals.rs` | 73 | 73 | 0 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 107 | 94 | 13 |  |
@@ -1093,7 +1093,7 @@
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 564 | 436 | 128 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7346 | 3361 | 3985 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7345 | 3360 | 3985 | giant-file |
 | `services::turn_orchestrator::active_source_dedup` | `src/services/turn_orchestrator/active_source_dedup.rs` | 129 | 129 | 0 |  |
 | `services::turn_orchestrator::dispatch_reservation` | `src/services/turn_orchestrator/dispatch_reservation.rs` | 743 | 475 | 268 |  |
 | `services::turn_orchestrator::overflow` | `src/services/turn_orchestrator/overflow.rs` | 35 | 35 | 0 |  |
