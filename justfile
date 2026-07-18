@@ -37,6 +37,9 @@ test-non-pg:
     python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
     env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+    # `ClaudeBinary` capability invariants are compile-fail doctests in src/lib.rs.
+    # Filter the real rustdoc harness to this public capability contract.
+    cargo test --doc ClaudeBinary
 
 test-postgres:
     cargo test -- _pg pg_ postgres --nocapture --test-threads=1

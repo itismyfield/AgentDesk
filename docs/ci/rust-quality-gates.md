@@ -6,8 +6,9 @@ repository is already clippy-clean.
 ## Entrypoints
 
 - `just check`: local/CI aggregate for `just fmt-check`, staged clippy,
-  `cargo check --workspace --all-features --all-targets`, and the existing
-  non-Postgres test subset.
+  `cargo check --workspace --all-features --all-targets`, the existing
+  non-Postgres test subset, and the targeted `ClaudeBinary` compile-fail
+  doctest guard.
 - `just test-postgres`: existing PostgreSQL test lane for CI jobs with a
   Postgres service.
 - `just lint-strict`: target end state, `cargo clippy --workspace --all-targets
