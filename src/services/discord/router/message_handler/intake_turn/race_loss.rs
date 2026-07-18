@@ -1,6 +1,6 @@
 use super::*;
 
-mod mailbox_reaction;
+pub(in crate::services::discord::router::message_handler::intake_turn) mod mailbox_reaction;
 
 async fn enqueue_race_loss_requeued_intervention(
     shared: &Arc<SharedData>,
@@ -399,6 +399,7 @@ pub(super) async fn handle_race_loss_enqueue(
             user_msg_id,
             emoji,
             turn_start_attempt,
+            "race_loss_message_queued",
         )
         .await;
         // #2036 Surface 3: detect queue→start races where the

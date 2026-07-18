@@ -83,6 +83,7 @@ async fn failed_queue_reaction_sends_exactly_one_referenced_fallback() {
         message_id,
         crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
         None,
+        "race_loss_message_queued",
     )
     .await;
 
@@ -154,6 +155,7 @@ async fn standalone_without_start_attempt_adds_mailbox_once() {
         message_id,
         crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
         None,
+        "race_loss_message_queued",
     )
     .await;
 
@@ -189,6 +191,7 @@ async fn matching_start_rollback_and_imperative_add_coalesce_without_double_mail
         message_id,
         crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
         Some(attempt),
+        "race_loss_message_queued",
     )
     .await;
 
@@ -255,6 +258,7 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
         message_id,
         crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
         Some(stale_attempt),
+        "race_loss_message_queued",
     )
     .await;
 
@@ -354,6 +358,7 @@ async fn recently_finalized_message_requeued_in_live_mailbox_repairs_mailbox_mar
         message_id,
         crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
         None,
+        "race_loss_message_queued",
     )
     .await;
 
