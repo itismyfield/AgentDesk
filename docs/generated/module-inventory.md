@@ -280,7 +280,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1644 | 1379 | 265 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 949 | 680 | 269 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 | 188 | 0 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2697 | 1771 | 926 | giant-file |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2701 | 1775 | 926 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 | 129 | 0 |  |
 | `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 405 | 405 | 0 |  |
@@ -491,10 +491,10 @@
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 1414 | 942 | 472 |  |
 | `services::discord::gateway::outbound_messages` | `src/services/discord/gateway/outbound_messages.rs` | 249 | 164 | 85 |  |
 | `services::discord::gateway_voice_queue` | `src/services/discord/gateway_voice_queue.rs` | 95 | 17 | 78 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 871 | 700 | 171 |  |
+| `services::discord::health` | `src/services/discord/health.rs` | 896 | 725 | 171 |  |
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 365 | 365 | 0 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 113 | 113 | 0 |  |
-| `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
+| `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 248 | 195 | 53 |  |
 | `services::discord::health::rebind_request` | `src/services/discord/health/rebind_request.rs` | 112 | 87 | 25 |  |
 | `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5855 | 2566 | 3289 | giant-file |
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
@@ -691,9 +691,9 @@
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 519 | 371 | 148 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 130 | 130 | 0 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 526 | 526 | 0 |  |
-| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 907 | 299 | 608 |  |
+| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 917 | 309 | 608 |  |
 | `services::discord::runtime_bootstrap::framework_setup` | `src/services/discord/runtime_bootstrap/framework_setup.rs` | 347 | 323 | 24 |  |
-| `services::discord::runtime_bootstrap::gateway_lease` | `src/services/discord/runtime_bootstrap/gateway_lease.rs` | 587 | 587 | 0 |  |
+| `services::discord::runtime_bootstrap::gateway_lease` | `src/services/discord/runtime_bootstrap/gateway_lease.rs` | 592 | 592 | 0 |  |
 | `services::discord::runtime_bootstrap::gateway_runtime` | `src/services/discord/runtime_bootstrap/gateway_runtime.rs` | 148 | 148 | 0 |  |
 | `services::discord::runtime_bootstrap::intake` | `src/services/discord/runtime_bootstrap/intake.rs` | 83 | 83 | 0 |  |
 | `services::discord::runtime_bootstrap::orphan_recovery` | `src/services/discord/runtime_bootstrap/orphan_recovery.rs` | 336 | 336 | 0 |  |
