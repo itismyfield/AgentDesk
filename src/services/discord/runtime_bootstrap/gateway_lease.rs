@@ -287,13 +287,19 @@ pub(super) enum GatewayLeaseOutcome {
     /// the standalone/no-DB path). Either way, startup proceeds.
     Proceed(Option<crate::db::postgres::AdvisoryLockLease>),
     /// Another node owns the lease, so this provider is a confirmed standby.
-    /// The startup diagnostic has already run; run_bot must decrement the
-    /// shutdown barrier and return after exposing any standby worker state.
+    /// The startup diagnostic has already run; run_bot must expose the standby
+    /// runtime and leave its shutdown-barrier slot for the marker poller.
     Standby,
     /// Lease ownership is unknown because acquisition failed. The startup
     /// diagnostic has already run; run_bot must fail closed and return without
     /// classifying this provider as standby.
     Failed,
+}
+
+impl GatewayLeaseOutcome {
+    pub(super) fn starts_provider_runtime(&self) -> bool {
+        !matches!(self, Self::Failed)
+    }
 }
 
 /// Acquire the Discord gateway singleton lease (advisory lock) when a PG pool

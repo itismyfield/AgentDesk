@@ -1,9 +1,9 @@
 use super::*;
 
-/// Start the leader gateway runtime after the singleton lease succeeds.
-/// This is the final `run_bot` tail: restored-state logging, health
-/// registration, poise framework/client construction, gateway-lease keepalive,
-/// SIGTERM handler spawn, and the gateway backend event loop, in that order.
+/// Start the leader gateway runtime after health registration, restart-marker
+/// fencing, and optional intake-worker startup. This final `run_bot` tail owns
+/// framework/client construction, gateway-lease keepalive, the SIGTERM handler,
+/// and the gateway backend event loop, in that order.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_start_gateway_runtime(
     token: &str,
@@ -44,11 +44,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
             );
         }
     }
-
-    // Register this provider with the health check registry
-    health_registry
-        .register(provider.as_str().to_string(), shared.clone())
-        .await;
 
     let token_owned = token.to_string();
     let shared_clone = shared.clone();

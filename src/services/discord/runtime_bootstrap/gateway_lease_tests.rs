@@ -6,6 +6,13 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn failed_lease_does_not_authorize_worker_or_poller_startup() {
+    assert!(!GatewayLeaseOutcome::Failed.starts_provider_runtime());
+    assert!(GatewayLeaseOutcome::Standby.starts_provider_runtime());
+    assert!(GatewayLeaseOutcome::Proceed(None).starts_provider_runtime());
+}
+
 fn cluster(enabled: bool, preferred: Option<&str>) -> crate::config::ClusterConfig {
     crate::config::ClusterConfig {
         enabled,

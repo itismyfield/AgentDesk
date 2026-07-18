@@ -216,8 +216,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         // — otherwise standby would mask the worsen signal it just unmasked.
         let cluster_standby_without_gateway =
             cluster_standby_without_gateway(state, server_up, &degraded_reasons).await;
-        let cluster_standby_with_worker = registry.has_standby_provider().await;
-        let cluster_standby = cluster_standby_without_gateway || cluster_standby_with_worker;
+        let all_registered_providers_standby = registry.all_providers_are_standby().await;
+        let cluster_standby = cluster_standby_without_gateway || all_registered_providers_standby;
         if cluster_standby {
             degraded_reasons.retain(|reason| reason.as_str() != Some("no_providers_registered"));
             json["cluster_standby"] = serde_json::json!(true);

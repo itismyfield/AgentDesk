@@ -258,8 +258,7 @@ pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
-// #2047 Finding 5 — expose role-map resolver to the HTTP routes layer so the
-// `/api/discord/channels/{id}` proxy can deny lookups for channels that are
+// #2047 Finding 5 — expose the role-map resolver so HTTP channel lookups can deny channels that are
 // not registered with this AgentDesk instance.
 pub(crate) use settings::resolve_role_binding as resolve_channel_role_binding;
 
@@ -2509,6 +2508,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         restart: RestartLifecycle {
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            intake_worker_lifecycle: Default::default(),
             finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             current_generation: 0,
             restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),

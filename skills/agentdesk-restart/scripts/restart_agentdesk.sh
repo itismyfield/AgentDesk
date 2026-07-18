@@ -66,56 +66,14 @@ if [[ "$ENV" != "preview" ]]; then
     exit 1
   fi
 
-  standby_without_live_turns=false
-  if _health_json_has_jq; then
-    if ! restart_health_json=$(curl -s --max-time 3 -H "$(_health_origin_header)" \
-      "http://${ADK_DEFAULT_LOOPBACK}:${PORT}/api/health/detail" 2>/dev/null); then
-      restart_health_json=""
-    fi
-    if [[ -n "$restart_health_json" ]] && printf '%s\n' "$restart_health_json" | jq -e '
-      (.cluster_standby == true)
-      and ((.global_active | type) == "number")
-      and ((.global_finalizing | type) == "number")
-      and (.global_active == 0)
-      and (.global_finalizing == 0)
-      and ((.providers | type) == "array")
-      and ((.providers | length) > 0)
-      and all(
-        .providers[];
-        (.runtime_state_complete == true)
-        and ((.active_turns | type) == "number")
-        and (.active_turns == 0)
-      )
-      and ((.mailboxes | type) == "array")
-      and all(
-        .mailboxes[];
-        ((.has_cancel_token | type) == "boolean")
-        and (.has_cancel_token == false)
-        and ((.inflight_state_present | type) == "boolean")
-        and (.inflight_state_present == false)
-        and ((.relay_health | type) == "object")
-        and ((.relay_health.active_turn | type) == "string")
-        and (.relay_health.active_turn == "none")
-        and ((.relay_health.bridge_inflight_present | type) == "boolean")
-        and (.relay_health.bridge_inflight_present == false)
-        and ((.relay_health.mailbox_has_cancel_token | type) == "boolean")
-        and (.relay_health.mailbox_has_cancel_token == false)
-        and ((.relay_stall_state | type) == "string")
-        and (.relay_stall_state == "healthy")
-      )
-    ' >/dev/null 2>&1; then
-      standby_without_live_turns=true
-    fi
+  # Every provider role participates in the same marker handshake. Health is
+  # drain evidence only after restart_pending has fenced new admissions; an
+  # idle snapshot by itself cannot authorize bootout because a standby intake
+  # worker may claim a full turn immediately after that snapshot.
+  if ! request_restart_drain_mode_or_fail "$ENV" "$LABEL" "$PORT" "$RUNTIME_ROOT" "agentdesk-restart-skill"; then
+    exit 1
   fi
-
-  if [[ "$standby_without_live_turns" == "true" ]]; then
-    echo "▸ [gate] ${ENV} cluster standby health explicitly proves no active/finalizing/runtime-evidence turns — skipping leader-only restart drain acknowledgement"
-  else
-    if ! request_restart_drain_mode_or_fail "$ENV" "$LABEL" "$PORT" "$RUNTIME_ROOT" "agentdesk-restart-skill"; then
-      exit 1
-    fi
-    MARKER_ARMED=1
-  fi
+  MARKER_ARMED=1
 
   if ! wait_for_live_turns_to_drain_or_fail "$ENV" "$LABEL" "$PORT" "$LIVE_TURN_WAIT_SECONDS" 2; then
     exit 1

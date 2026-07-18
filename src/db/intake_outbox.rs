@@ -275,6 +275,33 @@ pub(crate) async fn claim_pending_for_target(
     Ok(Some(row))
 }
 
+/// Restart-admission rollback: return exactly one owned pre-accept claim to
+/// `pending` when the worker observes its shutdown fence after claiming but
+/// before accepting. This is deliberately not a failure transition: it clears
+/// only claim ownership/timing and leaves retry/error bookkeeping untouched so
+/// the next healthy worker can claim the original attempt.
+///
+/// Returns `Ok(true)` when this owner released this row; `Ok(false)` when the
+/// row or ownership changed first (for example, a stale-claim sweep won).
+pub(crate) async fn return_claimed_to_pending(
+    pool: &PgPool,
+    id: i64,
+    claim_owner: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE intake_outbox
+         SET status = 'pending',
+             claim_owner = NULL,
+             claimed_at = NULL
+         WHERE id = $1 AND status = 'claimed' AND claim_owner = $2",
+    )
+    .bind(id)
+    .bind(claim_owner)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Transition `claimed → accepted` after the worker has validated cwd
 /// and is ready to spawn the turn. Verifies `claim_owner` matches via
 /// the WHERE clause so a stale leader-side sweep cannot accidentally
@@ -1466,6 +1493,70 @@ mod postgres_tests {
             .await
             .expect("read status");
         assert_eq!(status, "claimed", "wrong owner must NOT advance state");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_owned_claim_returns_exact_row_to_pending_without_failure_pollution() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        insert_pending(&pool, &payload("ch-cancel-owned", "msg-owned"), 1, None)
+            .await
+            .expect("insert owned row"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        let owned = claim_pending_for_target(&pool, "worker-1", "claude", "owner-cancelled")
+            .await
+            .expect("claim owned row") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            .expect("owned row"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        insert_pending(&pool, &payload("ch-cancel-other", "msg-other"), 1, None)
+            .await
+            .expect("insert other row"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        let other = claim_pending_for_target(&pool, "worker-1", "claude", "owner-other")
+            .await
+            .expect("claim other row") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            .expect("other row"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        assert!(
+            !return_claimed_to_pending(&pool, owned.id, "owner-wrong")
+                .await
+                .expect("wrong owner is a no-op"), // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            "a different worker must not release this claim"
+        );
+        assert!(
+            return_claimed_to_pending(&pool, owned.id, "owner-cancelled")
+                .await
+                .expect("release owned claim"), // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            "the cancelling worker must return its exact row to pending"
+        );
+
+        let released: (String, Option<String>, bool, i32, Option<String>, bool) = sqlx::query_as(
+            "SELECT status, claim_owner, claimed_at IS NULL, retry_count, last_error,
+                        completed_at IS NULL
+                 FROM intake_outbox WHERE id = $1",
+        )
+        .bind(owned.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read released row"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        assert_eq!(released.0, "pending");
+        assert_eq!(released.1, None);
+        assert!(released.2, "claimed_at must be cleared");
+        assert_eq!(released.3, 0, "restart cancellation is not a retry");
+        assert_eq!(released.4, None, "restart cancellation is not an error");
+        assert!(released.5, "restart cancellation is not completion");
+
+        let other_state: (String, Option<String>) =
+            sqlx::query_as("SELECT status, claim_owner FROM intake_outbox WHERE id = $1")
+                .bind(other.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read other row"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        assert_eq!(other_state.0, "claimed", "another row must not be reset");
+        assert_eq!(other_state.1.as_deref(), Some("owner-other"));
 
         pool.close().await;
         pg_db.drop().await;

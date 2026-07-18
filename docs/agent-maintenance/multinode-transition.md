@@ -445,6 +445,13 @@
 
 ### Audited touches
 
+- #4527 standby restart contract: both gateway and confirmed-standby providers
+  register the same restart marker poller before starting their intake worker.
+  The marker closes a provider-local atomic admission gate, returns an owned
+  pre-accept claim to `pending` without retry/error pollution, and waits for any
+  accepted tick to finish execution and its terminal outbox transition before
+  exposing `restart_pending` or consuming that provider's shutdown-barrier slot.
+  Indeterminate gateway-lease failures start neither worker nor poller.
 - #4550/#4604 intake preservation rolling-deploy contract: worker heartbeats
   advertise `preserve_on_cancel_v1`, and all three routing authorities
   (durable foreign session owner, explicit `/node`, and preferred labels) use the

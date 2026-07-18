@@ -62,14 +62,9 @@ pub(super) async fn run_bot_framework_setup(
 
     let shared_for_tmux = shared_for_migrate.clone();
 
-    // Background: poll for deferred restart marker when idle
-    super::spawns::run_bot_spawn_deferred_restart_poller(&shared_for_tmux, &provider_for_setup);
-
-    // (Phase 5.1 of intake-node-routing — issue #2007: the
-    // intake_worker poll loop is now spawned in `run_bot()`
-    // before the gateway lease check, so cluster-standby
-    // nodes also drain their share of `intake_outbox`. No
-    // worker bootstrap belongs here anymore.)
+    // (Phase 5.1 of intake-node-routing — issue #2007: `run_bot()` starts the
+    // intake worker only after the lease result authorizes a registered gateway
+    // or standby runtime. No worker bootstrap belongs here.)
 
     // Background: hot-reload skills on file changes (30s polling)
     // Scans home-level AND all active project-level skill directories.

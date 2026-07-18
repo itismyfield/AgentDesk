@@ -266,15 +266,13 @@ mod tests {
     async fn registered_idle_standby_is_healthy_and_http_ready() {
         let registry = HealthRegistry::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
-        registry
-            .register_standby("codex".to_string(), shared)
-            .await;
+        registry.register_standby("codex".to_string(), shared).await;
 
         let snapshot = build_health_snapshot(&registry).await;
 
         assert_eq!(snapshot.status(), HealthStatus::Healthy);
         assert!(snapshot.status().is_http_ready());
-        assert!(registry.has_standby_provider().await);
+        assert!(registry.all_providers_are_standby().await);
         let json = serde_json::to_value(snapshot).expect("serialize standby health");
         assert_eq!(json["providers"][0]["connected"], false);
         assert_eq!(json["providers"][0]["runtime_state_complete"], true);
@@ -301,10 +299,7 @@ mod tests {
             .await
         );
         shared.restart.global_active.store(1, Ordering::Relaxed);
-        shared
-            .restart
-            .global_finalizing
-            .store(1, Ordering::Relaxed);
+        shared.restart.global_finalizing.store(1, Ordering::Relaxed);
 
         let json = serde_json::to_value(build_health_snapshot(&registry).await)
             .expect("serialize active standby health");
@@ -314,6 +309,25 @@ mod tests {
         assert_eq!(json["providers"][0]["active_turns"], 1);
         assert_eq!(json["providers"][0]["runtime_state_complete"], true);
         assert_eq!(json["mailboxes"][0]["has_cancel_token"], true);
+    }
+
+    #[tokio::test]
+    async fn mixed_gateway_and_standby_is_not_classified_as_cluster_standby() {
+        let registry = HealthRegistry::new();
+        registry
+            .register(
+                "claude".to_string(),
+                crate::services::discord::make_shared_data_for_tests(),
+            )
+            .await;
+        registry
+            .register_standby(
+                "codex".to_string(),
+                crate::services::discord::make_shared_data_for_tests(),
+            )
+            .await;
+
+        assert!(!registry.all_providers_are_standby().await);
     }
 
     #[test]

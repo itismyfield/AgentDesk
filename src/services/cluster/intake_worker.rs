@@ -22,7 +22,7 @@
 
 use crate::db::intake_outbox::{
     IntakeOutboxRow, claim_pending_for_target, mark_accepted, mark_done, mark_failed_post_accept,
-    mark_failed_pre_accept, mark_spawned,
+    mark_failed_pre_accept, mark_spawned, return_claimed_to_pending,
 };
 use crate::services::discord::{IntakeRequest, SharedData, TurnKind, execute_intake_turn_core};
 use poise::serenity_prelude as serenity;
@@ -31,6 +31,106 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Provider-local worker activity used by the restart marker poller. The
+/// process-global shutdown counters remain separate; each provider waits only
+/// for its own accepted intake tick before consuming its barrier slot.
+pub(crate) struct IntakeWorkerLifecycle {
+    admission_fenced: AtomicBool,
+    active_ticks: std::sync::atomic::AtomicUsize,
+    drained: tokio::sync::Notify,
+}
+
+impl Default for IntakeWorkerLifecycle {
+    fn default() -> Self {
+        Self {
+            admission_fenced: AtomicBool::new(false),
+            active_ticks: std::sync::atomic::AtomicUsize::new(0),
+            drained: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl IntakeWorkerLifecycle {
+    /// Acquire admission for one complete worker tick. The post-increment fence
+    /// check closes the load-before-fence race: either the tick is counted before
+    /// the poller drains, or it relinquishes admission without touching the DB.
+    pub(crate) fn try_begin_tick(&self) -> Option<IntakeWorkerTickGuard<'_>> {
+        if self.admission_fenced.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.finish_admission_after_open_check()
+    }
+
+    fn finish_admission_after_open_check(&self) -> Option<IntakeWorkerTickGuard<'_>> {
+        self.active_ticks.fetch_add(1, Ordering::SeqCst);
+        if self.admission_fenced.load(Ordering::SeqCst) {
+            self.finish_tick();
+            return None;
+        }
+        Some(IntakeWorkerTickGuard { lifecycle: self })
+    }
+
+    pub(crate) fn fence_admission(&self) {
+        self.admission_fenced.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn admission_is_fenced(&self) -> bool {
+        self.admission_fenced.load(Ordering::SeqCst)
+    }
+
+    fn finish_tick(&self) {
+        if self.active_ticks.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.drained.notify_one();
+        }
+    }
+
+    /// Wait for the active tick, if any, to finish. `notify_one` retains a
+    /// permit when the drop races between the atomic load and `notified()`, so
+    /// the single provider poller cannot miss the drained edge.
+    pub(crate) async fn wait_until_drained(&self) {
+        while self.active_ticks.load(Ordering::SeqCst) != 0 {
+            self.drained.notified().await;
+        }
+    }
+}
+
+pub(crate) struct IntakeWorkerTickGuard<'a> {
+    lifecycle: &'a IntakeWorkerLifecycle,
+}
+
+impl Drop for IntakeWorkerTickGuard<'_> {
+    fn drop(&mut self) {
+        self.lifecycle.finish_tick();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionCheckpoint {
+    BeforeClaim,
+    AfterClaim,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionAction {
+    Proceed,
+    StopBeforeClaim,
+    ReleaseClaim,
+}
+
+fn admission_action(
+    cancel: &AtomicBool,
+    lifecycle: &IntakeWorkerLifecycle,
+    checkpoint: AdmissionCheckpoint,
+) -> AdmissionAction {
+    if !cancel.load(Ordering::Acquire) && !lifecycle.admission_is_fenced() {
+        return AdmissionAction::Proceed;
+    }
+    match checkpoint {
+        AdmissionCheckpoint::BeforeClaim => AdmissionAction::StopBeforeClaim,
+        AdmissionCheckpoint::AfterClaim => AdmissionAction::ReleaseClaim,
+    }
+}
 
 /// Poll-loop tunables. Defaults reflect the design doc's adaptive
 /// polling: tight cadence right after a successful claim so a burst
@@ -66,6 +166,9 @@ pub(crate) enum TickOutcome {
     /// stale-claim sweep got there first; this is operationally
     /// distinguishable from a normal Processed for metrics.
     LostClaimBeforeAccept,
+    /// The restart admission fence stopped the tick before claim, or returned
+    /// its owned claim to pending before accept.
+    Cancelled,
 }
 
 /// Run a single poll cycle: claim one row, run it through accept →
@@ -81,11 +184,39 @@ pub(crate) async fn run_intake_worker_tick(
     target_instance_id: &str,
     provider: &str,
     claim_owner: &str,
+    cancel: &AtomicBool,
 ) -> Result<TickOutcome, sqlx::Error> {
+    let Some(_active_tick) = shared.restart.intake_worker_lifecycle.try_begin_tick() else {
+        return Ok(TickOutcome::Cancelled);
+    };
+
+    // The lifecycle gate is the atomic admission boundary. The cancel check is
+    // retained as a belt-and-suspenders fence for signal-driven shutdown.
+    if admission_action(
+        cancel,
+        &shared.restart.intake_worker_lifecycle,
+        AdmissionCheckpoint::BeforeClaim,
+    ) == AdmissionAction::StopBeforeClaim
+    {
+        return Ok(TickOutcome::Cancelled);
+    }
+
     let claimed = claim_pending_for_target(pool, target_instance_id, provider, claim_owner).await?;
     let Some(row) = claimed else {
         return Ok(TickOutcome::QueueEmpty);
     };
+
+    // A marker can land while the claim transaction is in flight. Return only
+    // this worker's row to pending and stop before payload work or spawning.
+    if admission_action(
+        cancel,
+        &shared.restart.intake_worker_lifecycle,
+        AdmissionCheckpoint::AfterClaim,
+    ) == AdmissionAction::ReleaseClaim
+    {
+        release_cancelled_claim(pool, &row, claim_owner).await?;
+        return Ok(TickOutcome::Cancelled);
+    }
 
     // Round-2 P0 #2: pre-accept failure (cwd validation, payload
     // conversion) is retryable; post-accept failure is operator-only.
@@ -103,6 +234,19 @@ pub(crate) async fn run_intake_worker_tick(
             return Ok(TickOutcome::Processed);
         }
     };
+
+    // Payload conversion can race the marker too. Recheck at the final
+    // pre-accept boundary; after acceptance the lifecycle guard makes marker
+    // acknowledgement wait for execute/final DB transition to drain.
+    if admission_action(
+        cancel,
+        &shared.restart.intake_worker_lifecycle,
+        AdmissionCheckpoint::AfterClaim,
+    ) == AdmissionAction::ReleaseClaim
+    {
+        release_cancelled_claim(pool, &row, claim_owner).await?;
+        return Ok(TickOutcome::Cancelled);
+    }
 
     // Transition: claimed → accepted. If the sweep beat us to it,
     // ABORT (do not spawn) — Ok(false) means we lost ownership.
@@ -174,6 +318,23 @@ pub(crate) async fn run_intake_worker_tick(
     }
 }
 
+async fn release_cancelled_claim(
+    pool: &PgPool,
+    row: &IntakeOutboxRow,
+    claim_owner: &str,
+) -> Result<(), sqlx::Error> {
+    let released = return_claimed_to_pending(pool, row.id, claim_owner).await?;
+    if !released {
+        tracing::warn!(
+            row_id = row.id,
+            channel_id = row.channel_id,
+            user_msg_id = row.user_msg_id,
+            "[intake_worker] restart fence could not release claim (ownership/state changed) — aborting before accept"
+        );
+    }
+    Ok(())
+}
+
 /// Run the poll loop forever. Returns when `cancel.load(Acquire)` is true.
 /// Each tick claims at most one row; backoff between ticks adapts to
 /// whether the previous tick had work.
@@ -182,20 +343,17 @@ pub(crate) async fn run_intake_worker_tick(
 /// - Between ticks (during the adaptive sleep), the loop polls
 ///   `cancel` in slices of `max(busy_poll_interval, 50ms)` so a
 ///   flag flip unblocks within ~250ms by default.
-/// - During an active tick (DB roundtrip OR
-///   `execute_intake_turn_core`), the cancel flag is NOT polled —
-///   the running turn drains to completion before the loop exits.
-///   Operators with a stuck turn should use Phase 5's force-fail CLI
-///   rather than relying on cancel-mid-tick.
+/// - Before acceptance, the tick rechecks at the claim boundary and returns an
+///   owned claim to `pending` when cancellation races the claim transaction.
+/// - After `accepted`, cancellation does not interrupt execution. The active
+///   tick guard makes restart acknowledgement wait for the executor and final
+///   DB transition to drain. Operators with a stuck turn should use Phase 5's
+///   force-fail CLI rather than relying on cancel-mid-execute.
 ///
-/// What flips the cancel flag (codex Phase 5 P1 #3): the bootstrap
-/// passes `SharedData.restart.shutting_down`, which the SIGTERM/SIGINT path
-/// flips early in `setup_signal_handlers`. The marker-based DEFERRED
-/// restart flow only sets `restart_pending`, so the worker keeps
-/// polling during a deferred drain — by design, since the leader
-/// also queues new turns into the mailbox during drain. The worker
-/// stops when the actual restart happens and the new process flips
-/// `shutting_down` on the OLD process via the kill path.
+/// What flips the cancel flag (codex Phase 5 P1 #3): the bootstrap passes
+/// `SharedData.restart.shutting_down`. Both the signal path and the shared
+/// gateway/standby restart-marker poller set it before restart acknowledgement,
+/// fencing new poll ticks while an active tick drains to completion.
 pub(crate) async fn run_intake_worker_loop(
     pool: PgPool,
     http: Arc<serenity::http::Http>,
@@ -229,6 +387,7 @@ pub(crate) async fn run_intake_worker_loop(
             &target_instance_id,
             &provider,
             &claim_owner,
+            cancel.as_ref(),
         )
         .await;
 
@@ -236,6 +395,10 @@ pub(crate) async fn run_intake_worker_loop(
             Ok(TickOutcome::QueueEmpty) => config.idle_poll_interval,
             Ok(TickOutcome::Processed) | Ok(TickOutcome::LostClaimBeforeAccept) => {
                 config.busy_poll_interval
+            }
+            Ok(TickOutcome::Cancelled) => {
+                tracing::info!(target_instance_id, "[intake_worker] cancelled — exiting");
+                return;
             }
             Err(error) => {
                 tracing::warn!("[intake_worker] tick error (pool/sqlx): {error} — backing off");
@@ -438,6 +601,77 @@ mod tests {
         );
         assert!(parse_turn_kind("").is_err());
     }
+
+    #[test]
+    fn marker_between_loop_check_and_claim_stops_before_claim() {
+        let lifecycle = IntakeWorkerLifecycle::default();
+        assert!(
+            !lifecycle.admission_is_fenced(),
+            "the loop-level check observed an open fence"
+        );
+
+        lifecycle.fence_admission();
+        assert!(
+            lifecycle.try_begin_tick().is_none(),
+            "the lifecycle gate must suppress a tick admitted after the marker"
+        );
+    }
+
+    #[test]
+    fn restart_fence_rejects_all_future_tick_admissions_after_active_tick_drains() {
+        let lifecycle = IntakeWorkerLifecycle::default();
+        let active = lifecycle
+            .try_begin_tick()
+            .expect("tick admitted before restart fence");
+
+        lifecycle.fence_admission();
+        assert!(lifecycle.try_begin_tick().is_none());
+        drop(active);
+        assert!(
+            lifecycle.try_begin_tick().is_none(),
+            "drain must not reopen restart admission"
+        );
+    }
+
+    #[test]
+    fn fence_between_open_check_and_active_registration_rejects_late_tick() {
+        let lifecycle = IntakeWorkerLifecycle::default();
+        assert!(!lifecycle.admission_is_fenced());
+
+        lifecycle.fence_admission();
+        assert!(
+            lifecycle.finish_admission_after_open_check().is_none(),
+            "a worker paused after its open check must not register after the fence"
+        );
+        assert_eq!(lifecycle.active_ticks.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn marker_between_claim_and_accept_requires_release_without_spawn() {
+        let cancel = AtomicBool::new(false);
+        let lifecycle = IntakeWorkerLifecycle::default();
+        assert_eq!(
+            admission_action(&cancel, &lifecycle, AdmissionCheckpoint::BeforeClaim),
+            AdmissionAction::Proceed
+        );
+
+        let mut accepted = false;
+        let mut spawned = false;
+        let mut returned_pending = false;
+        lifecycle.fence_admission();
+        match admission_action(&cancel, &lifecycle, AdmissionCheckpoint::AfterClaim) {
+            AdmissionAction::ReleaseClaim => returned_pending = true,
+            AdmissionAction::Proceed => {
+                accepted = true;
+                spawned = true;
+            }
+            AdmissionAction::StopBeforeClaim => unreachable!("row is already claimed"),
+        }
+
+        assert!(returned_pending);
+        assert!(!accepted, "a fenced claimed row must not be accepted");
+        assert!(!spawned, "a fenced claimed row must not spawn");
+    }
 }
 
 // PG-backed tick coverage is intentionally NOT in this file:
@@ -448,6 +682,9 @@ mod tests {
 // harness `TestHealthHarness` lived in the removed SQLite-only feature). The
 // pre-execute branches we DO want to pin are already
 // covered at the helper level:
+//   - marker after loop check but before claim: extracted admission policy above
+//   - marker after claim but before accept: extracted policy above plus
+//     `db::intake_outbox::postgres_tests::cancelled_owned_claim_returns_exact_row_to_pending_without_failure_pollution`
 //   - lost-claim race (sweep wins between claim and accept):
 //     `db::intake_outbox::postgres_tests::mark_accepted_returns_false_when_sweep_already_reset_the_claim`
 //   - 23505 classification, claim ordering, sweep correctness:

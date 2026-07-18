@@ -290,12 +290,12 @@ impl HealthRegistry {
             .await;
     }
 
-    pub(crate) async fn has_standby_provider(&self) -> bool {
-        self.providers
-            .lock()
-            .await
-            .iter()
-            .any(|entry| entry.role == ProviderRuntimeRole::Standby)
+    pub(crate) async fn all_providers_are_standby(&self) -> bool {
+        let providers = self.providers.lock().await;
+        !providers.is_empty()
+            && providers
+                .iter()
+                .all(|entry| entry.role == ProviderRuntimeRole::Standby)
     }
 
     pub(in crate::services::discord) async fn register(

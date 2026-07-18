@@ -1,9 +1,45 @@
 use super::*;
 
-/// Background: poll for the deferred restart marker when idle (leader-only).
-/// Behavior-preserving extraction of the inline spawn from run_bot's setup
-/// callback. Both clones are used only inside the spawn; the JoinHandle is
-/// discarded exactly as the inline code did.
+struct DeferredRestartPermit;
+
+/// Publish the admission fence before health can acknowledge the marker. The
+/// per-provider CAS gives exactly one poller permission to wait, persist, and
+/// consume that provider's shutdown-barrier slot.
+fn begin_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> {
+    shared.restart.intake_worker_lifecycle.fence_admission();
+    shared.restart.shutting_down.store(true, Ordering::SeqCst);
+    shared
+        .restart
+        .shutdown_counted
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .ok()
+        .map(|_| DeferredRestartPermit)
+}
+
+async fn prepare_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> {
+    let permit = begin_deferred_restart(shared)?;
+    shared
+        .restart
+        .intake_worker_lifecycle
+        .wait_until_drained()
+        .await;
+    // `restart_pending` is the health-visible acknowledgement consumed by the
+    // wrapper. Publish it only after an accepted tick has fully executed.
+    shared.restart.restart_pending.store(true, Ordering::SeqCst);
+    Some(permit)
+}
+
+fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) -> bool {
+    shared
+        .restart
+        .shutdown_remaining
+        .fetch_sub(1, Ordering::AcqRel)
+        == 1
+}
+
+/// Background: poll for the deferred restart marker for gateway and standby
+/// runtimes. The marker first fences admissions and cancels intake polling;
+/// health counters then provide the drain proof before the wrapper boots out.
 pub(super) fn run_bot_spawn_deferred_restart_poller(
     shared_for_tmux: &Arc<SharedData>,
     provider_for_setup: &ProviderKind,
@@ -21,22 +57,11 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
             if let Some(root) = crate::agentdesk_runtime_root() {
                 let marker = root.join("restart_pending");
                 if marker.exists() {
-                    shared_for_deferred
-                        .restart
-                        .restart_pending
-                        .store(true, Ordering::SeqCst);
-                    shared_for_deferred
-                        .restart
-                        .shutting_down
-                        .store(true, Ordering::SeqCst);
-                    if shared_for_deferred
-                        .restart
-                        .shutdown_counted
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                        .is_err()
-                    {
+                    let Some(shutdown_permit) =
+                        prepare_deferred_restart(&shared_for_deferred).await
+                    else {
                         continue;
-                    }
+                    };
                     let drain =
                         mailbox_restart_drain_all(&shared_for_deferred, &provider_for_deferred)
                             .await;
@@ -85,12 +110,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                     tracing::info!(
                         "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
                     );
-                    if shared_for_deferred
-                        .restart
-                        .shutdown_remaining
-                        .fetch_sub(1, Ordering::AcqRel)
-                        == 1
-                    {
+                    if finish_deferred_restart(&shared_for_deferred, shutdown_permit) {
                         let _ = std::fs::remove_file(&marker);
                         std::process::exit(0);
                     }
@@ -265,4 +285,76 @@ pub(super) fn run_bot_spawn_dead_tmux_reaper(shared_clone: &Arc<SharedData>) {
             tokio::time::sleep(DEAD_SESSION_REAP_INTERVAL).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn standby_marker_fences_intake_exposes_ack_and_counts_shutdown_once() {
+        let registry = health::HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.restart.shutdown_remaining.store(1, Ordering::SeqCst);
+        registry
+            .register_standby("codex".to_string(), shared.clone())
+            .await;
+
+        let execute_started = Arc::new(tokio::sync::Notify::new());
+        let execute_release = Arc::new(tokio::sync::Notify::new());
+        let shared_for_worker = shared.clone();
+        let started_for_worker = execute_started.clone();
+        let release_for_worker = execute_release.clone();
+        let worker = tokio::spawn(async move {
+            let _active_tick = shared_for_worker
+                .restart
+                .intake_worker_lifecycle
+                .try_begin_tick()
+                .expect("tick admitted before restart fence");
+            started_for_worker.notify_one();
+            release_for_worker.notified().await;
+        });
+        execute_started.notified().await;
+
+        let shared_for_prepare = shared.clone();
+        let prepare =
+            tokio::spawn(async move { prepare_deferred_restart(&shared_for_prepare).await });
+        while !shared.restart.shutting_down.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            !shared.restart.restart_pending.load(Ordering::Acquire),
+            "health must not acknowledge while the accepted execute future is active"
+        );
+        assert_eq!(
+            shared.restart.shutdown_remaining.load(Ordering::Acquire),
+            1,
+            "the shutdown token must remain unconsumed while execute is active"
+        );
+        assert!(begin_deferred_restart(&shared).is_none());
+
+        execute_release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .expect("accepted execute drain")
+            .expect("worker join");
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(1), prepare)
+            .await
+            .expect("marker acknowledgement after execute drain")
+            .expect("prepare join")
+            .expect("first marker acknowledgement");
+
+        let snapshot = serde_json::to_value(health::build_health_snapshot(&registry).await)
+            .expect("serialize acknowledged standby health");
+        assert_eq!(snapshot["providers"][0]["restart_pending"], true);
+        assert!(shared.restart.shutting_down.load(Ordering::Acquire));
+
+        assert!(finish_deferred_restart(&shared, permit));
+        assert_eq!(
+            shared.restart.shutdown_remaining.load(Ordering::Acquire),
+            0,
+            "the standby provider consumes its barrier slot exactly once"
+        );
+    }
 }
