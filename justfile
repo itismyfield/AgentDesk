@@ -28,6 +28,16 @@ test-non-pg:
     cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib discord_thread_create -- --test-threads=1
+    # #4599: queue reaction fallback and persisted-v1 promotion contracts.
+    cargo test --lib reaction_control::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib intake_queue_transaction::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib pending_reaction_failure_adapter_tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib intake_dispatch_invariant_queued_entrypoints_promote_markers -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
+    cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
     cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres

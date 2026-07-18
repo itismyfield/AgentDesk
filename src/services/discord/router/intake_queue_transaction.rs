@@ -395,6 +395,9 @@ where
                     } else {
                         outcome.pending_reaction =
                             PendingReactionDecision::Skip(PendingReactionSkipReason::Failed);
+                        effects
+                            .notify_pending_reaction_failure(channel_id, message_id)
+                            .await;
                     }
                 }
                 IntakeQueuePendingReactionPolicy::Static(emoji) => {
@@ -409,6 +412,9 @@ where
                     } else {
                         outcome.pending_reaction =
                             PendingReactionDecision::Skip(PendingReactionSkipReason::Failed);
+                        effects
+                            .notify_pending_reaction_failure(channel_id, message_id)
+                            .await;
                     }
                 }
             }
@@ -765,6 +771,10 @@ mod tests {
                 IntakeQueueCommittedStep::CheckpointAdvanced,
             ]
         );
+        assert!(
+            effects.fallback_notices.is_empty(),
+            "a delivered accepted reaction must not emit fallback UI"
+        );
     }
 
     #[tokio::test]
@@ -795,6 +805,11 @@ mod tests {
                 IntakeQueueCommittedStep::CheckpointAdvanced,
             ],
             "a failed reaction must never be reported as PendingReactionApplied"
+        );
+        assert_eq!(
+            effects.fallback_notices,
+            vec![(serenity::ChannelId::new(42), serenity::MessageId::new(100))],
+            "a failed accepted reaction must emit exactly one referenced fallback notice"
         );
     }
 
@@ -832,6 +847,49 @@ mod tests {
         assert_eq!(
             effects.checkpoints,
             vec![(serenity::ChannelId::new(42), serenity::MessageId::new(100))]
+        );
+        assert!(
+            effects.fallback_notices.is_empty(),
+            "a delivered static reaction must not emit fallback UI"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_static_reaction_failure_emits_exactly_one_fallback() {
+        let mut effects = FakeEffects {
+            enqueue_outcome: MailboxEnqueueOutcome {
+                enqueued: true,
+                merged: false,
+                refusal_reason: None,
+                persistence_error: None,
+            },
+            reaction_delivery: false,
+            ..FakeEffects::default()
+        };
+        let mut options = IntakeQueueCommitOptions::default();
+        options.pending_reaction = IntakeQueuePendingReactionPolicy::Static(
+            super::super::super::queue_reactions::QUEUE_RECONCILE_PENDING_REACTION,
+        );
+
+        let outcome = commit_soft_intervention_transaction(&mut effects, request(options)).await;
+
+        assert!(outcome.accepted());
+        assert_eq!(
+            outcome.pending_reaction,
+            PendingReactionDecision::Skip(PendingReactionSkipReason::Failed)
+        );
+        assert_eq!(
+            effects.reactions,
+            vec![(
+                serenity::ChannelId::new(42),
+                serenity::MessageId::new(100),
+                '🔄'
+            )]
+        );
+        assert_eq!(
+            effects.fallback_notices,
+            vec![(serenity::ChannelId::new(42), serenity::MessageId::new(100))],
+            "a failed static accepted reaction must emit exactly one fallback"
         );
     }
 
@@ -872,6 +930,10 @@ mod tests {
         assert_eq!(
             outcome.committed_steps,
             vec![IntakeQueueCommittedStep::PendingReactionApplied]
+        );
+        assert!(
+            effects.fallback_notices.is_empty(),
+            "a delivered duplicate repair must not emit fallback UI"
         );
     }
 
@@ -963,6 +1025,10 @@ mod tests {
 
         assert!(outcome.failed());
         assert!(effects.reactions.is_empty());
+        assert!(
+            effects.fallback_notices.is_empty(),
+            "an intervention that was not durably queued must not claim queue admission"
+        );
         assert!(effects.checkpoints.is_empty());
         assert_eq!(
             outcome.committed_steps,

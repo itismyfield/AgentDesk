@@ -49,17 +49,21 @@ fn user_intervention(id: u64) -> Intervention {
     }
 }
 
-fn mailbox_add_count(shared: &SharedData, message_id: MessageId) -> usize {
+fn reaction_add_count(shared: &SharedData, message_id: MessageId, emoji: char) -> usize {
     shared
         .turn_view_reconciler
         .ops()
         .iter()
-        .filter(|op| op.target.message_id == message_id && op.add && op.emoji == '📬')
+        .filter(|op| op.target.message_id == message_id && op.add && op.emoji == emoji)
         .count()
 }
 
+fn mailbox_add_count(shared: &SharedData, message_id: MessageId) -> usize {
+    reaction_add_count(shared, message_id, '📬')
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn failed_queue_reaction_sends_exactly_one_referenced_fallback() {
+async fn busy_tui_wrapper_failure_uses_standalone_policy_and_exactly_one_fallback() {
     let _root = scoped_runtime_root();
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared)
@@ -76,21 +80,42 @@ async fn failed_queue_reaction_sends_exactly_one_referenced_fallback() {
             .is_empty()
     );
 
-    mailbox_reaction::note_queue_pending(
-        &shared,
-        &http,
-        channel_id,
-        message_id,
-        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
-        None,
-        "race_loss_message_queued",
+    mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
+        &shared, &http, channel_id, message_id, false, None,
     )
     .await;
 
+    assert_eq!(mailbox_add_count(&shared, message_id), 1);
     assert_eq!(
         crate::services::discord::outbound::reaction_control::take_test_reply_deliveries(),
         vec![crate::services::discord::outbound::reaction_control::ReactionControlReplyReason::QueueReactionFailed],
-        "failed race-loss reaction must emit exactly one referenced fallback"
+        "failed busy-TUI queue reaction must emit exactly one referenced fallback"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn busy_tui_wrapper_merged_success_uses_plus_without_fallback() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let http = Arc::new(serenity::Http::new("Bot test-token"));
+    let channel_id = ChannelId::new(455_400_000_000_082);
+    let message_id = MessageId::new(455_400_000_000_083);
+    assert!(
+        crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
+            .is_empty()
+    );
+
+    mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
+        &shared, &http, channel_id, message_id, true, None,
+    )
+    .await;
+
+    assert_eq!(reaction_add_count(&shared, message_id, '➕'), 1);
+    assert_eq!(mailbox_add_count(&shared, message_id), 0);
+    assert!(
+        crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
+            .is_empty(),
+        "a delivered busy-TUI merged reaction must remain reaction-only"
     );
 }
 
@@ -163,6 +188,11 @@ async fn standalone_without_start_attempt_adds_mailbox_once() {
         mailbox_add_count(&shared, message_id),
         1,
         "race-loss standalone enqueue must imperatively add 📬 without a start attempt"
+    );
+    assert!(
+        crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
+            .is_empty(),
+        "a delivered race-loss reaction must not emit fallback UI"
     );
 }
 

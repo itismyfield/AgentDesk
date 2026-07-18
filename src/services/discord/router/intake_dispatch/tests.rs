@@ -77,18 +77,33 @@ fn intake_dispatch_invariant_worker_post_claim_is_the_only_router_bypass() {
 }
 
 #[test]
-fn intake_dispatch_invariant_queued_entrypoints_admit_before_teardown() {
-    for (name, source) in [
-        ("gateway", include_str!("../../gateway.rs")),
-        ("discord_mod", include_str!("../../mod.rs")),
+fn intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish() {
+    for (name, source, promotion) in [
+        (
+            "gateway",
+            include_str!("../../gateway.rs"),
+            "drain_dispatched_queue_markers(",
+        ),
+        (
+            "discord_mod",
+            include_str!("../../mod.rs"),
+            "start_and_drain_kickoff_markers(",
+        ),
     ] {
         let admit = source
             .find("admit_queued_intake(")
             .unwrap_or_else(|| panic!("{name} queue path lost central admission"));
+        let promote = source
+            .find(promotion)
+            .unwrap_or_else(|| panic!("{name} queue path lost marker promotion"));
         let finish = source
             .find("finish_admitted_queued_intake(")
             .unwrap_or_else(|| panic!("{name} queue path lost admitted local finish"));
-        assert!(admit < finish, "{name} executes before admission");
+        assert!(
+            admit < promote && promote < finish,
+            "{name} must promote persisted queue markers only after admission and before finish"
+        );
+        assert_eq!(source.matches(promotion).count(), 1);
         assert_eq!(source.matches("finish_admitted_queued_intake(").count(), 1);
     }
 }

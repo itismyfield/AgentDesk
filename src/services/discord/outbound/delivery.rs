@@ -749,6 +749,7 @@ mod tests {
     struct MockClient {
         posts: Arc<Mutex<Vec<(String, String)>>>,
         referenced_posts: Arc<Mutex<Vec<(String, String, String, String)>>>,
+        referenced_nonce_posts: Arc<Mutex<Vec<(String, String, String, String, String, bool)>>>,
         dm_resolutions: Arc<Mutex<Vec<String>>>,
         length_failures_remaining: Arc<Mutex<usize>>,
         send_failures_remaining: Arc<Mutex<usize>>,
@@ -779,6 +780,10 @@ mod tests {
 
         fn referenced_posts(&self) -> Vec<(String, String, String, String)> {
             self.referenced_posts.lock().unwrap().clone()
+        }
+
+        fn referenced_nonce_posts(&self) -> Vec<(String, String, String, String, String, bool)> {
+            self.referenced_nonce_posts.lock().unwrap().clone()
         }
 
         fn dm_resolutions(&self) -> Vec<String> {
@@ -841,6 +846,29 @@ mod tests {
             ));
             Ok(format!(
                 "msg-ref-{target_channel}-{reference_channel}-{reference_message}-{}",
+                content.chars().count()
+            ))
+        }
+
+        async fn post_message_with_reference_and_nonce(
+            &self,
+            target_channel: &str,
+            content: &str,
+            reference_channel: &str,
+            reference_message: &str,
+            nonce: &str,
+            enforce_nonce: bool,
+        ) -> Result<String, DispatchMessagePostError> {
+            self.referenced_nonce_posts.lock().unwrap().push((
+                target_channel.to_string(),
+                content.to_string(),
+                reference_channel.to_string(),
+                reference_message.to_string(),
+                nonce.to_string(),
+                enforce_nonce,
+            ));
+            Ok(format!(
+                "msg-ref-nonce-{target_channel}-{reference_channel}-{reference_message}-{}",
                 content.chars().count()
             ))
         }
@@ -1047,6 +1075,7 @@ mod tests {
                 ChannelId::new(123),
                 poise::serenity_prelude::MessageId::new(456),
             ))
+            .with_create_nonce("stable-lifecycle-nonce", true)
         };
 
         let first = deliver_outbound(&client, &dedup, make(), None).await;
@@ -1059,21 +1088,38 @@ mod tests {
             } => {
                 assert_eq!(
                     existing_messages[0].raw_message_id,
-                    "msg-ref-123-123-456-19"
+                    "msg-ref-nonce-123-123-456-19"
                 );
             }
             other => panic!("expected duplicate, got {other:?}"),
         }
         assert!(client.posts().is_empty());
+        assert!(client.referenced_posts().is_empty());
         assert_eq!(
-            client.referenced_posts(),
+            client.referenced_nonce_posts(),
             vec![(
                 "123".to_string(),
                 "Already stopping...".to_string(),
                 "123".to_string(),
                 "456".to_string(),
+                "stable-lifecycle-nonce".to_string(),
+                true,
             )]
         );
+
+        let after_restart = deliver_outbound(&client, &OutboundDeduper::new(), make(), None).await;
+        assert!(matches!(after_restart, DeliveryResult::Sent { .. }));
+        let attempts = client.referenced_nonce_posts();
+        assert_eq!(
+            attempts.len(),
+            2,
+            "a fresh process-local deduper retries transport"
+        );
+        assert_eq!(
+            attempts[0].4, attempts[1].4,
+            "restart retry must reuse the nonce"
+        );
+        assert!(attempts.iter().all(|attempt| attempt.5));
     }
 
     #[tokio::test]

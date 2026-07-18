@@ -3,7 +3,7 @@ use super::super::intake_queue_transaction::{
 };
 use super::*;
 use crate::services::discord::outbound::reaction_control::{
-    ReactionControlReplyReason, send_reaction_control_reply,
+    ReactionControlReplyReason, ensure_queue_reaction_or_fallback_http, send_reaction_control_reply,
 };
 
 /// Pick the queue-pending reaction emoji based on the enqueue outcome.
@@ -55,15 +55,6 @@ async fn add_queue_pending_reaction_self_healing(
         )
         .await;
     if !delivered {
-        send_reaction_control_reply(
-            ctx,
-            &data.shared,
-            channel_id,
-            user_msg_id,
-            ReactionControlReplyReason::QueueReactionFailed,
-            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
-        )
-        .await;
         return false;
     }
     let still_queued = {
@@ -96,6 +87,15 @@ async fn add_queue_pending_reaction_self_healing(
 pub(super) struct IntakeGateQueueEffects<'a> {
     pub(super) ctx: &'a serenity::Context,
     pub(super) data: &'a Data,
+}
+
+async fn notify_pending_reaction_failure_http(
+    http: &Arc<serenity::http::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    message_id: serenity::MessageId,
+) {
+    ensure_queue_reaction_or_fallback_http(http, channel_id, shared, message_id, false).await;
 }
 
 /// #3903/#4024 — pure verdict for whether a post-enqueue deferred idle-queue
@@ -158,13 +158,11 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
     ) {
-        send_reaction_control_reply(
-            self.ctx,
+        notify_pending_reaction_failure_http(
+            &self.ctx.http,
             &self.data.shared,
             channel_id,
             message_id,
-            ReactionControlReplyReason::QueueReactionFailed,
-            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
         )
         .await;
     }
@@ -267,6 +265,35 @@ async fn repair_queued_source_pending_reaction_from_mailbox(
         }
     }
     Some(PendingReactionRepair { emoji, delivered })
+}
+
+#[cfg(test)]
+mod pending_reaction_failure_adapter_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_adapter_emits_exactly_one_queue_fallback() {
+        assert!(
+            crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
+                .is_empty()
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+
+        notify_pending_reaction_failure_http(
+            &http,
+            &shared,
+            serenity::ChannelId::new(455_400_000_000_231),
+            serenity::MessageId::new(455_400_000_000_232),
+        )
+        .await;
+
+        assert_eq!(
+            crate::services::discord::outbound::reaction_control::take_test_reply_deliveries(),
+            vec![ReactionControlReplyReason::QueueReactionFailed],
+            "the production queue-effects adapter must emit exactly one referenced fallback"
+        );
+    }
 }
 
 #[cfg(test)]
