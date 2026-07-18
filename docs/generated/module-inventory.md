@@ -859,11 +859,11 @@
 | `services::discord::turn_bridge::stream_loop` | `src/services/discord/turn_bridge/stream_loop.rs` | 975 | 975 | 0 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms` | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` | 629 | 629 | 0 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms::provider_error_presentation` | `src/services/discord/turn_bridge/stream_loop/content_arms/provider_error_presentation.rs` | 95 | 42 | 53 |  |
-| `services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification` | `src/services/discord/turn_bridge/stream_loop/content_arms/tui_error_classification.rs` | 153 | 24 | 129 |  |
+| `services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification` | `src/services/discord/turn_bridge/stream_loop/content_arms/tui_error_classification.rs` | 199 | 24 | 175 |  |
 | `services::discord::turn_bridge::stream_loop::tool_arms` | `src/services/discord/turn_bridge/stream_loop/tool_arms.rs` | 684 | 684 | 0 |  |
 | `services::discord::turn_bridge::stream_receiver` | `src/services/discord/turn_bridge/stream_receiver.rs` | 109 | 64 | 45 |  |
 | `services::discord::turn_bridge::stream_tick` | `src/services/discord/turn_bridge/stream_tick.rs` | 908 | 787 | 121 |  |
-| `services::discord::turn_bridge::streaming_edit_text` | `src/services/discord/turn_bridge/streaming_edit_text.rs` | 714 | 298 | 416 |  |
+| `services::discord::turn_bridge::streaming_edit_text` | `src/services/discord/turn_bridge/streaming_edit_text.rs` | 733 | 317 | 416 |  |
 | `services::discord::turn_bridge::task_notification_lifecycle` | `src/services/discord/turn_bridge/task_notification_lifecycle.rs` | 221 | 104 | 117 |  |
 | `services::discord::turn_bridge::terminal_controller_cutover` | `src/services/discord/turn_bridge/terminal_controller_cutover.rs` | 1839 | 961 | 878 |  |
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 2002 | 738 | 1264 |  |
