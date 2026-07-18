@@ -1005,8 +1005,14 @@ mod tests {
             InflightSignal::Completed { channel_id, .. } => *channel_id == own,
         };
 
-        assert!(matches(&InflightSignal::Completed { channel_id: own, turn_id: 1 }));
-        assert!(!matches(&InflightSignal::Completed { channel_id: other, turn_id: 1 }));
+        assert!(matches(&InflightSignal::Completed {
+            channel_id: own,
+            turn_id: 1
+        }));
+        assert!(!matches(&InflightSignal::Completed {
+            channel_id: other,
+            turn_id: 1
+        }));
     }
 
     #[test]
@@ -1314,12 +1320,18 @@ mod tests {
         use super::InflightSignal;
         let (tx, mut rx) = tokio::sync::broadcast::channel::<InflightSignal>(256);
 
-        let send_result = tx.send(InflightSignal::Completed { channel_id: 42, turn_id: 1 });
+        let send_result = tx.send(InflightSignal::Completed {
+            channel_id: 42,
+            turn_id: 1,
+        });
         assert!(send_result.is_ok());
 
         let received = rx.recv().await.expect("broadcast delivered");
         match received {
-            InflightSignal::Completed { channel_id, turn_id } => {
+            InflightSignal::Completed {
+                channel_id,
+                turn_id,
+            } => {
                 assert_eq!(channel_id, 42);
                 assert_eq!(turn_id, 1);
             }
