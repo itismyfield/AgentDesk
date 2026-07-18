@@ -1331,8 +1331,8 @@ mod stop_turn_notify_removal_tests {
     /// message is no longer enqueued by any stop entrypoint.
     const STOP_TURN_REASON_CODE: &str = "lifecycle.stop_turn";
 
-    /// Behavior model of the outbox under the four stop entrypoints
-    /// (reaction-remove ⏳, `/stop`, `!stop`, skill stop). Because
+    /// Behavior model of the outbox under the supported stop entrypoints
+    /// (`/stop`, `!stop`, and skill stop). Because
     /// `notify_turn_stop` was removed (compile-level guarantee — the function
     /// and its `commands` re-export no longer exist), simulating any stop path
     /// enqueues nothing. This in-test outbox records exactly what the stop
@@ -1410,7 +1410,7 @@ mod stop_turn_notify_removal_tests {
         );
         let key_b = dedupe_key_for_message(
             "channel:123",
-            "🛑 현재 턴 중단 (reaction remove ⏳) — tmux는 유지됩니다.",
+            "🛑 현재 턴 중단 (/stop) — tmux는 유지됩니다.",
             Some(STOP_TURN_REASON_CODE),
             Some("session-abc"),
         );

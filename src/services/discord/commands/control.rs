@@ -1,5 +1,5 @@
 use poise::serenity_prelude as serenity;
-use serenity::CreateAttachment;
+use serenity::{CreateAttachment, MessageId};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,8 +10,8 @@ use super::super::settings::cleanup_channel_uploads;
 use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::stop_active_turn;
 use super::super::{
-    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
-    saturating_decrement_global_active,
+    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn,
+    mailbox_cancel_soft_intervention, mailbox_clear_channel, saturating_decrement_global_active,
 };
 use super::config::{
     clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_channel,
@@ -535,6 +535,58 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     Ok(())
 }
 
+fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0)
+        .map(MessageId::new)
+}
+
+/// /cancel-queued — Remove one queued message without affecting active work.
+///
+/// The target is an exact Discord message id. The mailbox actor serializes the
+/// removal against dispatch, so a queued-to-active race is reported as stale
+/// instead of cancelling the newly active turn.
+#[poise::command(slash_command, rename = "cancel-queued")]
+pub(in crate::services::discord) async fn cmd_cancel_queued(
+    ctx: Context<'_>,
+    #[description = "Queued Discord message ID"] message_id: String,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+    if !super::enforce_slash_command_policy(&ctx, "/cancel-queued").await? {
+        return Ok(());
+    }
+
+    let Some(message_id) = parse_queued_message_id(&message_id) else {
+        ctx.say("유효한 큐 메시지 ID를 입력해 주세요.").await?;
+        return Ok(());
+    };
+
+    let removed = mailbox_cancel_soft_intervention(
+        &ctx.data().shared,
+        &ctx.data().provider,
+        ctx.channel_id(),
+        message_id,
+    )
+    .await;
+    if removed.is_some() {
+        ctx.say(format!("큐 메시지 `{}`를 취소했어요.", message_id.get()))
+            .await?;
+    } else {
+        ctx.say(format!(
+            "큐 메시지 `{}`는 이미 처리됐거나 현재 채널의 대기열에 없어요.",
+            message_id.get()
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
 /// /clear — Clear AI conversation history
 #[poise::command(slash_command, rename = "clear")]
 pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<(), Error> {
@@ -586,6 +638,13 @@ mod soft_clear_notify_tests {
             None,
             "`!clear` should leave the provider reply as the single user-visible completion surface"
         );
+    }
+
+    #[test]
+    fn queued_cancel_parser_accepts_exact_nonzero_ids_only() {
+        assert_eq!(parse_queued_message_id(" 42 "), Some(MessageId::new(42)));
+        assert_eq!(parse_queued_message_id("0"), None);
+        assert_eq!(parse_queued_message_id("stale"), None);
     }
 
     #[test]

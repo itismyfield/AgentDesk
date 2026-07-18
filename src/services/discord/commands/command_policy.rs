@@ -172,7 +172,7 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         // Per-channel session shaping (mirrors text-command tiers).
         "/start" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/node" | "/fast"
         | "/goals" | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop"
-        | "/restart" | "/steer" | "/debug" => CommandRisk::Mutating,
+        | "/cancel-queued" | "/restart" | "/steer" | "/debug" => CommandRisk::Mutating,
 
         // RCE-equivalent surface.
         // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue
@@ -217,5 +217,11 @@ mod steer_policy_tests {
         // mutating, allowed for any authorized user, never owner-gated.
         assert_eq!(slash_command_risk("/steer"), CommandRisk::Mutating);
         assert!(!slash_command_risk("/steer").is_high_risk());
+    }
+
+    #[test]
+    fn cancel_queued_is_registered_as_mutating_and_not_high_risk() {
+        assert_eq!(slash_command_risk("/cancel-queued"), CommandRisk::Mutating);
+        assert!(!slash_command_risk("/cancel-queued").is_high_risk());
     }
 }

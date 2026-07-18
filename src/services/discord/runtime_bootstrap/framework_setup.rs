@@ -217,6 +217,7 @@ pub(super) fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>>
         commands::cmd_inflight(),
         commands::cmd_clear(),
         commands::cmd_stop(),
+        commands::cmd_cancel_queued(),
         commands::cmd_down(),
         commands::cmd_shell(),
         commands::cmd_skill(),

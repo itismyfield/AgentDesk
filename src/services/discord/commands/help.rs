@@ -32,6 +32,7 @@ Each channel gets an independent session.
 `/inflight` — Show saved inflight turn state
 `/clear` — Clear AI conversation history
 `/stop` — Stop current AI request
+`/cancel-queued <message_id>` — Remove one queued message (`/queue` shows IDs)
 
 **File Transfer**
 `/down <file>` — Download file from server
@@ -78,6 +79,20 @@ AI can read, edit, and run commands in your session.
 }
 
 /// /help — Show help information
+#[cfg(test)]
+mod tests {
+    use super::build_main_help_body;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn help_advertises_explicit_queue_cancellation_not_reaction_removal() {
+        let body = build_main_help_body(&ProviderKind::Claude);
+        assert!(body.contains("`/cancel-queued <message_id>`"));
+        assert!(body.contains("`/queue` shows IDs"));
+        assert!(!body.contains("reaction remove"));
+    }
+}
+
 #[poise::command(slash_command, rename = "help")]
 pub(in crate::services::discord) async fn cmd_help(ctx: Context<'_>) -> Result<(), Error> {
     let help = build_main_help_body(&ctx.data().provider);

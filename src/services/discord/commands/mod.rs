@@ -111,7 +111,7 @@ pub(in crate::services::discord) use control::{
     SoftClearNotifyMode, clear_channel_session_state, clear_channel_session_state_with_session_key,
     reset_channel_provider_state, reset_managed_process_session, reset_provider_session_if_pending,
 };
-pub(super) use control::{cmd_clear, cmd_down, cmd_shell, cmd_stop};
+pub(super) use control::{cmd_cancel_queued, cmd_clear, cmd_down, cmd_shell, cmd_stop};
 pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
 };
