@@ -76,6 +76,10 @@ const STORAGE_TARGET_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(30);
 /// not pile on top of the other storage jobs at startup.
 const STORAGE_WORKTREE_ORPHAN_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(50);
 
+/// `storage.tmp_pipeline_sweep`: boot offset so the daily tmp pipeline sweep
+/// does not pile on top of the other storage jobs at startup.
+const STORAGE_TMP_PIPELINE_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(65);
+
 /// `storage.hang_dump_cleanup`: boot offset so the weekly hang-dump cleanup does
 /// not pile on top of the other storage jobs at startup.
 const STORAGE_HANG_DUMP_CLEANUP_STARTUP_STAGGER: Duration = Duration::from_secs(70);
@@ -162,6 +166,7 @@ impl MaintenanceJobRegistry {
             // the live leader-only scheduler executes them.
             Arc::new(StorageTargetSweepJob),
             Arc::new(StorageWorktreeOrphanSweepJob),
+            Arc::new(StorageTmpPipelineSweepJob),
             Arc::new(StorageHangDumpCleanupJob),
             Arc::new(StorageDbRetentionJob),
             Arc::new(MemoryMementoConsolidationJob),
@@ -605,6 +610,35 @@ impl MaintenanceJob for StorageWorktreeOrphanSweepJob {
                 crate::services::maintenance::jobs::worktree_orphan_sweep::Config::default_runtime(
                 ),
                 Some(pool.clone()),
+            )
+            .await
+        })
+    }
+}
+
+/// #4532 — daily tmp pipeline sweep. The implementation validates the
+/// canonical root against `/private/tmp`, applies the basename whitelist and
+/// activity-age gate, and fails closed when a live tmux owner cannot be ruled
+/// out. This wrapper only schedules that guarded implementation.
+struct StorageTmpPipelineSweepJob;
+
+impl MaintenanceJob for StorageTmpPipelineSweepJob {
+    fn name(&self) -> &'static str {
+        "storage.tmp_pipeline_sweep"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(
+            Duration::from_secs(24 * 60 * 60),
+            STORAGE_TMP_PIPELINE_SWEEP_STARTUP_STAGGER,
+        )
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let _ = pool;
+            crate::services::maintenance::jobs::tmp_pipeline_sweep::run(
+                crate::services::maintenance::jobs::tmp_pipeline_sweep::Config::default_runtime(),
             )
             .await
         })
@@ -1157,6 +1191,7 @@ mod registry_membership_tests {
         let names: Vec<&'static str> = registry.jobs().iter().map(|job| job.name()).collect();
         for expected in [
             "storage.worktree_orphan_sweep",
+            "storage.tmp_pipeline_sweep",
             "storage.target_sweep",
             "storage.hang_dump_cleanup",
             "storage.db_retention",
@@ -1207,6 +1242,10 @@ mod registry_membership_tests {
         assert_eq!(
             StorageWorktreeOrphanSweepJob.schedule().every_ms(),
             60 * 60 * 1_000
+        );
+        assert_eq!(
+            StorageTmpPipelineSweepJob.schedule().every_ms(),
+            24 * 60 * 60 * 1_000
         );
         assert_eq!(
             StorageHangDumpCleanupJob.schedule().every_ms(),
