@@ -15,8 +15,10 @@ use super::worktree_orphan_sweep::{
     collect_live_tmux_pane_paths, has_live_tmux_owner, remove_orphan_worktree,
 };
 
+const ALLOWED_TMP_BASE: &str = "/private/tmp";
 const APPROVED_NAME_PREFIXES: &[&str] = &["adk-", "agentdesk-"];
 const DEFAULT_MIN_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+const MINIMUM_MIN_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -67,13 +69,24 @@ pub(crate) fn is_sweep_candidate(basename: &str, prefixes: &[String]) -> bool {
     })
 }
 
-/// True when `last_activity` is at least `min_age` before `now`. A future or
+/// True when `last_activity` is more than `min_age` before `now`. A future or
 /// otherwise incomparable timestamp is treated as fresh so it cannot authorize
 /// deletion.
 pub(crate) fn is_stale(last_activity: SystemTime, now: SystemTime, min_age: Duration) -> bool {
     now.duration_since(last_activity)
-        .map(|age| age >= min_age)
+        .map(|age| age > min_age)
         .unwrap_or(false)
+}
+
+/// True when a canonical root is the approved base itself or lies below it.
+/// [`Path::starts_with`] compares path components, so `/private/tmpfoo` does not
+/// match `/private/tmp`.
+pub(crate) fn tmp_root_within_allowed_base(canonical_root: &Path, canonical_base: &Path) -> bool {
+    canonical_root.starts_with(canonical_base)
+}
+
+fn effective_min_age(configured_min_age: Duration) -> Duration {
+    configured_min_age.max(MINIMUM_MIN_AGE)
 }
 
 /// The pure deletion decision after candidate, age, and live-owner checks.
@@ -104,6 +117,46 @@ pub async fn run(config: Config) -> Result<()> {
 async fn run_inner(config: &Config) -> Result<SweepReport> {
     let mut report = SweepReport::default();
 
+    let canonical_base = match std::fs::canonicalize(ALLOWED_TMP_BASE) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                target: "maintenance",
+                job = "storage.tmp_pipeline_sweep",
+                allowed_tmp_base = ALLOWED_TMP_BASE,
+                error = %error,
+                "failed to canonicalize approved tmp pipeline sweep base; skipping"
+            );
+            report.errors = report.errors.saturating_add(1);
+            return Ok(report);
+        }
+    };
+    let canonical_root = match std::fs::canonicalize(&config.tmp_root) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                target: "maintenance",
+                job = "storage.tmp_pipeline_sweep",
+                tmp_root = %config.tmp_root.display(),
+                error = %error,
+                "failed to canonicalize tmp pipeline sweep root; skipping"
+            );
+            report.errors = report.errors.saturating_add(1);
+            return Ok(report);
+        }
+    };
+    if !tmp_root_within_allowed_base(&canonical_root, &canonical_base) {
+        tracing::warn!(
+            target: "maintenance",
+            job = "storage.tmp_pipeline_sweep",
+            tmp_root = %config.tmp_root.display(),
+            canonical_tmp_root = %canonical_root.display(),
+            allowed_tmp_base = %canonical_base.display(),
+            "tmp pipeline sweep root is outside the approved base; skipping"
+        );
+        return Ok(report);
+    }
+
     // Fail closed before inspecting candidates: an unavailable tmux probe means
     // no deletion can prove that it lacks a live owner.
     let Some(live_tmux_paths) = collect_live_tmux_pane_paths() else {
@@ -116,13 +169,13 @@ async fn run_inner(config: &Config) -> Result<SweepReport> {
         return Ok(report);
     };
 
-    let entries = match std::fs::read_dir(&config.tmp_root) {
+    let entries = match std::fs::read_dir(&canonical_root) {
         Ok(entries) => entries,
         Err(error) => {
             tracing::warn!(
                 target: "maintenance",
                 job = "storage.tmp_pipeline_sweep",
-                tmp_root = %config.tmp_root.display(),
+                tmp_root = %canonical_root.display(),
                 error = %error,
                 "failed to read tmp pipeline sweep root"
             );
@@ -132,6 +185,7 @@ async fn run_inner(config: &Config) -> Result<SweepReport> {
     };
 
     let now = SystemTime::now();
+    let min_age = effective_min_age(config.min_age);
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -197,7 +251,7 @@ async fn run_inner(config: &Config) -> Result<SweepReport> {
                 continue;
             }
         };
-        let stale = is_stale(last_activity, now, config.min_age);
+        let stale = is_stale(last_activity, now, min_age);
         if !stale {
             report.keep_fresh = report.keep_fresh.saturating_add(1);
             continue;
@@ -255,7 +309,10 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{APPROVED_NAME_PREFIXES, is_stale, is_sweep_candidate, should_remove};
+    use super::{
+        APPROVED_NAME_PREFIXES, MINIMUM_MIN_AGE, effective_min_age, is_stale,
+        is_sweep_candidate, should_remove, tmp_root_within_allowed_base,
+    };
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
 
     fn prefixes() -> Vec<String> {
@@ -285,14 +342,47 @@ mod tests {
     }
 
     #[test]
-    fn age_gate_keeps_fresh_directories() {
+    fn age_gate_requires_strictly_more_than_minimum_age() {
         let now = SystemTime::now();
         let minimum_age = Duration::from_secs(72 * 60 * 60);
         let fresh = now.checked_sub(Duration::from_secs(60 * 60)).unwrap();
+        let exactly_minimum_age_old = now.checked_sub(minimum_age).unwrap();
         let stale = now.checked_sub(Duration::from_secs(73 * 60 * 60)).unwrap();
 
         assert!(!is_stale(fresh, now, minimum_age));
+        assert!(!is_stale(exactly_minimum_age_old, now, minimum_age));
         assert!(is_stale(stale, now, minimum_age));
+    }
+
+    #[test]
+    fn configured_minimum_age_cannot_drop_below_one_hour() {
+        assert_eq!(effective_min_age(Duration::ZERO), MINIMUM_MIN_AGE);
+        assert_eq!(
+            effective_min_age(Duration::from_secs(2 * 60 * 60)),
+            Duration::from_secs(2 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn canonical_tmp_root_must_stay_within_approved_base() {
+        let base = Path::new("/private/tmp");
+
+        assert!(tmp_root_within_allowed_base(base, base));
+        assert!(tmp_root_within_allowed_base(
+            Path::new("/private/tmp/adk-impl-4173"),
+            base
+        ));
+        assert!(!tmp_root_within_allowed_base(Path::new("/var/tmp"), base));
+        assert!(!tmp_root_within_allowed_base(Path::new("/"), base));
+        assert!(!tmp_root_within_allowed_base(Path::new("/private/tmpfoo"), base));
+    }
+
+    #[test]
+    fn removal_decision_requires_candidate_staleness_and_no_live_owner() {
+        assert!(!should_remove(false, true, false));
+        assert!(!should_remove(true, false, false));
+        assert!(should_remove(true, true, false));
+        assert!(!should_remove(true, true, true));
     }
 
     #[test]
