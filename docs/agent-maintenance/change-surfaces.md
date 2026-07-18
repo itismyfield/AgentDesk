@@ -1138,7 +1138,7 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (2105 lines; -41 from #4591 R4: remove
+  - `src/services/tui_prompt_dedupe.rs` (2134 lines; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
     raw/envelope time-pair state so local slash-control representations may
     duplicate rather than swallowing a later human command; local stable entry
     IDs are now recorded only after the relay confirms its Discord session note,

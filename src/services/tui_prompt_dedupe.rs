@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::tui_prompt_control::classify_local_only_slash_control;
+use crate::services::tui_prompt_control::{
+    classify_local_only_slash_control, is_start_anchored_task_notification_prompt,
+};
 use chrono::{DateTime, Utc};
 
 mod synthetic_prompt;
@@ -1158,6 +1160,30 @@ fn observe_prompt_candidates_by_tmux_inner(
     if provider.is_empty() || tmux_session_name.is_empty() || candidates.is_empty() {
         return PromptObservation::Ignored;
     }
+    // #4567: structured task lifecycle records are status events, not positive
+    // user-input provenance. Publish them for the task-card/status observer, but
+    // deliberately bypass entry-id, pending, recent, lease, and SSH markers.
+    if candidates
+        .iter()
+        .any(|prompt| is_start_anchored_task_notification_prompt(prompt))
+    {
+        let prompt = candidates
+            .iter()
+            .find(|prompt| is_start_anchored_task_notification_prompt(prompt))
+            .expect("task notification candidate")
+            .to_string();
+        let event = ObservedTuiPrompt {
+            provider,
+            tmux_session_name: tmux_session_name.to_string(),
+            prompt,
+            source_event_id: entry_id.map(str::to_string),
+            observed_at,
+            external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        };
+        let _ = OBSERVED_PROMPTS.send(event);
+        return PromptObservation::PublishedTaskNotification;
+    }
     // #3540 (root cause): suppress by STABLE entry identity BEFORE any pending /
     // recent / lease bookkeeping or synthetic-turn mint. If this JSONL entry
     // `uuid` was already relayed for this `(provider, tmux)` pair it is a
@@ -1788,6 +1814,9 @@ fn starts_with_xmlish_tag(text: &str, tag: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptObservation {
     PublishedSshDirect,
+    /// A structured `<task-notification>` was published for status/card
+    /// rendering without creating external-input ownership or a response tail.
+    PublishedTaskNotification,
     SuppressedDiscordDuplicate,
     SuppressedRecentDuplicate,
     /// #3540: the observed prompt's stable JSONL entry `uuid` was ALREADY relayed
@@ -3627,6 +3656,34 @@ No response requested.\n\
             PromptObservation::PublishedSshDirect,
             "the local-delivery acknowledgement path cannot alter generic entry-id semantics"
         );
+    }
+
+    #[test]
+    fn task_notification_is_status_only_and_next_prompt_keeps_lease_free() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let task = "<task-notification><status>killed</status><task-id>stop-1</task-id></task-notification>";
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-stop-task", task),
+            PromptObservation::PublishedTaskNotification
+        );
+        assert!(
+            !external_input_relay_lease_present("claude", "tmux-stop-task", 42),
+            "killed task status must not create an external-input lease"
+        );
+        assert!(!is_ssh_direct_observation_pending(
+            "claude",
+            "tmux-stop-task"
+        ));
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-stop-task", "the next real prompt"),
+            PromptObservation::PublishedSshDirect
+        );
+        assert!(external_input_relay_lease_present(
+            "claude",
+            "tmux-stop-task",
+            42
+        ));
     }
 
     #[test]

@@ -807,7 +807,7 @@
 | `services::discord::tui_direct_abort_marker::sweep` | `src/services/discord/tui_direct_abort_marker/sweep.rs` | 177 | 177 | 0 |  |
 | `services::discord::tui_direct_abort_marker::tombstone` | `src/services/discord/tui_direct_abort_marker/tombstone.rs` | 70 | 70 | 0 |  |
 | `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 3815 | 1495 | 2320 | giant-file |
-| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 836 | 836 | 0 |  |
+| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 854 | 854 | 0 |  |
 | `services::discord::tui_prompt_relay::anchor_completion` | `src/services/discord/tui_prompt_relay/anchor_completion.rs` | 454 | 218 | 236 |  |
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
 | `services::discord::tui_prompt_relay::bridge_gateway` | `src/services/discord/tui_prompt_relay/bridge_gateway.rs` | 199 | 199 | 0 |  |
@@ -817,7 +817,7 @@
 | `services::discord::tui_prompt_relay::codex_idle_rollout` | `src/services/discord/tui_prompt_relay/codex_idle_rollout.rs` | 613 | 613 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_offset_resolution` | `src/services/discord/tui_prompt_relay/idle_offset_resolution.rs` | 100 | 100 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_transcript_scan` | `src/services/discord/tui_prompt_relay/idle_transcript_scan.rs` | 495 | 347 | 148 |  |
-| `services::discord::tui_prompt_relay::injected_prompt_policy` | `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` | 431 | 431 | 0 |  |
+| `services::discord::tui_prompt_relay::injected_prompt_policy` | `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` | 434 | 434 | 0 |  |
 | `services::discord::tui_prompt_relay::launch_script` | `src/services/discord/tui_prompt_relay/launch_script.rs` | 129 | 107 | 22 |  |
 | `services::discord::tui_prompt_relay::observed_prompt_decision` | `src/services/discord/tui_prompt_relay/observed_prompt_decision.rs` | 61 | 61 | 0 |  |
 | `services::discord::tui_prompt_relay::rehydration` | `src/services/discord/tui_prompt_relay/rehydration.rs` | 997 | 796 | 201 |  |
@@ -1080,8 +1080,8 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 276 | 265 | 11 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 898 | 787 | 111 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 286 | 220 | 66 |  |
-| `services::tui_prompt_control` | `src/services/tui_prompt_control.rs` | 232 | 194 | 38 |  |
-| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4702 | 2105 | 2597 | giant-file |
+| `services::tui_prompt_control` | `src/services/tui_prompt_control.rs` | 246 | 208 | 38 |  |
+| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4759 | 2134 | 2625 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2033 | 648 | 1385 |  |
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |

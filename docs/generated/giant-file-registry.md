@@ -106,6 +106,6 @@
 | `src/services/routines/discord_log.rs` | 1594 |
 | `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1112 |
-| `src/services/tui_prompt_dedupe.rs` | 2105 |
+| `src/services/tui_prompt_dedupe.rs` | 2134 |
 | `src/services/turn_orchestrator.rs` | 3288 |
 | `src/voice/receiver.rs` | 1108 |

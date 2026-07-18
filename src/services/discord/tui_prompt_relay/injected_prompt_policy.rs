@@ -24,8 +24,9 @@ const LOCAL_COMMAND_STDOUT_CLOSE: &str = "</local-command-stdout>";
 const COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX: &str = "<local-command-stdout>Compacted";
 
 /// Classification of TUI-injected prompt text. Each class drives different
-/// lifecycle handling: human/task turns get active-turn ownership, continuation
-/// banners stay passive, and slash-control echoes use command-kind rendering.
+/// lifecycle handling: human turns get active-turn ownership, task/subagent
+/// events and continuation banners stay passive, and slash-control echoes use
+/// command-kind rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InjectedPromptClass {
     HumanTuiDirect,
@@ -48,6 +49,7 @@ impl InjectedPromptClass {
         matches!(
             self,
             InjectedPromptClass::SystemContinuation
+                | InjectedPromptClass::TaskNotificationEvent
                 | InjectedPromptClass::SubagentNotificationEvent
         )
     }
@@ -58,6 +60,7 @@ impl InjectedPromptClass {
         !matches!(
             self,
             InjectedPromptClass::SystemContinuation
+                | InjectedPromptClass::TaskNotificationEvent
                 | InjectedPromptClass::SubagentNotificationEvent
         )
     }

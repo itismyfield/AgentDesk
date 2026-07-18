@@ -392,6 +392,24 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     let injected_class = relay_prompt_decision.injected_class;
     let task_notification =
         task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
+    if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+        // #4567: structured task lifecycle records retain their status-card
+        // authority, but have no positive user-input provenance. Resolve the
+        // card without recording a generic external lease; in particular, do
+        // not let a killed notification mint an anchor, mailbox token, or
+        // synthetic inflight that can fence the next real prompt.
+        let status_only_lease = ExternalInputRelayLease::unassigned(Some(channel_id.get()));
+        let _ = task_notification_prompt::resolve_gate(
+            shared,
+            &prompt,
+            channel_id,
+            injected_class,
+            &status_only_lease,
+            task_notification,
+        )
+        .await;
+        return;
+    }
     // Only external slash controls enter this broad two-second kind gate. Local
     // controls bypass it entirely: raw and envelope transcript records may each
     // render a note rather than risking suppression of a later human command.

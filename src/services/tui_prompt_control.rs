@@ -115,6 +115,20 @@ pub(crate) fn strip_leading_injection_wrapper(text: &str) -> &str {
     after_wrapper_line
 }
 
+/// Returns true only for a structured task lifecycle record at the beginning of
+/// an observed prompt. This seam is deliberately provider-neutral so the
+/// pre-publish dedupe layer can classify status records before it records any
+/// generic external-input lease. Human text quoting the tag mid-prompt is not a
+/// lifecycle record.
+pub(crate) fn is_start_anchored_task_notification_prompt(prompt: &str) -> bool {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = strip_leading_injection_wrapper(normalized.trim_start()).trim_start();
+    let Some(rest) = normalized.strip_prefix("<task-notification") else {
+        return false;
+    };
+    rest.starts_with('>') || rest.chars().next().is_some_and(char::is_whitespace)
+}
+
 fn strip_trailing_injection_code_fence(text: &str) -> &str {
     let trimmed = text.trim_end();
     let Some(before_fence) = trimmed.strip_suffix("```") else {

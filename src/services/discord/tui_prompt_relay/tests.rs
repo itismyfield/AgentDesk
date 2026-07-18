@@ -797,9 +797,23 @@ fn classify_injected_prompt_human_direct_input() {
     assert!(classify_injected_prompt("hi").is_human_active_turn());
 }
 
-// #3099: a `<task-notification>` auto-turn is a real provider turn (it earns
-// a `⏳`) but is not human-driven; its completion cleanup is anchored on the
-// injected message id, so it is classified distinctly from human input.
+// #4567: a `<task-notification>` is a status/card event, not positive
+// human-input provenance; it must not claim an external user-turn lifecycle.
+#[test]
+fn task_notification_lifecycle_is_not_an_external_turn() {
+    let decision = relay_observed_prompt_injected_prompt_decision(
+        "<task-notification><status>killed</status></task-notification>",
+    );
+    assert_eq!(
+        decision.injected_class,
+        InjectedPromptClass::TaskNotificationEvent
+    );
+    assert!(
+        !decision.starts_external_turn_lifecycle(),
+        "killed task status must not claim synthetic ownership"
+    );
+}
+
 #[test]
 fn classify_injected_prompt_task_notification_event() {
     let bare = "<task-notification><status>completed</status><task_id>codex-background-event</task_id></task-notification>";
@@ -1844,18 +1858,20 @@ fn system_continuation_suppresses_external_turn_lifecycle() {
     assert!(!subagent.still_delivers_assistant_output());
     assert!(!subagent.is_human_active_turn());
 
-    // Human + task-notification turns keep their user-turn lifecycle AND deliver
-    // output.
-    for active in [
-        InjectedPromptClass::HumanTuiDirect,
-        InjectedPromptClass::TaskNotificationEvent,
-    ] {
-        assert!(
-            !active.suppresses_user_turn_lifecycle(),
-            "{active:?} must keep its user-turn lifecycle"
-        );
-        assert!(active.still_delivers_assistant_output());
-    }
+    let human = InjectedPromptClass::HumanTuiDirect;
+    assert!(!human.suppresses_user_turn_lifecycle());
+    assert!(human.still_delivers_assistant_output());
+
+    let task = InjectedPromptClass::TaskNotificationEvent;
+    assert!(
+        task.suppresses_user_turn_lifecycle(),
+        "task lifecycle records must never claim a user-turn lifecycle"
+    );
+    assert!(
+        !task.still_delivers_assistant_output(),
+        "task lifecycle records must not spawn an output bridge tail"
+    );
+    assert!(!task.is_human_active_turn());
 }
 
 // #3100 codex re-review (P2): a human message that merely *quotes* the
