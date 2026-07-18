@@ -553,6 +553,12 @@ fn log_shadowed_owner_state(
     }
 }
 
+fn preferred_label_dependency_fallback(detail: String) -> IntakeRouterDecision {
+    IntakeRouterDecision::RanLocal {
+        reason: RanLocalReason::DbErrorFellBackToLocal { detail },
+    }
+}
+
 async fn route_by_preferred_labels(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
@@ -576,20 +582,10 @@ async fn route_by_preferred_labels(
                 );
             }
             Err(error) => {
-                let decision = if matches!(ctx.mode, IntakeRoutingMode::Observe) {
-                    IntakeRouterDecision::Blocked {
-                        reason: IntakeBlockedReason::RoutingDependencyFailed {
-                            detail: format!("agent lookup: {error}"),
-                        },
-                    }
-                } else {
-                    IntakeRouterDecision::RanLocal {
-                        reason: RanLocalReason::DbErrorFellBackToLocal {
-                            detail: format!("agent lookup: {error}"),
-                        },
-                    }
-                };
-                return apply_observe_mode(ctx.mode, decision);
+                return apply_observe_mode(
+                    ctx.mode,
+                    preferred_label_dependency_fallback(format!("agent lookup: {error}")),
+                );
             }
         };
 
@@ -622,20 +618,10 @@ async fn route_by_preferred_labels(
             candidates_from_worker_nodes_json(&eligible_nodes)
         }
         Err(error) => {
-            let decision = if matches!(ctx.mode, IntakeRoutingMode::Observe) {
-                IntakeRouterDecision::Blocked {
-                    reason: IntakeBlockedReason::RoutingDependencyFailed {
-                        detail: format!("list worker_nodes: {error}"),
-                    },
-                }
-            } else {
-                IntakeRouterDecision::RanLocal {
-                    reason: RanLocalReason::DbErrorFellBackToLocal {
-                        detail: format!("list worker_nodes: {error}"),
-                    },
-                }
-            };
-            return apply_observe_mode(ctx.mode, decision);
+            return apply_observe_mode(
+                ctx.mode,
+                preferred_label_dependency_fallback(format!("list worker_nodes: {error}")),
+            );
         }
     };
 
@@ -2201,7 +2187,7 @@ mod pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn confirmed_no_owner_keeps_preference_lookup_availability_fallback_pg() {
+    async fn no_owner_agent_lookup_error_has_observe_enforce_parity_without_mutation_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         sqlx::query("DROP TABLE agents CASCADE")
@@ -2209,17 +2195,87 @@ mod pg_tests {
             .await
             .expect("drop agents for preference lookup error");
 
-        let decision = try_route_intake(
+        let enforce = try_route_intake(
             &pool,
             &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-preference-error"),
         )
         .await;
+        let observe = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Observe, "ch-preference-error"),
+        )
+        .await;
+        let IntakeRouterDecision::RanLocal { reason } = enforce else {
+            panic!("expected enforce availability fallback, got {enforce:?}");
+        };
         assert!(matches!(
-            decision,
-            IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::DbErrorFellBackToLocal { .. }
-            }
+            reason,
+            RanLocalReason::DbErrorFellBackToLocal { .. }
         ));
+        assert_eq!(
+            observe,
+            IntakeRouterDecision::Observed {
+                outcome: ObservedIntakeOutcome::WouldKeepNoOwnerLocal { reason }
+            }
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-preference-error")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "observe dependency fallback must not insert");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_owner_worker_lookup_error_has_observe_enforce_parity_without_mutation_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-worker-lookup-error",
+            "ch-worker-lookup-error",
+            serde_json::json!(["mini"]),
+        )
+        .await;
+        sqlx::query("DROP TABLE worker_nodes CASCADE")
+            .execute(&pool)
+            .await
+            .expect("drop worker_nodes for preference routing error");
+
+        let enforce = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-worker-lookup-error"),
+        )
+        .await;
+        let observe = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Observe, "ch-worker-lookup-error"),
+        )
+        .await;
+        let IntakeRouterDecision::RanLocal { reason } = enforce else {
+            panic!("expected enforce availability fallback, got {enforce:?}");
+        };
+        assert!(matches!(
+            reason,
+            RanLocalReason::DbErrorFellBackToLocal { .. }
+        ));
+        assert_eq!(
+            observe,
+            IntakeRouterDecision::Observed {
+                outcome: ObservedIntakeOutcome::WouldKeepNoOwnerLocal { reason }
+            }
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-worker-lookup-error")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "observe dependency fallback must not insert");
 
         pool.close().await;
         pg_db.drop().await;

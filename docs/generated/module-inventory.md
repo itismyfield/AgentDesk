@@ -408,7 +408,7 @@
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1323 | 618 | 705 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 32 | 32 | 0 |  |
 | `services::cluster::capability_routing` | `src/services/cluster/capability_routing.rs` | 261 | 261 | 0 |  |
-| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2667 | 987 | 1680 |  |
+| `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 2723 | 973 | 1750 |  |
 | `services::cluster::intake_router_hook::owner_record` | `src/services/cluster/intake_router_hook/owner_record.rs` | 2354 | 902 | 1452 |  |
 | `services::cluster::intake_router_hook::session_owner` | `src/services/cluster/intake_router_hook/session_owner.rs` | 134 | 134 | 0 |  |
 | `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
