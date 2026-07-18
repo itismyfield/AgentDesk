@@ -227,7 +227,7 @@
 | `server::dto::kanban` | `src/server/dto/kanban.rs` | 109 | 109 | 0 |  |
 | `server::dto::settings` | `src/server/dto/settings.rs` | 16 | 16 | 0 |  |
 | `server::issue_specs` | `src/server/issue_specs.rs` | 396 | 284 | 112 |  |
-| `server::maintenance` | `src/server/maintenance.rs` | 1254 | 1119 | 135 | giant-file |
+| `server::maintenance` | `src/server/maintenance.rs` | 1293 | 1153 | 140 | giant-file |
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 | 0 | 419 |  |
 | `server::outbox_actionable_delivery` | `src/server/outbox_actionable_delivery.rs` | 121 | 89 | 32 |  |
 | `server::outbox_delivery_alert` | `src/server/outbox_delivery_alert.rs` | 149 | 149 | 0 |  |
@@ -962,7 +962,7 @@
 | `services::kanban_cards` | `src/services/kanban_cards.rs` | 251 | 251 | 0 |  |
 | `services::long_turn_watchdog` | `src/services/long_turn_watchdog.rs` | 325 | 237 | 88 |  |
 | `services::maintenance` | `src/services/maintenance/mod.rs` | 331 | 331 | 0 |  |
-| `services::maintenance::jobs` | `src/services/maintenance/jobs/mod.rs` | 178 | 178 | 0 |  |
+| `services::maintenance::jobs` | `src/services/maintenance/jobs/mod.rs` | 167 | 167 | 0 |  |
 | `services::maintenance::jobs::db_retention` | `src/services/maintenance/jobs/db_retention.rs` | 1104 | 602 | 502 |  |
 | `services::maintenance::jobs::hang_dump_cleanup` | `src/services/maintenance/jobs/hang_dump_cleanup.rs` | 125 | 125 | 0 |  |
 | `services::maintenance::jobs::memento_consolidation` | `src/services/maintenance/jobs/memento_consolidation.rs` | 301 | 301 | 0 |  |

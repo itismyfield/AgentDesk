@@ -1775,7 +1775,7 @@
     stale-inflight preservation review hardening; periodic reconcile loop
     covering stale inflights, orphan uploads, dispatched-session drift, and
     queue-review drift — split before adding non-bugfix behavior).
-  - `src/server/maintenance.rs` (1119 lines; #3909 added the leader-only voice
+  - `src/server/maintenance.rs` (1153 lines; #3909 added the leader-only voice
     TTS cache/temp sweep (`ProgressTtsCacheSweepJob`, 15th MaintenanceJob) +
     runtime-config threading, tipping the per-job-impl static registry over the
     1000-line giant threshold — also registered in `giant_file_registry.toml`.

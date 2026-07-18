@@ -12,7 +12,7 @@
 | Path | Prod | Owner | Deadline | Decompose Issue |
 | --- | ---: | --- | --- | --- |
 | `src/db/automation_candidates.rs` | 1003 | automation-pipeline | 2026-08-31 | #3405 |
-| `src/server/maintenance.rs` | 1119 | server-runtime | 2026-10-31 | #3909 |
+| `src/server/maintenance.rs` | 1153 | server-runtime | 2026-10-31 | #3909 |
 | `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/catch_up.rs` | 1796 | discord-relay | 2026-10-31 | #3405 |
