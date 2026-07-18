@@ -2262,7 +2262,6 @@ pub(super) async fn handle_text_message(
             "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
-        tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
         super::super::super::saturating_decrement_global_active(shared);
         shared.turn_start_times.remove(&channel_id);
         post_adk_session_status(
@@ -2700,15 +2699,12 @@ pub(super) async fn handle_text_message(
 #[cfg(test)]
 mod tui_busy_pre_submit_queue_reaction_tests {
     #[test]
-    fn busy_pre_submit_enqueue_applies_the_shared_pending_reaction() {
+    fn busy_pre_submit_enqueue_keeps_the_authoritative_queue_view() {
         let module_src = include_str!("intake_turn.rs");
         let busy_branch_pos = module_src
             .find("claude_tui follow-up queued because hosted TUI is busy before prompt submission")
             .expect("hosted-TUI busy pre-submit queue branch exists");
         let busy_branch = &module_src[..busy_branch_pos];
-        let reaction_call_pos = busy_branch
-            .rfind("note_busy_tui_pre_submit_queue_pending(")
-            .expect("accepted busy pre-submit enqueue must apply a queue-pending reaction");
         let enqueue_pos = busy_branch
             .rfind("enqueue_busy_tui_followup_for_retry(")
             .expect("busy pre-submit branch enqueues the follow-up");
@@ -2716,10 +2712,32 @@ mod tui_busy_pre_submit_queue_reaction_tests {
             .find("if enqueue_outcome.enqueued {")
             .map(|offset| enqueue_pos + offset)
             .expect("busy pre-submit reaction must be gated on accepted enqueue");
+        let accepted_helper = "note_busy_tui_pre_submit_queue_pending(";
+        let refusal_guard = "} else {\n            apply_tui_busy_enqueue_refusal(";
+        let accepted_clear =
+            "tv_clear_current(shared, http, channel_id, user_msg_id, \"intake_busy_queue\")";
+        let refusal_guard_pos = busy_branch[accepted_guard_pos..]
+            .find(refusal_guard)
+            .map(|offset| accepted_guard_pos + offset)
+            .expect("busy pre-submit enqueue refusal branch exists");
+        let reaction_call_pos = busy_branch[accepted_guard_pos..refusal_guard_pos]
+            .find(accepted_helper)
+            .map(|offset| accepted_guard_pos + offset)
+            .expect("accepted busy pre-submit enqueue must apply a queue-pending reaction");
+        let accepted_branch = &busy_branch[accepted_guard_pos..refusal_guard_pos];
+        let refusal_branch = &busy_branch[refusal_guard_pos..];
 
         assert!(
-            enqueue_pos < accepted_guard_pos && accepted_guard_pos < reaction_call_pos,
+            accepted_guard_pos < reaction_call_pos,
             "an accepted hosted-TUI busy pre-submit enqueue must reach the shared queue-pending reaction helper"
+        );
+        assert!(
+            !accepted_branch.contains(accepted_clear),
+            "accepted busy requeue must preserve the reconciler-owned queued marker"
+        );
+        assert!(
+            refusal_branch.contains(accepted_clear),
+            "refused busy enqueue must still clear the optimistic pending view"
         );
     }
 }
