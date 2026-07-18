@@ -378,17 +378,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         }
         return;
     }
-    // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
-    let live_events = &shared.ui.placeholder_live_events;
-    live_events.set_turn_request_anchor(channel_id, None);
-    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
-    // #3178 (codex P1 lease-overwrite): run the slash-command-control dedupe BEFORE
-    // recording ANY external-input lease. The #3153 double-post (raw echo + expanded
-    // `<command-*>` wrapper, ~tens-of-ms apart) must not let the SECOND half record a
-    // lease: the table is one-per-(provider,session), so it would overwrite the first
-    // turn's lease and its guard would clear that generation, stranding the first
-    // bridge tail. Drop the duplicate here, before any lease/anchor/inflight exists;
-    // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
     let injected_class = relay_prompt_decision.injected_class;
     let task_notification =
         task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);
@@ -410,6 +399,17 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         .await;
         return;
     }
+    // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
+    let live_events = &shared.ui.placeholder_live_events;
+    live_events.set_turn_request_anchor(channel_id, None);
+    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
+    // #3178 (codex P1 lease-overwrite): run the slash-command-control dedupe BEFORE
+    // recording ANY external-input lease. The #3153 double-post (raw echo + expanded
+    // `<command-*>` wrapper, ~tens-of-ms apart) must not let the SECOND half record a
+    // lease: the table is one-per-(provider,session), so it would overwrite the first
+    // turn's lease and its guard would clear that generation, stranding the first
+    // bridge tail. Drop the duplicate here, before any lease/anchor/inflight exists;
+    // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
     // Only external slash controls enter this broad two-second kind gate. Local
     // controls bypass it entirely: raw and envelope transcript records may each
     // render a note rather than risking suppression of a later human command.

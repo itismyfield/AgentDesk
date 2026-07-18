@@ -814,6 +814,43 @@ fn task_notification_lifecycle_is_not_an_external_turn() {
     );
 }
 
+#[tokio::test]
+async fn task_notification_status_only_preserves_existing_turn_request_anchor() {
+    let shared = super::super::make_shared_data_for_tests();
+    let channel_id = ChannelId::new(940_000_000_004_567);
+    let existing_anchor = 940_000_000_004_568;
+    let tmux = "AgentDesk-claude-4567-status-only-anchor";
+    shared
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(tmux, channel_id);
+    shared
+        .ui
+        .placeholder_live_events
+        .set_turn_request_anchor(channel_id, Some(existing_anchor));
+    let prompt = ObservedTuiPrompt {
+        provider: ProviderKind::Claude.as_str().to_string(),
+        tmux_session_name: tmux.to_string(),
+        prompt: "<task-notification><status>killed</status></task-notification>".to_string(),
+        source_event_id: None,
+        observed_at: chrono::Utc::now(),
+        external_input_lease_generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        ssh_direct_observation_generation:
+            crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+    };
+
+    relay_observed_prompt(&shared, prompt).await;
+
+    assert_eq!(
+        shared
+            .ui
+            .placeholder_live_events
+            .request_user_msg_id_for_test(channel_id),
+        Some(existing_anchor),
+        "status-only task notifications must not clear or replace the existing Discord turn request anchor",
+    );
+}
+
 #[test]
 fn classify_injected_prompt_task_notification_event() {
     let bare = "<task-notification><status>completed</status><task_id>codex-background-event</task_id></task-notification>";
