@@ -216,7 +216,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         // — otherwise standby would mask the worsen signal it just unmasked.
         let cluster_standby_without_gateway =
             cluster_standby_without_gateway(state, server_up, &degraded_reasons).await;
-        if cluster_standby_without_gateway {
+        let cluster_standby_with_worker = registry.has_standby_provider().await;
+        let cluster_standby = cluster_standby_without_gateway || cluster_standby_with_worker;
+        if cluster_standby {
             degraded_reasons.retain(|reason| reason.as_str() != Some("no_providers_registered"));
             json["cluster_standby"] = serde_json::json!(true);
         }
@@ -276,7 +278,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             startup_doctor_count_reasons(doctor_failed, doctor_warned);
 
         // #2049 Finding 3: now that every worsen check has run, lift status
-        // to Healthy only when standby has *no other* degraded reasons.
+        // only for the legacy empty-registry standby case. A registered standby
+        // worker keeps its provider classification; restart safety reads the
+        // explicit counters/mailboxes even when status remains degraded.
         if cluster_standby_without_gateway && degraded_reasons.is_empty() {
             status = health::HealthStatus::Healthy;
         }

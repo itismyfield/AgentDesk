@@ -73,30 +73,43 @@ if [[ "$ENV" != "preview" ]]; then
       restart_health_json=""
     fi
     if [[ -n "$restart_health_json" ]] && printf '%s\n' "$restart_health_json" | jq -e '
-    (.cluster_standby == true)
-    and ((.global_active | type) == "number")
-    and ((.global_finalizing | type) == "number")
-    and (.global_active == 0)
-    and (.global_finalizing == 0)
-    and (
-      [(.providers // [])[] | (.active_turns // 0)] | add // 0
-    ) == 0
-    and (
-      [(.mailboxes // [])[] | select(
-        (.has_cancel_token == true)
-        or (.inflight_state_present == true)
-        or (.relay_health.bridge_inflight_present == true)
-        or (.relay_health.mailbox_has_cancel_token == true)
-        or (.relay_stall_state == "active_foreground_stream")
-      )] | length
-    ) == 0
+      (.cluster_standby == true)
+      and ((.global_active | type) == "number")
+      and ((.global_finalizing | type) == "number")
+      and (.global_active == 0)
+      and (.global_finalizing == 0)
+      and ((.providers | type) == "array")
+      and ((.providers | length) > 0)
+      and all(
+        .providers[];
+        (.runtime_state_complete == true)
+        and ((.active_turns | type) == "number")
+        and (.active_turns == 0)
+      )
+      and ((.mailboxes | type) == "array")
+      and all(
+        .mailboxes[];
+        ((.has_cancel_token | type) == "boolean")
+        and (.has_cancel_token == false)
+        and ((.inflight_state_present | type) == "boolean")
+        and (.inflight_state_present == false)
+        and ((.relay_health | type) == "object")
+        and ((.relay_health.active_turn | type) == "string")
+        and (.relay_health.active_turn == "none")
+        and ((.relay_health.bridge_inflight_present | type) == "boolean")
+        and (.relay_health.bridge_inflight_present == false)
+        and ((.relay_health.mailbox_has_cancel_token | type) == "boolean")
+        and (.relay_health.mailbox_has_cancel_token == false)
+        and ((.relay_stall_state | type) == "string")
+        and (.relay_stall_state == "healthy")
+      )
     ' >/dev/null 2>&1; then
       standby_without_live_turns=true
     fi
   fi
 
   if [[ "$standby_without_live_turns" == "true" ]]; then
-    echo "▸ [gate] ${ENV} cluster standby has no active/finalizing/runtime-evidence turns — skipping leader-only restart drain acknowledgement"
+    echo "▸ [gate] ${ENV} cluster standby health explicitly proves no active/finalizing/runtime-evidence turns — skipping leader-only restart drain acknowledgement"
   else
     if ! request_restart_drain_mode_or_fail "$ENV" "$LABEL" "$PORT" "$RUNTIME_ROOT" "agentdesk-restart-skill"; then
       exit 1

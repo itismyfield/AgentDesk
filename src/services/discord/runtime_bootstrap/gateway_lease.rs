@@ -282,21 +282,27 @@ async fn try_acquire_discord_gateway_lease(
 }
 
 /// Outcome of the gateway singleton-lease acquisition phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GatewayLeaseOutcome {
     /// Either the lease was acquired (`Some`) or there is no PG pool (`None`,
     /// the standalone/no-DB path). Either way, startup proceeds.
     Proceed(Option<crate::db::postgres::AdvisoryLockLease>),
-    /// Lease is held elsewhere, or acquisition failed. The startup diagnostic
-    /// has already run; run_bot must decrement the shutdown barrier and return.
-    Skip,
+    /// Another node owns the lease, so this provider is a confirmed standby.
+    /// The startup diagnostic has already run; run_bot must decrement the
+    /// shutdown barrier and return after exposing any standby worker state.
+    Standby,
+    /// Lease ownership is unknown because acquisition failed. The startup
+    /// diagnostic has already run; run_bot must fail closed and return without
+    /// classifying this provider as standby.
+    Failed,
 }
 
 /// Acquire the Discord gateway singleton lease (advisory lock) when a PG pool
 /// is present. Returns `Proceed(Some(lease))` on success, `Proceed(None)` when
-/// there is no PG pool (standalone path), or `Skip` when the lease is held
-/// elsewhere / acquisition failed. On the `Skip` paths this runs the
-/// post-reconcile startup diagnostic exactly as the original early-returns did,
-/// before returning; run_bot then decrements the shutdown barrier and returns.
+/// there is no PG pool (standalone path), `Standby` when the lease is confirmed
+/// held elsewhere, or `Failed` when ownership could not be determined. Both
+/// non-proceed paths run the post-reconcile startup diagnostic exactly as the
+/// original early-returns did before run_bot decrements the shutdown barrier.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_acquire_gateway_lease(
     shared: &Arc<SharedData>,
@@ -343,7 +349,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                         "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
                         provider.display_name()
                     );
-                    GatewayLeaseOutcome::Skip
+                    GatewayLeaseOutcome::Standby
                 }
                 Err(error) => {
                     run_startup_diagnostic_after_reconcile_barrier(
@@ -359,7 +365,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                         provider.display_name(),
                         error
                     );
-                    GatewayLeaseOutcome::Skip
+                    GatewayLeaseOutcome::Failed
                 }
             }
         }
