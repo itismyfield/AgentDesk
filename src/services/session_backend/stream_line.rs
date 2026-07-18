@@ -683,7 +683,11 @@ mod tests {
         ));
 
         let messages: Vec<_> = receiver.try_iter().collect();
-        assert_eq!(messages.len(), 2, "each complete usage record must be observed");
+        assert_eq!(
+            messages.len(),
+            2,
+            "each complete usage record must be observed"
+        );
         assert!(matches!(
             &messages[0],
             StreamMessage::StatusUpdate { model, .. }
