@@ -6,12 +6,12 @@ use std::sync::Arc;
 use crate::services::provider::ProviderKind;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
+use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::cleanup_channel_uploads;
 use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::stop_active_turn;
 use super::super::{
-    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn,
-    mailbox_cancel_queued_primary_message, mailbox_clear_channel,
+    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
     saturating_decrement_global_active,
 };
 use super::config::{
