@@ -2275,6 +2275,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             super::adk_session::fetch_context_thresholds(shared.api_port)
                 .await
                 .compact_pct_for(&provider);
+        if !state.silent_turn {
+            super::super::router::message_handler::typing_indicator::spawn_native_typing_indicator(
+                shared,
+                http.clone(),
+                channel_id,
+                state.effective_finalizer_turn_id(),
+            );
+        }
         spawn_turn_bridge(
             shared.clone(),
             cancel_token,

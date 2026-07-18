@@ -180,7 +180,7 @@ pub(super) async fn run_standby_relay(
         loop {
             use tokio::sync::broadcast::error::TryRecvError;
             match inflight_signals.try_recv() {
-                Ok(InflightSignal::Completed { channel_id: c })
+                Ok(InflightSignal::Completed { channel_id: c, .. })
                     if c == channel_id.get()
                         && standby_completed_signal_starts_drain(
                             pending_result_text.as_deref(),
@@ -199,7 +199,7 @@ pub(super) async fn run_standby_relay(
                     );
                     break;
                 }
-                Ok(InflightSignal::Completed { channel_id: c }) if c == channel_id.get() => {
+                Ok(InflightSignal::Completed { channel_id: c, .. }) if c == channel_id.get() => {
                     continue;
                 }
                 Ok(_) => continue, // other channels — ignore
@@ -1002,11 +1002,17 @@ mod tests {
         let other = 22_222u64;
 
         let matches = |sig: &InflightSignal| match sig {
-            InflightSignal::Completed { channel_id } => *channel_id == own,
+            InflightSignal::Completed { channel_id, .. } => *channel_id == own,
         };
 
-        assert!(matches(&InflightSignal::Completed { channel_id: own }));
-        assert!(!matches(&InflightSignal::Completed { channel_id: other }));
+        assert!(matches(&InflightSignal::Completed {
+            channel_id: own,
+            turn_id: 1
+        }));
+        assert!(!matches(&InflightSignal::Completed {
+            channel_id: other,
+            turn_id: 1
+        }));
     }
 
     #[test]
@@ -1314,12 +1320,21 @@ mod tests {
         use super::InflightSignal;
         let (tx, mut rx) = tokio::sync::broadcast::channel::<InflightSignal>(256);
 
-        let send_result = tx.send(InflightSignal::Completed { channel_id: 42 });
+        let send_result = tx.send(InflightSignal::Completed {
+            channel_id: 42,
+            turn_id: 1,
+        });
         assert!(send_result.is_ok());
 
         let received = rx.recv().await.expect("broadcast delivered");
         match received {
-            InflightSignal::Completed { channel_id } => assert_eq!(channel_id, 42),
+            InflightSignal::Completed {
+                channel_id,
+                turn_id,
+            } => {
+                assert_eq!(channel_id, 42);
+                assert_eq!(turn_id, 1);
+            }
         }
     }
 

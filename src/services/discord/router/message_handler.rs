@@ -51,6 +51,7 @@ mod latency_spans;
 mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;
+pub(in crate::services::discord) mod typing_indicator;
 mod voice_announcement_route;
 mod voice_announcement_scope;
 mod watchdog;

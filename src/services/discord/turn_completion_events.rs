@@ -16,11 +16,22 @@ pub(in crate::services::discord) const TURN_COMPLETION_EVENT_BUS_CAPACITY: usize
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) struct TurnCompletionEvent {
     pub(in crate::services::discord) channel_id: ChannelId,
+    pub(in crate::services::discord) turn_id: Option<u64>,
 }
 
 impl TurnCompletionEvent {
     pub(in crate::services::discord) fn new(channel_id: ChannelId) -> Self {
-        Self { channel_id }
+        Self {
+            channel_id,
+            turn_id: None,
+        }
+    }
+
+    pub(in crate::services::discord) fn for_turn(channel_id: ChannelId, turn_id: u64) -> Self {
+        Self {
+            channel_id,
+            turn_id: Some(turn_id),
+        }
     }
 }
 
@@ -63,10 +74,15 @@ pub(in crate::services::discord) fn subscribe_turn_completion_events(
 pub(in crate::services::discord) fn publish_mailbox_release_completion_event(
     shared: &SharedData,
     channel_id: ChannelId,
+    turn_id: Option<u64>,
     finish: &FinishTurnResult,
 ) {
     if finish.removed_token.is_some() {
-        publish_turn_completion_event(shared, TurnCompletionEvent::new(channel_id));
+        let event = turn_id.map_or_else(
+            || TurnCompletionEvent::new(channel_id),
+            |turn_id| TurnCompletionEvent::for_turn(channel_id, turn_id),
+        );
+        publish_turn_completion_event(shared, event);
     }
 }
 

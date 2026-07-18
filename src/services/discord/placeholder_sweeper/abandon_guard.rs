@@ -319,7 +319,10 @@ pub(super) async fn finalize_abandoned_mailbox(
     }
     if actions.publish_completion_after_cleanup {
         super::super::turn_completion_events::publish_mailbox_release_completion_event(
-            shared, channel, &finish,
+            shared,
+            channel,
+            Some(user_msg_id.get()),
+            &finish,
         );
     }
     AbandonedTmuxCleanupOutcome::from_plan(plan)
