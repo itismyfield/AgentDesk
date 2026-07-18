@@ -395,6 +395,9 @@ where
                     } else {
                         outcome.pending_reaction =
                             PendingReactionDecision::Skip(PendingReactionSkipReason::Failed);
+                        effects
+                            .notify_pending_reaction_failure(channel_id, message_id)
+                            .await;
                     }
                 }
                 IntakeQueuePendingReactionPolicy::Static(emoji) => {
@@ -409,6 +412,9 @@ where
                     } else {
                         outcome.pending_reaction =
                             PendingReactionDecision::Skip(PendingReactionSkipReason::Failed);
+                        effects
+                            .notify_pending_reaction_failure(channel_id, message_id)
+                            .await;
                     }
                 }
             }
@@ -765,6 +771,10 @@ mod tests {
                 IntakeQueueCommittedStep::CheckpointAdvanced,
             ]
         );
+        assert!(
+            effects.fallback_notices.is_empty(),
+            "a delivered accepted reaction must not emit fallback UI"
+        );
     }
 
     #[tokio::test]
@@ -795,6 +805,11 @@ mod tests {
                 IntakeQueueCommittedStep::CheckpointAdvanced,
             ],
             "a failed reaction must never be reported as PendingReactionApplied"
+        );
+        assert_eq!(
+            effects.fallback_notices,
+            vec![(serenity::ChannelId::new(42), serenity::MessageId::new(100))],
+            "a failed accepted reaction must emit exactly one referenced fallback notice"
         );
     }
 
@@ -872,6 +887,10 @@ mod tests {
         assert_eq!(
             outcome.committed_steps,
             vec![IntakeQueueCommittedStep::PendingReactionApplied]
+        );
+        assert!(
+            effects.fallback_notices.is_empty(),
+            "a delivered duplicate repair must not emit fallback UI"
         );
     }
 

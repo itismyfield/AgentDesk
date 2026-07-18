@@ -45,8 +45,7 @@ mod tests {
         ));
         assert!(race_loss_reaction.contains(&compact(
             r#"
-                if !delivered {
-                    crate::services::discord::outbound::reaction_control::send_reaction_control_reply_http(
+                crate::services::discord::outbound::reaction_control::ensure_queue_reaction_or_fallback_http(
             "#,
         )));
 

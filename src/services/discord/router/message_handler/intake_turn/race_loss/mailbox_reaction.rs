@@ -77,15 +77,12 @@ pub(super) async fn note_queue_pending(
         source,
     )
     .await;
-    if !delivered {
-        crate::services::discord::outbound::reaction_control::send_reaction_control_reply_http(
-            http,
-            channel_id,
-            shared,
-            user_msg_id,
-            crate::services::discord::outbound::reaction_control::ReactionControlReplyReason::QueueReactionFailed,
-            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
-        )
-        .await;
-    }
+    crate::services::discord::outbound::reaction_control::ensure_queue_reaction_or_fallback_http(
+        http,
+        channel_id,
+        shared,
+        user_msg_id,
+        delivered,
+    )
+    .await;
 }

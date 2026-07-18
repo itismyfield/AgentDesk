@@ -164,6 +164,11 @@ async fn standalone_without_start_attempt_adds_mailbox_once() {
         1,
         "race-loss standalone enqueue must imperatively add 📬 without a start attempt"
     );
+    assert!(
+        crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
+            .is_empty(),
+        "a delivered race-loss reaction must not emit fallback UI"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

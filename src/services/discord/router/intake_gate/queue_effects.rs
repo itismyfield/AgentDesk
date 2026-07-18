@@ -3,7 +3,7 @@ use super::super::intake_queue_transaction::{
 };
 use super::*;
 use crate::services::discord::outbound::reaction_control::{
-    ReactionControlReplyReason, send_reaction_control_reply,
+    ReactionControlReplyReason, ensure_queue_reaction_or_fallback_http, send_reaction_control_reply,
 };
 
 /// Pick the queue-pending reaction emoji based on the enqueue outcome.
@@ -55,15 +55,6 @@ async fn add_queue_pending_reaction_self_healing(
         )
         .await;
     if !delivered {
-        send_reaction_control_reply(
-            ctx,
-            &data.shared,
-            channel_id,
-            user_msg_id,
-            ReactionControlReplyReason::QueueReactionFailed,
-            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
-        )
-        .await;
         return false;
     }
     let still_queued = {
@@ -158,13 +149,12 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
         channel_id: serenity::ChannelId,
         message_id: serenity::MessageId,
     ) {
-        send_reaction_control_reply(
-            self.ctx,
-            &self.data.shared,
+        ensure_queue_reaction_or_fallback_http(
+            &self.ctx.http,
             channel_id,
+            &self.data.shared,
             message_id,
-            ReactionControlReplyReason::QueueReactionFailed,
-            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
+            false,
         )
         .await;
     }

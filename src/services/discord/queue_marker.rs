@@ -249,6 +249,34 @@ mod tests {
         }
     }
 
+    fn write_persisted_v1_queue(
+        shared: &SharedData,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        generation: u64,
+    ) {
+        let path = persisted_path(channel_id, message_id);
+        std::fs::create_dir_all(path.parent().expect("persisted target parent"))
+            .expect("create persisted target parent");
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "version": 1,
+                "provider": shared.provider.as_str(),
+                "kind": "intake_user_message",
+                "channel_id": channel_id.get(),
+                "message_id": message_id.get(),
+                "owner_generation": generation,
+                "owner_turn_id": format!("discord:{}:{}", channel_id.get(), message_id.get()),
+                "applied": "queued",
+                "identity_label": "intake",
+                "token_hash": shared.token_hash.clone(),
+            })
+            .to_string(),
+        )
+        .expect("write persisted v1 queue state");
+    }
+
     struct ScopedRuntimeRoot {
         _lock: std::sync::MutexGuard<'static, ()>,
         _temp: tempfile::TempDir,
@@ -511,6 +539,94 @@ mod tests {
         )
         .expect("parse pending state");
         assert_eq!(persisted["applied"], "pending");
+    }
+
+    #[tokio::test]
+    async fn persisted_v1_dispatch_promotion_clears_orphan_queue_marker() {
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let channel_id = ChannelId::new(100_000_000_000_195);
+        let head = MessageId::new(100_000_000_000_196);
+        const GENERATION: u64 = 63;
+        write_persisted_v1_queue(&shared, channel_id, head, GENERATION);
+
+        drain_dispatched_queue_markers(
+            &shared,
+            &http,
+            channel_id,
+            head,
+            &[SourceMessageQueuedGeneration::new(head, GENERATION)],
+        )
+        .await;
+
+        let ops = shared.turn_view_reconciler.ops();
+        assert_eq!(
+            ops.iter()
+                .filter(|op| op.target.message_id == head && !op.add && op.emoji == '📬')
+                .count(),
+            1,
+            "v1 dispatch promotion must remove the legacy queue marker exactly once"
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| op.target.message_id == head && op.add && op.emoji == '⏳')
+                .count(),
+            1,
+            "v1 dispatch promotion must install pending state after cleanup"
+        );
+        assert!(
+            ops.iter()
+                .position(|op| op.target.message_id == head && !op.add && op.emoji == '📬')
+                < ops
+                    .iter()
+                    .position(|op| op.target.message_id == head && op.add && op.emoji == '⏳'),
+            "legacy cleanup must precede pending promotion"
+        );
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(persisted_path(channel_id, head)).expect("pending state"),
+        )
+        .expect("parse pending state");
+        assert_eq!(persisted["applied"], "pending");
+        assert_eq!(persisted["version"], 1);
+    }
+
+    #[tokio::test]
+    async fn persisted_v1_kickoff_promotion_clears_orphan_queue_marker() {
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let channel_id = ChannelId::new(100_000_000_000_197);
+        let head = MessageId::new(100_000_000_000_198);
+        write_persisted_v1_queue(&shared, channel_id, head, shared.restart.current_generation);
+
+        start_and_drain_kickoff_markers(
+            &shared,
+            &http,
+            channel_id,
+            head,
+            &[SourceMessageQueuedGeneration::new(
+                head,
+                shared.restart.current_generation,
+            )],
+        )
+        .await;
+
+        let ops = shared.turn_view_reconciler.ops();
+        assert_eq!(
+            ops.iter()
+                .filter(|op| op.target.message_id == head && !op.add && op.emoji == '📬')
+                .count(),
+            1,
+            "v1 idle kickoff must remove the legacy queue marker exactly once"
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| op.target.message_id == head && op.add && op.emoji == '⏳')
+                .count(),
+            1,
+            "v1 idle kickoff must install pending state after cleanup"
+        );
     }
 
     #[tokio::test]
