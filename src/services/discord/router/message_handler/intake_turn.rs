@@ -2228,6 +2228,15 @@ pub(super) async fn handle_text_message(
                 .len();
         let queued_card_rendered = false;
         if enqueue_outcome.enqueued {
+            race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
+                shared,
+                http,
+                channel_id,
+                user_msg_id,
+                enqueue_outcome.merged,
+                turn_start_attempt,
+            )
+            .await;
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
         } else {
             apply_tui_busy_enqueue_refusal(
@@ -2719,6 +2728,33 @@ pub(super) async fn handle_text_message(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tui_busy_pre_submit_queue_reaction_tests {
+    #[test]
+    fn busy_pre_submit_enqueue_applies_the_shared_pending_reaction() {
+        let module_src = include_str!("intake_turn.rs");
+        let busy_branch_pos = module_src
+            .find("claude_tui follow-up queued because hosted TUI is busy before prompt submission")
+            .expect("hosted-TUI busy pre-submit queue branch exists");
+        let busy_branch = &module_src[..busy_branch_pos];
+        let reaction_call_pos = busy_branch
+            .rfind("note_busy_tui_pre_submit_queue_pending(")
+            .expect("accepted busy pre-submit enqueue must apply a queue-pending reaction");
+        let enqueue_pos = busy_branch
+            .rfind("enqueue_busy_tui_followup_for_retry(")
+            .expect("busy pre-submit branch enqueues the follow-up");
+        let accepted_guard_pos = busy_branch[enqueue_pos..]
+            .find("if enqueue_outcome.enqueued {")
+            .map(|offset| enqueue_pos + offset)
+            .expect("busy pre-submit reaction must be gated on accepted enqueue");
+
+        assert!(
+            enqueue_pos < accepted_guard_pos && accepted_guard_pos < reaction_call_pos,
+            "an accepted hosted-TUI busy pre-submit enqueue must reach the shared queue-pending reaction helper"
+        );
+    }
 }
 
 #[cfg(test)]

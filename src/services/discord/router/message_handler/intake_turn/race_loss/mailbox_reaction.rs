@@ -18,6 +18,31 @@ pub(super) async fn clear_rejected_attempt_pending(
     .await;
 }
 
+pub(in crate::services::discord::router::message_handler::intake_turn) async fn note_busy_tui_pre_submit_queue_pending(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    merged: bool,
+    turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+) {
+    let emoji = if merged {
+        crate::services::discord::queue_reactions::QUEUE_MERGED_PENDING_REACTION
+    } else {
+        crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
+    };
+    note_queue_pending(
+        shared,
+        http,
+        channel_id,
+        user_msg_id,
+        emoji,
+        turn_start_attempt,
+        "tui_busy_pre_submit_message_queued",
+    )
+    .await;
+}
+
 pub(super) async fn note_queue_pending(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
@@ -25,6 +50,7 @@ pub(super) async fn note_queue_pending(
     user_msg_id: MessageId,
     emoji: char,
     turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+    source: &'static str,
 ) {
     if emoji == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
         && let Some(turn_start_attempt) = turn_start_attempt
@@ -34,7 +60,7 @@ pub(super) async fn note_queue_pending(
             channel_id,
             user_msg_id,
             turn_start_attempt,
-            "race_loss_message_queued",
+            source,
         )
         .await;
     }
@@ -48,7 +74,7 @@ pub(super) async fn note_queue_pending(
         channel_id,
         user_msg_id,
         emoji,
-        "race_loss_message_queued",
+        source,
     )
     .await;
     if !delivered {
