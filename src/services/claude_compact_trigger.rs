@@ -1,12 +1,13 @@
 //! Model-aware Claude `/compact` triggering and busy-turn steering.
 //!
 //! This trigger keeps main's proven *stateless observable-usage* shape: a single
-//! per-pane `armed` bool, consumed once per fill cycle at a turn-completion
-//! boundary and re-armed only after observable occupancy drops back below a
-//! hysteresis floor (which is exactly what a real compaction does). It never owns
-//! an identity/epoch/ticket lifecycle authority; the model-aware context window is
-//! resolved fresh each turn by the caller (`claude_compact_context`) and only the
-//! numeric threshold changes when the model/window changes.
+//! per-pane `armed` bool, consumed once per fill cycle at either an active usage
+//! observation or a turn-completion boundary and re-armed only after observable
+//! occupancy drops back below a hysteresis floor (which is exactly what a real
+//! compaction does). It never owns an identity/epoch/ticket lifecycle authority;
+//! the model-aware context window is resolved fresh for every observation by the
+//! caller (`claude_compact_context`) and only the numeric threshold changes when
+//! the model/window changes.
 //!
 //! What #4591 keeps on top of main's shape:
 //!   * a *token* threshold (`compact_threshold`) instead of a percentage, so the
@@ -97,9 +98,9 @@ static COMPACT_TRIGGER_STATE: LazyLock<Mutex<CompactTriggerState>> = LazyLock::n
     })
 });
 
-/// Update the per-pane armed flag from the latest turn-completion occupancy and
-/// report the fill-cycle generation to inject for (`Some(generation)`), or `None`
-/// when THIS observation must not inject.
+/// Update the per-pane armed flag from the latest observable occupancy and report
+/// the fill-cycle generation to inject for (`Some(generation)`), or `None` when
+/// THIS observation must not inject.
 ///
 /// The re-arm check runs FIRST and is edge-triggered on an observable occupancy
 /// drop (`occupied <= rearm_floor_tokens`): a real context reset — a landed
@@ -227,9 +228,73 @@ fn submit_under_composer_lock(
     )
 }
 
-/// Claude-only: at a watcher-completed (pane-idle) turn boundary, inject
-/// `/compact` into the live TUI when observable context occupancy first crosses
-/// the model-aware token threshold this fill cycle.
+/// Validate and forward one active Claude usage snapshot into the same stateless
+/// trigger used by watcher completion. A complete input/cache-write/cache-read
+/// triple is required because partial terminal telemetry cannot authoritatively
+/// express either a threshold crossing or the zero-valued post-compact re-arm.
+/// The live model and physical tmux name resolve the launch-bound context window;
+/// missing provenance fails closed without touching trigger state.
+pub(crate) fn observe_active_usage(
+    channel_id: u64,
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    cache_create_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    compact_percent: u64,
+    lower_bound_tokens: u64,
+) -> bool {
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+    let actual_window_tokens = model.and_then(|model| {
+        crate::services::claude_compact_context::context_window_for_turn(
+            tmux_session_name,
+            Some(model),
+        )
+    });
+    let Some((pane, generation, threshold, occupied)) = observe_active_usage_with_window(
+        channel_id,
+        tmux_session_name,
+        provider,
+        model,
+        input_tokens,
+        cache_create_tokens,
+        cache_read_tokens,
+        actual_window_tokens,
+        compact_percent,
+        lower_bound_tokens,
+    ) else {
+        return false;
+    };
+    spawn_compact_worker(pane, generation, threshold, occupied);
+    true
+}
+
+fn validate_active_usage_snapshot<'a>(
+    tmux_session_name: &'a str,
+    provider: &ProviderKind,
+    model: Option<&'a str>,
+    input_tokens: Option<u64>,
+    cache_create_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+) -> Option<(&'a str, &'a str, u64)> {
+    if !matches!(provider, ProviderKind::Claude) {
+        return None;
+    }
+    let tmux_session_name = tmux_session_name.trim();
+    let model = model.map(str::trim).filter(|value| !value.is_empty())?;
+    if tmux_session_name.is_empty() {
+        return None;
+    }
+    let occupied = input_tokens?
+        .saturating_add(cache_create_tokens?)
+        .saturating_add(cache_read_tokens?);
+    Some((tmux_session_name, model, occupied))
+}
+
+/// Claude-only: on an active usage observation or a watcher-completed boundary,
+/// inject `/compact` into the live TUI when observable context occupancy first
+/// crosses the model-aware token threshold this fill cycle.
 ///
 /// `usage_tokens` is the observable occupancy (`context_occupancy_input_tokens`);
 /// `actual_window_tokens` is the launch-provenance-resolved Claude context window
@@ -278,6 +343,18 @@ pub(crate) fn maybe_inject_compact(
         return;
     };
 
+    spawn_compact_worker(pane, generation, threshold, usage_tokens);
+}
+
+/// Spawn the single worker bound to one consumed fill-cycle generation.
+/// Callers must pass the generation returned by the same `observe_and_decide`
+/// call that consumed the arm flag; it is never reconstructed from later state.
+fn spawn_compact_worker(
+    pane: CompactPaneKey,
+    generation: u64,
+    threshold: CompactThreshold,
+    occupied: u64,
+) {
     // The flag was just consumed, so at most one blocking worker exists per
     // crossing. This worker holds ONLY the per-pane composer lock across the tmux
     // mutation (never the leaf state lock) and performs no turn-readiness wait. It
@@ -293,7 +370,7 @@ pub(crate) fn maybe_inject_compact(
             ),
             Some(CompactSubmitOutcome::AcceptedOrQueued) => tracing::info!(
                 tmux_session_name = %pane.tmux_session_name,
-                usage_tokens,
+                usage_tokens = occupied,
                 threshold_tokens = threshold.effective_tokens,
                 "Claude auto compact accepted or queued"
             ),
@@ -359,12 +436,72 @@ pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// Acquire the shared state guard and reset all compact-trigger test state while
 /// the guard is held. The caller retains the guard for its entire test.
 #[cfg(test)]
-fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = STATE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     reset_for_test();
     guard
+}
+
+fn observe_active_usage_with_window(
+    channel_id: u64,
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    cache_create_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    actual_window_tokens: Option<u64>,
+    compact_percent: u64,
+    lower_bound_tokens: u64,
+) -> Option<(CompactPaneKey, u64, CompactThreshold, u64)> {
+    let Some((tmux_session_name, _model, occupied)) = validate_active_usage_snapshot(
+        tmux_session_name,
+        provider,
+        model,
+        input_tokens,
+        cache_create_tokens,
+        cache_read_tokens,
+    ) else {
+        return None;
+    };
+    let actual_window_tokens = actual_window_tokens?;
+    let threshold = compact_threshold(actual_window_tokens, compact_percent, lower_bound_tokens)?;
+    let pane = CompactPaneKey {
+        channel_id,
+        tmux_session_name: tmux_session_name.to_string(),
+    };
+    let generation = observe_and_decide(&pane, occupied, threshold)?;
+    Some((pane, generation, threshold, occupied))
+}
+
+#[cfg(test)]
+pub(crate) fn observe_active_usage_with_window_for_test(
+    channel_id: u64,
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    cache_create_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    actual_window_tokens: Option<u64>,
+    compact_percent: u64,
+    lower_bound_tokens: u64,
+) -> bool {
+    observe_active_usage_with_window(
+        channel_id,
+        tmux_session_name,
+        provider,
+        model,
+        input_tokens,
+        cache_create_tokens,
+        cache_read_tokens,
+        actual_window_tokens,
+        compact_percent,
+        lower_bound_tokens,
+    )
+    .is_some()
 }
 
 #[cfg(test)]
@@ -668,6 +805,195 @@ mod tests {
     /// Degrade-safe no-inject paths never touch the armed flag and never spawn a
     /// worker (so these are safe to call without a Tokio runtime): a non-Claude
     /// provider, an unresolvable window, and a zero/disabled percent.
+    /// #4631 active-observation mutation proof. This drives the same validation
+    /// seam used by the stream content arm without spawning a tmux worker. Removing
+    /// the active observation call makes the two crossing assertions fail; removing
+    /// complete-snapshot/provider/model/tmux/window guards makes a fail-closed
+    /// assertion fail. No watcher-completed boundary participates.
+    #[test]
+    fn active_usage_crossing_without_watcher_completion_is_once_per_fill_cycle() {
+        let _guard = state_test_guard();
+        let observe = |occupied: u64| {
+            observe_active_usage_with_window_for_test(
+                42,
+                "tmux-active-4631",
+                &ProviderKind::Claude,
+                Some("routed-sonnet[1m]"),
+                Some(occupied),
+                Some(0),
+                Some(0),
+                Some(1_000_000),
+                50,
+                300_000,
+            )
+        };
+
+        assert!(
+            !observe(499_999),
+            "below-threshold live usage must not fire"
+        );
+        assert!(observe(560_000), "live threshold crossing must fire");
+        assert!(!observe(800_000), "same fill cycle must stay consumed");
+        assert!(!observe(450_000), "observable compact drop only re-arms");
+        assert!(observe(560_000), "next fill cycle must fire again");
+    }
+
+    #[test]
+    fn production_active_usage_resolves_launch_provenance_and_live_model() {
+        use crate::services::claude_compact_context::{
+            put_catalog_for_test, register_launch_provenance,
+            state_test_guard as context_state_test_guard,
+        };
+        use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
+
+        let _context_guard = context_state_test_guard();
+        let _trigger_guard = state_test_guard();
+        let proxy = "http://proxy-active-4631.test";
+        let tmux_session_name = "tmux-production-active-4631";
+        put_catalog_for_test(
+            proxy,
+            HashMap::from([("routed-sonnet[1m]".to_string(), 1_000_000)]),
+        );
+        register_launch_provenance(
+            tmux_session_name,
+            &ClaudeGatewayProxyEnv::Inject {
+                base_url: proxy.to_string(),
+            },
+        );
+
+        assert!(
+            crate::services::claude_compact_context::context_window_for_turn(
+                tmux_session_name,
+                Some("routed-sonnet[1m]"),
+            )
+            .is_some()
+        );
+        let validated = validate_active_usage_snapshot(
+            tmux_session_name,
+            &ProviderKind::Claude,
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            Some(0),
+            Some(0),
+        )
+        .expect("complete live snapshot");
+        let actual_window_tokens =
+            crate::services::claude_compact_context::context_window_for_turn(
+                tmux_session_name,
+                Some(validated.1),
+            )
+            .expect("launch-bound live model window");
+        let threshold = compact_threshold(actual_window_tokens, 50, 300_000)
+            .expect("production active compact threshold");
+        let pane = CompactPaneKey {
+            channel_id: 42,
+            tmux_session_name: validated.0.to_string(),
+        };
+        assert!(observe_and_decide(&pane, validated.2, threshold).is_some());
+        let pane = CompactPaneKey {
+            channel_id: 42,
+            tmux_session_name: tmux_session_name.to_string(),
+        };
+        assert_eq!(
+            armed_state(&pane),
+            Some(false),
+            "the production active observer must use launch provenance rather than a generic bridge window"
+        );
+        clear_for_tmux(tmux_session_name);
+        assert!(!observe_active_usage(
+            42,
+            "tmux-without-launch-provenance",
+            &ProviderKind::Claude,
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            Some(0),
+            Some(0),
+            50,
+            300_000,
+        ));
+        assert!(
+            !COMPACT_TRIGGER_STATE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .panes
+                .keys()
+                .any(|pane| pane.tmux_session_name == "tmux-without-launch-provenance"),
+            "missing launch provenance must fail closed without touching trigger state"
+        );
+    }
+
+    #[test]
+    fn active_usage_requires_complete_claude_launch_identity() {
+        let _guard = state_test_guard();
+        let observe = |provider: &ProviderKind,
+                       tmux: &str,
+                       model: Option<&str>,
+                       input: Option<u64>,
+                       cache_create: Option<u64>,
+                       cache_read: Option<u64>,
+                       window: Option<u64>| {
+            observe_active_usage_with_window_for_test(
+                42,
+                tmux,
+                provider,
+                model,
+                input,
+                cache_create,
+                cache_read,
+                window,
+                50,
+                300_000,
+            )
+        };
+
+        assert!(!observe(
+            &ProviderKind::Codex,
+            "tmux-active-4631",
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            Some(0),
+            Some(0),
+            Some(1_000_000),
+        ));
+        assert!(!observe(
+            &ProviderKind::Claude,
+            "   ",
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            Some(0),
+            Some(0),
+            Some(1_000_000),
+        ));
+        assert!(!observe(
+            &ProviderKind::Claude,
+            "tmux-active-4631",
+            None,
+            Some(560_000),
+            Some(0),
+            Some(0),
+            Some(1_000_000),
+        ));
+        assert!(!observe(
+            &ProviderKind::Claude,
+            "tmux-active-4631",
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            None,
+            Some(0),
+            Some(1_000_000),
+        ));
+        assert!(!observe(
+            &ProviderKind::Claude,
+            "tmux-active-4631",
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            Some(0),
+            Some(0),
+            None,
+        ));
+        assert!(panes_is_empty(), "invalid snapshots must not touch state");
+    }
+
     #[test]
     fn maybe_inject_degrades_safely_without_touching_the_flag() {
         let _guard = state_test_guard();

@@ -85,26 +85,48 @@ pub fn process_stream_line(
                 // accumulated for the cumulative output metric analytics
                 // expect.
                 state.saw_per_message_usage = true;
-                let input_tokens = usage
-                    .get("input_tokens")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0);
+                let input_tokens = usage.get("input_tokens").and_then(|value| value.as_u64());
                 let cache_read = usage
                     .get("cache_read_input_tokens")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0);
+                    .and_then(|value| value.as_u64());
                 let cache_creation = usage
                     .get("cache_creation_input_tokens")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0);
-                state.accum_input_tokens = input_tokens;
-                state.accum_cache_read_tokens = cache_read;
-                state.accum_cache_create_tokens = cache_creation;
+                    .and_then(|value| value.as_u64());
+                state.accum_input_tokens = input_tokens.unwrap_or(0);
+                state.accum_cache_read_tokens = cache_read.unwrap_or(0);
+                state.accum_cache_create_tokens = cache_creation.unwrap_or(0);
                 if let Some(output_tokens) =
                     usage.get("output_tokens").and_then(|value| value.as_u64())
                 {
                     state.accum_output_tokens =
                         state.accum_output_tokens.saturating_add(output_tokens);
+                }
+
+                // #4631: publish the latest API-call occupancy while the
+                // transcript is still active. Long Claude TUI tool loops may
+                // not produce a terminal `result` (or a watcher-completed
+                // boundary) for many minutes, so result-only telemetry leaves
+                // the auto-compact trigger blind while context keeps filling.
+                // Explicit zeroes are meaningful here: they are the observable
+                // post-compact drop that re-arms the stateless trigger.
+                if input_tokens.is_some()
+                    && cache_creation.is_some()
+                    && cache_read.is_some()
+                    && sender
+                        .send(StreamMessage::StatusUpdate {
+                            model: state.last_model.clone(),
+                            cost_usd: None,
+                            total_cost_usd: None,
+                            duration_ms: None,
+                            num_turns: None,
+                            input_tokens,
+                            cache_create_tokens: cache_creation,
+                            cache_read_tokens: cache_read,
+                            output_tokens: Some(state.accum_output_tokens),
+                        })
+                        .is_err()
+                {
+                    return false;
                 }
             }
         }
@@ -598,6 +620,63 @@ mod tests {
         assert!(messages.iter().any(
             |message| matches!(message, StreamMessage::Done { session_id, .. } if session_id.as_deref() == Some("sess-text"))
         ));
+    }
+
+    /// #4631: assistant usage must reach the live bridge before any terminal
+    /// `result`/`Done` boundary. Explicit zero cache fields are retained so an
+    /// observed post-compact reset can re-arm the stateless compact trigger.
+    /// Removing the assistant-side `StatusUpdate` send makes this test fail on its
+    /// own missing-message assertion rather than at compile time.
+    #[test]
+    fn assistant_usage_emits_complete_live_snapshot_before_done() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"routed-sonnet[1m]","usage":{"input_tokens":560000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":17},"content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(messages.len(), 1, "usage must publish before terminal Done");
+        assert!(matches!(
+            &messages[0],
+            StreamMessage::StatusUpdate {
+                model,
+                input_tokens: Some(560_000),
+                cache_create_tokens: Some(0),
+                cache_read_tokens: Some(0),
+                output_tokens: Some(17),
+                ..
+            } if model.as_deref() == Some("routed-sonnet[1m]")
+        ));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, StreamMessage::Done { .. })),
+            "the active usage observation must not depend on a terminal boundary"
+        );
+    }
+
+    #[test]
+    fn assistant_usage_does_not_fabricate_missing_cache_fields_as_zeroes() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"routed-sonnet[1m]","usage":{"input_tokens":560000,"cache_read_input_tokens":0,"output_tokens":17},"content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+
+        assert!(
+            receiver.try_iter().next().is_none(),
+            "partial usage must not become a compact-eligible complete snapshot"
+        );
+        assert_eq!(state.accum_input_tokens, 560_000);
+        assert_eq!(state.accum_cache_read_tokens, 0);
+        assert_eq!(state.accum_cache_create_tokens, 0);
     }
 
     /// #3281 zero side: a transcript window containing ONLY housekeeping lines

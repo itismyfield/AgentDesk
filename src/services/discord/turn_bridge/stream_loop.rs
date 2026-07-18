@@ -1,10 +1,4 @@
-//! #4230 S6 stream loop shell for `turn_bridge::spawn_turn_bridge`.
-//!
-//! Moved from the main stream receive/drain loop of `spawn_turn_bridge`:
-//! cancel finalization gates, ready-frame drain, remaining stream event arms,
-//! long-running placeholder open/retarget state, runtime handoff delegation,
-//! stream/status ticks, and bridge latency span emission.
-
+//! #4230 S6 stream receive/drain loop for `turn_bridge::spawn_turn_bridge`.
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -149,7 +143,12 @@ pub(super) async fn run_stream_loop(
     let status_interval = ctx.status_interval;
     let context_window_tokens = ctx.context_window_tokens;
     let context_compact_percent = ctx.context_compact_percent;
-
+    let compact_lower_bound_future = content_arms::active_usage::compact_lower_bound_tokens(
+        &provider,
+        adk_session_name.as_deref(),
+        shared_owned.api_port,
+    );
+    let context_compact_lower_bound_tokens = compact_lower_bound_future.await;
     let rx = &mut *state.rx;
     let mut full_response = std::mem::take(state.full_response);
     let mut last_edit_text = std::mem::take(state.last_edit_text);
@@ -395,12 +394,14 @@ pub(super) async fn run_stream_loop(
                                     message, stderr, ..
                                 } => StreamContentArmMessage::Error { message, stderr },
                                 StreamMessage::StatusUpdate {
+                                    model,
                                     input_tokens,
                                     cache_create_tokens,
                                     cache_read_tokens,
                                     output_tokens,
                                     ..
                                 } => StreamContentArmMessage::StatusUpdate {
+                                    model,
                                     input_tokens,
                                     cache_create_tokens,
                                     cache_read_tokens,
@@ -425,8 +426,10 @@ pub(super) async fn run_stream_loop(
                                     terminal_control_ready_observed,
                                     streaming_rollover_frozen_msg_ids:
                                         &streaming_rollover_frozen_msg_ids,
+                                    tmux_session_name: adk_session_name.as_deref(),
                                     context_window_tokens,
                                     context_compact_percent,
+                                    context_compact_lower_bound_tokens,
                                 },
                                 StreamContentArmState {
                                     state_dirty: &mut state_dirty,

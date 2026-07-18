@@ -663,7 +663,7 @@ fn reset_for_test() {
 }
 
 #[cfg(test)]
-fn put_catalog_for_test(proxy_url: &str, windows: HashMap<String, u64>) {
+pub(crate) fn put_catalog_for_test(proxy_url: &str, windows: HashMap<String, u64>) {
     CATALOG_STATE
         .lock()
         .unwrap_or_else(|error| error.into_inner())

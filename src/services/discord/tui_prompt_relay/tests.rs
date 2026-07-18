@@ -2873,6 +2873,77 @@ fn idle_stream_strips_leading_chrome_from_first_text_only() {
 
 #[cfg(unix)]
 #[test]
+fn idle_status_observation_runs_before_prose_without_creating_content() {
+    let status = StreamMessage::StatusUpdate {
+        model: Some("routed-sonnet[1m]".to_string()),
+        cost_usd: None,
+        total_cost_usd: None,
+        duration_ms: None,
+        num_turns: None,
+        input_tokens: Some(560_000),
+        cache_create_tokens: Some(0),
+        cache_read_tokens: Some(0),
+        output_tokens: Some(17),
+    };
+    let observed = Arc::new(Mutex::new(None));
+    let recorded = Arc::clone(&observed);
+
+    let accepted = observe_claude_idle_status_update(
+        ChannelId::new(42),
+        "tmux-active-4631",
+        &status,
+        50,
+        300_000,
+        move |channel_id,
+              tmux_session_name,
+              provider,
+              model,
+              input_tokens,
+              cache_create_tokens,
+              cache_read_tokens,
+              compact_percent,
+              lower_bound_tokens| {
+            *recorded.lock().expect("idle observation lock") = Some((
+                channel_id,
+                tmux_session_name.to_string(),
+                provider.clone(),
+                model.map(str::to_string),
+                input_tokens,
+                cache_create_tokens,
+                cache_read_tokens,
+                compact_percent,
+                lower_bound_tokens,
+            ));
+            true
+        },
+    );
+
+    assert!(
+        accepted,
+        "pre-content status must reach the active observer"
+    );
+    assert!(
+        !idle_stream_message_is_content(&status),
+        "usage telemetry must not create a Discord card for a no-prose turn"
+    );
+    assert_eq!(
+        observed.lock().expect("idle observation lock").as_ref(),
+        Some(&(
+            42,
+            "tmux-active-4631".to_string(),
+            ProviderKind::Claude,
+            Some("routed-sonnet[1m]".to_string()),
+            Some(560_000),
+            Some(0),
+            Some(0),
+            50,
+            300_000,
+        ))
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn idle_stream_content_classifier_ignores_pure_control_and_empty_done() {
     // Empty / control-only frames are NOT content: a turn yielding only
     // these takes the no-card empty path (preserving today's behavior).

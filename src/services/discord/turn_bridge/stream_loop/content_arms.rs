@@ -6,9 +6,12 @@ mod tui_error_classification;
 use super::super::streaming_edit_text::TuiErrorClassification;
 use super::super::thinking::{redacted_thinking_transcript_event, thinking_status_line};
 use super::*;
+use active_usage::observe_active_usage_from_status;
 use provider_error_presentation::ProviderErrorPresentation;
 use std::sync::Arc;
 use tui_error_classification::resolve_tui_error;
+
+pub(super) mod active_usage;
 
 pub(super) enum StreamContentArmMessage {
     RetryBoundary,
@@ -31,6 +34,7 @@ pub(super) enum StreamContentArmMessage {
         stderr: String,
     },
     StatusUpdate {
+        model: Option<String>,
         input_tokens: Option<u64>,
         cache_create_tokens: Option<u64>,
         cache_read_tokens: Option<u64>,
@@ -58,8 +62,10 @@ pub(super) struct StreamContentArmContext<'a> {
     pub(super) standby_relay_owns_output: bool,
     pub(super) terminal_control_ready_observed: bool,
     pub(super) streaming_rollover_frozen_msg_ids: &'a Vec<MessageId>,
+    pub(super) tmux_session_name: Option<&'a str>,
     pub(super) context_window_tokens: u64,
     pub(super) context_compact_percent: u64,
+    pub(super) context_compact_lower_bound_tokens: u64,
 }
 
 pub(super) struct StreamContentArmState<'a> {
@@ -118,8 +124,10 @@ pub(super) async fn handle_stream_content_message(
     let standby_relay_owns_output = ctx.standby_relay_owns_output;
     let terminal_control_ready_observed = ctx.terminal_control_ready_observed;
     let streaming_rollover_frozen_msg_ids = ctx.streaming_rollover_frozen_msg_ids;
+    let tmux_session_name = ctx.tmux_session_name;
     let context_window_tokens = ctx.context_window_tokens;
     let context_compact_percent = ctx.context_compact_percent;
+    let context_compact_lower_bound_tokens = ctx.context_compact_lower_bound_tokens;
 
     let mut state_dirty = *state.state_dirty;
     let mut full_response = std::mem::take(state.full_response);
@@ -145,8 +153,7 @@ pub(super) async fn handle_stream_content_message(
     let mut long_running_placeholder_active = state.long_running_placeholder_active.take();
     let mut pending_long_running_retarget_after_state_save =
         state.pending_long_running_retarget_after_state_save.take();
-    let mut terminal_full_replay_cleanup_msg_ids =
-        std::mem::take(state.terminal_full_replay_cleanup_msg_ids);
+    let mut terminal_full_replay_cleanup_msg_ids = std::mem::take(state.terminal_full_replay_cleanup_msg_ids);
     let mut active_background_child_session_ids =
         std::mem::take(state.active_background_child_session_ids);
     let mut done = *state.done;
@@ -154,8 +161,7 @@ pub(super) async fn handle_stream_content_message(
     let mut transport_error = *state.transport_error;
     let mut tui_error_classification = *state.tui_error_classification;
     let mut resume_failure_detected = *state.resume_failure_detected;
-    let mut bridge_confirmed_response_sent_offset =
-        *state.bridge_confirmed_response_sent_offset;
+    let mut bridge_confirmed_response_sent_offset = *state.bridge_confirmed_response_sent_offset;
     let mut terminal_session_reset_required = *state.terminal_session_reset_required;
     let mut accumulated_input_tokens = *state.accumulated_input_tokens;
     let mut accumulated_cache_create_tokens = *state.accumulated_cache_create_tokens;
@@ -568,21 +574,25 @@ pub(super) async fn handle_stream_content_message(
                             terminal_control_drain_until = None;
                         }
         StreamContentArmMessage::StatusUpdate {
+                            model,
                             input_tokens,
                             cache_create_tokens,
                             cache_read_tokens,
                             output_tokens,
                         } => {
-                            let has_context_token_data = input_tokens.is_some()
-                                || cache_create_tokens.is_some()
-                                || cache_read_tokens.is_some();
-                            // Token fields are provider-normalized snapshots,
-                            // not deltas. Claude reports uncached input,
-                            // cache writes, and cache reads separately, while
-                            // other providers may omit unavailable cache
-                            // fields. Keep the largest context-occupancy
-                            // snapshot seen in this turn so late partial
-                            // status events cannot make the live panel shrink.
+                            let has_context_token_data = input_tokens.is_some() || cache_create_tokens.is_some() || cache_read_tokens.is_some();
+                            observe_active_usage_from_status(
+                                channel_id,
+                                tmux_session_name,
+                                &provider,
+                                model.as_deref(),
+                                input_tokens,
+                                cache_create_tokens,
+                                cache_read_tokens,
+                                context_compact_percent,
+                                context_compact_lower_bound_tokens,
+                                crate::services::claude_compact_trigger::observe_active_usage,
+                            );
                             if has_context_token_data {
                                 apply_context_token_update(
                                     &mut accumulated_input_tokens,
@@ -593,14 +603,10 @@ pub(super) async fn handle_stream_content_message(
                                     cache_read_tokens,
                                 );
                             }
-                            if let Some(ot) = output_tokens {
-                                accumulated_output_tokens = accumulated_output_tokens.max(ot);
-                            }
+                            if let Some(ot) = output_tokens { accumulated_output_tokens = accumulated_output_tokens.max(ot); }
                             if shared_owned.ui.status_panel_v2_enabled && has_context_token_data {
-                                let context_provider_session_id = new_raw_provider_session_id
-                                    .as_deref()
-                                    .or(new_session_id.as_deref())
-                                    .or(inflight_state.session_id.as_deref());
+                                let context_provider_session_id = new_raw_provider_session_id.as_deref()
+                                    .or(new_session_id.as_deref()).or(inflight_state.session_id.as_deref());
                                 let context_dirty = shared_owned
                                     .ui
                                     .placeholder_live_events

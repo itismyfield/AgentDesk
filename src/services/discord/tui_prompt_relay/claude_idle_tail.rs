@@ -1,5 +1,47 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe_claude_idle_status_update(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    message: &StreamMessage,
+    compact_percent: u64,
+    lower_bound_tokens: u64,
+    observe: impl FnOnce(
+        u64,
+        &str,
+        &ProviderKind,
+        Option<&str>,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        u64,
+        u64,
+    ) -> bool,
+) -> bool {
+    let StreamMessage::StatusUpdate {
+        model,
+        input_tokens,
+        cache_create_tokens,
+        cache_read_tokens,
+        ..
+    } = message
+    else {
+        return false;
+    };
+    observe(
+        channel_id.get(),
+        tmux_session_name,
+        &ProviderKind::Claude,
+        model.as_deref(),
+        *input_tokens,
+        *cache_create_tokens,
+        *cache_read_tokens,
+        compact_percent,
+        lower_bound_tokens,
+    )
+}
+
 #[cfg(unix)]
 pub(super) async fn maybe_spawn_claude_idle_response_tail(
     shared: Arc<SharedData>,
@@ -371,11 +413,26 @@ pub(super) async fn run_claude_idle_response_tail(
     // Buffer leading frames on the blocking pool until the first content frame
     // (or the reader closes). `prefix` carries the frames already pulled,
     // `has_content` tells us whether the bridge should run, and we hand the live
-    // `reader_rx` back to drain the remainder into the bridge.
+    // `reader_rx` back to drain the remainder into the bridge. Observe status
+    // snapshots here as well: a long tool-only turn may not create the bridge for
+    // minutes, but compact occupancy must remain live during that interval.
+    let context_thresholds =
+        super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
+    let compact_percent = context_thresholds.compact_pct_for(&ProviderKind::Claude);
+    let lower_bound_tokens = context_thresholds.compact_lower_bound_tokens;
+    let observer_tmux_session_name = tmux_session_name.clone();
     let buffered = tokio::task::spawn_blocking(move || {
         let mut prefix: Vec<StreamMessage> = Vec::new();
         let mut has_content = false;
         while let Ok(message) = reader_rx.recv() {
+            observe_claude_idle_status_update(
+                channel_id,
+                &observer_tmux_session_name,
+                &message,
+                compact_percent,
+                lower_bound_tokens,
+                crate::services::claude_compact_trigger::observe_active_usage,
+            );
             let is_content = idle_stream_message_is_content(&message);
             let is_terminal = matches!(message, StreamMessage::Done { .. });
             prefix.push(message);
@@ -415,9 +472,22 @@ pub(super) async fn run_claude_idle_response_tail(
 
     if !has_content {
         // No prose / no terminal body for this turn: keep today's no-card empty
-        // path. Drain any residual frames so the reader thread can finish, then
-        // commit the binding offset.
-        let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
+        // path. Drain any residual frames so the reader thread can finish, while
+        // preserving live occupancy observations, then commit the binding offset.
+        let residual_tmux_session_name = tmux_session_name.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            while let Ok(message) = reader_rx.recv() {
+                observe_claude_idle_status_update(
+                    channel_id,
+                    &residual_tmux_session_name,
+                    &message,
+                    compact_percent,
+                    lower_bound_tokens,
+                    crate::services::claude_compact_trigger::observe_active_usage,
+                );
+            }
+        })
+        .await;
         if let Ok(Ok(final_offset)) = offset_rx.await {
             advance_claude_tmux_runtime_binding_offset(
                 &tmux_session_name,

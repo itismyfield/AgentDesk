@@ -175,7 +175,8 @@ use self::claude_idle_runtime::{
 };
 #[cfg(all(unix, test))]
 use self::claude_idle_tail::{
-    inflight_is_current_turn_synthetic, wait_for_transient_state_to_clear,
+    inflight_is_current_turn_synthetic, observe_claude_idle_status_update,
+    wait_for_transient_state_to_clear,
 };
 #[cfg(unix)]
 use self::claude_idle_tail::{
