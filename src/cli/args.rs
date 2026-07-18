@@ -423,6 +423,9 @@ pub(crate) enum Commands {
         issue_number: String,
     },
     /// Show auto-queue status with thread links
+    #[command(
+        after_help = "Deprecated compatibility command. For the queue-only inspector, use `agentdesk query queue`; use `agentdesk query` for the combined queue, dispatch, and phase-gate snapshot. This command preserves its legacy text and JSON output shapes."
+    )]
     Queue,
     /// Unified queue + dispatch + phase-gate inspection (issue #2651).
     ///
@@ -1136,6 +1139,25 @@ mod tests {
                 key: None,
             }) if message == "hello user"
         ));
+    }
+
+    #[test]
+    fn legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract() {
+        let Err(error) = Cli::try_parse_from(["agentdesk", "queue", "--help"]) else {
+            panic!("queue --help must render help instead of running the command");
+        };
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        assert_eq!(error.exit_code(), 0);
+
+        let help = error
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(help.contains("Deprecated compatibility command."));
+        assert!(help.contains("`agentdesk query queue`"));
+        assert!(help.contains("`agentdesk query`"));
+        assert!(help.contains("legacy text and JSON output shapes"));
     }
 
     #[test]
