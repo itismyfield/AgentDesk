@@ -2280,6 +2280,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 shared,
                 http.clone(),
                 channel_id,
+                state.effective_finalizer_turn_id(),
             );
         }
         spawn_turn_bridge(

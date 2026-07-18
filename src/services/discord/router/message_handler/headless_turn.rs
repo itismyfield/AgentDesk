@@ -1344,6 +1344,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             shared,
             ctx.http.clone(),
             channel_id,
+            inflight_state.effective_finalizer_turn_id(),
         );
     }
     spawn_turn_bridge(

@@ -593,9 +593,10 @@ pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Optio
 /// listeners need them.
 #[derive(Debug, Clone)]
 pub(in crate::services::discord) enum InflightSignal {
-    /// The turn_bridge task for `channel_id` reached its terminal drop —
-    /// any per-turn relay tasks bound to this channel may now exit.
-    Completed { channel_id: u64 },
+    /// The turn_bridge task for this exact turn reached its terminal drop.
+    /// Channel-scoped relays may use `channel_id`; turn-scoped consumers must
+    /// also match `turn_id` so a late turn cannot stop its successor.
+    Completed { channel_id: u64, turn_id: u64 },
 }
 
 /// #1446 Layer 1 — `inflight_state_is_stale` is a pure helper with no

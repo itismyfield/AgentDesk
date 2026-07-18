@@ -511,6 +511,7 @@ pub(super) fn spawn_turn_bridge(
             tx: bridge.completion_tx,
             broadcaster: shared_owned.inflight_signals.clone(),
             channel_id,
+            turn_id: bridge.inflight_state.effective_finalizer_turn_id(),
         };
         let mut inflight_guard = InflightCleanupGuard {
             provider: Some(provider.clone()),

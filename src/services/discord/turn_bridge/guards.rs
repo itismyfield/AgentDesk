@@ -13,6 +13,7 @@ pub(super) struct CompletionGuard {
     pub(super) tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(super) broadcaster: tokio::sync::broadcast::Sender<super::super::inflight::InflightSignal>,
     pub(super) channel_id: ChannelId,
+    pub(super) turn_id: u64,
 }
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
@@ -23,6 +24,7 @@ impl Drop for CompletionGuard {
             .broadcaster
             .send(super::super::inflight::InflightSignal::Completed {
                 channel_id: self.channel_id.get(),
+                turn_id: self.turn_id,
             });
     }
 }

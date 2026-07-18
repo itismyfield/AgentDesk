@@ -33,7 +33,7 @@ pub(in crate::services::discord) async fn mailbox_finish_owned_turn(
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     shared.mailboxes.recovery_done(channel_id).mark_done();
-    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, None, &result);
     result
 }
 
@@ -49,7 +49,7 @@ pub(in crate::services::discord) async fn mailbox_finish_cancelled_turn(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
-    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, None, &result);
     result
 }
 
@@ -70,7 +70,7 @@ pub(in crate::services::discord) async fn mailbox_finish_turn(
     // that the legacy heuristic depended on. The latch is idempotent — if
     // `mailbox_clear_recovery_marker` already ran, this is a no-op.
     shared.mailboxes.recovery_done(channel_id).mark_done();
-    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, None, &result);
     result
 }
 
@@ -105,7 +105,12 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
-    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    turn_completion_events::publish_mailbox_release_completion_event(
+        shared,
+        channel_id,
+        Some(expected_user_message_id.get()),
+        &result,
+    );
     result
 }
 
@@ -131,7 +136,10 @@ async fn mailbox_finish_turn_if_matches_started_before_inner(
     }
     if publish_completion {
         turn_completion_events::publish_mailbox_release_completion_event(
-            shared, channel_id, &result,
+            shared,
+            channel_id,
+            Some(expected_user_message_id.get()),
+            &result,
         );
     }
     result
