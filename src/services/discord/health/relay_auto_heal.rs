@@ -27,6 +27,7 @@ type RedriveKey = (String, String, u64);
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RedriveEpisode {
     frontier: u64,
+    reset_incarnation: u64,
     identity: Option<InflightTurnIdentity>,
     turn_nonce: Option<String>,
     reconnect_count: u64,
@@ -34,7 +35,8 @@ struct RedriveEpisode {
 
 impl RedriveEpisode {
     fn resets(&self, previous: &Self) -> bool {
-        self.frontier > previous.frontier
+        self.reset_incarnation != previous.reset_incarnation
+            || self.frontier > previous.frontier
             || (self.identity.is_some() && self.identity != previous.identity)
             || (self.turn_nonce.is_some() && self.turn_nonce != previous.turn_nonce)
             || self.reconnect_count != previous.reconnect_count
@@ -109,6 +111,7 @@ impl SharedData {
     }
 
     fn redrive_episode(
+        &self,
         provider: &ProviderKind,
         channel_id: ChannelId,
         snapshot: &WatcherStateSnapshot,
@@ -124,6 +127,7 @@ impl SharedData {
                 .and_then(|state| state.turn_nonce.filter(|nonce| !nonce.is_empty()));
         RedriveEpisode {
             frontier: snapshot.last_relay_offset,
+            reset_incarnation: self.relay_frontier_token(channel_id).reset_incarnation,
             identity: snapshot.inflight_identity.clone(),
             turn_nonce,
             reconnect_count: snapshot.reconnect_count,
@@ -138,7 +142,7 @@ impl SharedData {
         now_unix: i64,
     ) -> RedriveAttemptDecision {
         let key = self.redrive_key(provider, channel_id);
-        let episode = Self::redrive_episode(provider, channel_id, snapshot);
+        let episode = self.redrive_episode(provider, channel_id, snapshot);
         let mut state = REDRIVE_ATTEMPTS
             .entry(key)
             .or_insert_with(|| RedriveAttemptState::new(episode.clone(), now_unix));
@@ -227,8 +231,10 @@ impl SharedData {
                 provider,
                 shield_channel_id.get(),
             );
+            let shield_token = self.relay_frontier_token(shield_channel_id);
             RedriveEpisode {
-                frontier: self.committed_relay_offset(shield_channel_id),
+                frontier: shield_token.committed_offset,
+                reset_incarnation: shield_token.reset_incarnation,
                 identity: owner_inflight
                     .as_ref()
                     .map(InflightTurnIdentity::from_state),
@@ -401,11 +407,13 @@ impl HealthRegistry {
         if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, token) {
             return Ok(false);
         }
-        if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot)
-            || !shared.relay_frontier_token_is_current(channel_id, token)
-        {
+        if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
             return Ok(false);
         }
+        let Some(_frontier_mutation) = shared.acquire_relay_frontier_mutation(channel_id, token)
+        else {
+            return Ok(false);
+        };
         let attempt =
             shared.redrive_attempt_decision(provider, channel_id, &snapshot, now_unix_secs);
         trace_redrive_cap_if_needed(provider, channel_id, &snapshot, attempt);
@@ -559,11 +567,12 @@ fn nudge_existing_watcher_for_backlog(
 ) -> bool {
     #[cfg(test)]
     stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
-    if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token)
-        || !shared.relay_frontier_token_is_current(channel_id, token)
-    {
+    if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token) {
         return false;
     }
+    let Some(_frontier_mutation) = shared.acquire_relay_frontier_mutation(channel_id, token) else {
+        return false;
+    };
 
     let owner_channel_id = snapshot
         .watcher_owner_channel_id
@@ -1332,6 +1341,42 @@ mod tests {
     }
 
     #[test]
+    fn frontier_reset_rearms_capped_attempt_episode_4181() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_181_008);
+        let tmux_session = "AgentDesk-codex-4181-reset-cap";
+        let snapshot = backlog_snapshot(channel_id, tmux_session, "/tmp/4181.jsonl", 128, 256);
+        let coord = shared.tmux_relay_coord(channel_id);
+        coord
+            .confirmed_end_offset
+            .store(snapshot.last_relay_offset, Ordering::Release);
+        let base = 1_800_000_000;
+        drive_attempt_state_to_cap(&shared, &provider, channel_id, &snapshot, base);
+        assert!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 2_000)
+                .attempt
+                .is_none()
+        );
+
+        assert!(coord.reset_confirmed_frontier(snapshot.last_relay_offset, 0));
+        let mut low = snapshot.clone();
+        low.last_relay_offset = 0;
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &low, base + 2_001)
+                .attempt,
+            Some(1),
+            "a new reset incarnation must not inherit the stale-H attempt cap"
+        );
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+    }
+
+    #[test]
     fn redrive_self_reattach_identity_rejects_unrelated_synthetic_turns_4299() {
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(4_299_008);
@@ -1348,6 +1393,7 @@ mod tests {
         previous.turn_nonce = Some("previous-turn".to_string());
         let episode = RedriveEpisode {
             frontier: 128,
+            reset_incarnation: 0,
             identity: Some(InflightTurnIdentity::from_state(&previous)),
             turn_nonce: previous.turn_nonce.clone(),
             reconnect_count: 0,
@@ -1741,6 +1787,7 @@ mod tests {
             (
                 RedriveEpisode {
                     frontier: 0,
+                    reset_incarnation: 0,
                     identity: Some(first_owner_identity.clone()),
                     turn_nonce: first_owner.turn_nonce.clone(),
                     reconnect_count: 0,
@@ -1754,6 +1801,7 @@ mod tests {
             (
                 RedriveEpisode {
                     frontier: snapshot.last_relay_offset,
+                    reset_incarnation: 0,
                     identity: snapshot.inflight_identity.clone(),
                     turn_nonce: None,
                     reconnect_count: snapshot.reconnect_count,

@@ -1,8 +1,33 @@
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 
 use poise::serenity_prelude::ChannelId;
 
 use super::super::{SharedData, TmuxRelayCoord};
+
+#[derive(Default)]
+pub(in crate::services::discord) struct FrontierResetState {
+    incarnation: u64,
+    active_mutations: usize,
+    reset_pending: bool,
+}
+
+pub(in crate::services::discord) struct RelayFrontierMutationGuard {
+    coord: Arc<TmuxRelayCoord>,
+}
+
+impl Drop for RelayFrontierMutationGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .coord
+            .reset_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active_mutations -= 1;
+        if state.active_mutations == 0 {
+            self.coord.reset_idle.notify_all();
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::services::discord) struct RelayFrontierToken {
@@ -25,14 +50,36 @@ impl SharedData {
     ) -> bool {
         self.relay_frontier_token(channel_id) == token
     }
+
+    pub(in crate::services::discord) fn acquire_relay_frontier_mutation(
+        &self,
+        channel_id: ChannelId,
+        token: RelayFrontierToken,
+    ) -> Option<RelayFrontierMutationGuard> {
+        let coord = self.tmux_relay_coord(channel_id);
+        let mut state = coord
+            .reset_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.reset_pending
+            || state.incarnation != token.reset_incarnation
+            || coord.confirmed_end_offset.load(Ordering::Acquire) != token.committed_offset
+        {
+            return None;
+        }
+        state.active_mutations += 1;
+        drop(state);
+        Some(RelayFrontierMutationGuard { coord })
+    }
 }
 
 impl TmuxRelayCoord {
     pub(in crate::services::discord) fn frontier_token(&self) -> RelayFrontierToken {
-        let reset_incarnation = *self
+        let reset_incarnation = self
             .reset_state
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(|error| error.into_inner())
+            .incarnation;
         RelayFrontierToken {
             reset_incarnation,
             committed_offset: self.confirmed_end_offset.load(Ordering::Acquire),
@@ -45,11 +92,18 @@ impl TmuxRelayCoord {
         new_offset: u64,
     ) -> bool {
         debug_assert!(new_offset < expected_offset);
-        let mut reset_incarnation = self
+        let mut state = self
             .reset_state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if self
+        state.reset_pending = true;
+        while state.active_mutations != 0 {
+            state = self
+                .reset_idle
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        let reset = self
             .confirmed_end_offset
             .compare_exchange(
                 expected_offset,
@@ -57,18 +111,50 @@ impl TmuxRelayCoord {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_err()
-        {
-            return false;
+            .is_ok();
+        if reset {
+            state.incarnation = state.incarnation.wrapping_add(1);
         }
-        *reset_incarnation = reset_incarnation.wrapping_add(1);
-        true
+        state.reset_pending = false;
+        self.reset_idle.notify_all();
+        reset
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use super::*;
+
+    #[test]
+    fn reset_waits_for_admitted_mutation_and_invalidates_stale_token() {
+        let coord = Arc::new(TmuxRelayCoord::new(ChannelId::new(4_182)));
+        coord.confirmed_end_offset.store(100, Ordering::Release);
+        let token = coord.frontier_token();
+        let mut state = coord
+            .reset_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active_mutations += 1;
+        drop(state);
+        let guard = RelayFrontierMutationGuard {
+            coord: Arc::clone(&coord),
+        };
+        let reset_coord = Arc::clone(&coord);
+        let (started_tx, started_rx) = mpsc::channel();
+        let reset = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            reset_coord.reset_confirmed_frontier(100, 40)
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(coord.confirmed_end_offset.load(Ordering::Acquire), 100);
+        drop(guard);
+        assert!(reset.join().unwrap());
+        assert_ne!(coord.frontier_token(), token);
+    }
 
     #[test]
     fn reset_frontier_publishes_a_new_incarnation_token() {

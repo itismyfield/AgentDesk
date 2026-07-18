@@ -1477,14 +1477,12 @@ pub(super) struct TmuxRelayCoord {
     /// (idle-JSONL relay, session-bound sink) CONSULT this watermark so a
     /// byte-range the watcher already committed is relayed exactly once
     /// regardless of which actor observes it first (the E-13 dedup invariant).
-    /// For a normal
-    /// Discord-origin turn (inflight present) the watcher remains the sole
-    /// relay owner and relay dedupe is still scoped to the watcher instance via
-    /// its local `last_relayed_offset` — a valid owner is never suppressed
-    /// solely because another watcher advanced this watermark; only the
-    /// no-inflight wake/idle paths gate on it.
+    /// For a normal Discord-origin turn (inflight present) the watcher remains
+    /// sole relay owner; only no-inflight wake/idle paths gate on this watermark.
     pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
-    pub(in crate::services::discord) reset_state: std::sync::Mutex<u64>,
+    pub(in crate::services::discord) reset_state:
+        std::sync::Mutex<relay_health::FrontierResetState>,
+    pub(in crate::services::discord) reset_idle: std::sync::Condvar,
     /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
     /// relay. 0 = no confirmed relay observed yet. Read by the
     /// `watcher-state` observability endpoint (#964). Monotonic is NOT
@@ -1526,7 +1524,8 @@ impl TmuxRelayCoord {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            reset_state: std::sync::Mutex::new(0),
+            reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
+            reset_idle: std::sync::Condvar::new(),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
