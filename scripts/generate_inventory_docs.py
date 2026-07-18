@@ -883,6 +883,7 @@ _REGISTRY_LIST_KV_RE = re.compile(r'^"(?P<value>[^"]+)"\s*,?\s*$')
 _REGISTRY_KV_RE = re.compile(r'^(?P<key>[A-Za-z0-9_]+)\s*=\s*"(?P<value>[^"]*)"$')
 _REGISTRY_ARRAY_RE = re.compile(r"^(?P<name>[A-Za-z0-9_]+)\s*=\s*\[\s*(?P<rest>.*)$")
 _DEADLINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DECOMPOSE_ISSUE_RE = re.compile(r"^#[1-9]\d*$")
 _REGISTRY_ENTRY_FIELDS = ("file", "owner", "deadline", "decompose_issue")
 _REGISTRY_GRANDFATHERED_FIELDS = ("file", "owner", "disposition", "decompose_issue")
 _REGISTRY_ARRAY_NAMES = ("grandfathered_baseline_paths",)
@@ -1049,6 +1050,11 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             problems.append(
                 f"[[entry]] {path!r} deadline {entry['deadline']!r} is not YYYY-MM-DD"
             )
+        if not _DECOMPOSE_ISSUE_RE.fullmatch(entry["decompose_issue"]):
+            problems.append(
+                f"[[entry]] {path!r} decompose_issue "
+                f"{entry['decompose_issue']!r} must be a GitHub issue reference like '#4519'"
+            )
         if path in seen:
             problems.append(f"duplicate registry path: {path!r}")
         seen.add(path)
@@ -1086,6 +1092,12 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
         disposition = record["disposition"]
         deadline = record.get("deadline", "")
         keep_reason = record.get("keep_reason", "")
+        if not _DECOMPOSE_ISSUE_RE.fullmatch(record["decompose_issue"]):
+            problems.append(
+                f"[[grandfathered]] {path!r} decompose_issue "
+                f"{record['decompose_issue']!r} must be a GitHub issue reference "
+                "like '#4519'"
+            )
         if disposition not in _GRANDFATHERED_DISPOSITIONS:
             problems.append(
                 f"[[grandfathered]] {path!r} disposition {disposition!r} must be "

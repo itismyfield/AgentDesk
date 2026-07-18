@@ -291,7 +291,6 @@ async fn rebind_inflight_for_channel_inner(
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id =
         super::inflight::opt_channel_id(channel_id).ok_or(RebindError::ChannelIdZero)?;
-
     // Preflight existence check — fast 409 before walking the validation /
     // tmux-liveness path. Advisory only; the AUTHORITATIVE guard is the atomic
     // `save_inflight_state_create_new` below (`O_CREAT | O_EXCL`), so a live turn
@@ -335,7 +334,6 @@ async fn rebind_inflight_for_channel_inner(
         None => None,
     };
     let resuming_existing_inflight = existing_inflight.is_some();
-
     if resuming_existing_inflight {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(

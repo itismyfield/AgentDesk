@@ -300,6 +300,11 @@ def audit_repository_admissions(
         current_text = (repo_root / config_rel_path).read_text(encoding="utf-8")
         current_caps = parse_cap_table(current_text, table_name)
         history_path = repo_root / HISTORY_REL_PATH
+        # Unit fixtures and source exports do not carry git metadata or admission
+        # history. Branch-delta enforcement runs only in a checkout; fixtures still
+        # exercise the ratchet itself without having to recreate repository state.
+        if not (repo_root / ".git").exists() and not history_path.exists():
+            return AdmissionAudit((), ())
         current_events = parse_history(history_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
         return AdmissionAudit((f"ratchet admission metadata invalid: {exc}",), ())

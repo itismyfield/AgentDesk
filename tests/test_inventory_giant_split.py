@@ -605,7 +605,7 @@ class RegistryValidationTest(unittest.TestCase):
             "owner": "legacy-owner",
             "disposition": "keep",
             "keep_reason": "Frozen legacy giant; no dedicated shrink is scheduled.",
-            "decompose_issue": "TBD",
+            "decompose_issue": "#4519",
         }
         record.update(overrides)
         return record
@@ -715,6 +715,35 @@ class RegistryValidationTest(unittest.TestCase):
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("owner", str(ctx.exception))
+
+    def test_grandfather_decompose_issue_requires_github_reference(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        record = self._grandfather("src/a.rs", decompose_issue="TBD")
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([record], [])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("GitHub issue reference", str(ctx.exception))
+
+    def test_entry_decompose_issue_requires_github_reference(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        entry = {
+            "file": "src/a.rs",
+            "owner": "team",
+            "deadline": "2026-08-31",
+            "decompose_issue": "TBD",
+        }
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([], [entry])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("GitHub issue reference", str(ctx.exception))
 
     def test_grandfather_keep_requires_reason(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]

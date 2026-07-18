@@ -164,245 +164,247 @@ grandfathered_baseline_paths = [
 # an explicit keep/shrink disposition, and a candidate decomposition issue.
 # New giants must NOT be added here; the frozen baseline below remains the
 # admission boundary. A shrink disposition additionally requires a deadline;
-# a keep disposition requires a reason.
+# a keep disposition requires a reason. `#4519` is the candidate planning issue
+# for intentionally deferred records; replace it with a dedicated decomposition
+# issue when a file is promoted to scheduled shrink work.
 
 [[grandfathered]]
 file = "src/cli/client.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/dcserver.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/direct.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/doctor/orchestrator.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/init.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/migrate/apply.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/migrate/plan.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/migrate/source.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/cli/provider_cli/mod.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/config.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/db/auto_queue/entries.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/db/auto_queue/phase_gates.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/db/dispatched_sessions.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/db/dispatches/mod.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/db/postgres.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/dispatch/dispatch_context.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/dispatch/dispatch_create.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/dispatch/dispatch_status.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/engine/loader.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/engine/mod.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/engine/ops/db_ops.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/github/sync.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/pipeline.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/receipt.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/reconcile.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/mod.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/agents.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/agents_crud.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/agents_setup.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/escalation.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/health_api.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/kanban.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/meetings.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/server/routes/resume.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
   # decision_route.rs was decomposed in #3038 slice 1 and then S1-relocated in
   # #3038 review-decision S1 (4392 prod LoC -> 26-line route shim +
   # sub-1000-LoC modules under services/review_decision/); no longer a
@@ -415,63 +417,63 @@ file = "src/server/routes/v1.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/auto_queue.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/auto_queue/activate_command.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/auto_queue/cancel_run.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/claude.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/claude_tui/input.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/codex.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/codex_tmux_wrapper.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/codex_tui/input.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
   # commands/config.rs dropped to 954 prod LoC in #3038 S2 (session-override
   # bookkeeping helpers moved to discord/shared_state.rs); no longer a
   # prod-giant, so it is removed from `grandfathered` and from the baseline
@@ -489,14 +491,14 @@ file = "src/services/discord/commands/text_commands.rs"
 owner = "discord-relay"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/discord/formatting.rs"
 owner = "discord-relay"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
   # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line
   # module root + 6 sub-1000-LoC directory modules under health/); no longer
   # a prod-giant, so it is removed here AND from the frozen baseline above
@@ -508,21 +510,21 @@ file = "src/services/discord/meeting_orchestrator.rs"
 owner = "discord-relay"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/discord/mod.rs"
 owner = "discord-relay"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/discord/router/message_handler/headless_turn.rs"
 owner = "discord-relay"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
   # completion_guard.rs was decomposed in #3479 (1834 prod LoC -> 872-line
   # module root + completion_guard/{completion_postgres,completion_context}.rs,
   # both sub-1000-LoC); no longer a prod-giant, so it is removed here AND from
@@ -541,91 +543,91 @@ file = "src/services/discord_config_audit.rs"
 owner = "discord-relay"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/dispatched_sessions.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/dispatches/discord_delivery/orchestration.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/dispatches/outbox_route.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/gemini.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/memory/memento.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/onboarding/mod.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/opencode.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/platform/binary_resolver.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/provider.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/qwen.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/routines/agent_executor.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/routines/discord_log.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
   # migrated.rs dropped to 883 prod LoC after the #3028 splitter fix (its inline
   # test mod was previously miscounted as production); no longer a prod-giant, so
   # it is removed from `grandfathered` (kept in the frozen baseline above).
@@ -635,35 +637,35 @@ file = "src/services/routines/store.rs"
 owner = "automation-pipeline"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/settings.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/tui_prompt_dedupe.rs"
 owner = "discord-relay"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/services/turn_orchestrator.rs"
 owner = "server-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 [[grandfathered]]
 file = "src/voice/receiver.rs"
 owner = "voice-runtime"
 disposition = "keep"
 keep_reason = "Frozen legacy giant; no dedicated shrink is scheduled."
-decompose_issue = "TBD"
+decompose_issue = "#4519"
 
 # Tracked decompositions. Each requires owner + deadline (YYYY-MM-DD) +
 # decompose_issue. The generator renders these into the registry doc and the
