@@ -310,8 +310,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        APPROVED_NAME_PREFIXES, MINIMUM_MIN_AGE, effective_min_age, is_stale,
-        is_sweep_candidate, should_remove, tmp_root_within_allowed_base,
+        APPROVED_NAME_PREFIXES, MINIMUM_MIN_AGE, effective_min_age, is_stale, is_sweep_candidate,
+        should_remove, tmp_root_within_allowed_base,
     };
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
 
@@ -374,7 +374,10 @@ mod tests {
         ));
         assert!(!tmp_root_within_allowed_base(Path::new("/var/tmp"), base));
         assert!(!tmp_root_within_allowed_base(Path::new("/"), base));
-        assert!(!tmp_root_within_allowed_base(Path::new("/private/tmpfoo"), base));
+        assert!(!tmp_root_within_allowed_base(
+            Path::new("/private/tmpfoo"),
+            base
+        ));
     }
 
     #[test]
