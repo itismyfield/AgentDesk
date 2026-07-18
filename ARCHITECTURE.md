@@ -639,6 +639,7 @@ src/
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
 │   │   │   │   │   │   └── mailbox_reaction_tests.rs
+│   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── turn_watchdog.rs
 │   │   │   │   │   └── voice_intake.rs

@@ -488,7 +488,12 @@
 # the merged mutation-provable guard/wiring tests (doc moved to inner comments;
 # the two test mods were already merged into one). Dual-CLEAN (codex + Fable).
 # 2834 -> 2837.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2837
+# #4552: behavior-preserving decomposition lowers 2837 -> 2705 by moving the
+# claim-success request-anchor recording and idle-recap bootstrap into
+# `intake_turn/claim_bootstrap.rs`. The helper remains after the stale-dispatch
+# guard and before the placeholder handoff; won-claim gating and bump-before-
+# captured-clear ordering are unchanged.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2705
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered

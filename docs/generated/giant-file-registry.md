@@ -23,7 +23,7 @@
 | `src/services/discord/recovery_engine/restore_inflight.rs` | 2326 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1536 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1591 | discord-relay | 2026-10-31 | #3838 |
-| `src/services/discord/router/message_handler/intake_turn.rs` | 2744 | discord-relay | 2026-10-31 | #3837 |
+| `src/services/discord/router/message_handler/intake_turn.rs` | 2705 | discord-relay | 2026-10-31 | #4552 |
 | `src/services/discord/session_relay_sink.rs` | 1682 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1621 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 3558 | discord-relay | 2026-10-31 | #3832 |

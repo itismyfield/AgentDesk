@@ -300,11 +300,12 @@ decompose_issue = "#3834"
 
 [[entry]]
 # #3721 first-batch promotion: Discord message intake execution mixes request
-# normalization, mailbox effects, and turn lifecycle wiring.
+# normalization, mailbox effects, and turn lifecycle wiring. #4552 continues
+# the behavior-preserving decomposition of claim-success bootstrap effects.
 file = "src/services/discord/router/message_handler/intake_turn.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3837"
+decompose_issue = "#4552"
 
 [[entry]]
 # #3721 first-batch promotion: Discord admission gate owns mention/self/queue,

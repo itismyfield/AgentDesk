@@ -6,6 +6,7 @@ use super::super::super::turn_view_reconciler::{
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
+mod claim_bootstrap;
 mod race_loss;
 mod turn_watchdog;
 mod voice_intake;
@@ -1329,56 +1330,16 @@ pub(super) async fn handle_text_message(
         return Ok(());
     }
 
-    // #3811: record the original-request anchor (the real Discord user_msg_id)
-    // ONLY once THIS message won the mailbox claim (`started == true`) and the
-    // stale-dispatch guard passed. A message that merely QUEUES behind an active
-    // turn (`started == false`, enqueued + returned in the `if !started` block
-    // below) must NOT touch the active turn's anchor — it records its own anchor
-    // when later dequeued/promoted and re-enters here with `started == true`.
-    // Synthetic voice ids back no real Discord message → `None` (no fake link);
-    // headless turns never reach this interactive intake path.
-    if started {
-        shared.ui.placeholder_live_events.set_turn_request_anchor(
-            channel_id,
-            (!super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id))
-                .then(|| user_msg_id.get()),
-        );
-    }
-
-    // #3148: relocated idle-recap clear (Window 2 fix). The clear (and the
-    // per-channel turn-generation bump) used to run in `intake_gate` at
-    // message-accept time, BEFORE this mailbox claim — so it was not truly
-    // capture-at-claim and a racing recap POST could persist a fresh card the
-    // old-id-keyed clear could not remove. Run it HERE, right after the claim
-    // succeeds (`started == true`) and only when THIS message won the claim,
-    // mirroring the TUI path (`tui_prompt_relay` claim → bump → clear). A
-    // queued message that lost the claim race must NOT bump/clear — the winning
-    // turn does that. The bump runs BEFORE the clear so any idle-recap POST job
-    // whose persist CAS captured the pre-bump generation fails to persist a
-    // card over this just-claimed turn; the clear then removes any card the
-    // POST already persisted before this claim.
-    if started && let Some(pool) = shared.pg_pool.as_ref().cloned() {
-        if let Err(e) = crate::services::discord::idle_recap::bump_turn_generation(
-            &pool,
-            channel_id.get(),
-            &provider,
-            adk_session_key.as_deref(),
-        )
-        .await
-        {
-            tracing::warn!(
-                error = %e,
-                channel_id = channel_id.get(),
-                "idle_recap: failed to bump turn generation on Discord-intake claim"
-            );
-        }
-        crate::services::discord::idle_recap::spawn_clear_captured_idle_recap_for_channel(
-            http.clone(),
-            pool,
-            channel_id.get(),
-        )
-        .await;
-    }
+    claim_bootstrap::bootstrap_claimed_turn(
+        http,
+        shared,
+        started,
+        channel_id,
+        user_msg_id,
+        &provider,
+        adk_session_key.as_deref(),
+    )
+    .await;
 
     // #1332 dispatch hand-off: if this turn was previously enqueued and is now
     // being dispatched, reuse the Queued placeholder card so the user sees a
