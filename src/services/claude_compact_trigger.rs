@@ -215,6 +215,30 @@ fn rearm_for_retry(pane: &CompactPaneKey, generation: u64) {
     }
 }
 
+/// Invalidate a consumed cycle when its captured Managed authority was revoked
+/// before mutation. The generation and context-window match make this a
+/// compare-and-set: a stale worker cannot re-arm or clear a newer cycle. Resetting
+/// the matched generation lets the next eligible Managed observation at already
+/// high occupancy consume a fresh globally unique generation.
+fn invalidate_after_authority_rejection(
+    pane: &CompactPaneKey,
+    generation: u64,
+    threshold: CompactThreshold,
+) {
+    let mut guard = COMPACT_TRIGGER_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(entry) = guard.panes.get_mut(pane) {
+        if !entry.armed
+            && entry.generation == generation
+            && entry.last_window_tokens == threshold.actual_window_tokens
+        {
+            entry.armed = true;
+            entry.generation = 0;
+        }
+    }
+}
+
 /// Run the observable pre-send recheck and, if the world is unchanged, the
 /// compact submit — both inside a single per-pane composer critical section. The
 /// composer lock (not the leaf state lock) is the only lock held across the tmux
@@ -233,9 +257,11 @@ fn submit_under_composer_lock(
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         &pane.tmux_session_name,
         || {
-            if !pane_still_disarmed_for_send(pane, generation, threshold)
-                || !live_turn_matches(expected_turn)
-            {
+            if !pane_still_disarmed_for_send(pane, generation, threshold) {
+                return None;
+            }
+            if !live_turn_matches(expected_turn) {
+                invalidate_after_authority_rejection(pane, generation, threshold);
                 return None;
             }
             Some(submit())
@@ -790,8 +816,48 @@ mod tests {
                 0,
                 "{external_source:?} must cause zero composer mutations"
             );
+
+            let fresh_generation = observe_and_decide(&pane, 500_000, threshold)
+                .expect("a later Managed observation must start a fresh high-occupancy cycle");
+            assert_ne!(generation, fresh_generation);
+            assert!(
+                observe_and_decide(&pane, 500_000, threshold).is_none(),
+                "the fresh Managed cycle must schedule exactly once"
+            );
+            assert!(pane_still_disarmed_for_send(
+                &pane,
+                fresh_generation,
+                threshold
+            ));
             clear_for_tmux(&pane.tmux_session_name);
         }
+    }
+
+    #[test]
+    fn stale_authority_rejection_cannot_rearm_a_newer_cycle() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        let old_generation =
+            observe_and_decide(&pane, 600_000, threshold).expect("old crossing injects");
+
+        invalidate_after_authority_rejection(&pane, old_generation, threshold);
+        let new_generation =
+            observe_and_decide(&pane, 600_000, threshold).expect("fresh crossing injects");
+        assert_ne!(old_generation, new_generation);
+
+        invalidate_after_authority_rejection(&pane, old_generation, threshold);
+        rearm_for_retry(&pane, old_generation);
+        assert_eq!(
+            armed_state(&pane),
+            Some(false),
+            "a stale rejection or retry must not re-arm the newer consumed cycle"
+        );
+        assert!(pane_still_disarmed_for_send(
+            &pane,
+            new_generation,
+            threshold
+        ));
     }
 
     /// Observable retry: a non-confirmed send (`PreMutationRefused` or

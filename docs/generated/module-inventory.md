@@ -382,7 +382,7 @@
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_command` | `src/services/claude_command.rs` | 956 | 465 | 491 |  |
 | `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
-| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 886 | 431 | 455 |  |
+| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 952 | 457 | 495 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
