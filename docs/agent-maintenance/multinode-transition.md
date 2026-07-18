@@ -445,6 +445,12 @@
 
 ### Audited touches
 
+- #4568 explicit queue cancellation: `/cancel-queued` removes only the selected
+  queued item's primary Discord message ID through the existing per-channel
+  mailbox actor; `/queue` exposes those primary IDs for the same channel. This
+  is **worker-local** queue control: it changes neither the durable intake
+  schema nor the migration 0093 preserve-on-cancel rollout boundary. The
+  existing migration 0093 binary-floor contract above remains authoritative.
 - #4548 lane-1 owner-aware Observe parity — **Leader-only routing decision,
   worker-local execution, existing PG-backed visibility (not the dormant
   generation-fenced PG-lease authority)**: the gateway leader's
