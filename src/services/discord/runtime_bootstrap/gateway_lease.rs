@@ -282,7 +282,6 @@ async fn try_acquire_discord_gateway_lease(
 }
 
 /// Outcome of the gateway singleton-lease acquisition phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GatewayLeaseOutcome {
     /// Either the lease was acquired (`Some`) or there is no PG pool (`None`,
     /// the standalone/no-DB path). Either way, startup proceeds.

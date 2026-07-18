@@ -285,7 +285,7 @@ impl HealthRegistry {
         }
     }
 
-    pub(in crate::services::discord) async fn has_standby_provider(&self) -> bool {
+    pub(crate) async fn has_standby_provider(&self) -> bool {
         !self.standby_providers.lock().await.is_empty()
     }
 
