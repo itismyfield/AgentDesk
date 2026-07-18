@@ -536,7 +536,7 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     Ok(())
 }
 
-fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
+pub(super) fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
     raw.trim()
         .parse::<u64>()
         .ok()

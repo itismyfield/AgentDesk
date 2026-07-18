@@ -452,7 +452,7 @@
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 909 | 842 | 67 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics/mod.rs` | 389 | 389 | 0 |  |
-| `services::discord::commands::diagnostics::reports` | `src/services/discord/commands/diagnostics/reports.rs` | 729 | 657 | 72 |  |
+| `services::discord::commands::diagnostics::reports` | `src/services/discord/commands/diagnostics/reports.rs` | 765 | 667 | 98 |  |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 82 | 82 | 0 |  |
 | `services::discord::commands::goals` | `src/services/discord/commands/goals.rs` | 73 | 73 | 0 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 107 | 94 | 13 |  |

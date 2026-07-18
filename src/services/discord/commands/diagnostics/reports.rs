@@ -574,7 +574,17 @@ fn build_queue_report_sync(
                 ));
             }
             if queue.len() > 5 {
-                lines.push(format!("    ... +{} more", queue.len() - 5));
+                let hidden_ids = queue
+                    .iter()
+                    .skip(5)
+                    .map(|item| format!("`{}`", item.message_id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!(
+                    "    ... +{} more; message_ids: {}",
+                    queue.len() - 5,
+                    hidden_ids
+                ));
             }
         }
     }
@@ -668,6 +678,7 @@ fn build_queue_report_sync(
 #[cfg(test)]
 mod queue_report_tests {
     use super::*;
+    use crate::services::discord::commands::control::parse_queued_message_id;
     use crate::services::turn_orchestrator::{InterventionMode, SourceMessageQueuedGeneration};
     use poise::serenity_prelude::{MessageId, UserId};
 
@@ -695,20 +706,45 @@ mod queue_report_tests {
     }
 
     #[test]
-    fn queue_report_exposes_primary_message_id_for_cancel_queued() {
+    fn queue_report_exposes_all_primary_ids_as_cancel_queued_inputs() {
         let channel_id = ChannelId::new(7);
+        let expected_ids = (1_000..1_030).collect::<Vec<_>>();
         let mut queues = std::collections::HashMap::new();
-        queues.insert(channel_id, vec![queued_intervention(42)]);
+        queues.insert(
+            channel_id,
+            expected_ids
+                .iter()
+                .copied()
+                .map(queued_intervention)
+                .collect::<Vec<_>>(),
+        );
 
         let report = build_queue_report_sync(
             &queues,
             &ProviderKind::Claude,
-            "test-token",
+            "queue-report-test-token",
             channel_id,
             false,
         );
+        let rendered_ids = report
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
 
-        assert!(report.contains("message_id `42`"));
+        assert_eq!(rendered_ids.len(), expected_ids.len());
+        assert_eq!(rendered_ids.last().map(String::as_str), Some("1029"));
+        assert!(
+            rendered_ids.iter().all(|id| parse_queued_message_id(id)
+                .is_some_and(|parsed| parsed.get().to_string() == *id)),
+            "every rendered primary ID must be accepted by /cancel-queued"
+        );
+        assert!(
+            report.len() <= 2_000,
+            "a maximum-size queue report must fit Discord's message limit"
+        );
     }
 }
 
