@@ -49,11 +49,11 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+pub(crate) use queue_cancellation::has_soft_intervention_at;
 use queue_cancellation::{
     cancel_soft_intervention_by_message_id, cancel_soft_intervention_by_primary_message_id,
     dequeue_next_soft_intervention, has_soft_intervention,
 };
-pub(crate) use queue_cancellation::has_soft_intervention_at;
 pub(crate) use source_generation::SourceMessageQueuedGeneration;
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
 use turn_finished_signal::{
