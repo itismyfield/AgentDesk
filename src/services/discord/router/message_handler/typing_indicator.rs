@@ -6,9 +6,9 @@ use serenity::ChannelId;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, MissedTickBehavior};
 
+use super::super::super::SharedData;
 use super::super::super::inflight::InflightSignal;
 use super::super::super::turn_completion_events::TurnCompletionEvent;
-use super::super::super::SharedData;
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 
@@ -31,7 +31,7 @@ impl TypingTransport for SerenityTypingTransport {
     }
 }
 
-pub(super) fn spawn_native_typing_indicator(
+pub(in crate::services::discord) fn spawn_native_typing_indicator(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,
     channel_id: ChannelId,
