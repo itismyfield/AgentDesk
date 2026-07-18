@@ -30,6 +30,12 @@ pub(super) enum StreamContentArmMessage {
         message: String,
         stderr: String,
     },
+    ActiveUsageSnapshot {
+        model: Option<String>,
+        input_tokens: u64,
+        cache_create_tokens: u64,
+        cache_read_tokens: u64,
+    },
     StatusUpdate {
         input_tokens: Option<u64>,
         cache_create_tokens: Option<u64>,
@@ -58,8 +64,19 @@ pub(super) struct StreamContentArmContext<'a> {
     pub(super) standby_relay_owns_output: bool,
     pub(super) terminal_control_ready_observed: bool,
     pub(super) streaming_rollover_frozen_msg_ids: &'a Vec<MessageId>,
+    pub(super) context_compact_lower_bound_tokens: u64,
     pub(super) context_window_tokens: u64,
     pub(super) context_compact_percent: u64,
+}
+
+fn active_usage_snapshot_is_eligible_for_compact(
+    provider: &ProviderKind,
+    turn_source: crate::services::discord::inflight::TurnSource,
+    tmux_session_name: Option<&str>,
+) -> bool {
+    *provider == ProviderKind::Claude
+        && turn_source == crate::services::discord::inflight::TurnSource::Managed
+        && tmux_session_name.is_some_and(|name| !name.trim().is_empty())
 }
 
 pub(super) struct StreamContentArmState<'a> {
@@ -118,6 +135,7 @@ pub(super) async fn handle_stream_content_message(
     let standby_relay_owns_output = ctx.standby_relay_owns_output;
     let terminal_control_ready_observed = ctx.terminal_control_ready_observed;
     let streaming_rollover_frozen_msg_ids = ctx.streaming_rollover_frozen_msg_ids;
+    let context_compact_lower_bound_tokens = ctx.context_compact_lower_bound_tokens;
     let context_window_tokens = ctx.context_window_tokens;
     let context_compact_percent = ctx.context_compact_percent;
 
@@ -567,6 +585,31 @@ pub(super) async fn handle_stream_content_message(
                             done = true;
                             terminal_control_drain_until = None;
                         }
+        StreamContentArmMessage::ActiveUsageSnapshot {
+                            model,
+                            input_tokens,
+                            cache_create_tokens,
+                            cache_read_tokens,
+                        } => {
+                            let tmux_session_name = inflight_state.tmux_session_name.as_deref();
+                            if active_usage_snapshot_is_eligible_for_compact(
+                                &provider,
+                                inflight_state.turn_source,
+                                tmux_session_name,
+                            ) {
+                                let _ = crate::services::claude_compact_trigger::observe_active_usage(
+                                    channel_id.get(),
+                                    tmux_session_name.expect("eligible active usage has physical tmux pane"),
+                                    &provider,
+                                    model.as_deref(),
+                                    Some(input_tokens),
+                                    Some(cache_create_tokens),
+                                    Some(cache_read_tokens),
+                                    context_compact_percent,
+                                    context_compact_lower_bound_tokens,
+                                );
+                            }
+                        }
         StreamContentArmMessage::StatusUpdate {
                             input_tokens,
                             cache_create_tokens,
@@ -626,4 +669,52 @@ pub(super) async fn handle_stream_content_message(
     }
 
     finish!(StreamContentArmOutcome::ContinueDraining);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::active_usage_snapshot_is_eligible_for_compact;
+    use crate::services::discord::inflight::TurnSource;
+    use crate::services::provider::ProviderKind;
+
+    /// Mutation guard: live usage telemetry may arm compacting only for an
+    /// AgentDesk-managed Claude turn tied to a physical tmux pane. Removing the
+    /// `Managed` predicate makes the ExternalInput assertion fail.
+    #[test]
+    fn active_usage_compact_gate_allows_managed_and_rejects_external_turns() {
+        assert!(active_usage_snapshot_is_eligible_for_compact(
+            &ProviderKind::Claude,
+            TurnSource::Managed,
+            Some("tmux-4631"),
+        ));
+        for turn_source in [
+            TurnSource::ExternalInput,
+            TurnSource::MonitorTriggered,
+            TurnSource::ExternalAdopted,
+        ] {
+            assert!(
+                !active_usage_snapshot_is_eligible_for_compact(
+                    &ProviderKind::Claude,
+                    turn_source,
+                    Some("tmux-4631"),
+                ),
+                "{turn_source:?} must not create compact trigger state"
+            );
+        }
+        assert!(!active_usage_snapshot_is_eligible_for_compact(
+            &ProviderKind::Claude,
+            TurnSource::Managed,
+            None,
+        ));
+        assert!(!active_usage_snapshot_is_eligible_for_compact(
+            &ProviderKind::Claude,
+            TurnSource::Managed,
+            Some("   "),
+        ));
+        assert!(!active_usage_snapshot_is_eligible_for_compact(
+            &ProviderKind::Codex,
+            TurnSource::Managed,
+            Some("tmux-4631"),
+        ));
+    }
 }

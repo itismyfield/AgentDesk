@@ -66,6 +66,7 @@ struct PaneArmState {
     armed: bool,
     generation: u64,
     last_occupied: u64,
+    last_window_tokens: u64,
 }
 
 impl PaneArmState {
@@ -74,6 +75,7 @@ impl PaneArmState {
             armed: true,
             generation: 0,
             last_occupied: 0,
+            last_window_tokens: 0,
         }
     }
 }
@@ -131,7 +133,16 @@ fn observe_and_decide(
             .panes
             .entry(pane.clone())
             .or_insert_with(PaneArmState::fresh);
+        if entry.last_window_tokens != 0
+            && entry.last_window_tokens != threshold.actual_window_tokens
+        {
+            // A model/window switch starts a distinct fill cycle. Invalidate the
+            // prior worker before this observation can consume a fresh generation.
+            entry.armed = true;
+            entry.generation = 0;
+        }
         entry.last_occupied = occupied;
+        entry.last_window_tokens = threshold.actual_window_tokens;
         entry.armed
     };
     // Re-arm first, independent of the inject check: a post-compact occupancy
@@ -225,6 +236,52 @@ fn submit_under_composer_lock(
             Some(submit())
         },
     )
+}
+
+/// Validate and forward one complete active Claude usage snapshot. Missing model,
+/// launch provenance, or any usage component fails closed before pane state exists.
+pub(crate) fn observe_active_usage(
+    channel_id: u64,
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    cache_create_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    compact_percent: u64,
+    lower_bound_tokens: u64,
+) -> bool {
+    if !matches!(provider, ProviderKind::Claude) {
+        return false;
+    }
+    let tmux_session_name = tmux_session_name.trim();
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return false;
+    };
+    let (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)) =
+        (input_tokens, cache_create_tokens, cache_read_tokens)
+    else {
+        return false;
+    };
+    let actual_window_tokens = crate::services::claude_compact_context::context_window_for_turn(
+        tmux_session_name,
+        Some(model),
+    );
+    if actual_window_tokens.is_none() {
+        return false;
+    }
+    maybe_inject_compact(
+        channel_id,
+        tmux_session_name,
+        provider,
+        input_tokens
+            .saturating_add(cache_create_tokens)
+            .saturating_add(cache_read_tokens),
+        actual_window_tokens,
+        compact_percent,
+        lower_bound_tokens,
+    );
+    true
 }
 
 /// Claude-only: at a watcher-completed (pane-idle) turn boundary, inject
@@ -399,6 +456,108 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner())
             .panes
             .is_empty()
+    }
+
+    fn last_window_tokens(pane: &CompactPaneKey) -> Option<u64> {
+        COMPACT_TRIGGER_STATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .panes
+            .get(pane)
+            .map(|entry| entry.last_window_tokens)
+    }
+
+    /// Mutation guard: the window-change invalidation in `observe_and_decide`.
+    /// Changing context windows must issue a distinct generation, reject the old
+    /// queued worker at the composer barrier, and ignore its later retry re-arm.
+    #[test]
+    fn window_switch_invalidates_old_worker_and_starts_a_fresh_cycle() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let old_threshold = threshold_for(1_000_000);
+        let old_generation =
+            observe_and_decide(&pane, 600_000, old_threshold).expect("old window crossing");
+
+        let new_threshold = threshold_for(800_000);
+        let new_generation =
+            observe_and_decide(&pane, 600_000, new_threshold).expect("new window crossing");
+
+        assert_ne!(old_generation, new_generation);
+        assert_eq!(last_window_tokens(&pane), Some(800_000));
+        assert!(
+            !pane_still_disarmed_for_send(&pane, old_generation, old_threshold),
+            "a worker bound to the prior window must fail the composer barrier"
+        );
+        rearm_for_retry(&pane, old_generation);
+        assert_eq!(
+            armed_state(&pane),
+            Some(false),
+            "a stale retry must not re-arm the new window's consumed cycle"
+        );
+        assert!(pane_still_disarmed_for_send(&pane, new_generation, new_threshold));
+    }
+
+    #[test]
+    fn active_usage_missing_model_or_provenance_does_not_create_pane_state() {
+        let _guard = state_test_guard();
+        assert!(!observe_active_usage(
+            42,
+            "tmux-4631",
+            &ProviderKind::Claude,
+            None,
+            Some(560_000),
+            Some(0),
+            Some(0),
+            50,
+            300_000,
+        ));
+        assert!(panes_is_empty());
+        assert!(!observe_active_usage(
+            42,
+            "tmux-4631",
+            &ProviderKind::Claude,
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            Some(0),
+            Some(0),
+            50,
+            300_000,
+        ));
+        assert!(panes_is_empty());
+    }
+
+    #[test]
+    fn active_usage_rejects_partial_usage_before_creating_pane_state() {
+        let _guard = state_test_guard();
+        assert!(!observe_active_usage(
+            42,
+            "tmux-4631",
+            &ProviderKind::Claude,
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            None,
+            Some(0),
+            50,
+            300_000,
+        ));
+        assert!(panes_is_empty());
+    }
+
+    #[test]
+    fn active_usage_non_claude_provider_does_not_create_pane_state() {
+        let _guard = state_test_guard();
+        assert!(!observe_active_usage(
+            42,
+            "tmux-4631",
+            &ProviderKind::Codex,
+            Some("routed-sonnet[1m]"),
+            Some(560_000),
+            Some(0),
+            Some(0),
+            50,
+            300_000,
+        ));
+        assert!(panes_is_empty());
     }
 
     /// Mutation guard: the optimistic consume (disarm + fresh generation) in the

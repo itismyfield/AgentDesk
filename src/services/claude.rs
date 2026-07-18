@@ -1125,23 +1125,36 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         // status panel reflects the LAST API call's context
                         // occupancy. output_tokens stays cumulative for analytics.
                         saw_per_message_usage = true;
-                        let inp = usage
-                            .get("input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
+                        let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
                         let cache_read = usage
                             .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
+                            .and_then(|v| v.as_u64());
                         let cache_creation = usage
                             .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        last_call_input_tokens = inp;
-                        last_call_cache_read_tokens = cache_read;
-                        last_call_cache_create_tokens = cache_creation;
+                            .and_then(|v| v.as_u64());
+                        last_call_input_tokens = input_tokens.unwrap_or(0);
+                        last_call_cache_read_tokens = cache_read.unwrap_or(0);
+                        last_call_cache_create_tokens = cache_creation.unwrap_or(0);
                         if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                             cumulative_output_tokens = cumulative_output_tokens.saturating_add(out);
+                        }
+                        if let (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)) =
+                            (input_tokens, cache_creation, cache_read)
+                        {
+                            if sender
+                                .send(StreamMessage::ActiveUsageSnapshot {
+                                    model: msg_obj
+                                        .get("model")
+                                        .and_then(|value| value.as_str())
+                                        .map(str::to_string),
+                                    input_tokens,
+                                    cache_create_tokens,
+                                    cache_read_tokens,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
                 }
@@ -1308,6 +1321,16 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     }
                     StreamMessage::StatusEvents { events } => {
                         debug_log(&format!("  >>> StatusEvents: {} event(s)", events.len()));
+                    }
+                    StreamMessage::ActiveUsageSnapshot {
+                        model,
+                        input_tokens,
+                        cache_create_tokens,
+                        cache_read_tokens,
+                    } => {
+                        debug_log(&format!(
+                            "  >>> ActiveUsageSnapshot: model={model:?}, input={input_tokens}, cache_create={cache_create_tokens}, cache_read={cache_read_tokens}"
+                        ));
                     }
                     StreamMessage::TmuxReady { .. }
                     | StreamMessage::RuntimeReady { .. }

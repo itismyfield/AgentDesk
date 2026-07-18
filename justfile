@@ -20,6 +20,11 @@ cargo-check:
 
 test: test-non-pg
 
+# Active Claude usage compact-trigger contract.
+test-active-usage-4631:
+    cargo test --lib claude_compact_trigger::tests
+    cargo test --lib assistant_usage_emits_complete_active_snapshot_before_done
+
 # Stage 1 keeps the existing CI-safe subset. The broad non-PG sweep currently
 # fails legacy/full integration route tests; see docs/ci/rust-quality-gates.md.
 test-non-pg:

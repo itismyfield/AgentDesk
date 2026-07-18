@@ -149,6 +149,10 @@ pub(super) async fn run_stream_loop(
     let status_interval = ctx.status_interval;
     let context_window_tokens = ctx.context_window_tokens;
     let context_compact_percent = ctx.context_compact_percent;
+    let context_compact_lower_bound_tokens =
+        crate::services::discord::adk_session::fetch_context_thresholds(shared_owned.api_port)
+            .await
+            .compact_lower_bound_tokens;
 
     let rx = &mut *state.rx;
     let mut full_response = std::mem::take(state.full_response);
@@ -364,6 +368,7 @@ pub(super) async fn run_stream_loop(
                     }
                     match msg {
                         content_message @ (StreamMessage::RetryBoundary
+                        | StreamMessage::ActiveUsageSnapshot { .. }
                         | StreamMessage::Init { .. }
                         | StreamMessage::Text { .. }
                         | StreamMessage::Thinking { .. }
@@ -375,6 +380,17 @@ pub(super) async fn run_stream_loop(
                                 StreamMessage::RetryBoundary => {
                                     StreamContentArmMessage::RetryBoundary
                                 }
+                                StreamMessage::ActiveUsageSnapshot {
+                                    model,
+                                    input_tokens,
+                                    cache_create_tokens,
+                                    cache_read_tokens,
+                                } => StreamContentArmMessage::ActiveUsageSnapshot {
+                                    model,
+                                    input_tokens,
+                                    cache_create_tokens,
+                                    cache_read_tokens,
+                                },
                                 StreamMessage::Init {
                                     session_id,
                                     raw_session_id,
@@ -425,6 +441,7 @@ pub(super) async fn run_stream_loop(
                                     terminal_control_ready_observed,
                                     streaming_rollover_frozen_msg_ids:
                                         &streaming_rollover_frozen_msg_ids,
+                                    context_compact_lower_bound_tokens,
                                     context_window_tokens,
                                     context_compact_percent,
                                 },

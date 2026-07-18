@@ -74,8 +74,12 @@ pub fn process_stream_line(
 
     if msg_type == "assistant" {
         if let Some(message) = json.get("message") {
-            if let Some(model) = message.get("model").and_then(|value| value.as_str()) {
-                state.last_model = Some(model.to_string());
+            let current_model = message
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            if let Some(model) = current_model.as_ref() {
+                state.last_model = Some(model.clone());
             }
             if let Some(usage) = message.get("usage") {
                 // #1918: input/cache_read/cache_create replace so persisted
@@ -85,26 +89,37 @@ pub fn process_stream_line(
                 // accumulated for the cumulative output metric analytics
                 // expect.
                 state.saw_per_message_usage = true;
-                let input_tokens = usage
-                    .get("input_tokens")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0);
+                let input_tokens = usage.get("input_tokens").and_then(|value| value.as_u64());
                 let cache_read = usage
                     .get("cache_read_input_tokens")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0);
+                    .and_then(|value| value.as_u64());
                 let cache_creation = usage
                     .get("cache_creation_input_tokens")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0);
-                state.accum_input_tokens = input_tokens;
-                state.accum_cache_read_tokens = cache_read;
-                state.accum_cache_create_tokens = cache_creation;
+                    .and_then(|value| value.as_u64());
+                state.accum_input_tokens = input_tokens.unwrap_or(0);
+                state.accum_cache_read_tokens = cache_read.unwrap_or(0);
+                state.accum_cache_create_tokens = cache_creation.unwrap_or(0);
                 if let Some(output_tokens) =
                     usage.get("output_tokens").and_then(|value| value.as_u64())
                 {
                     state.accum_output_tokens =
                         state.accum_output_tokens.saturating_add(output_tokens);
+                }
+
+                if let (Some(input_tokens), Some(cache_creation), Some(cache_read)) =
+                    (input_tokens, cache_creation, cache_read)
+                {
+                    if sender
+                        .send(StreamMessage::ActiveUsageSnapshot {
+                            model: current_model,
+                            input_tokens,
+                            cache_create_tokens: cache_creation,
+                            cache_read_tokens: cache_read,
+                        })
+                        .is_err()
+                    {
+                        return false;
+                    }
                 }
             }
         }
@@ -170,7 +185,9 @@ pub fn process_stream_line(
     // `StatusUpdate` (turn_duration housekeeping) is metadata, not content.
     let (harvested, text_bytes) = match &message {
         StreamMessage::Text { content } => (1, content.len() as u64),
-        StreamMessage::Done { .. } | StreamMessage::StatusUpdate { .. } => (0, 0),
+        StreamMessage::Done { .. }
+        | StreamMessage::StatusUpdate { .. }
+        | StreamMessage::ActiveUsageSnapshot { .. } => (0, 0),
         _ => (1, 0),
     };
     if sender.send(message).is_err() {
@@ -598,6 +615,64 @@ mod tests {
         assert!(messages.iter().any(
             |message| matches!(message, StreamMessage::Done { session_id, .. } if session_id.as_deref() == Some("sess-text"))
         ));
+    }
+
+    #[test]
+    fn assistant_usage_emits_complete_active_snapshot_before_done() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"routed-sonnet[1m]","usage":{"input_tokens":560000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert!(matches!(
+            messages.as_slice(),
+            [StreamMessage::ActiveUsageSnapshot {
+                model,
+                input_tokens: 560_000,
+                cache_create_tokens: 0,
+                cache_read_tokens: 0,
+            }] if model.as_deref() == Some("routed-sonnet[1m]")
+        ));
+        assert!(!messages.iter().any(|message| matches!(message, StreamMessage::Done { .. })));
+    }
+
+    #[test]
+    fn active_snapshot_does_not_inherit_a_previous_record_model() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"old-route[1m]","content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":560000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert!(matches!(
+            messages.as_slice(),
+            [StreamMessage::ActiveUsageSnapshot { model: None, .. }]
+        ));
+    }
+
+    #[test]
+    fn assistant_usage_without_complete_triple_does_not_emit_active_snapshot() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"routed-sonnet[1m]","usage":{"input_tokens":560000,"cache_read_input_tokens":0},"content":[]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(receiver.try_iter().next().is_none());
     }
 
     /// #3281 zero side: a transcript window containing ONLY housekeeping lines
