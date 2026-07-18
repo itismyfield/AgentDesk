@@ -143,11 +143,57 @@ mod tests {
             include_str!("../../terminal_outcome_delivery.rs"),
             r#"
                 claude_tui_followup_pre_submit_requeue_candidate,
+                claude_tui_busy_requeue_pending,
                 tui_error_classification,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
             "#,
             "terminal outcome -> DeliveryEpilogueContext",
         );
+    }
+
+    /// #4640 regression: a follow-up readiness timeout where the pane is idle at
+    /// a ready prompt (prompt_marker_detected=true, hence
+    /// previous_tui_turn_still_running=false) proves the resumed provider session
+    /// is alive — only the follow-up input failed to confirm in time. It must be
+    /// classified as a session-preserving readiness timeout so the empty-response
+    /// no-handshake fallback does NOT kill the live tmux session for a fresh
+    /// retry. Before #4640, only previous_tui_turn_still_running=true (marker
+    /// absent) was preserved, so this restart follow-up case leaked to
+    /// fresh-session and dropped the resumed session.
+    #[test]
+    fn readiness_timeout_idle_at_prompt_marker_preserves_live_session() {
+        let provider = ProviderKind::Claude;
+        let resolution = resolve_tui_error(
+            &provider,
+            concat!(
+                "timeout waiting for claude tui follow-up prompt input readiness after 45s; ",
+                "reason=prompt_marker_unconfirmed; previous_tui_turn_still_running=false; ",
+                "prompt_marker_detected=true; prompt_draft_detected=false; ",
+                "capture_available=true",
+            ),
+            "",
+        );
+        assert!(
+            bridge_claude_tui_followup_busy_readiness_timeout(
+                &provider,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                resolution.tui_error_classification,
+            ),
+            "an idle-at-prompt readiness timeout (marker detected) proves the resumed \
+             session is alive and must be preserved from the fresh-session fallback"
+        );
+        // The follow-up input never confirmed, so it is still requeued like any
+        // other readiness timeout — preservation only blocks the destructive
+        // fresh-session retry, it does not swallow the pending follow-up.
+        let ProviderErrorPresentation::Failure(full_response) = resolution.presentation else {
+            panic!("readiness timeout must remain an ordinary provider failure");
+        };
+        assert!(bridge_claude_tui_followup_requeue_prompt_error(
+            &provider,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            &full_response,
+            resolution.tui_error_classification,
+        ));
     }
 }
