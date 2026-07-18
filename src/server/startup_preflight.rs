@@ -53,11 +53,8 @@ mod tests {
             },
             |present, version, path| {
                 check_calls.set(check_calls.get() + 1);
-                *observed.borrow_mut() = Some((
-                    present,
-                    version.map(str::to_owned),
-                    path.map(str::to_owned),
-                ));
+                *observed.borrow_mut() =
+                    Some((present, version.map(str::to_owned), path.map(str::to_owned)));
                 false
             },
         );
