@@ -652,10 +652,16 @@ impl PlaceholderLiveEvents {
 
 // Despite its historical name, this helper now recognizes only successful
 // background-Bash completions already represented by a matching footer slot.
-// Successful subagent/agent completions still require a card alongside footer ✓
-// per #4629 (user direction 2026-07-18); `event_key` and
-// `terminal_delivery_fingerprint` dedup prevent repeat observations from posting
-// duplicate cards. Background Bash retains footer-only suppression per #4097.
+// Successful subagent/agent completions now take the card path (CardRequired),
+// SYMMETRIC with failure completions, per #4629 (user direction 2026-07-18):
+// previously only successes were footer-only-suppressed here, so success cards
+// went missing while failures posted. This does NOT keep a footer ✓ *alongside*
+// the card — once the card is confirmed, `claim_terminal_slot_for_card` evicts
+// the matching terminal footer marker (#4055) exactly as it does for failures.
+// The card, not the transient footer ✓, is the durable completion signal.
+// `event_key`/`terminal_delivery_fingerprint` dedup prevent repeat observations
+// from posting duplicate cards. Background Bash retains footer-only suppression
+// per #4097.
 fn task_notification_success_completion_visible_in_snapshot(
     snapshot: &StatusPanelState,
     events: &[StatusEvent],

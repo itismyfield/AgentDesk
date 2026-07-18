@@ -6525,7 +6525,7 @@ fn confirmed_task_notification_card_evicts_only_exact_terminal_footer_slot() {
 }
 
 #[test]
-fn success_subagent_completion_requires_card_alongside_footer() {
+fn success_subagent_completion_takes_card_path_symmetric_with_failure() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_654_002);
     events.push_status_events(
@@ -6552,7 +6552,7 @@ fn success_subagent_completion_requires_card_alongside_footer() {
     assert!(
         !events
             .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, true,),
-        "successful subagent completion should post a card alongside footer ✓"
+        "successful subagent completion takes the card path (CardRequired), symmetric with failures"
     );
 
     let idless = "<task-notification><task-id>sub2</task-id><status>completed</status>\
