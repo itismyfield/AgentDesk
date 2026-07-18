@@ -13,7 +13,7 @@ pub(in crate::services) struct ManagedCompactTurnIdentity {
 }
 
 impl ManagedCompactTurnIdentity {
-    pub(in crate::services) fn capture(state: &InflightTurnState) -> Option<Self> {
+    pub(in crate::services::discord) fn capture(state: &InflightTurnState) -> Option<Self> {
         let tmux_session_name = state
             .tmux_session_name
             .as_deref()
@@ -26,6 +26,15 @@ impl ManagedCompactTurnIdentity {
             tmux_session_name: tmux_session_name.to_string(),
             turn_start_offset: state.turn_start_offset,
         })
+    }
+
+    pub(in crate::services) fn capture_live(
+        channel_id: u64,
+        tmux_session_name: &str,
+    ) -> Option<Self> {
+        let state = load_inflight_state_read_only(&ProviderKind::Claude, channel_id)?;
+        let identity = Self::capture(&state)?;
+        (identity.tmux_session_name == tmux_session_name.trim()).then_some(identity)
     }
 
     pub(in crate::services) fn channel_id(&self) -> u64 {
@@ -48,10 +57,11 @@ impl ManagedCompactTurnIdentity {
     }
 }
 
-pub(in crate::services) fn live_managed_turn_matches(expected: &ManagedCompactTurnIdentity) -> bool {
-    load_inflight_state_read_only(&ProviderKind::Claude, expected.channel_id).is_some_and(|state| {
-        managed_turn_matches_state(expected, &state)
-    })
+pub(in crate::services) fn live_managed_turn_matches(
+    expected: &ManagedCompactTurnIdentity,
+) -> bool {
+    load_inflight_state_read_only(&ProviderKind::Claude, expected.channel_id)
+        .is_some_and(|state| managed_turn_matches_state(expected, &state))
 }
 
 fn managed_turn_matches_state(

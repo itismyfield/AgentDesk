@@ -896,10 +896,12 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     // a window this turn cannot prove fails closed to no-inject. Idempotency is
     // keyed on the observable USAGE occupancy (`occupied`), never on a cosmetic
     // `auto_compacted` string heuristic.
-    if matches!(provider, ProviderKind::Claude) {
+    if matches!(provider, ProviderKind::Claude)
+        && let Some(turn_identity) =
+            super::ManagedCompactTurnIdentity::capture_live(channel_id.get(), tmux_session_name)
+    {
         crate::services::claude_compact_trigger::maybe_inject_compact(
-            channel_id.get(),
-            tmux_session_name,
+            turn_identity,
             provider,
             occupied,
             claude_launch_window,

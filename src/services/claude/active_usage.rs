@@ -25,9 +25,7 @@ pub(super) fn observe_assistant_usage(
     };
     *state.saw_per_message_usage = true;
     let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
-    let cache_read_tokens = usage
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64);
+    let cache_read_tokens = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
     let cache_create_tokens = usage
         .get("cache_creation_input_tokens")
         .and_then(Value::as_u64);
@@ -35,9 +33,8 @@ pub(super) fn observe_assistant_usage(
     *state.last_call_cache_read_tokens = cache_read_tokens.unwrap_or(0);
     *state.last_call_cache_create_tokens = cache_create_tokens.unwrap_or(0);
     if let Some(output_tokens) = usage.get("output_tokens").and_then(Value::as_u64) {
-        *state.cumulative_output_tokens = state
-            .cumulative_output_tokens
-            .saturating_add(output_tokens);
+        *state.cumulative_output_tokens =
+            state.cumulative_output_tokens.saturating_add(output_tokens);
     }
     let (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)) =
         (input_tokens, cache_create_tokens, cache_read_tokens)

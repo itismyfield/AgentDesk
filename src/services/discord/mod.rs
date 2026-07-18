@@ -7,7 +7,7 @@ pub(crate) mod bot_role;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
 mod commands;
-pub(in crate::services) mod compact_turn_authority;
+mod compact_turn_authority;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
@@ -150,7 +150,9 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 // declaration and constructor literals reference it without a module-qualified
 // path (surface freeze, #3294/#3295 pattern).
 pub(crate) use restart_mode::InflightRestartMode;
-pub(crate) use router::HeadlessTurnStartError;
+pub(crate) use router::{
+    HeadlessTurnStartError, IntakeRequest, TurnKind, execute_intake_turn_core,
+};
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 // #3038 S4: re-export the live-placeholder cluster type so `SharedData`
@@ -166,11 +168,6 @@ pub(in crate::services) use shared_state::DispatchRoutingState;
 // #3038 S3: same scope rationale as S2 — the cluster-E members were
 // `pub(super)` on `SharedData` (visible up to `crate::services`).
 pub(in crate::services) use shared_state::RestartLifecycle;
-// Phase 2-pre.3 of intake-node-routing: worker entry point. Phase 3 will
-// add the worker polling loop that imports these names; until then they
-// are intentionally exposed but unused at the crate boundary.
-#[allow(unused_imports)]
-pub(crate) use router::{IntakeRequest, TurnKind, execute_intake_turn_core};
 pub(crate) use turn_bridge::TmuxCleanupPolicy;
 
 use std::collections::HashMap;
@@ -201,13 +198,15 @@ use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
     lookup_pending_dispatch_for_thread, parse_dispatch_id, post_adk_session_status,
 };
+pub(in crate::services) use compact_turn_authority::{
+    ManagedCompactTurnIdentity, live_managed_turn_matches,
+};
 use formatting::{
     BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_tool_input,
     send_long_message_raw, truncate_str,
 };
-pub(crate) use inflight::clear_inflight_state;
-pub(crate) use inflight::lock_inflight_state_path;
 use inflight::{InflightTurnState, load_inflight_states, save_inflight_state};
+pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path};
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;

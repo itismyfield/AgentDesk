@@ -373,6 +373,7 @@ src/
 │   │   ├── allowed_path_tests.rs
 │   │   └── iteration_result_tests.rs
 │   ├── claude/
+│   │   ├── active_usage.rs
 │   │   └── backend_routing.rs
 │   ├── claude_e/
 │   │   ├── cancellation.rs
@@ -1157,9 +1158,6 @@ src/
 │   ├── auto_queue.rs
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
-│   ├── claude/
-│   │   ├── active_usage.rs
-│   │   └── backend_routing.rs
 │   ├── claude.rs
 │   ├── claude_command.rs
 │   ├── claude_compact_context.rs

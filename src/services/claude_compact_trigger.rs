@@ -42,9 +42,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::services::claude_compact_context::{CompactThreshold, compact_threshold};
 use crate::services::claude_tui::input::CompactSubmitOutcome;
-use crate::services::discord::compact_turn_authority::{
-    ManagedCompactTurnIdentity, live_managed_turn_matches,
-};
+use crate::services::discord::{ManagedCompactTurnIdentity, live_managed_turn_matches};
 use crate::services::provider::ProviderKind;
 
 /// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
@@ -247,7 +245,7 @@ fn submit_under_composer_lock(
 
 /// Validate and forward one complete active Claude usage snapshot. Missing model,
 /// launch provenance, or any usage component fails closed before pane state exists.
-pub(crate) fn observe_active_usage(
+pub(in crate::services) fn observe_active_usage(
     turn_identity: ManagedCompactTurnIdentity,
     provider: &ProviderKind,
     model: Option<&str>,
@@ -304,7 +302,7 @@ pub(crate) fn observe_active_usage(
 /// (Codex compacts natively), an unresolvable window, or a `0`/disabled percent.
 /// A `0`/low `usage_tokens` is deliberately NOT short-circuited: it is the
 /// post-compact re-arm signal handled inside [`observe_and_decide`].
-pub(crate) fn maybe_inject_compact(
+pub(in crate::services) fn maybe_inject_compact(
     turn_identity: ManagedCompactTurnIdentity,
     provider: &ProviderKind,
     usage_tokens: u64,
@@ -348,11 +346,7 @@ pub(crate) fn maybe_inject_compact(
             threshold,
             &turn_identity,
             live_managed_turn_matches,
-            || {
-                crate::services::claude_tui::input::send_compact_while_busy(
-                    &pane.tmux_session_name,
-                )
-            },
+            || crate::services::claude_tui::input::send_compact_while_busy(&pane.tmux_session_name),
         );
         match outcome {
             None => tracing::debug!(
@@ -505,7 +499,11 @@ mod tests {
             Some(false),
             "a stale retry must not re-arm the new window's consumed cycle"
         );
-        assert!(pane_still_disarmed_for_send(&pane, new_generation, new_threshold));
+        assert!(pane_still_disarmed_for_send(
+            &pane,
+            new_generation,
+            new_threshold
+        ));
     }
 
     #[test]
@@ -724,12 +722,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
-        use crate::services::discord::inflight::TurnSource;
-        use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, mpsc};
         use std::time::Duration;
 
-        for external_source in [TurnSource::ExternalInput, TurnSource::ExternalAdopted] {
+        #[derive(Debug)]
+        enum AuthorityTransition {
+            ExternalInput,
+            ExternalAdopted,
+        }
+
+        for external_source in [
+            AuthorityTransition::ExternalInput,
+            AuthorityTransition::ExternalAdopted,
+        ] {
             let _guard = state_test_guard();
             let pane = pane();
             let threshold = threshold_for(1_000_000);
@@ -737,12 +743,12 @@ mod tests {
                 observe_and_decide(&pane, 500_000, threshold).expect("crossing injects");
             let expected_turn =
                 ManagedCompactTurnIdentity::test_fixture(42, &pane.tmux_session_name);
-            let live_source = Arc::new(AtomicU8::new(TurnSource::Managed as u8));
+            let authority_is_managed = Arc::new(AtomicBool::new(true));
             let sends = Arc::new(AtomicUsize::new(0));
             let (queued_tx, queued_rx) = mpsc::channel();
             let (outcome_tx, outcome_rx) = mpsc::channel();
             let worker_pane = pane.clone();
-            let worker_live_source = Arc::clone(&live_source);
+            let worker_authority = Arc::clone(&authority_is_managed);
             let worker_sends = Arc::clone(&sends);
 
             crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
@@ -755,10 +761,7 @@ mod tests {
                             generation,
                             threshold,
                             &expected_turn,
-                            |_| {
-                                worker_live_source.load(Ordering::SeqCst)
-                                    == TurnSource::Managed as u8
-                            },
+                            |_| worker_authority.load(Ordering::SeqCst),
                             || {
                                 worker_sends.fetch_add(1, Ordering::SeqCst);
                                 CompactSubmitOutcome::AcceptedOrQueued
@@ -770,7 +773,7 @@ mod tests {
                         .recv_timeout(Duration::from_millis(250))
                         .expect("worker must queue behind the held composer lock");
                     assert!(outcome_rx.recv_timeout(Duration::from_millis(25)).is_err());
-                    live_source.store(external_source as u8, Ordering::SeqCst);
+                    authority_is_managed.store(false, Ordering::SeqCst);
                     worker
                 },
             )
@@ -880,5 +883,4 @@ mod tests {
         );
         assert!(armed_state(&pane).is_none());
     }
-
 }

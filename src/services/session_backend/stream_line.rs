@@ -638,7 +638,11 @@ mod tests {
                 cache_read_tokens: 0,
             }] if model.as_deref() == Some("routed-sonnet[1m]")
         ));
-        assert!(!messages.iter().any(|message| matches!(message, StreamMessage::Done { .. })));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, StreamMessage::Done { .. }))
+        );
     }
 
     #[test]

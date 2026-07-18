@@ -11,9 +11,9 @@ use provider_error_presentation::ProviderErrorPresentation;
 use std::sync::Arc;
 use tui_error_classification::resolve_tui_error;
 pub(super) use types::{
-    StreamContentArmContext, StreamContentArmMessage, StreamContentArmOutcome, StreamContentArmState,
+    StreamContentArmContext, StreamContentArmMessage, StreamContentArmOutcome,
+    StreamContentArmState,
 };
-
 
 fn active_usage_snapshot_is_eligible_for_compact(
     provider: &ProviderKind,
@@ -497,7 +497,7 @@ pub(super) async fn handle_stream_content_message(
                             cache_create_tokens,
                             cache_read_tokens,
                         } => {
-                            let managed_turn = crate::services::discord::compact_turn_authority::
+                            let managed_turn = crate::services::discord::
                                 ManagedCompactTurnIdentity::capture(inflight_state);
                             if active_usage_snapshot_is_eligible_for_compact(
                                 &provider,
