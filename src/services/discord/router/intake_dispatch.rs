@@ -125,12 +125,12 @@ pub(crate) async fn admit_text_intake(
             );
             IntakeAdmission::Local(LocalAdmissionPermit(()))
         }
-        IntakeRouterDecision::ObservedWouldForward { target_instance_id } => {
+        IntakeRouterDecision::Observed { outcome } => {
             tracing::info!(
-                %target_instance_id,
+                ?outcome,
                 channel_id,
                 user_msg_id,
-                "[intake_dispatch] observe-only route admitted local"
+                "[intake_dispatch] owner-aware observe route admitted local"
             );
             IntakeAdmission::Local(LocalAdmissionPermit(()))
         }
