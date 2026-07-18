@@ -7,6 +7,7 @@ pub(crate) mod bot_role;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
 mod commands;
+pub(in crate::services) mod compact_turn_authority;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;

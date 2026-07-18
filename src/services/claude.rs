@@ -37,8 +37,10 @@ use crate::services::session_backend::{
     read_output_file_until_result, read_output_file_until_result_with_harvest,
     remove_process_session, send_process_session_input, terminate_process_handle,
 };
+mod active_usage;
 #[cfg(unix)]
 mod backend_routing;
+use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]
 use self::backend_routing::{
     LocalTmuxStartupPlan, classify_local_tmux_startup_plan, cleanup_process_backend_before_tmux,
@@ -1115,48 +1117,21 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 if let Some(content) = json.get("message").and_then(|m| m.get("content")) {
                     debug_log(&format!("  Assistant content array: {}", content));
                 }
-                // Extract model name and token usage from assistant messages
-                if let Some(msg_obj) = json.get("message") {
-                    if let Some(model) = msg_obj.get("model").and_then(|v| v.as_str()) {
-                        last_model = Some(model.to_string());
-                    }
-                    if let Some(usage) = msg_obj.get("usage") {
-                        // #1918: input/cache_read/cache_create replace so the
-                        // status panel reflects the LAST API call's context
-                        // occupancy. output_tokens stays cumulative for analytics.
-                        saw_per_message_usage = true;
-                        let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
-                        let cache_read = usage
-                            .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_u64());
-                        let cache_creation = usage
-                            .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64());
-                        last_call_input_tokens = input_tokens.unwrap_or(0);
-                        last_call_cache_read_tokens = cache_read.unwrap_or(0);
-                        last_call_cache_create_tokens = cache_creation.unwrap_or(0);
-                        if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                            cumulative_output_tokens = cumulative_output_tokens.saturating_add(out);
-                        }
-                        if let (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)) =
-                            (input_tokens, cache_creation, cache_read)
-                        {
-                            if sender
-                                .send(StreamMessage::ActiveUsageSnapshot {
-                                    model: msg_obj
-                                        .get("model")
-                                        .and_then(|value| value.as_str())
-                                        .map(str::to_string),
-                                    input_tokens,
-                                    cache_create_tokens,
-                                    cache_read_tokens,
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
+                if let Some(msg_obj) = json.get("message")
+                    && !observe_assistant_usage(
+                        msg_obj,
+                        &sender,
+                        AssistantUsageState {
+                            last_model: &mut last_model,
+                            last_call_input_tokens: &mut last_call_input_tokens,
+                            last_call_cache_create_tokens: &mut last_call_cache_create_tokens,
+                            last_call_cache_read_tokens: &mut last_call_cache_read_tokens,
+                            cumulative_output_tokens: &mut cumulative_output_tokens,
+                            saw_per_message_usage: &mut saw_per_message_usage,
+                        },
+                    )
+                {
+                    break;
                 }
             }
 

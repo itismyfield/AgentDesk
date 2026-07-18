@@ -42,6 +42,9 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::services::claude_compact_context::{CompactThreshold, compact_threshold};
 use crate::services::claude_tui::input::CompactSubmitOutcome;
+use crate::services::discord::compact_turn_authority::{
+    ManagedCompactTurnIdentity, live_managed_turn_matches,
+};
 use crate::services::provider::ProviderKind;
 
 /// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
@@ -225,12 +228,16 @@ fn submit_under_composer_lock(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
+    expected_turn: &ManagedCompactTurnIdentity,
+    live_turn_matches: impl FnOnce(&ManagedCompactTurnIdentity) -> bool,
     submit: impl FnOnce() -> CompactSubmitOutcome,
 ) -> Option<CompactSubmitOutcome> {
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         &pane.tmux_session_name,
         || {
-            if !pane_still_disarmed_for_send(pane, generation, threshold) {
+            if !pane_still_disarmed_for_send(pane, generation, threshold)
+                || !live_turn_matches(expected_turn)
+            {
                 return None;
             }
             Some(submit())
@@ -241,8 +248,7 @@ fn submit_under_composer_lock(
 /// Validate and forward one complete active Claude usage snapshot. Missing model,
 /// launch provenance, or any usage component fails closed before pane state exists.
 pub(crate) fn observe_active_usage(
-    channel_id: u64,
-    tmux_session_name: &str,
+    turn_identity: ManagedCompactTurnIdentity,
     provider: &ProviderKind,
     model: Option<&str>,
     input_tokens: Option<u64>,
@@ -254,7 +260,7 @@ pub(crate) fn observe_active_usage(
     if !matches!(provider, ProviderKind::Claude) {
         return false;
     }
-    let tmux_session_name = tmux_session_name.trim();
+    let tmux_session_name = turn_identity.tmux_session_name();
     let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
         return false;
     };
@@ -271,8 +277,7 @@ pub(crate) fn observe_active_usage(
         return false;
     }
     maybe_inject_compact(
-        channel_id,
-        tmux_session_name,
+        turn_identity,
         provider,
         input_tokens
             .saturating_add(cache_create_tokens)
@@ -300,8 +305,7 @@ pub(crate) fn observe_active_usage(
 /// A `0`/low `usage_tokens` is deliberately NOT short-circuited: it is the
 /// post-compact re-arm signal handled inside [`observe_and_decide`].
 pub(crate) fn maybe_inject_compact(
-    channel_id: u64,
-    tmux_session_name: &str,
+    turn_identity: ManagedCompactTurnIdentity,
     provider: &ProviderKind,
     usage_tokens: u64,
     actual_window_tokens: Option<u64>,
@@ -311,10 +315,8 @@ pub(crate) fn maybe_inject_compact(
     if !matches!(provider, ProviderKind::Claude) {
         return;
     }
-    let tmux_session_name = tmux_session_name.trim();
-    if tmux_session_name.is_empty() {
-        return;
-    }
+    let channel_id = turn_identity.channel_id();
+    let tmux_session_name = turn_identity.tmux_session_name();
     // A window this turn could not prove is fail-closed to no-inject (the caller
     // already applied the model-aware [1m] same-family guard). Unresolvable
     // window / zero-percent degrade safely WITHOUT touching the armed flag, just
@@ -340,9 +342,18 @@ pub(crate) fn maybe_inject_compact(
     // mutation (never the leaf state lock) and performs no turn-readiness wait. It
     // carries `generation` so the pre-send recheck binds it to THIS crossing.
     tokio::task::spawn_blocking(move || {
-        let outcome = submit_under_composer_lock(&pane, generation, threshold, || {
-            crate::services::claude_tui::input::send_compact_while_busy(&pane.tmux_session_name)
-        });
+        let outcome = submit_under_composer_lock(
+            &pane,
+            generation,
+            threshold,
+            &turn_identity,
+            live_managed_turn_matches,
+            || {
+                crate::services::claude_tui::input::send_compact_while_busy(
+                    &pane.tmux_session_name,
+                )
+            },
+        );
         match outcome {
             None => tracing::debug!(
                 tmux_session_name = %pane.tmux_session_name,
@@ -501,8 +512,7 @@ mod tests {
     fn active_usage_missing_model_or_provenance_does_not_create_pane_state() {
         let _guard = state_test_guard();
         assert!(!observe_active_usage(
-            42,
-            "tmux-4631",
+            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Claude,
             None,
             Some(560_000),
@@ -513,8 +523,7 @@ mod tests {
         ));
         assert!(panes_is_empty());
         assert!(!observe_active_usage(
-            42,
-            "tmux-4631",
+            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Claude,
             Some("routed-sonnet[1m]"),
             Some(560_000),
@@ -530,8 +539,7 @@ mod tests {
     fn active_usage_rejects_partial_usage_before_creating_pane_state() {
         let _guard = state_test_guard();
         assert!(!observe_active_usage(
-            42,
-            "tmux-4631",
+            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Claude,
             Some("routed-sonnet[1m]"),
             Some(560_000),
@@ -547,8 +555,7 @@ mod tests {
     fn active_usage_non_claude_provider_does_not_create_pane_state() {
         let _guard = state_test_guard();
         assert!(!observe_active_usage(
-            42,
-            "tmux-4631",
+            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
             &ProviderKind::Codex,
             Some("routed-sonnet[1m]"),
             Some(560_000),
@@ -710,64 +717,78 @@ mod tests {
         assert!(!pane_still_disarmed_for_send(&pane, generation, threshold));
     }
 
-    /// Lock-discipline + pre-send-recheck integration. Proves (a) the composer
-    /// lock — not the leaf state lock — serializes the queued worker (it cannot
-    /// validate or send until the held composer lock releases), and (b) a teardown
-    /// that lands while the worker is queued makes the pre-send recheck bail with
-    /// zero sends. Reverting the recheck lets the worker send after teardown
-    /// (sends == 1, outcome != None). Holding the leaf lock across `submit`
-    /// instead of the composer lock would let the worker run immediately, failing
-    /// the `recv_timeout(25ms).is_err()` assertion.
+    /// The worker is parked behind the physical pane's composer lock. While it is
+    /// parked, the live turn authority changes from the captured Managed identity
+    /// to ExternalInput or ExternalAdopted. The post-lock authority recheck must
+    /// reject the stale worker before the submit closure can mutate the composer.
     #[cfg(unix)]
     #[test]
-    fn queued_worker_revalidates_under_composer_lock_and_bails_on_teardown() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
+        use crate::services::discord::inflight::TurnSource;
+        use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
         use std::sync::{Arc, mpsc};
         use std::time::Duration;
 
-        let _guard = state_test_guard();
-        let pane = pane();
-        let threshold = threshold_for(1_000_000);
-        let generation = observe_and_decide(&pane, 500_000, threshold).expect("crossing injects");
-        let sends = Arc::new(AtomicUsize::new(0));
-        let (queued_tx, queued_rx) = mpsc::channel();
-        let (outcome_tx, outcome_rx) = mpsc::channel();
-        let worker_pane = pane.clone();
-        let worker_sends = Arc::clone(&sends);
+        for external_source in [TurnSource::ExternalInput, TurnSource::ExternalAdopted] {
+            let _guard = state_test_guard();
+            let pane = pane();
+            let threshold = threshold_for(1_000_000);
+            let generation =
+                observe_and_decide(&pane, 500_000, threshold).expect("crossing injects");
+            let expected_turn =
+                ManagedCompactTurnIdentity::test_fixture(42, &pane.tmux_session_name);
+            let live_source = Arc::new(AtomicU8::new(TurnSource::Managed as u8));
+            let sends = Arc::new(AtomicUsize::new(0));
+            let (queued_tx, queued_rx) = mpsc::channel();
+            let (outcome_tx, outcome_rx) = mpsc::channel();
+            let worker_pane = pane.clone();
+            let worker_live_source = Arc::clone(&live_source);
+            let worker_sends = Arc::clone(&sends);
 
-        crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
-            &pane.tmux_session_name,
-            || {
-                let worker = std::thread::spawn(move || {
-                    queued_tx.send(()).expect("signal queued compact worker");
-                    let outcome =
-                        submit_under_composer_lock(&worker_pane, generation, threshold, || {
-                            worker_sends.fetch_add(1, Ordering::SeqCst);
-                            CompactSubmitOutcome::AcceptedOrQueued
-                        });
-                    outcome_tx.send(outcome).expect("return compact outcome");
-                });
-                queued_rx
-                    .recv_timeout(Duration::from_millis(250))
-                    .expect("worker must queue behind the held composer lock");
-                assert!(
-                    outcome_rx.recv_timeout(Duration::from_millis(25)).is_err(),
-                    "the queued worker must not validate or send before the composer lock releases"
-                );
-                clear_for_tmux(&pane.tmux_session_name);
-                worker
-            },
-        )
-        .join()
-        .expect("compact worker thread");
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                &pane.tmux_session_name,
+                || {
+                    let worker = std::thread::spawn(move || {
+                        queued_tx.send(()).expect("signal queued compact worker");
+                        let outcome = submit_under_composer_lock(
+                            &worker_pane,
+                            generation,
+                            threshold,
+                            &expected_turn,
+                            |_| {
+                                worker_live_source.load(Ordering::SeqCst)
+                                    == TurnSource::Managed as u8
+                            },
+                            || {
+                                worker_sends.fetch_add(1, Ordering::SeqCst);
+                                CompactSubmitOutcome::AcceptedOrQueued
+                            },
+                        );
+                        outcome_tx.send(outcome).expect("return compact outcome");
+                    });
+                    queued_rx
+                        .recv_timeout(Duration::from_millis(250))
+                        .expect("worker must queue behind the held composer lock");
+                    assert!(outcome_rx.recv_timeout(Duration::from_millis(25)).is_err());
+                    live_source.store(external_source as u8, Ordering::SeqCst);
+                    worker
+                },
+            )
+            .join()
+            .expect("compact worker thread");
 
-        assert_eq!(
-            outcome_rx
-                .recv_timeout(Duration::from_millis(250))
-                .expect("worker outcome"),
-            None
-        );
-        assert_eq!(sends.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                outcome_rx.recv_timeout(Duration::from_millis(250)).unwrap(),
+                None,
+                "{external_source:?} must reject the queued worker"
+            );
+            assert_eq!(
+                sends.load(Ordering::SeqCst),
+                0,
+                "{external_source:?} must cause zero composer mutations"
+            );
+            clear_for_tmux(&pane.tmux_session_name);
+        }
     }
 
     /// Observable retry: a non-confirmed send (`PreMutationRefused` or
@@ -832,8 +853,7 @@ mod tests {
         let _guard = state_test_guard();
         let pane = pane();
         maybe_inject_compact(
-            pane.channel_id,
-            &pane.tmux_session_name,
+            ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
             &ProviderKind::Codex,
             600_000,
             Some(1_000_000),
@@ -842,8 +862,7 @@ mod tests {
         );
         assert!(armed_state(&pane).is_none());
         maybe_inject_compact(
-            pane.channel_id,
-            &pane.tmux_session_name,
+            ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
             &ProviderKind::Claude,
             600_000,
             None,
@@ -852,8 +871,7 @@ mod tests {
         );
         assert!(armed_state(&pane).is_none());
         maybe_inject_compact(
-            pane.channel_id,
-            &pane.tmux_session_name,
+            ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
             &ProviderKind::Claude,
             600_000,
             Some(1_000_000),
@@ -863,19 +881,4 @@ mod tests {
         assert!(armed_state(&pane).is_none());
     }
 
-    /// Empty tmux session names are ignored (no flag entry created).
-    #[test]
-    fn blank_tmux_session_name_is_ignored() {
-        let _guard = state_test_guard();
-        maybe_inject_compact(
-            42,
-            "   ",
-            &ProviderKind::Claude,
-            600_000,
-            Some(1_000_000),
-            50,
-            300_000,
-        );
-        assert!(panes_is_empty());
-    }
 }

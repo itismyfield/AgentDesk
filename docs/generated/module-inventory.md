@@ -377,11 +377,12 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4308 | 2953 | 1355 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4306 | 2951 | 1355 | giant-file |
+| `services::claude::active_usage` | `src/services/claude/active_usage.rs` | 58 | 58 | 0 |  |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_command` | `src/services/claude_command.rs` | 956 | 465 | 491 |  |
 | `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
-| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 722 | 369 | 353 |  |
+| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 884 | 437 | 447 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
@@ -435,7 +436,8 @@
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 862 | 354 | 508 |  |
 | `services::codex_tui::warm_followup` | `src/services/codex_tui/warm_followup.rs` | 730 | 515 | 215 |  |
 | `services::cswap` | `src/services/cswap.rs` | 887 | 552 | 335 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 5639 | 4169 | 1470 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 5640 | 4170 | 1470 | giant-file |
+| `services::discord::compact_turn_authority` | `src/services/discord/compact_turn_authority.rs` | 67 | 67 | 0 |  |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 910 | 843 | 67 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1078 | 651 | 427 |  |
@@ -859,10 +861,12 @@
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 80 | 80 | 0 |  |
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 301 | 144 | 157 |  |
 | `services::discord::turn_bridge::status_panel` | `src/services/discord/turn_bridge/status_panel.rs` | 678 | 678 | 0 |  |
-| `services::discord::turn_bridge::stream_loop` | `src/services/discord/turn_bridge/stream_loop.rs` | 975 | 975 | 0 |  |
-| `services::discord::turn_bridge::stream_loop::content_arms` | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` | 629 | 629 | 0 |  |
+| `services::discord::turn_bridge::stream_loop` | `src/services/discord/turn_bridge/stream_loop.rs` | 944 | 944 | 0 |  |
+| `services::discord::turn_bridge::stream_loop::content_arms` | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` | 626 | 579 | 47 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms::provider_error_presentation` | `src/services/discord/turn_bridge/stream_loop/content_arms/provider_error_presentation.rs` | 95 | 42 | 53 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification` | `src/services/discord/turn_bridge/stream_loop/content_arms/tui_error_classification.rs` | 199 | 24 | 175 |  |
+| `services::discord::turn_bridge::stream_loop::content_arms::types` | `src/services/discord/turn_bridge/stream_loop/content_arms/types.rs` | 100 | 100 | 0 |  |
+| `services::discord::turn_bridge::stream_loop::message_conversion` | `src/services/discord/turn_bridge/stream_loop/message_conversion.rs` | 49 | 49 | 0 |  |
 | `services::discord::turn_bridge::stream_loop::tool_arms` | `src/services/discord/turn_bridge/stream_loop/tool_arms.rs` | 684 | 684 | 0 |  |
 | `services::discord::turn_bridge::stream_receiver` | `src/services/discord/turn_bridge/stream_receiver.rs` | 109 | 64 | 45 |  |
 | `services::discord::turn_bridge::stream_tick` | `src/services/discord/turn_bridge/stream_tick.rs` | 908 | 787 | 121 |  |

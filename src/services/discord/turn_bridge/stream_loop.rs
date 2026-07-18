@@ -29,6 +29,7 @@ use tool_arms::{
 };
 
 mod content_arms;
+mod message_conversion;
 mod tool_arms;
 
 pub(super) struct StreamLoopContext {
@@ -376,57 +377,8 @@ pub(super) async fn run_stream_loop(
                         | StreamMessage::Error { .. }
                         | StreamMessage::StatusUpdate { .. }
                         | StreamMessage::StatusEvents { .. }) => {
-                            let message = match content_message {
-                                StreamMessage::RetryBoundary => {
-                                    StreamContentArmMessage::RetryBoundary
-                                }
-                                StreamMessage::ActiveUsageSnapshot {
-                                    model,
-                                    input_tokens,
-                                    cache_create_tokens,
-                                    cache_read_tokens,
-                                } => StreamContentArmMessage::ActiveUsageSnapshot {
-                                    model,
-                                    input_tokens,
-                                    cache_create_tokens,
-                                    cache_read_tokens,
-                                },
-                                StreamMessage::Init {
-                                    session_id,
-                                    raw_session_id,
-                                } => StreamContentArmMessage::Init {
-                                    session_id,
-                                    raw_session_id,
-                                },
-                                StreamMessage::Text { content } => {
-                                    StreamContentArmMessage::Text { content }
-                                }
-                                StreamMessage::Thinking { summary } => {
-                                    StreamContentArmMessage::Thinking { summary }
-                                }
-                                StreamMessage::Done { result, session_id } => {
-                                    StreamContentArmMessage::Done { result, session_id }
-                                }
-                                StreamMessage::Error {
-                                    message, stderr, ..
-                                } => StreamContentArmMessage::Error { message, stderr },
-                                StreamMessage::StatusUpdate {
-                                    input_tokens,
-                                    cache_create_tokens,
-                                    cache_read_tokens,
-                                    output_tokens,
-                                    ..
-                                } => StreamContentArmMessage::StatusUpdate {
-                                    input_tokens,
-                                    cache_create_tokens,
-                                    cache_read_tokens,
-                                    output_tokens,
-                                },
-                                StreamMessage::StatusEvents { events } => {
-                                    StreamContentArmMessage::StatusEvents { events }
-                                }
-                                _ => unreachable!("content-message pattern must stay exhaustive"),
-                            };
+                            let message = message_conversion::into_content_message(content_message)
+                                .expect("content-message pattern must stay exhaustive");
                             let outcome = handle_stream_content_message(
                                 message,
                                 StreamContentArmContext {

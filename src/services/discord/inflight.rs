@@ -553,7 +553,7 @@ pub(super) fn load_inflight_state(
 /// Load a single inflight state without compatibility backfills or cleanup.
 ///
 /// Use this for diagnostic/read-only probes that must not mutate sidecar state.
-pub(super) fn load_inflight_state_read_only(
+pub(in crate::services::discord) fn load_inflight_state_read_only(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Option<InflightTurnState> {
