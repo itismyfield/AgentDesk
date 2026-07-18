@@ -1250,7 +1250,7 @@ mod pg_tests {
             "claude",
             "ch-observe-local",
             "leader-1",
-            "active",
+            "turn_active",
         )
         .await;
 
@@ -1265,13 +1265,12 @@ mod pg_tests {
                 outcome: ObservedIntakeOutcome::WouldKeepLocalExistingOwner
             }
         );
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1",
-        )
-        .bind("ch-observe-local")
-        .fetch_one(&pool)
-        .await
-        .expect("count");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-observe-local")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
         assert_eq!(count, 0);
 
         pool.close().await;
@@ -1289,7 +1288,7 @@ mod pg_tests {
             "claude",
             "ch-observe-foreign",
             "worker-owner",
-            "active",
+            "turn_active",
         )
         .await;
 
@@ -1306,13 +1305,12 @@ mod pg_tests {
                 }
             }
         );
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1",
-        )
-        .bind("ch-observe-foreign")
-        .fetch_one(&pool)
-        .await
-        .expect("count");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-observe-foreign")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
         assert_eq!(count, 0);
 
         pool.close().await;
@@ -1329,7 +1327,7 @@ mod pg_tests {
             "claude",
             "ch-observe-stale",
             "stale-owner",
-            "active",
+            "turn_active",
         )
         .await;
 
@@ -1348,13 +1346,12 @@ mod pg_tests {
                 }
             }
         );
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1",
-        )
-        .bind("ch-observe-stale")
-        .fetch_one(&pool)
-        .await
-        .expect("count");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-observe-stale")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
         assert_eq!(count, 0);
 
         pool.close().await;
@@ -1372,7 +1369,7 @@ mod pg_tests {
             "claude",
             "ch-observe-upload",
             "worker-owner",
-            "active",
+            "turn_active",
         )
         .await;
         let mut ctx = ctx_for_channel(IntakeRoutingMode::Observe, "ch-observe-upload");
@@ -1389,13 +1386,12 @@ mod pg_tests {
                 }
             }
         );
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1",
-        )
-        .bind("ch-observe-upload")
-        .fetch_one(&pool)
-        .await
-        .expect("count");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-observe-upload")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
         assert_eq!(count, 0);
 
         pool.close().await;

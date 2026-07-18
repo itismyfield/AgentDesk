@@ -445,6 +445,19 @@
 
 ### Audited touches
 
+- #4548 lane-1 owner-aware Observe parity — **Leader-only routing decision,
+  worker-local execution, existing PG-backed visibility (not the dormant
+  generation-fenced PG-lease authority)**: the gateway leader's
+  `src/services/cluster/intake_router_hook.rs` now sends `Observe` through the
+  same live `sessions` owner classification, `worker_nodes` capability/liveness,
+  open `intake_outbox` route, attachment portability, `/node` override, and
+  preferred-label plan used by `Enforce`. Observe returns a structured shadow
+  outcome and `src/services/discord/router/intake_dispatch.rs` still admits the
+  turn locally, so provider/tmux execution remains worker-local and no outbox or
+  owner row is written. The reads use existing shared PostgreSQL state, but this
+  slice does not activate `owner_record.rs`, acquire a PG advisory lease, stamp
+  an owner generation, or add a leader side effect beyond the already
+  leader-owned gateway admission decision.
 - #4527 standby restart contract: both gateway and confirmed-standby providers
   register the same restart marker poller before starting their intake worker.
   The marker closes a provider-local atomic admission gate, returns an owned
