@@ -45,3 +45,11 @@ old_cap = 4168
 new_cap = 4169
 decompose_issue = 4486
 count = 1
+
+[[admission]]
+ratchet = "hotfile_ratchet"
+file = "src/services/discord/turn_bridge/mod.rs"
+old_cap = 997
+new_cap = 998
+decompose_issue = 4639
+count = 2
