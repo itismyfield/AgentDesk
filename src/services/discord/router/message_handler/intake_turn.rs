@@ -2670,11 +2670,7 @@ pub(super) async fn handle_text_message(
 
     // #3813 Phase 1a: provider input is about to be handed to the turn bridge.
     intake_latency.mark_input_written();
-    super::typing_indicator::spawn_native_typing_indicator(
-        shared,
-        http.clone(),
-        channel_id,
-    );
+    super::typing_indicator::spawn_native_typing_indicator(shared, http.clone(), channel_id);
     spawn_turn_bridge(
         shared.clone(),
         cancel_token.clone(),
