@@ -19,15 +19,6 @@ pub(crate) fn run() {
     );
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn startup_preflight_keeps_the_check_non_blocking_contract() {
-        let source = include_str!("startup_preflight.rs");
-
-        assert!(source.contains(
-            "let _ = crate::services::claude_tui::hook_bundle::run_codex_hook_startup_self_check"
-        ));
-        assert!(!source.contains("?;"));
-    }
-}
+// The startup stage is diagnostics-only. Changing it to propagate a `Result`
+// becomes a compile error instead of a runtime boot failure.
+const _: fn() = run;
