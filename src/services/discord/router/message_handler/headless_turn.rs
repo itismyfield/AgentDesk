@@ -1339,6 +1339,13 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         }
     });
 
+    if !inflight_state.silent_turn {
+        super::super::super::typing_indicator::spawn_native_typing_indicator(
+            shared,
+            ctx.http.clone(),
+            channel_id,
+        );
+    }
     spawn_turn_bridge(
         shared.clone(),
         cancel_token,
