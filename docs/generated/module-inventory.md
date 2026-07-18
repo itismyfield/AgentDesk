@@ -204,7 +204,7 @@
 | `kanban::transition_cleanup` | `src/kanban/transition_cleanup.rs` | 341 | 341 | 0 |  |
 | `kanban::transition_core` | `src/kanban/transition_core.rs` | 674 | 674 | 0 |  |
 | `launch` | `src/launch.rs` | 67 | 67 | 0 |  |
-| `lib` | `src/lib.rs` | 187 | 187 | 0 |  |
+| `lib` | `src/lib.rs` | 259 | 259 | 0 |  |
 | `logging` | `src/logging.rs` | 554 | 382 | 172 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 35 | 35 | 0 |  |
 | `pipeline` | `src/pipeline.rs` | 1517 | 1383 | 134 | giant-file |

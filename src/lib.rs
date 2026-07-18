@@ -146,9 +146,81 @@ mod services;
 /// }
 /// ```
 ///
+/// The capability remains sealed through aliases, references, helpers, closures,
+/// and renamed imports as well:
+///
+/// ```compile_fail
+/// use agentdesk::ClaudeBinary;
+/// use std::process::Command as ProcessCommand;
+///
+/// type BinaryAlias = ClaudeBinary;
+///
+/// fn bypass_alias(binary: ClaudeBinary) {
+///     let alias: BinaryAlias = binary;
+///     let _raw_command = ProcessCommand::new(alias);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use agentdesk::ClaudeBinary;
+/// use std::process::Command as ProcessCommand;
+///
+/// fn bypass_reference(binary: ClaudeBinary) {
+///     let reference = &binary;
+///     let _raw_command = ProcessCommand::new(reference);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use agentdesk::ClaudeBinary;
+/// use std::process::Command as ProcessCommand;
+///
+/// fn helper(binary: ClaudeBinary) {
+///     let _raw_command = ProcessCommand::new(binary);
+/// }
+///
+/// fn bypass_helper(binary: ClaudeBinary) {
+///     helper(binary);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use agentdesk::ClaudeBinary;
+/// use std::process::Command as ProcessCommand;
+///
+/// fn bypass_closure(binary: ClaudeBinary) {
+///     let spawn = |candidate: ClaudeBinary| ProcessCommand::new(candidate);
+///     let _raw_command = spawn(binary);
+/// }
+/// ```
+///
+/// A renamed `Command` import does not provide an escape hatch:
+///
+/// ```compile_fail
+/// use agentdesk::ClaudeBinary;
+/// use std::process::Command as ProcessCommand;
+///
+/// fn bypass_renamed_command(binary: ClaudeBinary) {
+///     let _raw_command = ProcessCommand::new(binary);
+/// }
+/// ```
+
 /// `ClaudeBinary` intentionally does not implement `AsRef<OsStr>`, `Deref`,
 /// `Display`, or a public path getter. It can therefore be consumed only through
 /// guarded Claude launch APIs rather than passed directly to `Command::new`.
+///
+/// This capability is created at trusted Claude launch boundaries and consumed
+/// by the guarded launch builder; raw process construction is intentionally not
+/// part of its public API.
+///
+/// ```compile_fail
+/// use agentdesk::ClaudeBinary;
+/// use std::process::Command as ProcessCommand;
+///
+/// fn bypass_public_capability(binary: ClaudeBinary) {
+///     let _raw_command = ProcessCommand::new(binary);
+/// }
+/// ```
 pub use services::claude_command::ClaudeBinary;
 
 // Supervisor test hooks are intentionally retained for dispatch/runtime tests.
