@@ -11,6 +11,7 @@ use super::delivery::{deliver_outbound, first_raw_message_id};
 use super::message::{DiscordOutboundMessage, OutboundReferenceContext, OutboundTarget};
 use super::policy::DiscordOutboundPolicy;
 use super::result::DeliveryResult;
+use super::transport::{outbound_fingerprint, post_serenity_message_with_nonce};
 use super::{DiscordOutboundClient, shared_outbound_deduper};
 use crate::services::discord::{SharedData, rate_limit_wait};
 
@@ -29,6 +30,12 @@ pub(in crate::services::discord) async fn send_referenced_lifecycle_notice(
     semantic_event_id: String,
 ) -> Result<Option<MessageId>, String> {
     let client = SerenityReferenceOutboundClient { http, shared };
+    let nonce = referenced_lifecycle_notice_nonce(
+        channel_id,
+        reference_message_id,
+        &correlation_id,
+        &semantic_event_id,
+    );
     let msg = DiscordOutboundMessage::new(
         correlation_id,
         semantic_event_id,
@@ -39,8 +46,24 @@ pub(in crate::services::discord) async fn send_referenced_lifecycle_notice(
     .with_reference(OutboundReferenceContext::reply_to(
         channel_id,
         reference_message_id,
-    ));
+    ))
+    .with_create_nonce(nonce, true);
     delivery_message_id(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)
+}
+
+fn referenced_lifecycle_notice_nonce(
+    channel_id: ChannelId,
+    reference_message_id: MessageId,
+    correlation_id: &str,
+    semantic_event_id: &str,
+) -> String {
+    outbound_fingerprint(&[
+        "referenced-lifecycle-notice",
+        &channel_id.get().to_string(),
+        &reference_message_id.get().to_string(),
+        correlation_id,
+        semantic_event_id,
+    ])
 }
 
 fn delivery_message_id(result: DeliveryResult) -> Result<Option<MessageId>, String> {
@@ -117,6 +140,33 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
             .map(|message| message.id.get().to_string())
             .map_err(dispatch_post_error)
     }
+
+    async fn post_message_with_reference_and_nonce(
+        &self,
+        target_channel: &str,
+        content: &str,
+        reference_channel: &str,
+        reference_message: &str,
+        nonce: &str,
+        enforce_nonce: bool,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = parse_channel_id(target_channel)?;
+        let reference_channel_id = parse_channel_id(reference_channel)?;
+        let reference_message_id = parse_message_id(reference_message).map_err(|error| {
+            DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error)
+        })?;
+        post_serenity_message_with_nonce(
+            &self.http,
+            &self.shared,
+            channel_id,
+            content,
+            Some((reference_channel_id, reference_message_id)),
+            nonce,
+            enforce_nonce,
+        )
+        .await
+        .map_err(dispatch_post_error)
+    }
 }
 
 fn parse_channel_id(raw: &str) -> Result<ChannelId, DispatchMessagePostError> {
@@ -146,4 +196,44 @@ fn dispatch_post_error(error: serenity::Error) -> DispatchMessagePostError {
         DispatchMessagePostErrorKind::Other
     };
     DispatchMessagePostError::new(kind, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::referenced_lifecycle_notice_nonce;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+
+    #[test]
+    fn lifecycle_notice_nonce_is_stable_and_semantic_event_scoped() {
+        let channel_id = ChannelId::new(123);
+        let message_id = MessageId::new(456);
+        let first = referenced_lifecycle_notice_nonce(
+            channel_id,
+            message_id,
+            "intake-reaction-control:123:456",
+            "intake-reaction-control:123:456:queue_reaction_failed",
+        );
+        let retry = referenced_lifecycle_notice_nonce(
+            channel_id,
+            message_id,
+            "intake-reaction-control:123:456",
+            "intake-reaction-control:123:456:queue_reaction_failed",
+        );
+        let distinct_reason = referenced_lifecycle_notice_nonce(
+            channel_id,
+            message_id,
+            "intake-reaction-control:123:456",
+            "intake-reaction-control:123:456:queued_card_post_failed",
+        );
+
+        assert_eq!(
+            first, retry,
+            "retries across process-local dedupers need one nonce"
+        );
+        assert_ne!(
+            first, distinct_reason,
+            "different lifecycle reasons must not coalesce"
+        );
+        assert_eq!(first.len(), 16);
+    }
 }

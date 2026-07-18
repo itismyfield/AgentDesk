@@ -555,7 +555,7 @@
 | `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 53 | 53 | 0 |  |
 | `services::discord::outbound::confirmation` | `src/services/discord/outbound/confirmation.rs` | 65 | 65 | 0 |  |
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 248 | 248 | 0 |  |
-| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1387 | 737 | 650 |  |
+| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1433 | 737 | 696 |  |
 | `services::discord::outbound::delivery_frontier_probe` | `src/services/discord/outbound/delivery_frontier_probe.rs` | 75 | 75 | 0 |  |
 | `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2962 | 1326 | 1636 | giant-file |
 | `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1203 | 594 | 609 |  |
@@ -567,7 +567,7 @@
 | `services::discord::outbound::send_gate` | `src/services/discord/outbound/send_gate.rs` | 555 | 349 | 206 |  |
 | `services::discord::outbound::send_target` | `src/services/discord/outbound/send_target.rs` | 263 | 153 | 110 |  |
 | `services::discord::outbound::send_to_agent` | `src/services/discord/outbound/send_to_agent.rs` | 164 | 100 | 64 |  |
-| `services::discord::outbound::serenity_reference` | `src/services/discord/outbound/serenity_reference.rs` | 149 | 149 | 0 |  |
+| `services::discord::outbound::serenity_reference` | `src/services/discord/outbound/serenity_reference.rs` | 239 | 200 | 39 |  |
 | `services::discord::outbound::source_registry` | `src/services/discord/outbound/source_registry.rs` | 247 | 159 | 88 |  |
 | `services::discord::outbound::transport` | `src/services/discord/outbound/transport.rs` | 431 | 431 | 0 |  |
 | `services::discord::outbound::turn_output_controller` | `src/services/discord/outbound/turn_output_controller.rs` | 3519 | 1228 | 2291 | giant-file |
@@ -603,7 +603,7 @@
 | `services::discord::prompt_builder::section_dedupe` | `src/services/discord/prompt_builder/section_dedupe.rs` | 159 | 105 | 54 |  |
 | `services::discord::queue_dispatch` | `src/services/discord/queue_dispatch.rs` | 50 | 50 | 0 |  |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 2310 | 751 | 1559 |  |
-| `services::discord::queue_marker` | `src/services/discord/queue_marker.rs` | 759 | 223 | 536 |  |
+| `services::discord::queue_marker` | `src/services/discord/queue_marker.rs` | 763 | 223 | 540 |  |
 | `services::discord::queue_overflow_dlq` | `src/services/discord/queue_overflow_dlq.rs` | 210 | 127 | 83 |  |
 | `services::discord::queue_reactions` | `src/services/discord/queue_reactions.rs` | 37 | 25 | 12 |  |
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 251 | 251 | 0 |  |
@@ -666,9 +666,9 @@
 | `services::discord::router::intake_gate::busy_duplicate_notice` | `src/services/discord/router/intake_gate/busy_duplicate_notice.rs` | 55 | 27 | 28 |  |
 | `services::discord::router::intake_gate::component_events` | `src/services/discord/router/intake_gate/component_events.rs` | 41 | 41 | 0 |  |
 | `services::discord::router::intake_gate::gate` | `src/services/discord/router/intake_gate/gate.rs` | 155 | 102 | 53 |  |
-| `services::discord::router::intake_gate::queue_effects` | `src/services/discord/router/intake_gate/queue_effects.rs` | 1308 | 861 | 447 |  |
+| `services::discord::router::intake_gate::queue_effects` | `src/services/discord/router/intake_gate/queue_effects.rs` | 1345 | 870 | 475 |  |
 | `services::discord::router::intake_gate::stale_turn` | `src/services/discord/router/intake_gate/stale_turn.rs` | 633 | 283 | 350 |  |
-| `services::discord::router::intake_queue_transaction` | `src/services/discord/router/intake_queue_transaction.rs` | 1123 | 550 | 573 |  |
+| `services::discord::router::intake_queue_transaction` | `src/services/discord/router/intake_queue_transaction.rs` | 1170 | 550 | 620 |  |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 208 | 208 | 0 |  |
 | `services::discord::router::message_handler::attachments` | `src/services/discord/router/message_handler/attachments.rs` | 142 | 114 | 28 |  |
 | `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 87 | 87 | 0 |  |

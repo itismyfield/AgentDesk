@@ -594,21 +594,25 @@ mod tests {
     #[tokio::test]
     async fn persisted_v1_kickoff_promotion_clears_orphan_queue_marker() {
         let _root = scoped_runtime_root();
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        const QUEUED_GENERATION: u64 = 63;
+        const RESTARTED_GENERATION: u64 = 64;
+        Arc::get_mut(&mut shared)
+            .expect("unshared test state")
+            .restart
+            .current_generation = RESTARTED_GENERATION;
         let http = Arc::new(serenity::Http::new("Bot test-token"));
         let channel_id = ChannelId::new(100_000_000_000_197);
         let head = MessageId::new(100_000_000_000_198);
-        write_persisted_v1_queue(&shared, channel_id, head, shared.restart.current_generation);
+        let queued_generation = QUEUED_GENERATION;
+        write_persisted_v1_queue(&shared, channel_id, head, queued_generation);
 
         start_and_drain_kickoff_markers(
             &shared,
             &http,
             channel_id,
             head,
-            &[SourceMessageQueuedGeneration::new(
-                head,
-                shared.restart.current_generation,
-            )],
+            &[SourceMessageQueuedGeneration::new(head, queued_generation)],
         )
         .await;
 

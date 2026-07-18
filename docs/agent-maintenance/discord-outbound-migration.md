@@ -206,7 +206,7 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/services/discord/task_notification_delivery/gateway.rs` via `gateway/outbound_messages.rs` | durable task-notification cards | **migrated_v3**. Create uses the row's stable nonce with enforcement; edit returns a classified confirmed-missing result only for structured Discord `404/10008`. The PG card authority, not the process deduper, decides create/edit/replacement ownership. |
 | `src/services/discord/formatting/long_send_rollback.rs` via `http.rs` | durable task-response replies | **nonce-hardened required-reference compatibility path**. Sink and watcher share the exact `response_turn_key`; each physical reply chunk derives a distinct stable nonce and sets `enforce_nonce=true`. A retry after Discord POST success but response `sent`-CAS failure reconciles the returned message id instead of duplicating the reply. |
 | `src/services/discord/gateway.rs:400` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
-| `src/services/discord/router/intake_gate.rs` (`send_reaction_control_reply`) | reaction-control lifecycle replies | **migrated_v3**. Short fixed replies for queued-card POST fallback and duplicate stop now use referenced v3 lifecycle notices. Correlation = `intake-reaction-control:<channel_id>:<message_id>`, semantic = `intake-reaction-control:<channel_id>:<message_id>:<reason_key>`. |
+| `src/services/discord/outbound/reaction_control.rs` (`send_reaction_control_reply_http`) | reaction-control lifecycle replies | **migrated_v3 and nonce-hardened**. Queued-card POST and queue-reaction failure fallbacks use referenced v3 lifecycle notices. Correlation = `intake-reaction-control:<channel_id>:<message_id>`, semantic = `intake-reaction-control:<channel_id>:<message_id>:<reason_key>`; the same identity derives an enforced stable Discord create nonce for bounded replay suppression across process-local deduper restarts. |
 | `src/services/discord/monitoring_status.rs:115` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
 | `src/services/discord/meeting_orchestrator.rs:754, 796` (`meeting_outbound_message` / edit path) | meeting status / cancel / parse-error | **migrated_v3**. Stable meeting dedup metadata plus `OutboundOperation::Edit`. |
 | `src/services/routines/discord_log.rs:486, 531` (`deliver_or_update_discord_summary`) | routine Discord summary | **migrated_v3**. Uses direct v3 send/edit and disables semantic dedupe for repeated summary writes. |
@@ -401,9 +401,14 @@ button hits the manual outbound API, which is covered under §3.A
   `response_reply_nonce_reconciles_after_sent_cas_failure_and_lease_takeover_pg`
   pin per-chunk reply nonces, required references, and the POST-success / failed
   `sent`-CAS / expired-lease takeover boundary without a second physical reply.
-- `src/services/discord/outbound/reaction_control.rs`:
-  `reaction_control_reply_ids_are_stable_per_message_and_reason` verifies the
-  reaction-control lifecycle replies keep stable correlation and semantic ids.
+- `src/services/discord/outbound/reaction_control.rs`,
+  `src/services/discord/outbound/serenity_reference.rs`, and
+  `src/services/discord/outbound/delivery.rs`:
+  `reaction_control_reply_ids_are_stable_for_queued_card_failure`,
+  `lifecycle_notice_nonce_is_stable_and_semantic_event_scoped`, and
+  `v3_referenced_send_preserves_reference_and_dedupes` verify stable lifecycle
+  identity, reason-scoped enforced nonce reuse, and reference preservation across
+  a fresh process-local deduper retry.
 - `src/services/discord/turn_bridge/mod.rs`:
   `final_completion_delivery_stays_blocked_until_terminal_message_commits`
   verifies final completion delivery remains blocked until the terminal Discord
