@@ -56,7 +56,7 @@
 | `app_state` | `src/app_state.rs` | 47 | 47 | 0 |  |
 | `bootstrap` | `src/bootstrap.rs` | 93 | 93 | 0 |  |
 | `cli` | `src/cli/mod.rs` | 25 | 25 | 0 |  |
-| `cli::args` | `src/cli/args.rs` | 1570 | 972 | 598 |  |
+| `cli::args` | `src/cli/args.rs` | 1592 | 975 | 617 |  |
 | `cli::client` | `src/cli/client.rs` | 2722 | 2464 | 258 | giant-file |
 | `cli::client::runtime_config` | `src/cli/client/runtime_config.rs` | 55 | 23 | 32 |  |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1650 | 1650 | 0 | giant-file |
