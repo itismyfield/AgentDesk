@@ -9,7 +9,6 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
 use super::AppState;
-use crate::error::{AppError, AppResult, ErrorCode};
 use crate::db::meetings::{
     TranscriptEntry, UpsertMeetingParams, delete_meeting_pg, discard_all_issues_pg,
     discard_issue_pg, get_effective_rounds_pg, get_issue_url_pg, get_latest_summary_id_pg,
@@ -19,6 +18,7 @@ use crate::db::meetings::{
     persist_meeting_query_hashes_pg, replace_transcripts_pg, store_issue_url_pg,
     update_summary_transcript_pg, upsert_issue_repo_pg, upsert_meeting_record_pg,
 };
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::discord::meeting_artifact_store::UpsertMeetingBody;
 use crate::services::discord::{health, meeting, settings};
 use crate::services::github_issue_creation::{
@@ -517,7 +517,9 @@ fn apply_selection_reason_fallback(
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/round-table-meetings
-pub async fn list_meetings(State(state): State<AppState>) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+pub async fn list_meetings(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1153,7 +1155,11 @@ pub async fn upsert_meeting(
                 Json(json!({"ok": true, "meeting": meeting})),
             ))
         }
-        Ok(None) => return Err(AppError::internal("meeting was not persisted").with_code(ErrorCode::Database)),
+        Ok(None) => {
+            return Err(
+                AppError::internal("meeting was not persisted").with_code(ErrorCode::Database)
+            );
+        }
         Err(e) => return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database)),
     }
 }

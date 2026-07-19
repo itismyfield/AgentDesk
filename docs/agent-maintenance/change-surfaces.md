@@ -1706,7 +1706,7 @@
     `src/server/routes/docs/inventory/endpoints/`; keep new API-docs data in
     those child modules and preserve `scripts/check_api_docs_coverage.py`.
   - `src/server/routes/escalation.rs` (1379 lines; +3 from #4486 UtilityBotRole alias typing, mechanical/non-behavioral).
-  - `src/server/routes/meetings.rs` (1290 lines; SQL extracted to `src/db/meetings.rs` in #3570 slice 1; +24 from #3742 explicit shared GitHub-only issue creation outcomes).
+  - `src/server/routes/meetings.rs` (1245 lines; SQL extracted to `src/db/meetings.rs` in #3570 slice 1; +24 from #3742 explicit shared GitHub-only issue creation outcomes).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
     #3038 slice 1 and S1-relocated into a 26-line route shim delegating to
     `src/services/review_decision.rs` plus sub-1000-line service modules under
