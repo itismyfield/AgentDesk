@@ -195,8 +195,14 @@ mod tests {
         let err = ensure_valid_query("owner", 1).unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "repo must be in 'owner/name' form");
-        assert_eq!(err.to_json_value()["error"], "repo must be in 'owner/name' form");
-        assert_eq!(err.context().get("field").and_then(Value::as_str), Some("repo"));
+        assert_eq!(
+            err.to_json_value()["error"],
+            "repo must be in 'owner/name' form"
+        );
+        assert_eq!(
+            err.context().get("field").and_then(Value::as_str),
+            Some("repo")
+        );
     }
 
     #[test]
@@ -207,8 +213,14 @@ mod tests {
         let err = ensure_valid_query("owner/repo", 0).unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "pr must be a positive integer");
-        assert_eq!(err.to_json_value()["error"], "pr must be a positive integer");
-        assert_eq!(err.context().get("field").and_then(Value::as_str), Some("pr"));
+        assert_eq!(
+            err.to_json_value()["error"],
+            "pr must be a positive integer"
+        );
+        assert_eq!(
+            err.context().get("field").and_then(Value::as_str),
+            Some("pr")
+        );
     }
 
     #[test]
@@ -221,6 +233,9 @@ mod tests {
             .with_context("source", "gh");
         assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(err.to_json_value()["error"], "gh exploded");
-        assert_eq!(err.context().get("source").and_then(Value::as_str), Some("gh"));
+        assert_eq!(
+            err.context().get("source").and_then(Value::as_str),
+            Some("gh")
+        );
     }
 }
