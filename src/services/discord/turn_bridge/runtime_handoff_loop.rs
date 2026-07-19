@@ -595,7 +595,10 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     // to a tmux pane and is intentionally
                     // not stamped here.
                     let _ = session_name;
-                    let expected_identity = InflightTurnIdentity::from_state(&inflight_state);
+                    let expected_identity =
+                        crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                            &inflight_state,
+                        );
                     let expected_save_generation = inflight_state.save_generation;
                     let process_identity = crate::services::process::ProcessIdentity::capture(pid);
                     tmux_last_offset = Some(last_offset);
