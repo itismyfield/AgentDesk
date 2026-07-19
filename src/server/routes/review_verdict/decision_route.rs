@@ -1,12 +1,29 @@
 use axum::{Json, extract::State, http::StatusCode};
+use serde_json::Value;
 
 use super::super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 // #3037: `ReviewDecisionBody` relocated to the services layer so service-side
 // loopback callers no longer reach back into `crate::server`. axum `Json<T>`
 // extraction is location-independent; the handler references the services path.
 use crate::services::review_decision::ReviewDecisionBody;
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
+
+fn review_decision_error(status: StatusCode, response: Json<Value>) -> AppError {
+    let Value::Object(body) = response.0 else {
+        return AppError::new(status, ErrorCode::Dispatch, "review decision failed");
+    };
+    let message = body
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("review decision failed")
+        .to_string();
+    body.into_iter().filter(|(key, _)| key != "error").fold(
+        AppError::new(status, ErrorCode::Dispatch, message),
+        |error, (key, value)| error.with_context(key, value),
+    )
+}
 
 /// POST /api/reviews/decision
 ///
@@ -21,6 +38,12 @@ use crate::services::review_decision::ReviewDecisionBody;
 pub async fn submit_review_decision(
     State(state): State<AppState>,
     Json(body): Json<ReviewDecisionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    crate::services::review_decision::submit_review_decision(&state, body).await
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let (status, response) =
+        crate::services::review_decision::submit_review_decision(&state, body).await;
+    if status.is_success() {
+        Ok((status, response))
+    } else {
+        Err(review_decision_error(status, response))
+    }
 }

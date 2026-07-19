@@ -6,6 +6,7 @@ use axum::{
 use serde_json::json;
 
 use super::super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::provider::ProviderKind;
 // #3037: `SubmitVerdictBody` / `VerdictItem` relocated to the services layer so
 // service-side loopback callers no longer reach back into `crate::server`. axum
@@ -16,6 +17,21 @@ use crate::services::review_decision::SubmitVerdictBody;
 #[cfg(test)]
 const PREFLIGHT_SUPPRESS_FOLLOWUP_OUTBOX_HEADER: &str =
     "x-agentdesk-preflight-suppress-followup-outbox";
+
+fn verdict_error(status: StatusCode, body: serde_json::Value) -> AppError {
+    let serde_json::Value::Object(body) = body else {
+        return AppError::new(status, ErrorCode::Dispatch, "review verdict failed");
+    };
+    let message = body
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("review verdict failed")
+        .to_string();
+    body.into_iter().filter(|(key, _)| key != "error").fold(
+        AppError::new(status, ErrorCode::Dispatch, message),
+        |error, (key, value)| error.with_context(key, value),
+    )
+}
 
 fn request_suppresses_followup_outbox(headers: &HeaderMap) -> bool {
     #[cfg(test)]
@@ -258,16 +274,14 @@ pub async fn submit_verdict(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<SubmitVerdictBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     // #116: accept removed — it's a review-decision action, not a counter-model verdict.
     let valid_verdicts = ["pass", "improve", "reject", "rework", "approved"];
     if !valid_verdicts.contains(&body.overall.as_str()) {
-        return (
+        return Err(verdict_error(
             StatusCode::BAD_REQUEST,
-            Json(
-                json!({"error": format!("overall must be one of: {}", valid_verdicts.join(", "))}),
-            ),
-        );
+            json!({"error": format!("overall must be one of: {}", valid_verdicts.join(", "))}),
+        ));
     }
 
     let dispatch = match crate::dispatch::load_dispatch_row_with_backends(
@@ -276,16 +290,16 @@ pub async fn submit_verdict(
     ) {
         Ok(Some(dispatch)) => dispatch,
         Ok(None) => {
-            return (
+            return Err(verdict_error(
                 StatusCode::NOT_FOUND,
-                Json(json!({"error": "dispatch not found"})),
-            );
+                json!({"error": "dispatch not found"}),
+            ));
         }
         Err(error) => {
-            return (
+            return Err(verdict_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("load dispatch: {error}")})),
-            );
+                json!({"error": format!("load dispatch: {error}")}),
+            ));
         }
     };
 
@@ -299,18 +313,18 @@ pub async fn submit_verdict(
         {
             Some("review") => {} // allowed
             Some(dtype) => {
-                return (
+                return Err(verdict_error(
                     StatusCode::BAD_REQUEST,
-                    Json(json!({
+                    json!({
                         "error": format!("review-verdict only accepts 'review' dispatches, got '{}'", dtype)
-                    })),
-                );
+                    }),
+                ));
             }
             None => {
-                return (
+                return Err(verdict_error(
                     StatusCode::NOT_FOUND,
-                    Json(json!({"error": "dispatch not found"})),
-                );
+                    json!({"error": "dispatch not found"}),
+                ));
             }
         }
 
@@ -334,12 +348,12 @@ pub async fn submit_verdict(
             // Require provider field and normalize via ProviderKind.
             match &body.provider {
                 None => {
-                    return (
+                    return Err(verdict_error(
                         StatusCode::BAD_REQUEST,
-                        Json(json!({
+                        json!({
                             "error": "provider field is required for counter-model review verdicts"
-                        })),
-                    );
+                        }),
+                    ));
                 }
                 Some(raw_submitter) => {
                     let submitter = ProviderKind::from_str(raw_submitter);
@@ -349,39 +363,39 @@ pub async fn submit_verdict(
                     match submitter {
                         None => {
                             // Unknown/unsupported provider string
-                            return (
+                            return Err(verdict_error(
                                 StatusCode::BAD_REQUEST,
-                                Json(json!({
+                                json!({
                                     "error": format!(
                                         "unknown provider '{}' — expected a supported provider like 'claude', 'codex', 'gemini', 'opencode', or 'qwen'",
                                         raw_submitter
                                     )
-                                })),
-                            );
+                                }),
+                            ));
                         }
                         Some(ref s) if Some(s) == from_kind.as_ref() => {
                             // Same provider as implementer → self-review blocked
-                            return (
+                            return Err(verdict_error(
                                 StatusCode::BAD_REQUEST,
-                                Json(json!({
+                                json!({
                                     "error": format!(
                                         "self-review rejected: submitting provider '{}' matches implementing provider",
                                         s.as_str()
                                     )
-                                })),
-                            );
+                                }),
+                            ));
                         }
                         Some(ref s) if target_kind.is_some() && Some(s) != target_kind.as_ref() => {
                             // Known provider but doesn't match expected reviewer
-                            return (
+                            return Err(verdict_error(
                                 StatusCode::BAD_REQUEST,
-                                Json(json!({
+                                json!({
                                     "error": format!(
                                         "provider mismatch: expected '{}' but got '{}'",
                                         target_p, s.as_str()
                                     )
-                                })),
-                            );
+                                }),
+                            ));
                         }
                         _ => {} // Normalized cross-provider match → allowed
                     }
@@ -400,12 +414,12 @@ pub async fn submit_verdict(
         if let Some(submitted) = body.commit.as_deref()
             && !is_valid_commit_sha(submitted)
         {
-            return (
+            return Err(verdict_error(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
+                json!({
                     "error": "commit must be a lowercase git SHA matching ^[0-9a-f]{7,64}$"
-                })),
-            );
+                }),
+            ));
         }
 
         let stored_reviewed_commit: Option<String> = dispatch_context
@@ -416,15 +430,15 @@ pub async fn submit_verdict(
         match (&body.commit, &stored_reviewed_commit) {
             (Some(submitted), Some(stored)) => {
                 if submitted != stored {
-                    return (
+                    return Err(verdict_error(
                         StatusCode::BAD_REQUEST,
-                        Json(json!({
+                        json!({
                             "error": format!(
                                 "commit mismatch: submitted {} but dispatch was created for {}",
                                 submitted, stored
                             )
-                        })),
-                    );
+                        }),
+                    ));
                 }
                 Some(stored.clone())
             }
@@ -475,10 +489,10 @@ pub async fn submit_verdict(
     ) {
         Ok(n) => n,
         Err(e) => {
-            return (
+            return Err(verdict_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("update dispatch: {e}")})),
-            );
+                json!({"error": format!("update dispatch: {e}")}),
+            ));
         }
     };
 
@@ -501,7 +515,7 @@ pub async fn submit_verdict(
             Some("failed") => "dispatch already failed",
             _ => "dispatch not found",
         };
-        return (StatusCode::CONFLICT, Json(json!({"error": msg})));
+        return Err(verdict_error(StatusCode::CONFLICT, json!({"error": msg})));
     }
 
     // Find associated card
@@ -531,13 +545,13 @@ pub async fn submit_verdict(
                 Some(&["completed"]),
                 false,
             );
-            return (
+            return Err(verdict_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
+                json!({
                     "ok": false,
                     "error": format!("failed to write release marker: {e}"),
-                })),
-            );
+                }),
+            ));
         }
     }
 
@@ -611,7 +625,7 @@ pub async fn submit_verdict(
         emit_card_updated(&state, cid).await;
     }
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -619,7 +633,7 @@ pub async fn submit_verdict(
             "overall": body.overall,
             "card_id": card_id,
         })),
-    )
+    ))
 }
 
 #[cfg(test)]
