@@ -52,12 +52,13 @@ from pathlib import Path
 # call sites permitted under src/services/discord. Lower this as sites convert
 # to the identity-guarded variant; never raise it casually.
 #
-# #4259 PR-1 baseline = 29; PR-2a lowered to 26. Track decomposition
+# #4259 PR-1 baseline = 29; PR-2a lowered to 26; #4596 lowered to 25;
+# the post-loop-finalize slice lowered to 21. Track decomposition
 # (convert + lower per PR-2..N):
 #   turn_bridge/runtime_handoff_loop.rs .. 5  (#4596 converted ClaudeEAdapter)
 #   turn_bridge/stream_tick.rs .......... 5
 #   turn_bridge/stream_loop.rs .......... 2
-#   turn_bridge/post_loop_finalize.rs ... 4
+#   turn_bridge/post_loop_finalize.rs ... 0  (#4259 post-loop slice converted 4)
 #   turn_bridge/mod.rs (hotfile, solo) .. 1
 #   external (router/session/tui) ....... 8
 #     (headless_turn, intake_turn, provider_isolation, watchdog,
@@ -77,7 +78,7 @@ from pathlib import Path
 # helper) still (re)write identity-pinned `tmux_session_name`, beyond what the
 # output-restamp variant tolerates, so each needs per-flow session-name-stability
 # verification or an adoption-aware variant before converting.
-BASELINE = 25
+BASELINE = 21
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 

@@ -522,6 +522,7 @@ src/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   └── claude_e_stamp.rs
 │   │   │   │   ├── identity_gate.rs
+│   │   │   │   ├── post_loop_identity_guard_tests.rs
 │   │   │   │   └── rebind_adoption.rs
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs

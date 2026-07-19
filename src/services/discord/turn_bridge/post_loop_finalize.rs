@@ -146,7 +146,10 @@ pub(super) async fn run_post_loop_finalize(
         || (rx_disconnected && tmux_handed_off && full_response.is_empty());
     if pending_long_running_open_after_state_save.take().is_some() {
         inflight_state.long_running_placeholder_active = false;
-        let _ = save_inflight_state(&inflight_state);
+        let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+            &inflight_state,
+            "turn_bridge::post_loop_finalize::pending_long_running_open",
+        );
     }
     if !cancelled && relay_owns_output_at_stream_end {
         let relay_owned_pending_retarget_matches_active =
@@ -163,7 +166,10 @@ pub(super) async fn run_post_loop_finalize(
             let _ = pending_long_running_retarget_after_state_save.take();
             shared_owned.ui.placeholder_controller.detach(&key);
             inflight_state.long_running_placeholder_active = false;
-            let _ = save_inflight_state(&inflight_state);
+            let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                &inflight_state,
+                "turn_bridge::post_loop_finalize::relay_owned_retarget",
+            );
         }
     }
     if !cancelled && !relay_owns_output_at_stream_end {
@@ -193,7 +199,10 @@ pub(super) async fn run_post_loop_finalize(
                     inflight_state.long_running_placeholder_active = false;
                 }
             }
-            let _ = save_inflight_state(&inflight_state);
+            let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                &inflight_state,
+                "turn_bridge::post_loop_finalize::terminal_placeholder_transition",
+            );
         }
         if transport_error || rx_disconnected {
             close_all_tracked_background_children(
@@ -225,7 +234,10 @@ pub(super) async fn run_post_loop_finalize(
             current_tool_line = Some(finalized);
             inflight_state.current_tool_line = current_tool_line.clone();
             inflight_state.prev_tool_status = prev_tool_status.clone();
-            let _ = save_inflight_state(&inflight_state);
+            let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                &inflight_state,
+                "turn_bridge::post_loop_finalize::orphaned_tool_status",
+            );
         }
     }
 
