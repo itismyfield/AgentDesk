@@ -61,7 +61,7 @@
 | `cli::client::runtime_config` | `src/cli/client/runtime_config.rs` | 55 | 23 | 32 |  |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1650 | 1650 | 0 | giant-file |
 | `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 1068 | 544 | 524 |  |
-| `cli::direct` | `src/cli/direct.rs` | 1758 | 1758 | 0 | giant-file |
+| `cli::direct` | `src/cli/direct.rs` | 1767 | 1767 | 0 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 472 | 249 | 223 |  |
 | `cli::discord_thread_create` | `src/cli/discord_thread_create.rs` | 1468 | 415 | 1053 |  |
 | `cli::discord_thread_create_lock` | `src/cli/discord_thread_create_lock.rs` | 669 | 611 | 58 |  |

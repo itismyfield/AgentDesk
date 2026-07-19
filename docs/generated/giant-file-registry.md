@@ -45,7 +45,7 @@
 | --- | ---: |
 | `src/cli/client.rs` | 2464 |
 | `src/cli/dcserver.rs` | 1650 |
-| `src/cli/direct.rs` | 1758 |
+| `src/cli/direct.rs` | 1767 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
 | `src/cli/migrate/apply.rs` | 3237 |
