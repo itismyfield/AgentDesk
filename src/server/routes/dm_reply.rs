@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::error::{AppError, AppResult};
 use crate::services::discord_dm_reply_store::register_pending_dm_reply_db;
 
 #[derive(Deserialize)]
@@ -22,15 +23,14 @@ pub struct RegisterRequest {
 pub async fn register_handler(
     State(state): State<AppState>,
     Json(body): Json<RegisterRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let source_agent = body.source_agent.trim().to_string();
     let user_id = body.user_id.trim().to_string();
 
     if source_agent.is_empty() || user_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "source_agent and user_id are required"})),
-        );
+        return Err(AppError::bad_request(
+            "source_agent and user_id are required",
+        ));
     }
 
     let channel_id = body.channel_id.as_deref().map(|s| s.trim().to_string());
@@ -53,8 +53,8 @@ pub async fn register_handler(
             tracing::info!(
                 "  [{ts}] [HTTP] dmReply.register -> user={user_id} agent={source_agent} (id={id})"
             );
-            (StatusCode::OK, Json(json!({"ok": true, "id": id})))
+            Ok((StatusCode::OK, Json(json!({"ok": true, "id": id}))))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
+        Err(e) => Err(AppError::internal(e)),
     }
 }
