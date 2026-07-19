@@ -430,8 +430,11 @@ pub(crate) async fn load_cancel_turn_session(
                 ca.requested_provider,
                 s.instance_id,
                 CASE
-                  WHEN COALESCE(s.thread_channel_id, '') = $1 THEN 0
-                  WHEN s.session_key LIKE '%' || $1 || '%' THEN 1
+                  WHEN COALESCE(s.thread_channel_id, '') = $1
+                    OR COALESCE(s.channel_id, '') = $1 THEN 0
+                  WHEN s.session_key LIKE '%' || $1 || '%'
+                    AND s.thread_channel_id IS NULL
+                    AND s.channel_id IS NULL THEN 1
                   WHEN ca.requested_provider IS NOT NULL
                        AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
                   ELSE 3
@@ -441,7 +444,12 @@ pub(crate) async fn load_cancel_turn_session(
          WHERE s.status = 'turn_active'
            AND (
              COALESCE(s.thread_channel_id, '') = $1
-             OR s.session_key LIKE '%' || $1 || '%'
+             OR COALESCE(s.channel_id, '') = $1
+             OR (
+               s.session_key LIKE '%' || $1 || '%'
+               AND s.thread_channel_id IS NULL
+               AND s.channel_id IS NULL
+             )
              OR (
                ca.agent_id IS NOT NULL
                AND (
