@@ -869,7 +869,7 @@
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 301 | 144 | 157 |  |
 | `services::discord::turn_bridge::status_panel` | `src/services/discord/turn_bridge/status_panel.rs` | 678 | 678 | 0 |  |
 | `services::discord::turn_bridge::stream_loop` | `src/services/discord/turn_bridge/stream_loop.rs` | 944 | 944 | 0 |  |
-| `services::discord::turn_bridge::stream_loop::content_arms` | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` | 635 | 584 | 52 |  |
+| `services::discord::turn_bridge::stream_loop::content_arms` | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` | 635 | 583 | 52 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms::provider_error_presentation` | `src/services/discord/turn_bridge/stream_loop/content_arms/provider_error_presentation.rs` | 95 | 42 | 53 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification` | `src/services/discord/turn_bridge/stream_loop/content_arms/tui_error_classification.rs` | 199 | 24 | 175 |  |
 | `services::discord::turn_bridge::stream_loop::content_arms::types` | `src/services/discord/turn_bridge/stream_loop/content_arms/types.rs` | 100 | 100 | 0 |  |
