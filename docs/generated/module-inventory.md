@@ -239,7 +239,7 @@
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 554 | 554 | 0 |  |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 281 | 178 | 103 |  |
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 195 | 195 | 0 |  |
-| `server::routes::automation_candidates` | `src/server/routes/automation_candidates.rs` | 330 | 330 | 0 |  |
+| `server::routes::automation_candidates` | `src/server/routes/automation_candidates.rs` | 320 | 320 | 0 |  |
 | `server::routes::claude_accounts_api` | `src/server/routes/claude_accounts_api.rs` | 182 | 182 | 0 |  |
 | `server::routes::cluster` | `src/server/routes/cluster.rs` | 451 | 451 | 0 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 | 180 | 0 |  |
@@ -298,7 +298,7 @@
 | `server::routes::pr_summary` | `src/server/routes/pr_summary.rs` | 241 | 142 | 99 |  |
 | `server::routes::prompt_manifest_retention` | `src/server/routes/prompt_manifest_retention.rs` | 57 | 57 | 0 |  |
 | `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 386 | 386 | 0 |  |
-| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 447 | 398 | 49 |  |
+| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 430 | 381 | 49 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 815 | 502 | 313 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | 1260 | 0 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 14 | 14 | 0 |  |
