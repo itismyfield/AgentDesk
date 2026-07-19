@@ -116,8 +116,7 @@ pub async fn memory_recall(
     }
 
     let fragments = local_recall_pg(&state, &body).await.map_err(|error| {
-        AppError::internal(format!("local recall failed: {error}"))
-            .with_code(ErrorCode::Database)
+        AppError::internal(format!("local recall failed: {error}")).with_code(ErrorCode::Database)
     })?;
 
     let response = json!({
@@ -173,8 +172,7 @@ pub async fn memory_remember(
     }
 
     let id = local_remember_pg(&state, &body).await.map_err(|error| {
-        AppError::internal(format!("local remember failed: {error}"))
-            .with_code(ErrorCode::Database)
+        AppError::internal(format!("local remember failed: {error}")).with_code(ErrorCode::Database)
     })?;
     Ok((
         StatusCode::OK,
@@ -245,10 +243,8 @@ pub async fn memory_forget(
                 "detected_backend": backend.as_str(),
             })),
         )),
-        Err(error) => Err(
-            AppError::internal(format!("local forget failed: {error}"))
-                .with_code(ErrorCode::Database),
-        ),
+        Err(error) => Err(AppError::internal(format!("local forget failed: {error}"))
+            .with_code(ErrorCode::Database)),
     }
 }
 

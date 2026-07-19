@@ -290,10 +290,7 @@ pub async fn set_repo_pipeline(
         .set_repo_pipeline(&id, body.config.as_ref())
         .await
         .map_err(pipeline_override_error)?;
-    Ok((
-        StatusCode::OK,
-        Json(json!({"ok": true, "repo": id})),
-    ))
+    Ok((StatusCode::OK, Json(json!({"ok": true, "repo": id}))))
 }
 
 /// GET /api/pipeline/config/agent/:agent_id
