@@ -588,9 +588,7 @@ pub async fn update_decisions(
     }
 
     let Some(pg_pool) = state.pg_pool_ref() else {
-        return Err(
-            AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database)
-        );
+        return Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database));
     };
 
     let decisions = update_decisions_pg(pg_pool, &id, &body.decisions)
@@ -608,9 +606,7 @@ pub async fn recover_review_target(
     Json(body): Json<ReviewTargetRecoveryBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = state.pg_pool_ref() else {
-        return Err(
-            AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database)
-        );
+        return Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database));
     };
 
     let value = recover_review_target_pg(pg_pool, body)
@@ -625,9 +621,7 @@ pub async fn trigger_rework(
     Path(id): Path<String>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = state.pg_pool_ref() else {
-        return Err(
-            AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database)
-        );
+        return Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database));
     };
 
     let card_id = resolve_review_card_id_pg(pg_pool, &id)

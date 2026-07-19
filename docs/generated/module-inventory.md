@@ -305,7 +305,7 @@
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 56 | 56 | 0 |  |
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 14 | 14 | 0 |  |
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 702 | 638 | 64 |  |
-| `server::routes::reviews` | `src/server/routes/reviews.rs` | 760 | 671 | 89 |  |
+| `server::routes::reviews` | `src/server/routes/reviews.rs` | 733 | 644 | 89 |  |
 | `server::routes::routines` | `src/server/routes/routines.rs` | 252 | 154 | 98 |  |
 | `server::routes::routines::audit` | `src/server/routes/routines/audit.rs` | 190 | 115 | 75 |  |
 | `server::routes::routines::handlers` | `src/server/routes/routines/handlers.rs` | 501 | 501 | 0 |  |
@@ -315,7 +315,7 @@
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 13 | 13 | 0 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 91 | 91 | 0 |  |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 425 | 425 | 0 |  |
-| `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 684 | 684 | 0 |  |
+| `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 640 | 640 | 0 |  |
 | `server::routes::stats` | `src/server/routes/stats.rs` | 722 | 589 | 133 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 152 | 152 | 0 |  |
 | `server::routes::tests::preflight_harness::types` | `src/server/routes/tests/preflight_harness/types.rs` | 217 | 0 | 217 |  |
