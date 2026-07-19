@@ -6,59 +6,62 @@ use axum::{
 use serde_json::json;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::automation_candidate_materializer::{
     AutomationCandidateMaterializer, IterationResultInput, MaterializeCandidateInput,
     MaterializerError, PrepareWorktreeOutput,
 };
 
-fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
+fn pg_unavailable() -> AppError {
+    AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool not configured"})),
+        ErrorCode::Config,
+        "postgres pool not configured",
     )
 }
 
-fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<serde_json::Value>) {
+fn materializer_error_response(
+    error: MaterializerError,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     match error {
-        MaterializerError::CardNotFound => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "automation candidate card not found"})),
-        ),
-        MaterializerError::MissingProgram(msg) => (
+        MaterializerError::CardNotFound => {
+            Err(AppError::not_found("automation candidate card not found"))
+        }
+        MaterializerError::MissingProgram(msg) => Ok((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": msg, "code": "MISSING_PROGRAM_CONTRACT"})),
-        ),
-        MaterializerError::MissingChangedPathsReport => (
+        )),
+        MaterializerError::MissingChangedPathsReport => Ok((
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": "allowed_write_paths_used is required and must be non-empty",
                 "code": "MISSING_CHANGED_PATHS_REPORT",
             })),
-        ),
-        MaterializerError::AllowedPathsViolation { path } => (
+        )),
+        MaterializerError::AllowedPathsViolation { path } => Ok((
             StatusCode::FORBIDDEN,
             Json(json!({
                 "error": format!("path '{}' is not in allowed_write_paths", path),
                 "code": "ALLOWED_PATHS_VIOLATION",
                 "path": path,
             })),
-        ),
-        MaterializerError::DuplicateIteration => (
+        )),
+        MaterializerError::DuplicateIteration => Ok((
             StatusCode::CONFLICT,
             Json(json!({
                 "error": "iteration result already recorded for this card/iteration",
                 "code": "DUPLICATE_ITERATION",
             })),
-        ),
-        MaterializerError::InactiveLoopState { status } => (
+        )),
+        MaterializerError::InactiveLoopState { status } => Ok((
             StatusCode::CONFLICT,
             Json(json!({
                 "error": format!("automation candidate is not executable in status '{status}'"),
                 "code": "INACTIVE_AUTOMATION_CANDIDATE",
                 "status": status,
             })),
-        ),
-        MaterializerError::IterationOutOfSequence { expected, actual } => (
+        )),
+        MaterializerError::IterationOutOfSequence { expected, actual } => Ok((
             StatusCode::CONFLICT,
             Json(json!({
                 "error": format!("iteration out of sequence: expected {expected}, got {actual}"),
@@ -66,8 +69,8 @@ fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<se
                 "expected": expected,
                 "actual": actual,
             })),
-        ),
-        MaterializerError::IterationBudgetExceeded { max, actual } => (
+        )),
+        MaterializerError::IterationBudgetExceeded { max, actual } => Ok((
             StatusCode::CONFLICT,
             Json(json!({
                 "error": format!("iteration exceeds budget: max iteration {max}, got {actual}"),
@@ -75,15 +78,14 @@ fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<se
                 "max": max,
                 "actual": actual,
             })),
-        ),
-        MaterializerError::WorktreeError(msg) => (
+        )),
+        MaterializerError::WorktreeError(msg) => Ok((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error": msg, "code": "WORKTREE_ERROR"})),
-        ),
-        MaterializerError::Database(msg) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": msg})),
-        ),
+        )),
+        MaterializerError::Database(msg) => {
+            Err(AppError::internal(msg).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -96,9 +98,9 @@ fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<se
 pub async fn materialize_candidate(
     State(state): State<AppState>,
     Json(body): Json<MaterializeCandidateInput>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let materializer = AutomationCandidateMaterializer::new(pool.clone());
@@ -114,7 +116,7 @@ pub async fn materialize_candidate(
                     "start_ready": output.start_ready,
                 }),
             );
-            (
+            Ok((
                 if output.created {
                     StatusCode::CREATED
                 } else {
@@ -128,7 +130,7 @@ pub async fn materialize_candidate(
                     "start_ready": output.start_ready,
                     "discriminator": output.discriminator,
                 })),
-            )
+            ))
         }
         Err(error) => materializer_error_response(error),
     }
@@ -142,23 +144,17 @@ pub async fn submit_iteration_result(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     Json(body): Json<IterationResultInput>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     if body.iteration < 1 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "iteration must be >= 1"})),
-        );
+        return Err(AppError::bad_request("iteration must be >= 1"));
     }
 
     if body.branch.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "branch is required"})),
-        );
+        return Err(AppError::bad_request("branch is required"));
     }
 
     let materializer = AutomationCandidateMaterializer::new(pool.clone());
@@ -174,7 +170,7 @@ pub async fn submit_iteration_result(
                     "child_card_id": output.child_card_id,
                 }),
             );
-            (
+            Ok((
                 StatusCode::CREATED,
                 Json(json!({
                     "record": output.record,
@@ -182,7 +178,7 @@ pub async fn submit_iteration_result(
                     "action": output.action,
                     "child_card_id": output.child_card_id,
                 })),
-            )
+            ))
         }
         Err(error) => materializer_error_response(error),
     }
@@ -194,18 +190,15 @@ pub async fn submit_iteration_result(
 pub async fn list_iterations(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let materializer = AutomationCandidateMaterializer::new(pool.clone());
     match materializer.list_iterations(&card_id).await {
-        Ok(records) => (StatusCode::OK, Json(json!({"iterations": records}))),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(records) => Ok((StatusCode::OK, Json(json!({"iterations": records})))),
+        Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
     }
 }
 
@@ -217,9 +210,9 @@ pub async fn list_iterations(
 pub async fn approve_candidate(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let materializer = AutomationCandidateMaterializer::new(pool.clone());
@@ -235,7 +228,7 @@ pub async fn approve_candidate(
                     "safe_for_auto_apply": output.side_effect_simulation.safe_for_auto_apply,
                 }),
             );
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({
                     "status": "approved",
@@ -245,7 +238,7 @@ pub async fn approve_candidate(
                     "next_action": output.next_action,
                     "side_effect_simulation": output.side_effect_simulation,
                 })),
-            )
+            ))
         }
         Err(error) => materializer_error_response(error),
     }
@@ -265,24 +258,21 @@ pub struct PrepareWorktreeRequest {
 pub async fn get_automation_inventory(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let materializer = AutomationCandidateMaterializer::new(pool.clone());
     match materializer.list_iterations(&card_id).await {
-        Ok(records) => (
+        Ok(records) => Ok((
             StatusCode::OK,
             Json(json!({
                 "card_id": card_id,
                 "iterations": records,
             })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        )),
+        Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
     }
 }
 
@@ -297,9 +287,9 @@ pub async fn prepare_worktree(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     Json(body): Json<PrepareWorktreeRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let materializer = AutomationCandidateMaterializer::new(pool.clone());
@@ -312,7 +302,7 @@ pub async fn prepare_worktree(
             branch,
             commit,
             created,
-        }) => (
+        }) => Ok((
             if created {
                 StatusCode::CREATED
             } else {
@@ -324,7 +314,7 @@ pub async fn prepare_worktree(
                 "commit": commit,
                 "created": created,
             })),
-        ),
+        )),
         Err(error) => materializer_error_response(error),
     }
 }

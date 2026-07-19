@@ -13,6 +13,7 @@ use serde_json::json;
 use sqlx::Row;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 // ── GET /api/channels/:id/queue ─────────────────────────────────
 
@@ -104,15 +105,12 @@ pub async fn list_pending_dispatches(State(state): State<AppState>) -> Json<serd
 pub async fn cancel_dispatch(
     State(state): State<AppState>,
     Path(dispatch_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let body = state
         .queue_service()
         .cancel_dispatch(state.health_registry.as_ref(), &dispatch_id)
-        .await
-    {
-        Ok(body) => (StatusCode::OK, Json(body)),
-        Err(error) => error.into_json_response(),
-    }
+        .await?;
+    Ok((StatusCode::OK, Json(body)))
 }
 
 // ── POST /api/dispatches/cancel-all ─────────────────────────────
@@ -127,15 +125,12 @@ pub struct CancelAllBody {
 pub async fn cancel_all_dispatches(
     State(state): State<AppState>,
     Json(body): Json<CancelAllBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let response = state
         .queue_service()
         .cancel_all_dispatches(body.kanban_card_id.as_deref(), body.agent_id.as_deref())
-        .await
-    {
-        Ok(response) => (StatusCode::OK, Json(response)),
-        Err(error) => error.into_json_response(),
-    }
+        .await?;
+    Ok((StatusCode::OK, Json(response)))
 }
 
 // ── POST /api/turns/:channel_id/cancel ──────────────────────────
@@ -200,10 +195,10 @@ pub async fn cancel_turn(
     Path(channel_id): Path<String>,
     Query(query): Query<CancelTurnQuery>,
     body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let force = resolve_cancel_force(query.force, &body);
     let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
-    match state
+    let response = state
         .queue_service()
         .cancel_turn(
             state.health_registry.as_ref(),
@@ -212,11 +207,8 @@ pub async fn cancel_turn(
             &headers,
             &forward_context,
         )
-        .await
-    {
-        Ok(response) => (StatusCode::OK, Json(response)),
-        Err(error) => error.into_json_response(),
-    }
+        .await?;
+    Ok((StatusCode::OK, Json(response)))
 }
 
 // ── GET /api/channels/:id/watcher-state ─────────────────────────
@@ -248,37 +240,32 @@ pub async fn cancel_turn(
 pub async fn get_watcher_state(
     State(state): State<AppState>,
     Path(channel_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let channel_num: u64 = match channel_id.parse() {
-        Ok(n) => n,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "channel_id must be a numeric Discord channel ID"})),
-            );
-        }
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let channel_num: u64 = channel_id
+        .parse()
+        .map_err(|_| AppError::bad_request("channel_id must be a numeric Discord channel ID"))?;
 
-    let Some(registry) = state.health_registry.as_ref() else {
-        return (
+    let registry = state.health_registry.as_ref().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "health registry unavailable in this runtime"})),
-        );
-    };
+            ErrorCode::Config,
+            "health registry unavailable in this runtime",
+        )
+    })?;
 
     match registry.snapshot_watcher_state(channel_num).await {
         Some(snapshot) => {
             let body = serde_json::to_value(&snapshot)
                 .unwrap_or_else(|_| json!({"error": "failed to serialize watcher snapshot"}));
-            (StatusCode::OK, Json(body))
+            Ok((StatusCode::OK, Json(body)))
         }
-        None => (
+        None => Ok((
             StatusCode::NOT_FOUND,
             Json(json!({
                 "error": "no watcher, relay-coord, or inflight state for this channel",
                 "channel_id": channel_id,
             })),
-        ),
+        )),
     }
 }
 
@@ -304,16 +291,10 @@ pub async fn extend_turn_timeout(
     State(state): State<AppState>,
     Path(channel_id): Path<String>,
     Json(body): Json<ExtendTimeoutBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let channel_num: u64 = match channel_id.parse() {
-        Ok(n) => n,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "channel_id must be a numeric Discord channel ID"})),
-            );
-        }
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let channel_num: u64 = channel_id
+        .parse()
+        .map_err(|_| AppError::bad_request("channel_id must be a numeric Discord channel ID"))?;
 
     match crate::services::discord::extend_watchdog_deadline(
         channel_num,
@@ -326,7 +307,7 @@ pub async fn extend_turn_timeout(
             let now_ms = chrono::Utc::now().timestamp_millis();
             let remaining_min = (extension.new_deadline_ms - now_ms) / 1000 / 60;
             let max_remaining_min = (extension.max_deadline_ms - now_ms) / 1000 / 60;
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({
                     "ok": true,
@@ -346,18 +327,20 @@ pub async fn extend_turn_timeout(
                     "extension_total_secs_limit": extension.extension_total_secs_limit,
                     "clamped": extension.clamped,
                 })),
-            )
+            ))
         }
         Err(
             crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::MailboxUnavailable,
-        ) => (
+        ) => Ok((
             StatusCode::NOT_FOUND,
             Json(json!({"error": "no mailbox for channel", "channel_id": channel_id})),
-        ),
-        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::NoActiveTurn) => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "no active turn for channel", "channel_id": channel_id})),
-        ),
+        )),
+        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::NoActiveTurn) => {
+            Ok((
+                StatusCode::CONFLICT,
+                Json(json!({"error": "no active turn for channel", "channel_id": channel_id})),
+            ))
+        }
     }
 }
 
