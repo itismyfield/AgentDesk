@@ -40,7 +40,9 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use crate::services::claude_compact_context::{CompactThreshold, compact_threshold};
+use crate::services::claude_compact_context::{
+    CLAUDE_AUTO_COMPACT_MAX_TOKENS, CompactThreshold, TurnWindowResolution, compact_threshold,
+};
 use crate::services::claude_tui::input::CompactSubmitOutcome;
 use crate::services::discord::{ManagedCompactTurnIdentity, live_managed_turn_matches};
 use crate::services::provider::ProviderKind;
@@ -68,6 +70,22 @@ struct PaneArmState {
     generation: u64,
     last_occupied: u64,
     last_window_tokens: u64,
+    last_window_source: Option<CompactWindowSource>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services) enum CompactWindowSource {
+    Proven,
+    FallbackMax,
+}
+
+impl CompactWindowSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Proven => "proven",
+            Self::FallbackMax => "fallback_max",
+        }
+    }
 }
 
 impl PaneArmState {
@@ -77,6 +95,7 @@ impl PaneArmState {
             generation: 0,
             last_occupied: 0,
             last_window_tokens: 0,
+            last_window_source: None,
         }
     }
 }
@@ -123,6 +142,15 @@ fn observe_and_decide(
     occupied: u64,
     threshold: CompactThreshold,
 ) -> Option<u64> {
+    observe_and_decide_with_source(pane, occupied, threshold, CompactWindowSource::Proven)
+}
+
+fn observe_and_decide_with_source(
+    pane: &CompactPaneKey,
+    occupied: u64,
+    threshold: CompactThreshold,
+    window_source: CompactWindowSource,
+) -> Option<u64> {
     let mut guard = COMPACT_TRIGGER_STATE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -135,15 +163,18 @@ fn observe_and_decide(
             .entry(pane.clone())
             .or_insert_with(PaneArmState::fresh);
         if entry.last_window_tokens != 0
-            && entry.last_window_tokens != threshold.actual_window_tokens
+            && (entry.last_window_tokens != threshold.actual_window_tokens
+                || entry.last_window_source != Some(window_source))
         {
-            // A model/window switch starts a distinct fill cycle. Invalidate the
-            // prior worker before this observation can consume a fresh generation.
+            // A model/window or proof-source switch starts a distinct fill cycle.
+            // Invalidate the prior worker before this observation can consume a
+            // fresh generation, including fallback-to-proven transitions at 1M.
             entry.armed = true;
             entry.generation = 0;
         }
         entry.last_occupied = occupied;
         entry.last_window_tokens = threshold.actual_window_tokens;
+        entry.last_window_source = Some(window_source);
         entry.armed
     };
     // Re-arm first, independent of the inject check: a post-compact occupancy
@@ -269,6 +300,19 @@ fn submit_under_composer_lock(
     )
 }
 
+fn trigger_window_for_resolution(
+    resolution: Option<TurnWindowResolution>,
+) -> Option<(u64, CompactWindowSource)> {
+    match resolution {
+        None => None,
+        Some(TurnWindowResolution::Proven(window)) => Some((window, CompactWindowSource::Proven)),
+        Some(TurnWindowResolution::UnprovenLaunchBound) => Some((
+            CLAUDE_AUTO_COMPACT_MAX_TOKENS,
+            CompactWindowSource::FallbackMax,
+        )),
+    }
+}
+
 /// Validate and forward one complete active Claude usage snapshot. Missing model,
 /// launch provenance, or any usage component fails closed before pane state exists.
 pub(in crate::services) fn observe_active_usage(
@@ -293,22 +337,40 @@ pub(in crate::services) fn observe_active_usage(
     else {
         return false;
     };
-    let actual_window_tokens = crate::services::claude_compact_context::context_window_for_turn(
+    let occupied = input_tokens
+        .saturating_add(cache_create_tokens)
+        .saturating_add(cache_read_tokens);
+    let resolution = crate::services::claude_compact_context::context_window_for_turn(
         tmux_session_name,
         Some(model),
     );
-    if actual_window_tokens.is_none() {
+    let Some((actual_window_tokens, window_source)) = trigger_window_for_resolution(resolution)
+    else {
+        tracing::debug!(
+            tmux_session_name,
+            model,
+            occupied,
+            "skipping Claude auto compact without launch provenance or model evidence"
+        );
         return false;
+    };
+    if window_source == CompactWindowSource::FallbackMax {
+        tracing::debug!(
+            tmux_session_name,
+            model,
+            occupied,
+            fallback_window_tokens = CLAUDE_AUTO_COMPACT_MAX_TOKENS,
+            "using conservative maximum-window fallback for Claude auto compact"
+        );
     }
-    maybe_inject_compact(
+    maybe_inject_compact_with_source(
         turn_identity,
         provider,
-        input_tokens
-            .saturating_add(cache_create_tokens)
-            .saturating_add(cache_read_tokens),
-        actual_window_tokens,
+        occupied,
+        Some(actual_window_tokens),
         compact_percent,
         lower_bound_tokens,
+        window_source,
     );
     true
 }
@@ -318,9 +380,9 @@ pub(in crate::services) fn observe_active_usage(
 /// the model-aware token threshold this fill cycle.
 ///
 /// `usage_tokens` is the observable occupancy (`context_occupancy_input_tokens`);
-/// `actual_window_tokens` is the launch-provenance-resolved Claude context window
-/// for this turn (`None` when the window cannot be proven — fail closed, never
-/// invent a native fallback). The percentage/lower-bound are combined into an
+/// `actual_window_tokens` is the launch-provenance-resolved trigger window for
+/// this turn: either an exact proven window or the conservative maximum-window
+/// bound selected by the caller. The percentage/lower-bound are combined into an
 /// absolute token threshold each turn, so a model/window change simply changes
 /// the number on the next turn.
 ///
@@ -336,16 +398,39 @@ pub(in crate::services) fn maybe_inject_compact(
     compact_percent: u64,
     lower_bound_tokens: u64,
 ) {
+    maybe_inject_compact_with_source(
+        turn_identity,
+        provider,
+        usage_tokens,
+        actual_window_tokens,
+        compact_percent,
+        lower_bound_tokens,
+        CompactWindowSource::Proven,
+    );
+}
+
+pub(in crate::services) fn maybe_inject_compact_with_source(
+    turn_identity: ManagedCompactTurnIdentity,
+    provider: &ProviderKind,
+    usage_tokens: u64,
+    actual_window_tokens: Option<u64>,
+    compact_percent: u64,
+    lower_bound_tokens: u64,
+    window_source: CompactWindowSource,
+) {
     if !matches!(provider, ProviderKind::Claude) {
         return;
     }
     let channel_id = turn_identity.channel_id();
     let tmux_session_name = turn_identity.tmux_session_name();
-    // A window this turn could not prove is fail-closed to no-inject (the caller
-    // already applied the model-aware [1m] same-family guard). Unresolvable
-    // window / zero-percent degrade safely WITHOUT touching the armed flag, just
-    // like main's `threshold_pct == 0` short-circuit.
+    // Callers map launch-bound but unproven windows to the conservative maximum.
+    // Missing provenance/model and zero-percent still degrade safely WITHOUT
+    // touching the armed flag, like main's `threshold_pct == 0` short-circuit.
     let Some(actual_window_tokens) = actual_window_tokens else {
+        tracing::debug!(
+            tmux_session_name,
+            "skipping Claude auto compact without a resolved trigger window"
+        );
         return;
     };
     let Some(threshold) =
@@ -357,7 +442,9 @@ pub(in crate::services) fn maybe_inject_compact(
         channel_id,
         tmux_session_name: tmux_session_name.to_string(),
     };
-    let Some(generation) = observe_and_decide(&pane, usage_tokens, threshold) else {
+    let Some(generation) =
+        observe_and_decide_with_source(&pane, usage_tokens, threshold, window_source)
+    else {
         return;
     };
 
@@ -383,6 +470,7 @@ pub(in crate::services) fn maybe_inject_compact(
                 tmux_session_name = %pane.tmux_session_name,
                 usage_tokens,
                 threshold_tokens = threshold.effective_tokens,
+                window_source = window_source.as_str(),
                 "Claude auto compact accepted or queued"
             ),
             Some(CompactSubmitOutcome::PreMutationRefused) => {
@@ -529,6 +617,134 @@ mod tests {
             &pane,
             new_generation,
             new_threshold
+        ));
+    }
+
+    /// Mutation guards: mapping a catalog miss back to `None` fails the active
+    /// usage assertions, while lowering the maximum fallback fires at 499K.
+    #[test]
+    fn suffixed_only_catalog_bare_model_fires_at_max_window_threshold_only() {
+        let _context_guard =
+            crate::services::claude_compact_context::state_test_guard();
+        let _trigger_guard = state_test_guard();
+        let proxy = "http://proxy-4678-suffixed-only.test";
+        crate::services::claude_compact_context::put_catalog_for_test(
+            proxy,
+            HashMap::from([
+                ("claude-opus-4-8-hgq".to_string(), 1_000_000),
+                ("claude-opus-4-8-j97".to_string(), 1_000_000),
+            ]),
+        );
+        let gateway = crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv::Inject {
+            base_url: proxy.to_string(),
+        };
+        crate::services::claude_compact_context::register_launch_provenance(
+            "tmux-4678-high",
+            &gateway,
+        );
+        crate::services::claude_compact_context::register_launch_provenance(
+            "tmux-4678-low",
+            &gateway,
+        );
+
+        let high_resolution =
+            crate::services::claude_compact_context::context_window_for_turn(
+                "tmux-4678-high",
+                Some("claude-opus-4-8"),
+            );
+        let (window, source) =
+            trigger_window_for_resolution(high_resolution).expect("launch-bound trigger window");
+        let threshold = threshold_for(window);
+        let high = CompactPaneKey {
+            channel_id: 42,
+            tmux_session_name: "tmux-4678-high".to_string(),
+        };
+        assert!(observe_and_decide_with_source(&high, 552_000, threshold, source).is_some());
+
+        let low_resolution =
+            crate::services::claude_compact_context::context_window_for_turn(
+                "tmux-4678-low",
+                Some("claude-opus-4-8"),
+            );
+        let (window, source) =
+            trigger_window_for_resolution(low_resolution).expect("launch-bound trigger window");
+        let low = CompactPaneKey {
+            channel_id: 42,
+            tmux_session_name: "tmux-4678-low".to_string(),
+        };
+        assert!(
+            observe_and_decide_with_source(&low, 499_000, threshold_for(window), source).is_none()
+        );
+        assert_eq!(armed_state(&low), Some(true));
+        assert_eq!(last_window_tokens(&low), Some(CLAUDE_AUTO_COMPACT_MAX_TOKENS));
+    }
+
+    /// Mutation guard: replacing the conservative 1M fallback with a native 200K
+    /// window makes the 350K assertion inject early.
+    #[test]
+    fn scrub_fallback_never_uses_a_small_native_trigger() {
+        let _guard = state_test_guard();
+        let (window, source) = trigger_window_for_resolution(Some(
+            TurnWindowResolution::UnprovenLaunchBound,
+        ))
+        .expect("scrub launch-bound fallback");
+        let threshold = threshold_for(window);
+        for (channel_id, occupied) in [(42, 199_000), (43, 350_000)] {
+            let pane = CompactPaneKey {
+                channel_id,
+                tmux_session_name: format!("tmux-scrub-{occupied}"),
+            };
+            assert!(
+                observe_and_decide_with_source(&pane, occupied, threshold, source).is_none()
+            );
+        }
+    }
+
+    /// Mutation guard: routing a proven exact hit through the 1M fallback makes
+    /// the 350K crossing miss its 372K-window threshold.
+    #[test]
+    fn proven_window_takes_priority_over_maximum_fallback() {
+        let _guard = state_test_guard();
+        let (window, source) = trigger_window_for_resolution(Some(
+            TurnWindowResolution::Proven(372_000),
+        ))
+        .expect("proven exact hit");
+        assert_eq!(source, CompactWindowSource::Proven);
+        assert!(observe_and_decide_with_source(&pane(), 350_000, threshold_for(window), source)
+            .is_some());
+    }
+
+    /// Mutation guard: ignoring proof source when the numeric window remains 1M
+    /// lets the fallback worker survive and prevents a fresh proven generation.
+    #[test]
+    fn fallback_to_proven_transition_invalidates_old_generation() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(CLAUDE_AUTO_COMPACT_MAX_TOKENS);
+        let old_generation = observe_and_decide_with_source(
+            &pane,
+            552_000,
+            threshold,
+            CompactWindowSource::FallbackMax,
+        )
+        .expect("fallback crossing");
+        let new_generation = observe_and_decide_with_source(
+            &pane,
+            552_000,
+            threshold,
+            CompactWindowSource::Proven,
+        )
+        .expect("proven crossing starts a fresh generation");
+        assert_ne!(old_generation, new_generation);
+        assert!(!pane_still_disarmed_for_send(
+            &pane,
+            old_generation,
+            threshold
+        ));
+        assert!(pane_still_disarmed_for_send(
+            &pane,
+            new_generation,
+            threshold
         ));
     }
 

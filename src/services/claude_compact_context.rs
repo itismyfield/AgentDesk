@@ -20,7 +20,7 @@ const COMPACT_SAFETY_RESERVE_TOKENS: u64 = 64_000;
 const NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const ONE_MILLION_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 const CLAUDE_AUTO_COMPACT_MIN_TOKENS: u64 = 100_000;
-const CLAUDE_AUTO_COMPACT_MAX_TOKENS: u64 = 1_000_000;
+pub(crate) const CLAUDE_AUTO_COMPACT_MAX_TOKENS: u64 = 1_000_000;
 const CATALOG_TTL: Duration = Duration::from_secs(5 * 60);
 const LAUNCH_PROVENANCE_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 const MAX_CATALOGS: usize = 32;
@@ -75,6 +75,12 @@ static LAUNCH_PROVENANCE: LazyLock<Mutex<HashMap<String, LaunchProvenanceEntry>>
 static CATALOG_STATE: LazyLock<Mutex<CatalogState>> =
     LazyLock::new(|| Mutex::new(CatalogState::default()));
 static CONTEXT_WINDOW_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnWindowResolution {
+    Proven(u64),
+    UnprovenLaunchBound,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CompactThreshold {
@@ -141,23 +147,25 @@ pub(crate) fn clear_launch_provenance_for_tmux(tmux_session_name: &str) {
         .remove(tmux_session_name.trim());
 }
 
-/// Resolve a live interactive TUI's context window only when the completion
-/// evidence is sufficient to prove it. Launch provenance identifies the
-/// gateway that owns the pane; it is deliberately not a model/window fallback.
-/// Claude completion records canonicalize the selected model and can erase a
-/// `[1m]` choice, so inferring a native 200K window here could compact a 1M
-/// session early. `None` therefore means "do not auto-compact this TUI turn".
+/// Resolve a live interactive TUI's context window from launch-bound evidence.
+/// A fresh, unambiguous catalog hit proves the exact window. Otherwise, known
+/// launch provenance plus a non-empty model permits only the conservative
+/// maximum-window trigger bound. `None` remains reserved for panes without
+/// managed launch provenance or usable model evidence.
 pub(crate) fn context_window_for_turn(
     tmux_session_name: &str,
     current_model: Option<&str>,
-) -> Option<u64> {
+) -> Option<TurnWindowResolution> {
     let launch = launch_provenance_for_tmux(tmux_session_name)?;
     let current_model = current_model.and_then(preserve_model_selector)?;
     match launch.provenance {
         ClaudeLaunchProvenance::Inject { base_url } => {
-            live_catalog_context_window_for_selector(&base_url, &current_model)
+            match live_catalog_context_window_for_selector(&base_url, &current_model) {
+                Some(window) => Some(TurnWindowResolution::Proven(window)),
+                None => Some(TurnWindowResolution::UnprovenLaunchBound),
+            }
         }
-        ClaudeLaunchProvenance::Scrub => None,
+        ClaudeLaunchProvenance::Scrub => Some(TurnWindowResolution::UnprovenLaunchBound),
     }
 }
 
@@ -317,16 +325,37 @@ fn catalog_context_window_for_selector(base_url: &str, model: &str) -> Option<u6
 /// smaller auto-compact threshold for that potentially 1M session.
 fn live_catalog_context_window_for_selector(base_url: &str, model: &str) -> Option<u64> {
     let selector = preserve_model_selector(model)?;
-    let catalog = cached_catalog_and_schedule_refresh(base_url)?;
-    let window = catalog
+    let Some(catalog) = cached_catalog_and_schedule_refresh(base_url) else {
+        tracing::debug!(
+            proxy_url = base_url,
+            %selector,
+            "Claude context-window catalog is cold or stale; using launch-bound fallback"
+        );
+        return None;
+    };
+    let Some(window) = catalog
         .get(&selector)
         .copied()
-        .filter(|window| *window > 0)?;
+        .filter(|window| *window > 0)
+    else {
+        tracing::debug!(
+            proxy_url = base_url,
+            %selector,
+            catalog_key_count = catalog.len(),
+            "Claude context-window selector missed the live catalog; using launch-bound fallback"
+        );
+        return None;
+    };
     if !is_one_m_model_selector(&selector)
         && catalog
             .get(&format!("{selector}[1m]"))
             .is_some_and(|window| *window > 0)
     {
+        tracing::debug!(
+            proxy_url = base_url,
+            %selector,
+            "Claude context-window selector has an ambiguous [1m] sibling; using launch-bound fallback"
+        );
         return None;
     }
     Some(window)
@@ -663,7 +692,7 @@ fn reset_for_test() {
 }
 
 #[cfg(test)]
-fn put_catalog_for_test(proxy_url: &str, windows: HashMap<String, u64>) {
+pub(crate) fn put_catalog_for_test(proxy_url: &str, windows: HashMap<String, u64>) {
     CATALOG_STATE
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -712,6 +741,27 @@ mod tests {
                 threshold.rearm_floor_tokens,
                 expected.saturating_sub(window * 5 / 100)
             );
+        }
+    }
+
+    /// Mutation guard: replacing the unproven trigger bound with any sampled
+    /// smaller window breaks at least one comparison below. The maximum-window
+    /// threshold must never be earlier than the threshold for a supported window.
+    #[test]
+    fn compact_threshold_is_monotonic_through_the_maximum_supported_window() {
+        for percent in [1, 5, 25, 50, 60, 80, 100, 200] {
+            for lower in [1, 100_000, 300_000, 900_000, u64::MAX] {
+                let max = compact_threshold(CLAUDE_AUTO_COMPACT_MAX_TOKENS, percent, lower)
+                    .expect("maximum-window threshold");
+                for window in [64_001, 100_000, 128_000, 200_000, 372_000, 500_000, 999_999] {
+                    let current = compact_threshold(window, percent, lower)
+                        .expect("sampled supported-window threshold");
+                    assert!(
+                        current.effective_tokens <= max.effective_tokens,
+                        "window={window}, percent={percent}, lower={lower}"
+                    );
+                }
+            }
         }
     }
 
@@ -795,23 +845,49 @@ mod tests {
         register_launch_provenance("tmux-a", &gateway);
         assert_eq!(
             context_window_for_turn("tmux-a", Some("routed-sonnet")),
-            None,
-            "a mutable base completion is ambiguous while a fresh [1m] sibling exists"
+            Some(TurnWindowResolution::UnprovenLaunchBound),
+            "an ambiguous mutable completion must use only the maximum-window trigger bound"
         );
         assert_eq!(
             context_window_for_turn("tmux-a", Some("routed-sonnet[1m]")),
-            Some(1_000_000),
+            Some(TurnWindowResolution::Proven(1_000_000)),
             "an explicit [1m] selector must not fall through to its base route"
         );
         assert_eq!(
             context_window_for_turn("tmux-a", Some("claude-sonnet-5")),
-            None,
-            "a canonical completion id cannot prove its live [1m] state without a catalog hit"
+            Some(TurnWindowResolution::UnprovenLaunchBound),
+            "a canonical completion without an exact hit must use only the launch-bound fallback"
         );
         assert_eq!(
             context_window_for_turn("tmux-a", Some("unknown")),
-            None,
-            "a different catalog entry must never become an invented fallback"
+            Some(TurnWindowResolution::UnprovenLaunchBound),
+            "a different catalog entry must never become a falsely proven window"
+        );
+    }
+
+    /// Mutation guard: mapping an exact miss back to `None` reproduces #4678 and
+    /// fails this assertion for a proxy that advertises only suffixed route keys.
+    #[test]
+    fn suffixed_only_catalog_keeps_bare_completion_launch_bound() {
+        let _guard = state_test_guard();
+        let proxy = "http://proxy-suffixed-only.test";
+        put_catalog_for_test(
+            proxy,
+            HashMap::from([
+                ("claude-opus-4-8-hgq".to_string(), 1_000_000),
+                ("claude-opus-4-8-j97".to_string(), 1_000_000),
+            ]),
+        );
+        register_launch_provenance(
+            "tmux-suffixed-only",
+            &ClaudeGatewayProxyEnv::Inject {
+                base_url: proxy.to_string(),
+            },
+        );
+
+        assert_eq!(
+            context_window_for_turn("tmux-suffixed-only", Some("claude-opus-4-8")),
+            Some(TurnWindowResolution::UnprovenLaunchBound)
         );
     }
 
@@ -829,7 +905,7 @@ mod tests {
         // a real catalog rather than using the old 100K fallback.
         assert_eq!(
             context_window_for_turn("tmux-cold-routed", Some("routed-sonnet")),
-            None
+            Some(TurnWindowResolution::UnprovenLaunchBound)
         );
 
         put_catalog_for_test(
@@ -838,7 +914,7 @@ mod tests {
         );
         assert_eq!(
             context_window_for_turn("tmux-cold-routed", Some("routed-sonnet")),
-            Some(372_000)
+            Some(TurnWindowResolution::Proven(372_000))
         );
     }
 
@@ -921,19 +997,19 @@ mod tests {
     }
 
     #[test]
-    fn live_scrub_tui_fails_closed_when_completion_canonicalizes_the_model() {
+    fn live_scrub_tui_uses_launch_bound_fallback_only_with_a_model() {
         let _guard = state_test_guard();
         register_launch_provenance("tmux-native", &ClaudeGatewayProxyEnv::Scrub);
         assert_eq!(context_window_for_turn("tmux-native", None), None);
         assert_eq!(
             context_window_for_turn("tmux-native", Some("sonnet")),
-            None,
-            "a base completion id may represent sonnet[1m], so it cannot arm a 200K trigger"
+            Some(TurnWindowResolution::UnprovenLaunchBound),
+            "a canonicalized base selector must not be falsely proven as a 200K window"
         );
         assert_eq!(
             context_window_for_turn("tmux-native", Some("claude-sonnet-4-6")),
-            None,
-            "launch provenance must not retain a same-family [1m] interpretation"
+            Some(TurnWindowResolution::UnprovenLaunchBound),
+            "scrub provenance plus a model permits only the maximum-window trigger bound"
         );
     }
 

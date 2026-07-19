@@ -858,7 +858,7 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     // today's live config. Keep the provider fallback for panel display when a
     // legacy/unregistered pane cannot prove launch provenance, but never use it
     // to drive the authoritative compact trigger.
-    let claude_launch_window = matches!(provider, ProviderKind::Claude)
+    let claude_window_resolution = matches!(provider, ProviderKind::Claude)
         .then(|| {
             crate::services::claude_compact_context::context_window_for_turn(
                 tmux_session_name,
@@ -866,6 +866,26 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
             )
         })
         .flatten();
+    let claude_launch_window = match claude_window_resolution {
+        Some(crate::services::claude_compact_context::TurnWindowResolution::Proven(window)) => {
+            Some(window)
+        }
+        _ => None,
+    };
+    let claude_trigger_window = claude_window_resolution.map(|resolution| match resolution {
+        crate::services::claude_compact_context::TurnWindowResolution::Proven(window) => window,
+        crate::services::claude_compact_context::TurnWindowResolution::UnprovenLaunchBound => {
+            crate::services::claude_compact_context::CLAUDE_AUTO_COMPACT_MAX_TOKENS
+        }
+    });
+    let compact_window_source = claude_window_resolution.map(|resolution| match resolution {
+        crate::services::claude_compact_context::TurnWindowResolution::Proven(_) => {
+            crate::services::claude_compact_trigger::CompactWindowSource::Proven
+        }
+        crate::services::claude_compact_context::TurnWindowResolution::UnprovenLaunchBound => {
+            crate::services::claude_compact_trigger::CompactWindowSource::FallbackMax
+        }
+    });
     let context_window = claude_launch_window
         .unwrap_or_else(|| provider.resolve_context_window(state.last_model.as_deref()));
     let ctx_cfg = fetch_context_thresholds(shared.api_port).await;
@@ -890,23 +910,35 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     }
 
     // The token trigger runs even when `occupied == 0`: a post-compact usage
-    // reset is the observable re-arm signal handled inside the trigger. It is
-    // deliberately gated on a proven launch-bound Claude window
-    // (`claude_launch_window`), rather than inventing a live-config fallback, so
-    // a window this turn cannot prove fails closed to no-inject. Idempotency is
-    // keyed on the observable USAGE occupancy (`occupied`), never on a cosmetic
-    // `auto_compacted` string heuristic.
+    // reset is the observable re-arm signal handled inside the trigger. Exact
+    // catalog evidence uses the proven window; launch-bound but unproven panes use
+    // the conservative maximum-window threshold. Missing provenance/model remains
+    // a no-op. Idempotency is keyed on observable USAGE occupancy (`occupied`),
+    // never on a cosmetic `auto_compacted` string heuristic.
     if matches!(provider, ProviderKind::Claude)
         && let Some(turn_identity) =
             super::ManagedCompactTurnIdentity::capture_live(channel_id.get(), tmux_session_name)
     {
-        crate::services::claude_compact_trigger::maybe_inject_compact(
-            turn_identity,
-            provider,
-            occupied,
-            claude_launch_window,
-            compact_pct,
-            ctx_cfg.compact_lower_bound_tokens,
-        );
+        match compact_window_source {
+            Some(window_source) => {
+                crate::services::claude_compact_trigger::maybe_inject_compact_with_source(
+                    turn_identity,
+                    provider,
+                    occupied,
+                    claude_trigger_window,
+                    compact_pct,
+                    ctx_cfg.compact_lower_bound_tokens,
+                    window_source,
+                );
+            }
+            None => crate::services::claude_compact_trigger::maybe_inject_compact(
+                turn_identity,
+                provider,
+                occupied,
+                None,
+                compact_pct,
+                ctx_cfg.compact_lower_bound_tokens,
+            ),
+        }
     }
 }
