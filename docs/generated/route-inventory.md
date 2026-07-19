@@ -110,12 +110,12 @@
 | `GET` | `/api/github-issues` | `github_dashboard::list_issues` | `src/server/routes/github_dashboard.rs:61` | `src/server/routes/domains/integrations.rs:36` |
 | `PATCH` | `/api/github-issues/{owner}/{repo}/{number}/close` | `github_dashboard::close_issue` | `src/server/routes/github_dashboard.rs:104` | `src/server/routes/domains/integrations.rs:37` |
 | `GET` | `/api/github-repos` | `github_dashboard::list_repos` | `src/server/routes/github_dashboard.rs:27` | `src/server/routes/domains/integrations.rs:35` |
-| `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:299` | `src/server/routes/domains/integrations.rs:24` |
+| `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:300` | `src/server/routes/domains/integrations.rs:24` |
 | `GET` | `/api/github/pr-summary` | `pr_summary::get_pr_summary` | `src/server/routes/pr_summary.rs:88` | `src/server/routes/domains/integrations.rs:30` |
 | `POST` | `/api/github/pr-summary/invalidate` | `pr_summary::invalidate_pr_summary` | `src/server/routes/pr_summary.rs:131` | `src/server/routes/domains/integrations.rs:31` |
-| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:771` | `src/server/routes/domains/integrations.rs:25` |
-| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:809` | `src/server/routes/domains/integrations.rs:25` |
-| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:861` | `src/server/routes/domains/integrations.rs:29` |
+| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:787` | `src/server/routes/domains/integrations.rs:25` |
+| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:820` | `src/server/routes/domains/integrations.rs:25` |
+| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:864` | `src/server/routes/domains/integrations.rs:29` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:842` | `src/server/routes/domains/access.rs:10` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:847` | `src/server/routes/domains/ops.rs:22` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:38` | `src/server/routes/domains/ops.rs:352` |
@@ -199,8 +199,8 @@
 | `POST` | `/api/pm-decision` | `kanban::pm_decision` | `src/server/routes/kanban.rs:1431` | `src/server/routes/domains/kanban.rs:60` |
 | `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:1256` | `src/server/routes/domains/agents.rs:50` |
 | `GET` | `/api/prompt-manifest/retention` | `prompt_manifest_retention::get_retention_status` | `src/server/routes/prompt_manifest_retention.rs:36` | `src/server/routes/domains/ops.rs:230` |
-| `GET` | `/api/provider-cli` | `provider_cli_api::get_provider_cli_status` | `src/server/routes/provider_cli_api.rs:28` | `src/server/routes/domains/ops.rs:359` |
-| `PATCH` | `/api/provider-cli/{provider}` | `provider_cli_api::patch_provider_cli` | `src/server/routes/provider_cli_api.rs:96` | `src/server/routes/domains/ops.rs:363` |
+| `GET` | `/api/provider-cli` | `provider_cli_api::get_provider_cli_status` | `src/server/routes/provider_cli_api.rs:29` | `src/server/routes/domains/ops.rs:359` |
+| `PATCH` | `/api/provider-cli/{provider}` | `provider_cli_api::patch_provider_cli` | `src/server/routes/provider_cli_api.rs:90` | `src/server/routes/domains/ops.rs:363` |
 | `GET` | `/api/quality/events` | `analytics::quality_events` | `src/server/routes/analytics.rs:316` | `src/server/routes/domains/analytics.rs:14` |
 | `POST` | `/api/queue/cancel` | `auto_queue::cancel` | `src/server/routes/auto_queue.rs:138` | `src/server/routes/domains/ops.rs:319` |
 | `POST` | `/api/queue/dispatch-next` | `auto_queue::activate` | `src/server/routes/auto_queue.rs:35` | `src/server/routes/domains/ops.rs:294` |
