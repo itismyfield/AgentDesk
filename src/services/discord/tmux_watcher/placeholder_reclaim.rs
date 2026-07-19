@@ -44,7 +44,7 @@ pub(super) async fn reclaim_orphan_external_input_placeholder(
     let Some(msg_id) = *placeholder_msg_id else {
         return true;
     };
-    if let Some((nudged_at_millis, frontier_at_nudge, shield_identity)) =
+    if let Some((nudged_at_millis, frontier_token, shield_identity)) =
         shared.redrive_placeholder_shield_context(provider, channel_id)
         && shield_identity.is_some()
         && shield_identity
@@ -52,10 +52,12 @@ pub(super) async fn reclaim_orphan_external_input_placeholder(
                 .map(|state| {
                     crate::services::discord::inflight::InflightTurnIdentity::from_state(&state)
                 })
+        && shared.relay_frontier_token(channel_id).reset_incarnation
+            == frontier_token.reset_incarnation
         && super::panel_decisions::redrive_shielded_placeholder(
             nudged_at_millis,
             msg_id.created_at().timestamp_millis(),
-            shared.committed_relay_offset(channel_id) <= frontier_at_nudge,
+            shared.committed_relay_offset(channel_id) <= frontier_token.committed_offset,
             chrono::Utc::now().timestamp_millis(),
         )
     {
@@ -64,7 +66,7 @@ pub(super) async fn reclaim_orphan_external_input_placeholder(
             event = "redrive_placeholder_reclaim_shielded",
             channel_id = channel_id.get(),
             message_id = msg_id.get(),
-            frontier_at_nudge,
+            frontier_at_nudge = frontier_token.committed_offset,
             "redrive-created placeholder preserved while the frontier is frozen"
         );
         return false;

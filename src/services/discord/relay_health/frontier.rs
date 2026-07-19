@@ -8,7 +8,6 @@ use super::super::{SharedData, TmuxRelayCoord};
 pub(in crate::services::discord) struct FrontierResetState {
     incarnation: u64,
     active_mutations: usize,
-    reset_pending: bool,
 }
 
 pub(in crate::services::discord) struct RelayFrontierMutationGuard {
@@ -23,9 +22,6 @@ impl Drop for RelayFrontierMutationGuard {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         state.active_mutations -= 1;
-        if state.active_mutations == 0 {
-            self.coord.reset_idle.notify_all();
-        }
     }
 }
 
@@ -61,8 +57,7 @@ impl SharedData {
             .reset_state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if state.reset_pending
-            || state.incarnation != token.reset_incarnation
+        if state.incarnation != token.reset_incarnation
             || coord.confirmed_end_offset.load(Ordering::Acquire) != token.committed_offset
         {
             return None;
@@ -96,12 +91,8 @@ impl TmuxRelayCoord {
             .reset_state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        state.reset_pending = true;
-        while state.active_mutations != 0 {
-            state = self
-                .reset_idle
-                .wait(state)
-                .unwrap_or_else(|error| error.into_inner());
+        if state.active_mutations != 0 {
+            return false;
         }
         let reset = self
             .confirmed_end_offset
@@ -115,24 +106,18 @@ impl TmuxRelayCoord {
         if reset {
             state.incarnation = state.incarnation.wrapping_add(1);
         }
-        state.reset_pending = false;
-        self.reset_idle.notify_all();
         reset
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
     use super::*;
 
-    #[test]
-    fn reset_waits_for_admitted_mutation_and_invalidates_stale_token() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_yields_to_pending_mutation_on_same_thread_without_deadlock() {
         let coord = Arc::new(TmuxRelayCoord::new(ChannelId::new(4_182)));
         coord.confirmed_end_offset.store(100, Ordering::Release);
-        let token = coord.frontier_token();
         let mut state = coord
             .reset_state
             .lock()
@@ -142,18 +127,16 @@ mod tests {
         let guard = RelayFrontierMutationGuard {
             coord: Arc::clone(&coord),
         };
-        let reset_coord = Arc::clone(&coord);
-        let (started_tx, started_rx) = mpsc::channel();
-        let reset = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            reset_coord.reset_confirmed_frontier(100, 40)
-        });
-        started_rx.recv().unwrap();
-        std::thread::sleep(Duration::from_millis(20));
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            assert!(!coord.reset_confirmed_frontier(100, 40));
+        })
+        .await
+        .expect("reset must not block the executor needed to release the mutation");
         assert_eq!(coord.confirmed_end_offset.load(Ordering::Acquire), 100);
         drop(guard);
-        assert!(reset.join().unwrap());
-        assert_ne!(coord.frontier_token(), token);
+        tokio::task::yield_now().await;
+        assert!(coord.reset_confirmed_frontier(100, 40));
     }
 
     #[test]

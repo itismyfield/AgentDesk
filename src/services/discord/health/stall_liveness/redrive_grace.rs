@@ -78,12 +78,26 @@ thread_local! {
     static TEST_CLOCK_OVERRIDE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }
 
-/// #4181 item-2 F2: set the monotonic seconds the production `MonotonicRedriveClock`
-/// reports, for redrive integration tests that reach the grace through the deep
-/// `relay_auto_heal` call chain. Thread-local, so parallel tests stay isolated.
 #[cfg(test)]
-pub(in crate::services::discord::health) fn set_redrive_grace_test_clock(mono_secs: i64) {
-    TEST_CLOCK_OVERRIDE.with(|cell| cell.set(Some(mono_secs)));
+pub(in crate::services::discord::health) struct RedriveGraceTestClockGuard {
+    previous: Option<i64>,
+}
+
+#[cfg(test)]
+impl Drop for RedriveGraceTestClockGuard {
+    fn drop(&mut self) {
+        TEST_CLOCK_OVERRIDE.with(|cell| cell.set(self.previous));
+    }
+}
+
+/// Scoped monotonic override for deep redrive integration tests. Restores the
+/// prior thread-local value on normal return or panic and is absent in production.
+#[cfg(test)]
+pub(in crate::services::discord::health) fn set_redrive_grace_test_clock(
+    mono_secs: i64,
+) -> RedriveGraceTestClockGuard {
+    let previous = TEST_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(mono_secs)));
+    RedriveGraceTestClockGuard { previous }
 }
 
 /// #4181 item-2 P3-2: clear the override so the production `Instant` reader runs.
@@ -570,6 +584,28 @@ mod tests {
         );
 
         super::super::clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    #[test]
+    fn scoped_test_clock_restores_nested_and_panicking_overrides_4181() {
+        clear_redrive_grace_test_clock();
+        let outer = set_redrive_grace_test_clock(11);
+        assert_eq!(MonotonicRedriveClock.mono_secs(), 11);
+        {
+            let _inner = set_redrive_grace_test_clock(22);
+            assert_eq!(MonotonicRedriveClock.mono_secs(), 22);
+        }
+        assert_eq!(MonotonicRedriveClock.mono_secs(), 11);
+
+        let panic = std::panic::catch_unwind(|| {
+            let _panicking = set_redrive_grace_test_clock(33);
+            assert_eq!(MonotonicRedriveClock.mono_secs(), 33);
+            panic!("exercise panic-safe clock restoration");
+        });
+        assert!(panic.is_err());
+        assert_eq!(MonotonicRedriveClock.mono_secs(), 11);
+        drop(outer);
+        assert!(TEST_CLOCK_OVERRIDE.with(|cell| cell.get()).is_none());
     }
 
     /// #4181 F2 (production clock coverage): exercise the real

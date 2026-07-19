@@ -369,9 +369,16 @@ pub(in crate::services::discord) fn reset_stale_relay_watermark_if_output_regres
             );
             return true;
         }
-        confirmed = relay_coord
+        let observed = relay_coord
             .confirmed_end_offset
             .load(std::sync::atomic::Ordering::Acquire);
+        if observed == confirmed {
+            // An admitted frontier mutation currently owns this incarnation.
+            // Yield this tick rather than spin on the async executor thread;
+            // the next watcher tick will retry the still-observable regression.
+            return false;
+        }
+        confirmed = observed;
     }
 
     false

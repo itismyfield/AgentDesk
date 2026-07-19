@@ -278,12 +278,25 @@ impl SharedData {
         channel_id: ChannelId,
     ) -> Option<(
         i64,
-        u64,
+        RelayFrontierToken,
         Option<crate::services::discord::inflight::InflightTurnIdentity>,
     )> {
         REDRIVE_PLACEHOLDER_SHIELDS
             .get(&self.redrive_key(provider, channel_id))
-            .map(|shield| (shield.1, shield.0.frontier, shield.0.identity.clone()))
+            .filter(|shield| {
+                self.relay_frontier_token(channel_id).reset_incarnation
+                    == shield.0.reset_incarnation
+            })
+            .map(|shield| {
+                (
+                    shield.1,
+                    RelayFrontierToken {
+                        reset_incarnation: shield.0.reset_incarnation,
+                        committed_offset: shield.0.frontier,
+                    },
+                    shield.0.identity.clone(),
+                )
+            })
     }
 }
 
@@ -397,7 +410,7 @@ impl HealthRegistry {
         now_unix_secs: i64,
     ) -> Result<bool, RelayRecoveryError> {
         #[cfg(test)]
-        stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
+        let _test_clock = stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
         let Some(snapshot) = self
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
             .await
@@ -568,7 +581,7 @@ fn nudge_existing_watcher_for_backlog(
     token: RelayFrontierToken,
 ) -> bool {
     #[cfg(test)]
-    stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
+    let _test_clock = stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
     if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token) {
         return false;
     }
@@ -1189,7 +1202,7 @@ mod tests {
         channel_id: ChannelId,
         now: i64,
     ) -> (bool, Option<u8>) {
-        stall_liveness::set_redrive_grace_test_clock(now);
+        let _test_clock = stall_liveness::set_redrive_grace_test_clock(now);
         let token = shared.relay_frontier_token(channel_id);
         if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token)
             || !shared.relay_frontier_token_is_current(channel_id, token)
@@ -1374,6 +1387,52 @@ mod tests {
                 .attempt,
             Some(1),
             "a new reset incarnation must not inherit the stale-H attempt cap"
+        );
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+    }
+
+    #[test]
+    fn frontier_reset_invalidates_placeholder_shield_episode_4181() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_181_009);
+        let tmux_session = "AgentDesk-codex-4181-reset-shield";
+        let snapshot =
+            backlog_snapshot(channel_id, tmux_session, "/tmp/4181-shield.jsonl", 128, 256);
+        let coord = shared.tmux_relay_coord(channel_id);
+        coord
+            .confirmed_end_offset
+            .store(snapshot.last_relay_offset, Ordering::Release);
+        let key = shared.redrive_key(&provider, channel_id);
+        REDRIVE_PLACEHOLDER_SHIELDS.insert(
+            key,
+            (
+                RedriveEpisode {
+                    frontier: snapshot.last_relay_offset,
+                    reset_incarnation: 0,
+                    identity: snapshot.inflight_identity.clone(),
+                    turn_nonce: None,
+                    reconnect_count: snapshot.reconnect_count,
+                },
+                1_800_000_000,
+            ),
+        );
+        assert!(
+            shared
+                .redrive_placeholder_shield_context(&provider, channel_id)
+                .is_some(),
+            "shield is active in its original frontier incarnation"
+        );
+
+        assert!(coord.reset_confirmed_frontier(snapshot.last_relay_offset, 0));
+        assert!(
+            shared
+                .redrive_placeholder_shield_context(&provider, channel_id)
+                .is_none(),
+            "an H shield must not defer reclaim in the fresh L incarnation"
         );
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
     }
@@ -1862,7 +1921,7 @@ mod tests {
             "repeat nudge must not extend 900s"
         );
         assert_eq!(
-            frontier_at_first_nudge, 0,
+            frontier_at_first_nudge.committed_offset, 0,
             "owner progress must not move the frozen first-nudge frontier"
         );
         assert_eq!(shield_identity, Some(first_owner_identity));
@@ -1872,7 +1931,8 @@ mod tests {
             "a successor owner turn must not be absorbed into the old shield"
         );
         assert!(
-            shared.committed_relay_offset(owner_channel_id) > frontier_at_first_nudge,
+            shared.committed_relay_offset(owner_channel_id)
+                > frontier_at_first_nudge.committed_offset,
             "owner progress must restore reclaim against the frozen shield snapshot"
         );
 

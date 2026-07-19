@@ -1482,7 +1482,6 @@ pub(super) struct TmuxRelayCoord {
     pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::services::discord) reset_state:
         std::sync::Mutex<relay_health::FrontierResetState>,
-    pub(in crate::services::discord) reset_idle: std::sync::Condvar,
     /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
     /// relay. 0 = no confirmed relay observed yet. Read by the
     /// `watcher-state` observability endpoint (#964). Monotonic is NOT
@@ -1525,7 +1524,6 @@ impl TmuxRelayCoord {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
-            reset_idle: std::sync::Condvar::new(),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
