@@ -77,7 +77,7 @@
 | `src/server/routes/kanban.rs` | 2725 |
 | `src/server/routes/meetings.rs` | 1290 |
 | `src/server/routes/resume.rs` | 1260 |
-| `src/server/routes/v1.rs` | 1857 |
+| `src/server/routes/v1.rs` | 1866 |
 | `src/services/auto_queue.rs` | 1545 |
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1031 |

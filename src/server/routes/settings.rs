@@ -14,9 +14,7 @@ fn settings_json_response<T: Serialize>(status: StatusCode, body: T) -> (StatusC
 }
 
 /// GET /api/settings
-pub async fn get_settings(
-    State(state): State<AppState>,
-) -> AppResult<(StatusCode, Json<Value>)> {
+pub async fn get_settings(State(state): State<AppState>) -> AppResult<(StatusCode, Json<Value>)> {
     match state.settings_service().get_settings().await {
         Ok(body) => Ok(settings_json_response(StatusCode::OK, body)),
         Err(error) => Err(error),

@@ -279,7 +279,7 @@
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 33 | 33 | 0 |  |
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1644 | 1379 | 265 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 949 | 680 | 269 |  |
-| `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 | 188 | 0 |  |
+| `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 190 | 190 | 0 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 2701 | 1775 | 926 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 136 | 136 | 0 |  |
@@ -313,14 +313,14 @@
 | `server::routes::routines::responses` | `src/server/routes/routines/responses.rs` | 195 | 76 | 119 |  |
 | `server::routes::scheduled_messages` | `src/server/routes/scheduled_messages.rs` | 935 | 898 | 37 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 13 | 13 | 0 |  |
-| `server::routes::settings` | `src/server/routes/settings.rs` | 95 | 95 | 0 |  |
+| `server::routes::settings` | `src/server/routes/settings.rs` | 91 | 91 | 0 |  |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 425 | 425 | 0 |  |
 | `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 684 | 684 | 0 |  |
 | `server::routes::stats` | `src/server/routes/stats.rs` | 722 | 589 | 133 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 152 | 152 | 0 |  |
 | `server::routes::tests::preflight_harness::types` | `src/server/routes/tests/preflight_harness/types.rs` | 217 | 0 | 217 |  |
 | `server::routes::tests::preflight_harness::validation` | `src/server/routes/tests/preflight_harness/validation.rs` | 260 | 0 | 260 |  |
-| `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | 1857 | 0 | giant-file |
+| `server::routes::v1` | `src/server/routes/v1.rs` | 1866 | 1866 | 0 | giant-file |
 | `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 466 | 396 | 70 |  |
 | `server::startup_preflight` | `src/server/startup_preflight.rs` | 72 | 36 | 36 |  |
 | `server::state` | `src/server/state.rs` | 11 | 11 | 0 |  |
