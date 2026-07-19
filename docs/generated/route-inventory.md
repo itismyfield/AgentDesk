@@ -68,11 +68,11 @@
 | `POST` | `/api/cluster/test-phase-runs/start` | `cluster::start_test_phase_run` | `src/server/routes/cluster.rs:297` | `src/server/routes/domains/ops.rs:86` |
 | `POST` | `/api/cluster/test-phase-runs/upsert` | `cluster::upsert_test_phase_run` | `src/server/routes/cluster.rs:281` | `src/server/routes/domains/ops.rs:82` |
 | `GET` | `/api/cron-jobs` | `cron_api::list_cron_jobs` | `src/server/routes/cron_api.rs:166` | `src/server/routes/domains/ops.rs:228` |
-| `GET` | `/api/departments` | `departments::list_departments` | `src/server/routes/departments.rs:53` | `src/server/routes/domains/admin.rs:34` |
-| `POST` | `/api/departments` | `departments::create_department` | `src/server/routes/departments.rs:71` | `src/server/routes/domains/admin.rs:34` |
-| `PATCH` | `/api/departments/reorder` | `departments::reorder_departments` | `src/server/routes/departments.rs:210` | `src/server/routes/domains/admin.rs:38` |
-| `DELETE` | `/api/departments/{id}` | `departments::delete_department` | `src/server/routes/departments.rs:184` | `src/server/routes/domains/admin.rs:42` |
-| `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:110` | `src/server/routes/domains/admin.rs:42` |
+| `GET` | `/api/departments` | `departments::list_departments` | `src/server/routes/departments.rs:69` | `src/server/routes/domains/admin.rs:34` |
+| `POST` | `/api/departments` | `departments::create_department` | `src/server/routes/departments.rs:81` | `src/server/routes/domains/admin.rs:34` |
+| `PATCH` | `/api/departments/reorder` | `departments::reorder_departments` | `src/server/routes/departments.rs:186` | `src/server/routes/domains/admin.rs:38` |
+| `DELETE` | `/api/departments/{id}` | `departments::delete_department` | `src/server/routes/departments.rs:166` | `src/server/routes/domains/admin.rs:42` |
+| `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:112` | `src/server/routes/domains/admin.rs:42` |
 | `GET` | `/api/discord/bindings` | `discord::list_bindings` | `src/server/routes/discord.rs:18` | `src/server/routes/domains/integrations.rs:42` |
 | `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1595` | `src/server/routes/domains/ops.rs:42` |
 | `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:315` | `src/server/routes/domains/integrations.rs:47` |

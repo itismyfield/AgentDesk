@@ -243,7 +243,7 @@
 | `server::routes::claude_accounts_api` | `src/server/routes/claude_accounts_api.rs` | 182 | 182 | 0 |  |
 | `server::routes::cluster` | `src/server/routes/cluster.rs` | 451 | 451 | 0 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 | 180 | 0 |  |
-| `server::routes::departments` | `src/server/routes/departments.rs` | 300 | 300 | 0 |  |
+| `server::routes::departments` | `src/server/routes/departments.rs` | 342 | 266 | 76 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 416 | 359 | 57 |  |
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 138 | 138 | 0 |  |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 29 | 29 | 0 |  |

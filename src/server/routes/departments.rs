@@ -204,8 +204,10 @@ pub async fn reorder_departments(
             Ok(result) => updated += result.rows_affected() as usize,
             Err(error) => {
                 let _ = tx.rollback().await;
-                return Err(AppError::internal(format!("update id={}: {error}", item.id))
-                    .with_code(ErrorCode::Database));
+                return Err(
+                    AppError::internal(format!("update id={}: {error}", item.id))
+                        .with_code(ErrorCode::Database),
+                );
             }
         }
     }
@@ -214,7 +216,10 @@ pub async fn reorder_departments(
         AppError::internal(format!("commit: {error}")).with_code(ErrorCode::Database)
     })?;
 
-    Ok((StatusCode::OK, Json(json!({"ok": true, "updated": updated}))))
+    Ok((
+        StatusCode::OK,
+        Json(json!({"ok": true, "updated": updated})),
+    ))
 }
 
 async fn list_departments_pg(
@@ -319,8 +324,8 @@ mod tests {
         // Asserts the reorder transaction failures keep HTTP 500 and their
         // exact prefixed messages ("begin tx: …", "update id=…: …", "commit:
         // …"), matching the inline `map_err` bodies in `reorder_departments`.
-        let begin = AppError::internal(format!("begin tx: {}", "boom"))
-            .with_code(ErrorCode::Database);
+        let begin =
+            AppError::internal(format!("begin tx: {}", "boom")).with_code(ErrorCode::Database);
         assert_eq!(begin.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(begin.to_json_value()["error"], "begin tx: boom");
 
@@ -329,8 +334,8 @@ mod tests {
         assert_eq!(update.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(update.to_json_value()["error"], "update id=d1: boom");
 
-        let commit = AppError::internal(format!("commit: {}", "boom"))
-            .with_code(ErrorCode::Database);
+        let commit =
+            AppError::internal(format!("commit: {}", "boom")).with_code(ErrorCode::Database);
         assert_eq!(commit.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(commit.to_json_value()["error"], "commit: boom");
     }
