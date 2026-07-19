@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use sqlx::{QueryBuilder, Row};
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::memory::MementoRememberRequest;
 
 // ── Backend detection ────────────────────────────────────────────
@@ -107,60 +108,45 @@ pub struct ForgetBody {
 pub async fn memory_recall(
     State(state): State<AppState>,
     Json(body): Json<RecallBody>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     let backend = detect_memory_backend();
 
     if backend == MemoryBackend::Memento {
-        return memento_memory_operation_unsupported("recall");
+        return Ok(memento_memory_operation_unsupported("recall"));
     }
 
-    let fragments = match local_recall_pg(&state, &body).await {
-        Ok(fragments) => fragments,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("local recall failed: {error}")})),
-            );
-        }
-    };
+    let fragments = local_recall_pg(&state, &body).await.map_err(|error| {
+        AppError::internal(format!("local recall failed: {error}")).with_code(ErrorCode::Database)
+    })?;
 
     let response = json!({
         "fragments": fragments,
         "source": MemoryBackend::Local.as_str(),
         "detected_backend": backend.as_str(),
     });
-    (StatusCode::OK, Json(response))
+    Ok((StatusCode::OK, Json(response)))
 }
 
 /// POST /api/memory/remember
 pub async fn memory_remember(
     State(state): State<AppState>,
     Json(body): Json<RememberBody>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     if body.content.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "content is required"})),
-        );
+        return Err(AppError::bad_request("content is required"));
     }
     if body.topic.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "topic is required"})),
-        );
+        return Err(AppError::bad_request("topic is required"));
     }
     if body.kind.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "type is required"})),
-        );
+        return Err(AppError::bad_request("type is required"));
     }
 
     let backend = detect_memory_backend();
 
     if backend == MemoryBackend::Memento {
         if let Some(error) = validate_memento_remember_scope(&body) {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(AppError::bad_request(error));
         }
         match memento_remember(&body).await {
             Ok(()) => {
@@ -168,13 +154,13 @@ pub async fn memory_remember(
                 // current `remember` wrapper, so we return an opaque
                 // backend-qualified token to satisfy the API contract.
                 let id = format!("memento:{}", body.topic.trim());
-                return (
+                return Ok((
                     StatusCode::OK,
                     Json(json!({
                         "id": id,
                         "source": MemoryBackend::Memento.as_str(),
                     })),
-                );
+                ));
             }
             Err(error) => {
                 tracing::warn!(
@@ -185,20 +171,17 @@ pub async fn memory_remember(
         }
     }
 
-    match local_remember_pg(&state, &body).await {
-        Ok(id) => (
-            StatusCode::OK,
-            Json(json!({
-                "id": id,
-                "source": MemoryBackend::Local.as_str(),
-                "detected_backend": backend.as_str(),
-            })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("local remember failed: {error}")})),
-        ),
-    }
+    let id = local_remember_pg(&state, &body).await.map_err(|error| {
+        AppError::internal(format!("local remember failed: {error}")).with_code(ErrorCode::Database)
+    })?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "id": id,
+            "source": MemoryBackend::Local.as_str(),
+            "detected_backend": backend.as_str(),
+        })),
+    ))
 }
 
 fn validate_memento_remember_scope(body: &RememberBody) -> Option<String> {
@@ -231,42 +214,37 @@ fn validate_memento_remember_scope(body: &RememberBody) -> Option<String> {
 pub async fn memory_forget(
     State(state): State<AppState>,
     Json(body): Json<ForgetBody>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     let id = body.id.trim().to_string();
     if id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "id is required"})),
-        );
+        return Err(AppError::bad_request("id is required"));
     }
 
     let backend = detect_memory_backend();
 
     if backend == MemoryBackend::Memento {
-        return memento_memory_operation_unsupported("forget");
+        return Ok(memento_memory_operation_unsupported("forget"));
     }
 
     match local_forget_pg(&state, &id).await {
-        Ok(true) => (
+        Ok(true) => Ok((
             StatusCode::OK,
             Json(json!({
                 "ok": true,
                 "source": MemoryBackend::Local.as_str(),
                 "detected_backend": backend.as_str(),
             })),
-        ),
-        Ok(false) => (
+        )),
+        Ok(false) => Ok((
             StatusCode::NOT_FOUND,
             Json(json!({
                 "ok": false,
                 "error": "id not found",
                 "detected_backend": backend.as_str(),
             })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("local forget failed: {error}")})),
-        ),
+        )),
+        Err(error) => Err(AppError::internal(format!("local forget failed: {error}"))
+            .with_code(ErrorCode::Database)),
     }
 }
 
@@ -768,14 +746,16 @@ mod request_body_tests {
                 ..RecallBody::default()
             }),
         )
-        .await;
+        .await
+        .expect("recall local memory through route");
         assert_eq!(recall_status, StatusCode::OK);
         assert_eq!(recall["source"], "local");
         assert_eq!(recall["detected_backend"], "local");
         assert_eq!(recall["fragments"][0]["id"], id);
 
-        let (forget_status, Json(forget)) =
-            memory_forget(State(state), Json(ForgetBody { id })).await;
+        let (forget_status, Json(forget)) = memory_forget(State(state), Json(ForgetBody { id }))
+            .await
+            .expect("forget local memory through route");
         assert_eq!(forget_status, StatusCode::OK);
         assert_eq!(forget["ok"], true);
         assert_eq!(forget["source"], "local");

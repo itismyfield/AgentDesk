@@ -7,49 +7,42 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::pipeline_override::{PipelineOverrideError, PipelineOverrideService};
 pub use crate::services::pipeline_routes::PipelineStageInput as PutStageItem;
 use crate::services::pipeline_routes::{PipelineRouteError, PipelineRouteService};
 
-fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
+fn pg_unavailable() -> AppError {
+    AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool not configured"})),
+        ErrorCode::Database,
+        "postgres pool not configured",
     )
 }
 
-fn pipeline_override_error_response(
-    error: PipelineOverrideError,
-) -> (StatusCode, Json<serde_json::Value>) {
+fn pipeline_override_error(error: PipelineOverrideError) -> AppError {
     match error {
-        PipelineOverrideError::BadRequest(error) => {
-            (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
+        PipelineOverrideError::BadRequest(error) => AppError::bad_request(error),
+        PipelineOverrideError::NotFound(error) => AppError::not_found(error),
+        PipelineOverrideError::Database(error) => {
+            AppError::internal(error).with_code(ErrorCode::Database)
         }
-        PipelineOverrideError::NotFound(error) => {
-            (StatusCode::NOT_FOUND, Json(json!({"error": error})))
-        }
-        PipelineOverrideError::Database(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
     }
 }
 
 fn pipeline_route_error_response(
     error: PipelineRouteError,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     match error {
-        PipelineRouteError::BadRequest { stage, error } => (
+        PipelineRouteError::BadRequest { stage, error } => Ok((
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": format!("stage '{stage}': {error}"),
                 "stage": stage,
             })),
-        ),
-        PipelineRouteError::NotFound(error) => {
-            (StatusCode::NOT_FOUND, Json(json!({"error": error})))
-        }
-        PipelineRouteError::Readonly { table, source } => (
+        )),
+        PipelineRouteError::NotFound(error) => Err(AppError::not_found(error)),
+        PipelineRouteError::Readonly { table, source } => Ok((
             StatusCode::METHOD_NOT_ALLOWED,
             Json(json!({
                 "error": format!(
@@ -60,11 +53,10 @@ fn pipeline_route_error_response(
                 "table": table,
                 "source_of_truth": source,
             })),
-        ),
-        PipelineRouteError::Database(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        )),
+        PipelineRouteError::Database(error) => {
+            Err(AppError::internal(error).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -100,9 +92,9 @@ pub struct TranscriptQuery {
 pub async fn get_stages(
     State(state): State<AppState>,
     Query(params): Query<GetStagesQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineRouteService::new(pool);
     let stages = match service
@@ -113,16 +105,16 @@ pub async fn get_stages(
         Err(error) => return pipeline_route_error_response(error),
     };
 
-    (StatusCode::OK, Json(json!({ "stages": stages })))
+    Ok((StatusCode::OK, Json(json!({ "stages": stages }))))
 }
 
 /// PUT /api/pipeline/stages — bulk replace stages for a repo
 pub async fn put_stages(
     State(state): State<AppState>,
     Json(body): Json<PutStagesBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineRouteService::new(pool);
     let stages = match service.replace_stages(&body.repo, &body.stages).await {
@@ -130,23 +122,23 @@ pub async fn put_stages(
         Err(error) => return pipeline_route_error_response(error),
     };
 
-    (StatusCode::OK, Json(json!({ "stages": stages })))
+    Ok((StatusCode::OK, Json(json!({ "stages": stages }))))
 }
 
 /// DELETE /api/pipeline/stages?repo=...
 pub async fn delete_stages(
     State(state): State<AppState>,
     Query(params): Query<DeleteStagesQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineRouteService::new(pool);
     match service.delete_stages(&params.repo).await {
-        Ok(count) => (
+        Ok(count) => Ok((
             StatusCode::OK,
             Json(json!({"deleted": true, "count": count})),
-        ),
+        )),
         Err(error) => pipeline_route_error_response(error),
     }
 }
@@ -155,9 +147,9 @@ pub async fn delete_stages(
 pub async fn get_card_pipeline(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let service = PipelineRouteService::new(pool);
@@ -166,7 +158,7 @@ pub async fn get_card_pipeline(
         Err(error) => return pipeline_route_error_response(error),
     };
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "repo_id": card_pipeline.repo_id,
@@ -174,16 +166,16 @@ pub async fn get_card_pipeline(
             "history": card_pipeline.history,
             "current_stage": card_pipeline.current_stage,
         })),
-    )
+    ))
 }
 
 /// GET /api/pipeline/cards/{card_id}/history
 pub async fn get_card_history(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineRouteService::new(pool);
     let history = match service.card_history(&card_id).await {
@@ -191,7 +183,7 @@ pub async fn get_card_history(
         Err(error) => return pipeline_route_error_response(error),
     };
 
-    (StatusCode::OK, Json(json!({"history": history})))
+    Ok((StatusCode::OK, Json(json!({"history": history}))))
 }
 
 /// GET /api/pipeline/cards/{card_id}/transcripts?limit=10
@@ -199,9 +191,9 @@ pub async fn get_card_transcripts(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     Query(params): Query<TranscriptQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let service = PipelineRouteService::new(pool);
@@ -209,13 +201,13 @@ pub async fn get_card_transcripts(
         .card_transcripts(&card_id, params.limit.unwrap_or(10))
         .await
     {
-        Ok(transcripts) => (
+        Ok(transcripts) => Ok((
             StatusCode::OK,
             Json(json!({
                 "card_id": card_id,
                 "transcripts": transcripts,
             })),
-        ),
+        )),
         Err(error) => pipeline_route_error_response(error),
     }
 }
@@ -230,13 +222,10 @@ pub struct EffectivePipelineQuery {
 }
 
 /// GET /api/pipeline/config/default — the base pipeline YAML as JSON
-pub async fn get_default_pipeline() -> (StatusCode, Json<serde_json::Value>) {
+pub async fn get_default_pipeline() -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     match crate::pipeline::try_get() {
-        Some(p) => (StatusCode::OK, Json(p.to_json())),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "default pipeline not loaded"})),
-        ),
+        Some(p) => Ok((StatusCode::OK, Json(p.to_json()))),
+        None => Err(AppError::not_found("default pipeline not loaded")),
     }
 }
 
@@ -245,16 +234,16 @@ pub async fn get_default_pipeline() -> (StatusCode, Json<serde_json::Value>) {
 pub async fn get_effective_pipeline(
     State(state): State<AppState>,
     Query(params): Query<EffectivePipelineQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineRouteService::new(pool);
     match service
         .effective_pipeline(params.repo.as_deref(), params.agent_id.as_deref())
         .await
     {
-        Ok(effective) => (StatusCode::OK, Json(effective)),
+        Ok(effective) => Ok((StatusCode::OK, Json(effective))),
         Err(error) => pipeline_route_error_response(error),
     }
 }
@@ -269,21 +258,21 @@ pub struct SetPipelineOverrideBody {
 pub async fn get_repo_pipeline(
     State(state): State<AppState>,
     Path((owner, repo)): Path<(String, String)>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let id = format!("{owner}/{repo}");
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineOverrideService::new(pool);
-    let parsed = match service.get_repo_pipeline(&id).await {
-        Ok(parsed) => parsed,
-        Err(error) => return pipeline_override_error_response(error),
-    };
+    let parsed = service
+        .get_repo_pipeline(&id)
+        .await
+        .map_err(pipeline_override_error)?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({"repo": id, "pipeline_config": parsed})),
-    )
+    ))
 }
 
 /// PUT /api/pipeline/config/repo/:owner/:repo
@@ -291,36 +280,37 @@ pub async fn set_repo_pipeline(
     State(state): State<AppState>,
     Path((owner, repo)): Path<(String, String)>,
     Json(body): Json<SetPipelineOverrideBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let id = format!("{owner}/{repo}");
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineOverrideService::new(pool);
-    if let Err(error) = service.set_repo_pipeline(&id, body.config.as_ref()).await {
-        return pipeline_override_error_response(error);
-    }
-    (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
+    service
+        .set_repo_pipeline(&id, body.config.as_ref())
+        .await
+        .map_err(pipeline_override_error)?;
+    Ok((StatusCode::OK, Json(json!({"ok": true, "repo": id}))))
 }
 
 /// GET /api/pipeline/config/agent/:agent_id
 pub async fn get_agent_pipeline(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineOverrideService::new(pool);
-    let parsed = match service.get_agent_pipeline(&agent_id).await {
-        Ok(parsed) => parsed,
-        Err(error) => return pipeline_override_error_response(error),
-    };
+    let parsed = service
+        .get_agent_pipeline(&agent_id)
+        .await
+        .map_err(pipeline_override_error)?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({"agent_id": agent_id, "pipeline_config": parsed})),
-    )
+    ))
 }
 
 /// PUT /api/pipeline/config/agent/:agent_id
@@ -328,21 +318,19 @@ pub async fn set_agent_pipeline(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(body): Json<SetPipelineOverrideBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineOverrideService::new(pool);
-    if let Err(error) = service
+    service
         .set_agent_pipeline(&agent_id, body.config.as_ref())
         .await
-    {
-        return pipeline_override_error_response(error);
-    }
-    (
+        .map_err(pipeline_override_error)?;
+    Ok((
         StatusCode::OK,
         Json(json!({"ok": true, "agent_id": agent_id})),
-    )
+    ))
 }
 
 /// GET /api/pipeline/config/graph?repo=...&agent_id=...
@@ -350,16 +338,16 @@ pub async fn set_agent_pipeline(
 pub async fn get_pipeline_graph(
     State(state): State<AppState>,
     Query(params): Query<EffectivePipelineQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let service = PipelineRouteService::new(pool);
     match service
         .pipeline_graph(params.repo.as_deref(), params.agent_id.as_deref())
         .await
     {
-        Ok(graph) => (StatusCode::OK, Json(graph)),
+        Ok(graph) => Ok((StatusCode::OK, Json(graph))),
         Err(error) => pipeline_route_error_response(error),
     }
 }

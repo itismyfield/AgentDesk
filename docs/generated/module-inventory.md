@@ -288,13 +288,13 @@
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 234 | 234 | 0 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 | 17 | 0 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 1290 | 1290 | 0 | giant-file |
-| `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 901 | 465 | 436 |  |
+| `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 881 | 443 | 438 |  |
 | `server::routes::message_outbox` | `src/server/routes/message_outbox.rs` | 477 | 284 | 193 |  |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 195 | 195 | 0 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 96 | 96 | 0 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 485 | 485 | 0 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 58 | 58 | 0 |  |
-| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 365 | 365 | 0 |  |
+| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 353 | 353 | 0 |  |
 | `server::routes::pr_summary` | `src/server/routes/pr_summary.rs` | 241 | 142 | 99 |  |
 | `server::routes::prompt_manifest_retention` | `src/server/routes/prompt_manifest_retention.rs` | 57 | 57 | 0 |  |
 | `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 386 | 386 | 0 |  |
