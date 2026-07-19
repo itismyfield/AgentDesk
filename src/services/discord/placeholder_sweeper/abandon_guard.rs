@@ -5,7 +5,11 @@ use super::super::inflight::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
     clear_inflight_state_if_matches_identity_generation, opt_channel_id, opt_message_id,
 };
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::platform::tmux::PaneLiveness;
+#[cfg(unix)]
+use crate::services::process::ProcessIdentity;
+use crate::services::process::ProcessIdentityProbe;
 use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,11 +97,59 @@ where
     }
 }
 
+fn claude_e_process_probe_decision(probe: ProcessIdentityProbe) -> AbandonedTmuxCleanupDecision {
+    match probe {
+        ProcessIdentityProbe::GoneOrReused => AbandonedTmuxCleanupDecision::Kill,
+        ProcessIdentityProbe::Same | ProcessIdentityProbe::ProbeError => {
+            AbandonedTmuxCleanupDecision::PreserveRetry
+        }
+    }
+}
+
+// This closes only the row-present ClaudeE sweeper path. The Drop-time row-delete
+// gap remains a separate follow-up because no durable identity survives that deletion.
+#[cfg(unix)]
+fn claude_e_process_cleanup_decision(
+    runtime_kind: Option<RuntimeHandoffKind>,
+    pid: Option<u32>,
+    starttime: Option<u128>,
+    macos_lstart_hash: Option<u128>,
+) -> AbandonedTmuxCleanupDecision {
+    if runtime_kind != Some(RuntimeHandoffKind::ClaudeEAdapter) {
+        return AbandonedTmuxCleanupDecision::PreserveRetry;
+    }
+    let Some(pid) = pid.filter(|pid| *pid != 0) else {
+        return AbandonedTmuxCleanupDecision::PreserveRetry;
+    };
+    if starttime.is_none() && macos_lstart_hash.is_none() {
+        return AbandonedTmuxCleanupDecision::PreserveRetry;
+    }
+    let identity = ProcessIdentity::from_persisted(starttime, macos_lstart_hash);
+    claude_e_process_probe_decision(identity.probe(pid))
+}
+
+#[cfg(not(unix))]
+fn claude_e_process_cleanup_decision(
+    _runtime_kind: Option<RuntimeHandoffKind>,
+    _pid: Option<u32>,
+    _starttime: Option<u128>,
+    _macos_lstart_hash: Option<u128>,
+) -> AbandonedTmuxCleanupDecision {
+    AbandonedTmuxCleanupDecision::PreserveRetry
+}
+
 pub(super) async fn abandoned_tmux_cleanup_decision_for(
     state: &InflightTurnState,
 ) -> AbandonedTmuxCleanupDecision {
     let Some(session_name) = state.tmux_session_name.as_deref() else {
-        return AbandonedTmuxCleanupDecision::PreserveRetry;
+        let runtime_kind = state.runtime_kind;
+        let pid = state.claude_e_pid;
+        let starttime = state.claude_e_process_starttime;
+        let macos_lstart_hash = state.claude_e_macos_lstart_hash;
+        return run_blocking_cleanup_probe(move || {
+            claude_e_process_cleanup_decision(runtime_kind, pid, starttime, macos_lstart_hash)
+        })
+        .await;
     };
     let session_name = session_name.trim();
     if session_name.is_empty() {
@@ -444,7 +496,8 @@ mod tests {
         AbandonedCleanupEvidence, AbandonedTmuxCleanupDecision, RevivedVisibleRepair,
         RuntimeActivityEvidence, abandoned_cleanup_evidence_for_probe, abandoned_cleanup_plan,
         abandoned_mailbox_finish_actions, abandoned_tmux_cleanup_decision,
-        abandoned_tmux_cleanup_decision_for, decision_for_user_identity, revived_visible_repair,
+        abandoned_tmux_cleanup_decision_for, claude_e_process_cleanup_decision,
+        claude_e_process_probe_decision, decision_for_user_identity, revived_visible_repair,
         run_blocking_cleanup_probe, runtime_activity_evidence_from, should_detach_after_cleanup,
     };
     use crate::services::discord::inflight::InflightTurnState;
@@ -519,6 +572,95 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn claude_e_missing_or_legacy_identity_preserves_retry() {
+        let mut state = sweep_state();
+        state.tmux_session_name = None;
+        state.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter);
+        state.claude_e_pid = Some(std::process::id());
+
+        assert_eq!(
+            abandoned_tmux_cleanup_decision_for(&state).await,
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_e_live_process_preserves_retry() {
+        let mut state = sweep_state();
+        let identity = crate::services::process::ProcessIdentity::capture(std::process::id());
+        state.tmux_session_name = None;
+        state.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter);
+        state.claude_e_pid = Some(std::process::id());
+        state.claude_e_process_starttime = identity.persisted_starttime();
+        state.claude_e_macos_lstart_hash = identity.persisted_macos_lstart_hash();
+
+        assert_eq!(
+            abandoned_tmux_cleanup_decision_for(&state).await,
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+    }
+
+    #[test]
+    fn claude_e_probe_error_preserves_retry() {
+        assert_eq!(
+            claude_e_process_probe_decision(
+                crate::services::process::ProcessIdentityProbe::ProbeError,
+            ),
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_e_pid_reuse_evidence_allows_cleanup() {
+        let identity = crate::services::process::ProcessIdentity::capture(std::process::id());
+        let wrong_starttime = identity
+            .persisted_starttime()
+            .map(|value| value.wrapping_add(1));
+        let wrong_macos_hash = identity
+            .persisted_macos_lstart_hash()
+            .map(|value| value.wrapping_add(1));
+        assert_eq!(
+            claude_e_process_cleanup_decision(
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter),
+                Some(std::process::id()),
+                wrong_starttime,
+                wrong_macos_hash,
+            ),
+            AbandonedTmuxCleanupDecision::Kill,
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn claude_e_process_cleanup_is_fail_closed_without_unix_probe() {
+        assert_eq!(
+            claude_e_process_cleanup_decision(
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter),
+                Some(42),
+                Some(1),
+                Some(1),
+            ),
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+    }
+
+    #[test]
+    fn tmuxless_wrong_runtime_kind_preserves_retry() {
+        assert_eq!(
+            claude_e_process_cleanup_decision(
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend),
+                Some(u32::MAX),
+                Some(1),
+                Some(1),
+            ),
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+    }
+
     #[test]
     fn confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup() {
         assert_eq!(
@@ -533,6 +675,26 @@ mod tests {
 
     #[test]
     fn live_pane_preserves_the_tmux_session_even_when_activity_is_not_recent() {
+        assert_eq!(
+            abandoned_tmux_cleanup_decision(
+                true,
+                PaneLiveness::Live,
+                RuntimeActivityEvidence::Inactive,
+            ),
+            AbandonedTmuxCleanupDecision::PreserveRetry,
+        );
+    }
+
+    #[test]
+    fn tmux_present_path_is_unchanged_by_claude_e_process_evidence() {
+        assert_eq!(
+            abandoned_tmux_cleanup_decision(
+                true,
+                PaneLiveness::DeadOrAbsent,
+                RuntimeActivityEvidence::Inactive,
+            ),
+            AbandonedTmuxCleanupDecision::Kill,
+        );
         assert_eq!(
             abandoned_tmux_cleanup_decision(
                 true,

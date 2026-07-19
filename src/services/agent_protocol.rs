@@ -142,6 +142,7 @@ pub enum RuntimeHandoff {
         output_path: String,
         session_name: String,
         last_offset: u64,
+        pid: u32,
     },
 }
 

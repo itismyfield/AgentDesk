@@ -370,6 +370,7 @@ fn runtime_handoff_for_recovery(
             output_path,
             session_name: tmux_session_name,
             last_offset,
+            pid: 0,
         },
     }
 }

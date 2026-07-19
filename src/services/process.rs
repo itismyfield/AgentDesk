@@ -255,6 +255,29 @@ impl ProcessIdentity {
         ProcessIdentityProbe::ProbeError
     }
 
+    pub(crate) fn from_persisted(starttime: Option<u128>, macos_lstart_hash: Option<u128>) -> Self {
+        Self {
+            starttime,
+            #[cfg(target_os = "macos")]
+            macos_lstart_hash,
+        }
+    }
+
+    pub(crate) fn persisted_starttime(&self) -> Option<u128> {
+        self.starttime
+    }
+
+    pub(crate) fn persisted_macos_lstart_hash(&self) -> Option<u128> {
+        #[cfg(target_os = "macos")]
+        {
+            self.macos_lstart_hash
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
     fn has_baseline(&self) -> bool {
         self.starttime.is_some() || {
             #[cfg(target_os = "macos")]
