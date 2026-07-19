@@ -782,7 +782,7 @@ mod tests {
             Some("102"),
             None,
             Some("worker-b"),
-            "working",
+            "turn_active",
         )
         .await;
 
