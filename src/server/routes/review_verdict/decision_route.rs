@@ -10,19 +10,26 @@ use crate::services::review_decision::ReviewDecisionBody;
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
 
-fn review_decision_error(status: StatusCode, response: Json<Value>) -> AppError {
+fn review_decision_result(
+    status: StatusCode,
+    response: Json<Value>,
+) -> AppResult<(StatusCode, Json<Value>)> {
     let Value::Object(body) = response.0 else {
-        return AppError::new(status, ErrorCode::Dispatch, "review decision failed");
+        return Err(AppError::new(
+            status,
+            ErrorCode::Dispatch,
+            "review decision failed",
+        ));
     };
+    if body.keys().any(|key| key != "error") {
+        return Ok((status, Json(Value::Object(body))));
+    }
     let message = body
         .get("error")
         .and_then(Value::as_str)
         .unwrap_or("review decision failed")
         .to_string();
-    body.into_iter().filter(|(key, _)| key != "error").fold(
-        AppError::new(status, ErrorCode::Dispatch, message),
-        |error, (key, value)| error.with_context(key, value),
-    )
+    Err(AppError::new(status, ErrorCode::Dispatch, message))
 }
 
 /// POST /api/reviews/decision
@@ -44,6 +51,6 @@ pub async fn submit_review_decision(
     if status.is_success() {
         Ok((status, response))
     } else {
-        Err(review_decision_error(status, response))
+        review_decision_result(status, response)
     }
 }

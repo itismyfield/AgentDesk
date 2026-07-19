@@ -545,12 +545,12 @@ pub async fn submit_verdict(
                 Some(&["completed"]),
                 false,
             );
-            return Err(verdict_error(
+            return Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                json!({
+                Json(json!({
                     "ok": false,
                     "error": format!("failed to write release marker: {e}"),
-                }),
+                })),
             ));
         }
     }
