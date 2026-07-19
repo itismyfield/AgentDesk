@@ -241,7 +241,7 @@
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 195 | 195 | 0 |  |
 | `server::routes::automation_candidates` | `src/server/routes/automation_candidates.rs` | 330 | 330 | 0 |  |
 | `server::routes::claude_accounts_api` | `src/server/routes/claude_accounts_api.rs` | 182 | 182 | 0 |  |
-| `server::routes::cluster` | `src/server/routes/cluster.rs` | 451 | 451 | 0 |  |
+| `server::routes::cluster` | `src/server/routes/cluster.rs` | 379 | 379 | 0 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 | 180 | 0 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 342 | 266 | 76 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 416 | 359 | 57 |  |
