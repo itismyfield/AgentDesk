@@ -70,7 +70,7 @@
 | `src/reconcile.rs` | 1902 |
 | `src/server/mod.rs` | 2756 |
 | `src/server/routes/agents.rs` | 1278 |
-| `src/server/routes/agents_crud.rs` | 1331 |
+| `src/server/routes/agents_crud.rs` | 1271 |
 | `src/server/routes/agents_setup.rs` | 1365 |
 | `src/server/routes/escalation.rs` | 1379 |
 | `src/server/routes/health_api.rs` | 1775 |

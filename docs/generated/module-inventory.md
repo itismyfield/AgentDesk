@@ -234,7 +234,7 @@
 | `server::resource_locks` | `src/server/resource_locks.rs` | 416 | 239 | 177 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 570 | 335 | 235 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 1328 | 1278 | 50 | giant-file |
-| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1331 | 1331 | 0 | giant-file |
+| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1271 | 1271 | 0 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1365 | 1365 | 0 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 554 | 554 | 0 |  |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 281 | 178 | 103 |  |

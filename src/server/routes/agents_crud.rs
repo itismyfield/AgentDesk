@@ -733,8 +733,10 @@ pub(super) async fn create_agent(
                 );
                 Ok((StatusCode::CREATED, Json(json!({"agent": agent}))))
             }
-            Ok(None) => Err(AppError::internal("agent insert succeeded but readback failed")
-                .with_code(ErrorCode::Database)),
+            Ok(None) => Err(
+                AppError::internal("agent insert succeeded but readback failed")
+                    .with_code(ErrorCode::Database),
+            ),
             Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
         };
     }
@@ -940,7 +942,9 @@ pub(super) async fn update_agent(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
+                    return Err(
+                        AppError::internal(format!("{error}")).with_code(ErrorCode::Database)
+                    );
                 }
             }
         }
@@ -950,8 +954,10 @@ pub(super) async fn update_agent(
                 StatusCode::OK,
                 Json(json!({"agent": agent, "prompt": prompt_result})),
             )),
-            Ok(None) => Err(AppError::internal("agent update succeeded but readback failed")
-                .with_code(ErrorCode::Database)),
+            Ok(None) => Err(
+                AppError::internal("agent update succeeded but readback failed")
+                    .with_code(ErrorCode::Database),
+            ),
             Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
         };
     }
@@ -1039,8 +1045,10 @@ pub(super) async fn duplicate_agent(
             resolve_agent_prompt_path(&id, Some(&provider)).map(|path| path.display().to_string())
         });
     let Some(prompt_template_path) = prompt_path else {
-        return Err(AppError::internal("source prompt path could not be resolved")
-            .with_code(ErrorCode::Config));
+        return Err(
+            AppError::internal("source prompt path could not be resolved")
+                .with_code(ErrorCode::Config),
+        );
     };
 
     let setup_body = agents_setup::AgentSetupBody {
@@ -1115,8 +1123,10 @@ pub(super) async fn duplicate_agent(
     .execute(pool)
     .await
     {
-        return Err(AppError::internal(format!("update duplicate metadata: {error}"))
-            .with_code(ErrorCode::Database));
+        return Err(
+            AppError::internal(format!("update duplicate metadata: {error}"))
+                .with_code(ErrorCode::Database),
+        );
     }
 
     if let Err(error) = update_duplicate_config_metadata(
