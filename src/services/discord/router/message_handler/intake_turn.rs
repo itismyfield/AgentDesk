@@ -8,6 +8,7 @@ use super::*;
 
 mod claim_bootstrap;
 mod race_loss;
+mod stale_dispatch_guard;
 mod turn_watchdog;
 mod voice_intake;
 
@@ -1296,37 +1297,18 @@ pub(super) async fn handle_text_message(
     // — see latency_spans.rs). Never `.log()`'d on the early returns below.
     let mut intake_latency = super::latency_spans::IntakeLatencySpans::turn_claimed();
 
-    if started
-        && !preserve_on_cancel
-        && let Some(stale) =
-            super::super::super::stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)
-                .await
+    if stale_dispatch_guard::abort_terminal_dispatch_at_turn_start(
+        http,
+        shared,
+        &provider,
+        channel_id,
+        user_msg_id,
+        user_text,
+        started,
+        preserve_on_cancel,
+    )
+    .await
     {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⏭ DISPATCH-GUARD: aborted terminal dispatch at turn start in channel {} (dispatch={}, status={})",
-            channel_id,
-            stale.dispatch_id,
-            stale.status
-        );
-        let finish =
-            super::super::super::mailbox_finish_turn(shared.as_ref(), &provider, channel_id).await;
-        super::super::super::advance_last_message_checkpoint(
-            shared,
-            &provider,
-            channel_id,
-            user_msg_id,
-        );
-        let emoji = super::super::super::queue_exit_feedback_emoji(stale.queue_exit_kind);
-        queue_marker::note_exit_feedback_added(shared, http, channel_id, user_msg_id, emoji).await;
-        if finish.has_pending {
-            super::super::super::schedule_deferred_idle_queue_kickoff(
-                shared.clone(),
-                provider.clone(),
-                channel_id,
-                "terminal dispatch skipped at turn start",
-            );
-        }
         return Ok(());
     }
 
@@ -2783,9 +2765,12 @@ mod recovery_context_take_order_tests {
         let root = tempfile::tempdir().expect("create temp runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
         let module_src = include_str!("intake_turn.rs");
+        // #4552: the stale-dispatch guard body now lives in the
+        // `stale_dispatch_guard` submodule; the caller keeps the guarded early
+        // return, so anchor on the call site (still ahead of the take below).
         let stale_guard_pos = module_src
-            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
-            .expect("intake stale-dispatch guard exists");
+            .find("abort_terminal_dispatch_at_turn_start(")
+            .expect("intake stale-dispatch guard call exists");
         let stale_return_pos = stale_guard_pos
             + module_src[stale_guard_pos..]
                 .find("return Ok(());")
@@ -3019,19 +3004,17 @@ mod turn_start_dispatch_guard_preservation_tests {
     // `DISPATCH:<id>` prefix, silently defeating the feature end-to-end.
     #[test]
     fn turn_start_guard_is_gated_on_preserve_on_cancel() {
-        let module_src = include_str!("intake_turn.rs");
-        let claim_pos = module_src
-            .find("let started = try_start_turn_with_stale_busy_heal(")
-            .expect("turn-start mailbox claim exists");
-        let stale_call_pos = module_src[claim_pos..]
-            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
-            .map(|offset| claim_pos + offset)
+        // #4552: the guard body moved to the `stale_dispatch_guard` submodule.
+        // The invariant (gate the raw stale-text lookup on `!preserve_on_cancel`)
+        // now lives entirely inside that helper, so scan it directly.
+        let guard_src = include_str!("intake_turn/stale_dispatch_guard.rs");
+        let stale_call_pos = guard_src
+            .find("stale_dispatch_turn_for_text(")
             .expect("turn-start dispatch-guard raw stale-text lookup exists");
-        let gate_between_claim_and_lookup =
-            module_src[claim_pos..stale_call_pos].find("!preserve_on_cancel");
+        let gate_before_lookup = guard_src[..stale_call_pos].find("!preserve_on_cancel");
 
         assert!(
-            gate_between_claim_and_lookup.is_some(),
+            gate_before_lookup.is_some(),
             "turn-start DISPATCH-GUARD must gate the raw stale-text lookup on \
              `!preserve_on_cancel` (#4247 FIX 1) — removing this gate lets a \
              preserved (marked) genuine human instruction get dropped at turn \
@@ -3041,35 +3024,46 @@ mod turn_start_dispatch_guard_preservation_tests {
     }
 
     // Companion: the gated stale lookup must still feed the SAME abort branch
-    // (finish turn, advance checkpoint, exit emoji), i.e. the gate did not get
-    // attached to some other unrelated `stale_dispatch_turn_for_text` use.
+    // (finish turn, advance checkpoint, exit emoji) and signal abort back to the
+    // caller, i.e. the gate did not get attached to some other unrelated
+    // `stale_dispatch_turn_for_text` use.
     #[test]
     fn gated_stale_lookup_feeds_the_turn_abort_branch() {
-        let module_src = include_str!("intake_turn.rs");
-        let claim_pos = module_src
-            .find("let started = try_start_turn_with_stale_busy_heal(")
-            .expect("turn-start mailbox claim exists");
-        let stale_call_pos = module_src[claim_pos..]
-            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
-            .map(|offset| claim_pos + offset)
+        // #4552: the abort branch body lives in the `stale_dispatch_guard`
+        // helper; the caller keeps the guarded early return.
+        let guard_src = include_str!("intake_turn/stale_dispatch_guard.rs");
+        let stale_call_pos = guard_src
+            .find("stale_dispatch_turn_for_text(")
             .expect("turn-start dispatch-guard raw stale-text lookup exists");
-        // Anchor on the abort log, then look for the branch's finish + early
-        // return by RELATIVE offset — no fixed byte window (multibyte-safe, and
-        // resilient to added log lines). (Fable review note.)
-        let abort_pos = module_src[stale_call_pos..]
+        // Anchor on the abort log, then look for the branch's finish + abort
+        // signal by RELATIVE offset — no fixed byte window (multibyte-safe, and
+        // resilient to added log lines).
+        let abort_pos = guard_src[stale_call_pos..]
             .find("DISPATCH-GUARD: aborted terminal dispatch at turn start")
             .map(|offset| stale_call_pos + offset)
             .expect("gated stale lookup must still feed the turn-start abort log/branch");
-        let abort_region = &module_src[abort_pos..];
+        let abort_region = &guard_src[abort_pos..];
         let finish = abort_region.find("mailbox_finish_turn");
-        let ret = abort_region.find("return Ok(());");
+        let ret = abort_region.find("return true;");
         assert!(
             finish.is_some_and(|f| f < 600),
             "turn-start abort branch must still finish the mailbox turn"
         );
         assert!(
             ret.is_some_and(|r| r < 1200),
-            "turn-start abort branch must still return early"
+            "turn-start abort branch must still signal abort to the caller"
+        );
+
+        // The caller must honor that abort signal with an early return.
+        let module_src = include_str!("intake_turn.rs");
+        let call_pos = module_src
+            .find("abort_terminal_dispatch_at_turn_start(")
+            .expect("live intake calls the turn-start guard");
+        assert!(
+            module_src[call_pos..]
+                .find("return Ok(());")
+                .is_some_and(|r| r < 400),
+            "the live-intake caller must return early when the guard aborts"
         );
     }
 
@@ -3090,15 +3084,27 @@ mod turn_start_dispatch_guard_preservation_tests {
             .find("preserve_on_cancel: bool,")
             .map(|offset| signature_pos + offset)
             .expect("handle_text_message receives preserve_on_cancel as a parameter");
-        let guard_pos = module_src[param_pos..]
-            .find("&& !preserve_on_cancel")
-            .map(|offset| param_pos + offset);
-
+        // #4552: the guard body moved to the `stale_dispatch_guard` submodule.
+        // The parameter must still be forwarded into the guard call unmodified,
+        // and the extracted guard must still gate on it.
+        let call_pos = module_src[param_pos..]
+            .find("abort_terminal_dispatch_at_turn_start(")
+            .map(|offset| param_pos + offset)
+            .expect("the live-intake path must call the turn-start guard");
+        let call_end = module_src[call_pos..]
+            .find(".await")
+            .map(|offset| call_pos + offset)
+            .expect("the turn-start guard call must be awaited");
         assert!(
-            guard_pos.is_some(),
+            module_src[call_pos..call_end].contains("preserve_on_cancel"),
             "the live-intake preserve_on_cancel parameter must flow into the \
-             FIX 1 turn-start guard; mutating either the parameter plumbing or \
-             the guard breaks this"
+             FIX 1 turn-start guard call; mutating the parameter plumbing breaks this"
+        );
+
+        let guard_src = include_str!("intake_turn/stale_dispatch_guard.rs");
+        assert!(
+            guard_src.contains("&& !preserve_on_cancel"),
+            "the extracted turn-start guard must still gate on `!preserve_on_cancel`"
         );
     }
 }
