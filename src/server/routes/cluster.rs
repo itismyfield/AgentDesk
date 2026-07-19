@@ -7,14 +7,23 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
+use sqlx::PgPool;
 
-pub async fn list_nodes(state: State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
+fn pg_pool(state: &AppState) -> AppResult<&PgPool> {
+    state.pg_pool_ref().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+            ErrorCode::Config,
+            "postgres unavailable",
+        )
+    })
+}
+
+pub async fn list_nodes(
+    state: State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     let lease_ttl_secs = state.config.cluster.lease_ttl_secs.max(1);
     match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
         Ok(mut nodes) => {
@@ -53,7 +62,7 @@ pub async fn list_nodes(state: State<AppState>) -> (StatusCode, Json<serde_json:
                         )
                     }
                 };
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({
                     "cluster": {
@@ -67,12 +76,9 @@ pub async fn list_nodes(state: State<AppState>) -> (StatusCode, Json<serde_json:
                     "session_owners": session_owners,
                     "session_owner_error": session_owner_error,
                 })),
-            )
+            ))
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Err(error) => Err(AppError::internal(error)),
     }
 }
 
@@ -84,22 +90,16 @@ pub struct RoutingDiagnosticsQuery {
 pub async fn routing_diagnostics(
     State(state): State<AppState>,
     Query(params): Query<RoutingDiagnosticsQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     let required = match params.required.as_deref() {
         Some(raw) if !raw.trim().is_empty() => {
             match serde_json::from_str::<serde_json::Value>(raw) {
                 Ok(value) => value,
                 Err(error) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": format!("invalid required JSON: {error}")})),
-                    );
+                    return Err(AppError::bad_request(format!(
+                        "invalid required JSON: {error}"
+                    )));
                 }
             }
         }
@@ -124,7 +124,7 @@ pub async fn routing_diagnostics(
                 .iter()
                 .map(|node| crate::server::cluster::explain_capability_match(node, &required))
                 .collect::<Vec<_>>();
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({
                     "required": required,
@@ -132,12 +132,9 @@ pub async fn routing_diagnostics(
                     "routing": routing,
                     "constraint_results": constraint_results,
                 })),
-            )
+            ))
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Err(error) => Err(AppError::internal(error)),
     }
 }
 
@@ -150,38 +147,25 @@ pub struct ResourceLocksQuery {
 pub async fn list_resource_locks(
     State(state): State<AppState>,
     Query(params): Query<ResourceLocksQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::resource_locks::list_resource_locks(pool, params.include_expired).await {
-        Ok(locks) => (
+        Ok(locks) => Ok((
             StatusCode::OK,
             Json(json!({
                 "locks": locks,
                 "default_ttl_secs": crate::server::resource_locks::default_resource_lock_ttl_secs()
             })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        )),
+        Err(error) => Err(AppError::internal(error)),
     }
 }
 
 pub async fn acquire_resource_lock(
     State(state): State<AppState>,
     Json(body): Json<crate::server::resource_locks::ResourceLockRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::resource_locks::acquire_resource_lock(pool, &body).await {
         Ok(outcome) => {
             let status = if outcome.acquired {
@@ -189,29 +173,24 @@ pub async fn acquire_resource_lock(
             } else {
                 StatusCode::CONFLICT
             };
-            (status, Json(json!(outcome)))
+            Ok((status, Json(json!(outcome))))
         }
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn heartbeat_resource_lock(
     State(state): State<AppState>,
     Json(body): Json<crate::server::resource_locks::ResourceLockRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::resource_locks::heartbeat_resource_lock(pool, &body).await {
-        Ok(Some(lock)) => (StatusCode::OK, Json(json!({"ok": true, "lock": lock}))),
-        Ok(None) => (
+        Ok(Some(lock)) => Ok((StatusCode::OK, Json(json!({"ok": true, "lock": lock})))),
+        Ok(None) => Ok((
             StatusCode::CONFLICT,
             Json(json!({"ok": false, "error": "lock is not held by requester or has expired"})),
-        ),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        )),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
@@ -225,13 +204,8 @@ pub struct ResourceLockReleaseRequest {
 pub async fn release_resource_lock(
     State(state): State<AppState>,
     Json(body): Json<ResourceLockReleaseRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::resource_locks::release_resource_lock(
         pool,
         &body.lock_key,
@@ -240,71 +214,48 @@ pub async fn release_resource_lock(
     )
     .await
     {
-        Ok(released) => (StatusCode::OK, Json(json!({"released": released}))),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Ok(released) => Ok((StatusCode::OK, Json(json!({"released": released})))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn reclaim_expired_resource_locks(
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::resource_locks::reclaim_expired_resource_locks(pool).await {
-        Ok(reclaimed) => (StatusCode::OK, Json(json!({"reclaimed": reclaimed}))),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(reclaimed) => Ok((StatusCode::OK, Json(json!({"reclaimed": reclaimed})))),
+        Err(error) => Err(AppError::internal(error)),
     }
 }
 
 pub async fn list_test_phase_runs(
     State(state): State<AppState>,
     Query(params): Query<crate::server::test_phase_runs::TestPhaseRunListQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::test_phase_runs::list_test_phase_runs(pool, &params).await {
-        Ok(runs) => (StatusCode::OK, Json(json!({"runs": runs}))),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Ok(runs) => Ok((StatusCode::OK, Json(json!({"runs": runs})))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn upsert_test_phase_run(
     State(state): State<AppState>,
     Json(body): Json<crate::server::test_phase_runs::TestPhaseRunRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::test_phase_runs::upsert_test_phase_run(pool, &body).await {
-        Ok(run) => (StatusCode::OK, Json(json!({"run": run}))),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Ok(run) => Ok((StatusCode::OK, Json(json!({"run": run})))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn start_test_phase_run(
     State(state): State<AppState>,
     Json(body): Json<crate::server::test_phase_runs::TestPhaseRunStartRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::test_phase_runs::start_test_phase_run(pool, &body).await {
         Ok(outcome) => {
             let status = if outcome.started {
@@ -312,38 +263,28 @@ pub async fn start_test_phase_run(
             } else {
                 StatusCode::CONFLICT
             };
-            (status, Json(json!(outcome)))
+            Ok((status, Json(json!(outcome))))
         }
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn complete_test_phase_run(
     State(state): State<AppState>,
     Json(body): Json<crate::server::test_phase_runs::TestPhaseRunCompleteRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::test_phase_runs::complete_test_phase_run(pool, &body).await {
-        Ok(outcome) => (StatusCode::OK, Json(json!(outcome))),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Ok(outcome) => Ok((StatusCode::OK, Json(json!(outcome)))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn latest_test_phase_evidence(
     State(state): State<AppState>,
     Query(params): Query<crate::server::test_phase_runs::TestPhaseEvidenceQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::test_phase_runs::latest_passing_evidence(
         pool,
         &params.phase_key,
@@ -351,60 +292,45 @@ pub async fn latest_test_phase_evidence(
     )
     .await
     {
-        Ok(Some(run)) => (StatusCode::OK, Json(json!({"ok": true, "run": run}))),
-        Ok(None) => (
+        Ok(Some(run)) => Ok((StatusCode::OK, Json(json!({"ok": true, "run": run})))),
+        Ok(None) => Ok((
             StatusCode::NOT_FOUND,
             Json(json!({"ok": false, "error": "passing evidence not found"})),
-        ),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        )),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn claim_task_dispatches(
     State(state): State<AppState>,
     Json(body): Json<crate::server::task_dispatch_claims::TaskDispatchClaimRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::task_dispatch_claims::claim_task_dispatches(pool, &body).await {
-        Ok(outcome) => (StatusCode::OK, Json(json!(outcome))),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Ok(outcome) => Ok((StatusCode::OK, Json(json!(outcome)))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn list_issue_specs(
     State(state): State<AppState>,
     Query(params): Query<crate::server::issue_specs::IssueSpecListQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::issue_specs::list_issue_specs(pool, &params).await {
-        Ok(specs) => (StatusCode::OK, Json(json!({"specs": specs}))),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Ok(specs) => Ok((StatusCode::OK, Json(json!({"specs": specs})))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
 pub async fn upsert_issue_spec(
     State(state): State<AppState>,
     Json(body): Json<crate::server::issue_specs::IssueSpecUpsertRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres unavailable"})),
-        );
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = pg_pool(&state)?;
     match crate::server::issue_specs::upsert_issue_spec(pool, &body).await {
-        Ok(spec) => (StatusCode::OK, Json(json!({"spec": spec}))),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+        Ok(spec) => Ok((StatusCode::OK, Json(json!({"spec": spec})))),
+        Err(error) => Err(AppError::bad_request(error)),
     }
 }
 
@@ -419,7 +345,9 @@ pub async fn upsert_issue_spec(
 /// `cluster.session_bound_relay_enabled` was flipped on. A field of `0` on a
 /// session that should be producing output is the canonical signal that the
 /// producer wiring regressed.
-pub async fn list_sessions(_state: State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn list_sessions(
+    _state: State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let registry = crate::services::cluster::session_registry::global_session_registry();
     let entries = registry.list_matched();
     let producers =
@@ -447,5 +375,5 @@ pub async fn list_sessions(_state: State<AppState>) -> (StatusCode, Json<serde_j
         "count": sessions.len(),
         "sessions": sessions,
     });
-    (StatusCode::OK, Json(payload))
+    Ok((StatusCode::OK, Json(payload)))
 }
