@@ -378,12 +378,16 @@ pub(crate) async fn cmd_review_verdict(
             commit: commit.map(str::to_string),
             provider: provider.map(str::to_string),
         };
-        let (status, body) = crate::server::routes::review_verdict::submit_verdict(
+        let (status, body) = match crate::server::routes::review_verdict::submit_verdict(
             State(state),
             HeaderMap::new(),
             Json(body),
         )
-        .await;
+        .await
+        {
+            Ok((status, body)) => (status, body),
+            Err(error) => (error.status(), Json(error.to_json_value())),
+        };
         route_json(status, body)
     })
     .await
@@ -453,11 +457,16 @@ pub(crate) async fn cmd_review_decision(
                     dispatch_id,
                     out_of_scope: None,
                 };
-                let (status, body) = crate::server::routes::review_verdict::submit_review_decision(
-                    State(state),
-                    Json(body),
-                )
-                .await;
+                let (status, body) =
+                    match crate::server::routes::review_verdict::submit_review_decision(
+                        State(state),
+                        Json(body),
+                    )
+                    .await
+                    {
+                        Ok((status, body)) => (status, body),
+                        Err(error) => (error.status(), Json(error.to_json_value())),
+                    };
                 route_json(status, body)
             }
             ReviewDecisionMode::Pm { requested, applied } => {
