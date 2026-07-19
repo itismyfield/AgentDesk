@@ -624,8 +624,7 @@ mod tests {
     /// usage assertions, while lowering the maximum fallback fires at 499K.
     #[test]
     fn suffixed_only_catalog_bare_model_fires_at_max_window_threshold_only() {
-        let _context_guard =
-            crate::services::claude_compact_context::state_test_guard();
+        let _context_guard = crate::services::claude_compact_context::state_test_guard();
         let _trigger_guard = state_test_guard();
         let proxy = "http://proxy-4678-suffixed-only.test";
         crate::services::claude_compact_context::put_catalog_for_test(
@@ -647,11 +646,10 @@ mod tests {
             &gateway,
         );
 
-        let high_resolution =
-            crate::services::claude_compact_context::context_window_for_turn(
-                "tmux-4678-high",
-                Some("claude-opus-4-8"),
-            );
+        let high_resolution = crate::services::claude_compact_context::context_window_for_turn(
+            "tmux-4678-high",
+            Some("claude-opus-4-8"),
+        );
         let (window, source) =
             trigger_window_for_resolution(high_resolution).expect("launch-bound trigger window");
         let threshold = threshold_for(window);
@@ -661,11 +659,10 @@ mod tests {
         };
         assert!(observe_and_decide_with_source(&high, 552_000, threshold, source).is_some());
 
-        let low_resolution =
-            crate::services::claude_compact_context::context_window_for_turn(
-                "tmux-4678-low",
-                Some("claude-opus-4-8"),
-            );
+        let low_resolution = crate::services::claude_compact_context::context_window_for_turn(
+            "tmux-4678-low",
+            Some("claude-opus-4-8"),
+        );
         let (window, source) =
             trigger_window_for_resolution(low_resolution).expect("launch-bound trigger window");
         let low = CompactPaneKey {
@@ -676,7 +673,10 @@ mod tests {
             observe_and_decide_with_source(&low, 499_000, threshold_for(window), source).is_none()
         );
         assert_eq!(armed_state(&low), Some(true));
-        assert_eq!(last_window_tokens(&low), Some(CLAUDE_AUTO_COMPACT_MAX_TOKENS));
+        assert_eq!(
+            last_window_tokens(&low),
+            Some(CLAUDE_AUTO_COMPACT_MAX_TOKENS)
+        );
     }
 
     /// Mutation guard: replacing the conservative 1M fallback with a native 200K
@@ -684,19 +684,16 @@ mod tests {
     #[test]
     fn scrub_fallback_never_uses_a_small_native_trigger() {
         let _guard = state_test_guard();
-        let (window, source) = trigger_window_for_resolution(Some(
-            TurnWindowResolution::UnprovenLaunchBound,
-        ))
-        .expect("scrub launch-bound fallback");
+        let (window, source) =
+            trigger_window_for_resolution(Some(TurnWindowResolution::UnprovenLaunchBound))
+                .expect("scrub launch-bound fallback");
         let threshold = threshold_for(window);
         for (channel_id, occupied) in [(42, 199_000), (43, 350_000)] {
             let pane = CompactPaneKey {
                 channel_id,
                 tmux_session_name: format!("tmux-scrub-{occupied}"),
             };
-            assert!(
-                observe_and_decide_with_source(&pane, occupied, threshold, source).is_none()
-            );
+            assert!(observe_and_decide_with_source(&pane, occupied, threshold, source).is_none());
         }
     }
 
@@ -705,13 +702,14 @@ mod tests {
     #[test]
     fn proven_window_takes_priority_over_maximum_fallback() {
         let _guard = state_test_guard();
-        let (window, source) = trigger_window_for_resolution(Some(
-            TurnWindowResolution::Proven(372_000),
-        ))
-        .expect("proven exact hit");
+        let (window, source) =
+            trigger_window_for_resolution(Some(TurnWindowResolution::Proven(372_000)))
+                .expect("proven exact hit");
         assert_eq!(source, CompactWindowSource::Proven);
-        assert!(observe_and_decide_with_source(&pane(), 350_000, threshold_for(window), source)
-            .is_some());
+        assert!(
+            observe_and_decide_with_source(&pane(), 350_000, threshold_for(window), source)
+                .is_some()
+        );
     }
 
     /// Mutation guard: ignoring proof source when the numeric window remains 1M
@@ -728,13 +726,9 @@ mod tests {
             CompactWindowSource::FallbackMax,
         )
         .expect("fallback crossing");
-        let new_generation = observe_and_decide_with_source(
-            &pane,
-            552_000,
-            threshold,
-            CompactWindowSource::Proven,
-        )
-        .expect("proven crossing starts a fresh generation");
+        let new_generation =
+            observe_and_decide_with_source(&pane, 552_000, threshold, CompactWindowSource::Proven)
+                .expect("proven crossing starts a fresh generation");
         assert_ne!(old_generation, new_generation);
         assert!(!pane_still_disarmed_for_send(
             &pane,

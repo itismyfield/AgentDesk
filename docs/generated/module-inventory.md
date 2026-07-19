@@ -381,8 +381,8 @@
 | `services::claude::active_usage` | `src/services/claude/active_usage.rs` | 55 | 55 | 0 |  |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_command` | `src/services/claude_command.rs` | 1055 | 473 | 582 |  |
-| `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
-| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 952 | 457 | 495 |  |
+| `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1120 | 723 | 397 |  |
+| `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 1168 | 545 | 623 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
 | `services::claude_e::jsonl_parser` | `src/services/claude_e/jsonl_parser.rs` | 4 | 4 | 0 |  |
@@ -438,7 +438,7 @@
 | `services::cswap` | `src/services/cswap.rs` | 887 | 552 | 335 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 5635 | 4165 | 1470 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
-| `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 912 | 845 | 67 |  |
+| `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 944 | 877 | 67 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 1078 | 651 | 427 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1079 | 978 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |

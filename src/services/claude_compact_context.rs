@@ -333,11 +333,7 @@ fn live_catalog_context_window_for_selector(base_url: &str, model: &str) -> Opti
         );
         return None;
     };
-    let Some(window) = catalog
-        .get(&selector)
-        .copied()
-        .filter(|window| *window > 0)
-    else {
+    let Some(window) = catalog.get(&selector).copied().filter(|window| *window > 0) else {
         tracing::debug!(
             proxy_url = base_url,
             %selector,
