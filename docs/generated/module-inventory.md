@@ -523,7 +523,7 @@
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 301 | 287 | 14 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 1376 | 842 | 534 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 5854 | 611 | 5243 |  |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 5858 | 615 | 5243 |  |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 550 | 189 | 361 |  |
 | `services::discord::inflight::budget` | `src/services/discord/inflight/budget.rs` | 340 | 109 | 231 |  |
 | `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store/mod.rs` | 879 | 879 | 0 |  |
@@ -534,7 +534,6 @@
 | `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1348 | 995 | 353 |  |
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 821 | 307 | 514 |  |
 | `services::discord::inflight::ownership_ops` | `src/services/discord/inflight/ownership_ops.rs` | 329 | 329 | 0 |  |
-| `services::discord::inflight::post_loop_identity_guard_tests` | `src/services/discord/inflight/save_store/post_loop_identity_guard_tests.rs` | 84 | 0 | 84 |  |
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 810 | 810 | 0 |  |
 | `services::discord::inflight::removal` | `src/services/discord/inflight/removal.rs` | 465 | 465 | 0 |  |
 | `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 972 | 242 | 730 |  |

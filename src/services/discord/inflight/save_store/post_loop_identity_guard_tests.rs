@@ -64,8 +64,8 @@ fn post_loop_finalize_saves_require_matching_identity() {
         GuardedSaveOutcome::IdentityMismatch,
         "a stale post-loop finalize must decline after a different turn re-owns the row"
     );
-    let persisted = load_inflight_state(&ProviderKind::Codex, original.channel_id)
-        .expect("newer turn row");
+    let persisted =
+        load_inflight_state(&ProviderKind::Codex, original.channel_id).expect("newer turn row");
     assert_eq!(persisted.user_msg_id, newer_turn.user_msg_id);
     assert!(persisted.long_running_placeholder_active);
 
