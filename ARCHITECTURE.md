@@ -518,6 +518,8 @@ src/
 │   │   │   │   ├── abandon.rs
 │   │   │   │   └── mod.rs
 │   │   │   ├── save_store/
+│   │   │   │   ├── identity_gate/
+│   │   │   │   │   └── claude_e_stamp.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   └── rebind_adoption.rs
 │   │   │   ├── stall_recovery_tests/
@@ -810,6 +812,7 @@ src/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   └── completion_postgres.rs
 │   │   │   ├── runtime_handoff_loop/
+│   │   │   │   ├── claude_e.rs
 │   │   │   │   └── guarded_save.rs
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms/

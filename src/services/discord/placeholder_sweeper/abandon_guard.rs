@@ -95,9 +95,7 @@ where
     }
 }
 
-fn claude_e_process_probe_decision(
-    probe: ProcessIdentityProbe,
-) -> AbandonedTmuxCleanupDecision {
+fn claude_e_process_probe_decision(probe: ProcessIdentityProbe) -> AbandonedTmuxCleanupDecision {
     match probe {
         ProcessIdentityProbe::GoneOrReused => AbandonedTmuxCleanupDecision::Kill,
         ProcessIdentityProbe::Same | ProcessIdentityProbe::ProbeError => {
@@ -565,7 +563,8 @@ mod tests {
     async fn claude_e_missing_or_legacy_identity_preserves_retry() {
         let mut state = sweep_state();
         state.tmux_session_name = None;
-        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter);
+        state.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter);
         state.claude_e_pid = Some(std::process::id());
 
         assert_eq!(
@@ -579,7 +578,8 @@ mod tests {
         let mut state = sweep_state();
         let identity = crate::services::process::ProcessIdentity::capture(std::process::id());
         state.tmux_session_name = None;
-        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter);
+        state.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter);
         state.claude_e_pid = Some(std::process::id());
         state.claude_e_process_starttime = identity.persisted_starttime();
         state.claude_e_macos_lstart_hash = identity.persisted_macos_lstart_hash();

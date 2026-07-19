@@ -7,6 +7,8 @@ use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind};
 
 use super::*;
 
+mod claude_e;
+
 pub(super) enum RuntimeHandoffLoopMessage {
     TmuxReady {
         output_path: String,
@@ -595,32 +597,13 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     // to a tmux pane and is intentionally
                     // not stamped here.
                     let _ = session_name;
-                    let expected_identity =
-                        crate::services::discord::inflight::InflightTurnIdentity::from_state(
-                            &inflight_state,
-                        );
-                    let expected_save_generation = inflight_state.save_generation;
-                    let process_identity = crate::services::process::ProcessIdentity::capture(pid);
                     tmux_last_offset = Some(last_offset);
-                    inflight_state.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
-                    inflight_state.tmux_session_name = None;
-                    inflight_state.output_path = Some(output_path);
-                    inflight_state.input_fifo_path = None;
-                    inflight_state.last_offset = last_offset;
-                    inflight_state.claude_e_pid = Some(pid);
-                    inflight_state.claude_e_process_starttime =
-                        process_identity.persisted_starttime();
-                    inflight_state.claude_e_macos_lstart_hash =
-                        process_identity.persisted_macos_lstart_hash();
-                    let save_outcome =
-                        crate::services::discord::inflight::stamp_claude_e_process_if_matches_identity_generation(
-                            &inflight_state,
-                            &expected_identity,
-                            expected_save_generation,
-                        );
-                    state_dirty = guarded_save::tmux_ready_state_dirty_after_guarded_save(
+                    state_dirty = claude_e::stamp_process_evidence(
+                        inflight_state,
+                        output_path,
+                        last_offset,
+                        pid,
                         state_dirty,
-                        Some(save_outcome),
                     );
                     if done {
                         terminal_control_drain_until = None;
