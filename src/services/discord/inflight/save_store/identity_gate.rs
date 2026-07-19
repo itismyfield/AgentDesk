@@ -1,7 +1,7 @@
 use super::*;
 #[path = "identity_gate/claude_e_stamp.rs"]
 mod claude_e_stamp;
-pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity_generation;
+pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity;
 
 pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
     state: &InflightTurnState,
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_e_handoff_stamp_is_identity_and_generation_guarded() {
+    fn claude_e_handoff_stamp_accepts_stale_memory_generation_but_guards_identity() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1031,19 +1031,22 @@ mod tests {
         let durable: InflightTurnState =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read seeded row"))
                 .expect("parse seeded row");
-        let expected = InflightTurnIdentity::from_state(&durable);
+        let expected = InflightTurnIdentity::from_state(&state);
+        assert!(
+            durable.save_generation > state.save_generation,
+            "test must reproduce the production stale in-memory generation"
+        );
 
-        let mut handoff = durable.clone();
+        let mut handoff = state.clone();
         handoff.tmux_session_name = None;
         handoff.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
         handoff.claude_e_pid = Some(42);
         handoff.claude_e_process_starttime = Some(9001);
         assert_eq!(
-            claude_e_stamp::stamp_claude_e_process_if_matches_identity_generation_in_root(
+            claude_e_stamp::stamp_claude_e_process_if_matches_identity_in_root(
                 temp.path(),
                 &handoff,
                 &expected,
-                durable.save_generation,
             ),
             GuardedSaveOutcome::Saved,
         );
@@ -1057,11 +1060,10 @@ mod tests {
         newer.user_msg_id = 99_999;
         save_inflight_state_in_root(temp.path(), &newer).expect("seed newer turn");
         assert_eq!(
-            claude_e_stamp::stamp_claude_e_process_if_matches_identity_generation_in_root(
+            claude_e_stamp::stamp_claude_e_process_if_matches_identity_in_root(
                 temp.path(),
                 &handoff,
                 &expected,
-                durable.save_generation,
             ),
             GuardedSaveOutcome::IdentityMismatch,
         );

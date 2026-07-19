@@ -9,7 +9,6 @@ pub(super) fn stamp_process_evidence(
 ) -> bool {
     let expected_identity =
         crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
-    let expected_save_generation = inflight_state.save_generation;
     let process_identity = crate::services::process::ProcessIdentity::capture(pid);
     inflight_state.runtime_kind =
         Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter);
@@ -20,11 +19,9 @@ pub(super) fn stamp_process_evidence(
     inflight_state.claude_e_pid = Some(pid);
     inflight_state.claude_e_process_starttime = process_identity.persisted_starttime();
     inflight_state.claude_e_macos_lstart_hash = process_identity.persisted_macos_lstart_hash();
-    let outcome =
-        crate::services::discord::inflight::stamp_claude_e_process_if_matches_identity_generation(
-            inflight_state,
-            &expected_identity,
-            expected_save_generation,
-        );
+    let outcome = crate::services::discord::inflight::stamp_claude_e_process_if_matches_identity(
+        inflight_state,
+        &expected_identity,
+    );
     super::guarded_save::tmux_ready_state_dirty_after_guarded_save(state_dirty, Some(outcome))
 }

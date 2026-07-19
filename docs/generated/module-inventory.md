@@ -536,8 +536,8 @@
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 810 | 810 | 0 |  |
 | `services::discord::inflight::removal` | `src/services/discord/inflight/removal.rs` | 465 | 465 | 0 |  |
 | `services::discord::inflight::save_store` | `src/services/discord/inflight/save_store.rs` | 972 | 242 | 730 |  |
-| `services::discord::inflight::save_store::identity_gate` | `src/services/discord/inflight/save_store/identity_gate.rs` | 1337 | 999 | 338 |  |
-| `services::discord::inflight::save_store::identity_gate::claude_e_stamp` | `src/services/discord/inflight/save_store/identity_gate/claude_e_stamp.rs` | 67 | 67 | 0 |  |
+| `services::discord::inflight::save_store::identity_gate` | `src/services/discord/inflight/save_store/identity_gate.rs` | 1339 | 999 | 340 |  |
+| `services::discord::inflight::save_store::identity_gate::claude_e_stamp` | `src/services/discord/inflight/save_store/identity_gate/claude_e_stamp.rs` | 64 | 64 | 0 |  |
 | `services::discord::inflight::save_store::rebind_adoption` | `src/services/discord/inflight/save_store/rebind_adoption.rs` | 76 | 76 | 0 |  |
 | `services::discord::inflight::stall_recovery_tests::flake_isolation_4361` | `src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs` | 289 | 0 | 289 |  |
 | `services::discord::inflight::stall_recovery_tests::flake_isolation_4422` | `src/services/discord/inflight/stall_recovery_tests/flake_isolation_4422.rs` | 98 | 0 | 98 |  |
@@ -859,7 +859,7 @@
 | `services::discord::turn_bridge::response_delivery` | `src/services/discord/turn_bridge/response_delivery.rs` | 222 | 93 | 129 |  |
 | `services::discord::turn_bridge::retry_state` | `src/services/discord/turn_bridge/retry_state.rs` | 891 | 426 | 465 |  |
 | `services::discord::turn_bridge::runtime_handoff_loop` | `src/services/discord/turn_bridge/runtime_handoff_loop.rs` | 989 | 989 | 0 |  |
-| `services::discord::turn_bridge::runtime_handoff_loop::claude_e` | `src/services/discord/turn_bridge/runtime_handoff_loop/claude_e.rs` | 30 | 30 | 0 |  |
+| `services::discord::turn_bridge::runtime_handoff_loop::claude_e` | `src/services/discord/turn_bridge/runtime_handoff_loop/claude_e.rs` | 27 | 27 | 0 |  |
 | `services::discord::turn_bridge::runtime_handoff_loop::guarded_save` | `src/services/discord/turn_bridge/runtime_handoff_loop/guarded_save.rs` | 211 | 76 | 135 |  |
 | `services::discord::turn_bridge::single_message_footer` | `src/services/discord/turn_bridge/single_message_footer.rs` | 835 | 521 | 314 |  |
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 80 | 80 | 0 |  |

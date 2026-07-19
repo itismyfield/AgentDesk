@@ -1,26 +1,19 @@
 use super::*;
 
-pub(in crate::services::discord) fn stamp_claude_e_process_if_matches_identity_generation(
+pub(in crate::services::discord) fn stamp_claude_e_process_if_matches_identity(
     state: &InflightTurnState,
     expected: &InflightTurnIdentity,
-    expected_save_generation: u64,
 ) -> GuardedSaveOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedSaveOutcome::IoError;
     };
-    stamp_claude_e_process_if_matches_identity_generation_in_root(
-        &root,
-        state,
-        expected,
-        expected_save_generation,
-    )
+    stamp_claude_e_process_if_matches_identity_in_root(&root, state, expected)
 }
 
-pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_identity_generation_in_root(
+pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
     expected: &InflightTurnIdentity,
-    expected_save_generation: u64,
 ) -> GuardedSaveOutcome {
     let Some(provider) = state.provider_kind() else {
         return GuardedSaveOutcome::IoError;
@@ -32,10 +25,14 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
         return GuardedSaveOutcome::Missing;
     };
-    if on_disk.rebind_origin
-        || on_disk.save_generation != expected_save_generation
-        || !expected.matches_state(&on_disk)
-    {
+    if on_disk.rebind_origin || !expected.matches_state(&on_disk) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            snapshot_identity = ?expected,
+            durable_identity = ?InflightTurnIdentity::from_state(&on_disk),
+            "ClaudeE process-evidence stamp skipped because durable row authority changed"
+        );
         return GuardedSaveOutcome::IdentityMismatch;
     }
 
@@ -51,7 +48,7 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
         root,
         &path,
         &on_disk,
-        "src/services/discord/inflight.rs:stamp_claude_e_process_if_matches_identity_generation_in_root",
+        "src/services/discord/inflight.rs:stamp_claude_e_process_if_matches_identity_in_root",
     ) {
         Ok(()) => GuardedSaveOutcome::Saved,
         Err(error) => {
