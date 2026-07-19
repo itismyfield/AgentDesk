@@ -61,6 +61,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use super::AppState;
+use crate::error::AppResult;
 use crate::services::discord::idle_recap;
 use crate::services::discord::idle_recap::RecapSnapshot;
 use crate::services::provider::ProviderKind;
@@ -69,7 +70,7 @@ use crate::services::provider::ProviderKind;
 pub async fn post_idle_recap(
     State(state): State<AppState>,
     Path(session_key): Path<String>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     let Some(pool) = state.pg_pool.as_ref().cloned() else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "pg pool unavailable");
     };
@@ -139,7 +140,7 @@ pub async fn post_idle_recap(
         }
     });
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -147,7 +148,7 @@ pub async fn post_idle_recap(
             "posted": false,
             "channel_id": channel_id.to_string(),
         })),
-    )
+    ))
 }
 
 async fn run_idle_recap_post_job(
@@ -393,13 +394,13 @@ async fn run_idle_recap_post_job(
     }
 }
 
-fn skip(reason: &str) -> (StatusCode, Json<Value>) {
-    (
+fn skip(reason: &str) -> AppResult<(StatusCode, Json<Value>)> {
+    Ok((
         StatusCode::OK,
         Json(json!({"ok": true, "posted": false, "skipped": true, "reason": reason})),
-    )
+    ))
 }
 
-fn error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({"ok": false, "error": message})))
+fn error(status: StatusCode, message: &str) -> AppResult<(StatusCode, Json<Value>)> {
+    Ok((status, Json(json!({"ok": false, "error": message}))))
 }

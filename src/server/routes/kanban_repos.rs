@@ -8,6 +8,7 @@ use serde_json::json;
 use sqlx::Row;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 // ── Body types ─────────────────────────────────────────────────
 
@@ -26,9 +27,11 @@ pub struct UpdateRepoBody {
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/kanban-repos
-pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn list_repos(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     let rows = match sqlx::query(
         "SELECT id, display_name, sync_enabled, last_synced_at::text AS last_synced_at,
@@ -40,12 +43,7 @@ pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serd
     .await
     {
         Ok(rows) => rows,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
+        Err(error) => return Err(AppError::internal(format!("{error}"))),
     };
 
     let repos: Vec<serde_json::Value> = rows
@@ -71,23 +69,20 @@ pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serd
         })
         .collect();
 
-    (StatusCode::OK, Json(json!({"repos": repos})))
+    Ok((StatusCode::OK, Json(json!({"repos": repos}))))
 }
 
 /// POST /api/kanban-repos
 pub async fn create_repo(
     State(state): State<AppState>,
     Json(body): Json<CreateRepoBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if body.repo.is_empty() || !body.repo.contains('/') {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "repo must be in 'owner/name' format"})),
-        );
+        return Err(AppError::bad_request("repo must be in 'owner/name' format"));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     let display_name = body
@@ -98,10 +93,7 @@ pub async fn create_repo(
         .to_string();
 
     if let Err(error) = crate::db::postgres::register_repo(pool, &body.repo).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
+        return Err(AppError::internal(error).with_code(ErrorCode::Database));
     }
 
     if let Err(error) = sqlx::query(
@@ -117,10 +109,7 @@ pub async fn create_repo(
     .execute(pool)
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        );
+        return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
     }
 
     match sqlx::query(
@@ -132,7 +121,7 @@ pub async fn create_repo(
     .fetch_one(pool)
     .await
     {
-        Ok(row) => (
+        Ok(row) => Ok((
             StatusCode::CREATED,
             Json(json!({"repo": {
                 "id": row.try_get::<String, _>("id").unwrap_or_default(),
@@ -141,11 +130,8 @@ pub async fn create_repo(
                 "last_synced_at": row.try_get::<Option<String>, _>("last_synced_at").ok().flatten(),
                 "default_agent_id": row.try_get::<Option<String>, _>("default_agent_id").ok().flatten(),
             }})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+        )),
+        Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
     }
 }
 
@@ -154,11 +140,11 @@ pub async fn update_repo(
     State(state): State<AppState>,
     Path((owner, repo)): Path<(String, String)>,
     Json(body): Json<UpdateRepoBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let id = format!("{owner}/{repo}");
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     if let Some(ref agent_id) = body.default_agent_id {
         match sqlx::query("UPDATE github_repos SET default_agent_id = $1 WHERE id = $2")
@@ -168,17 +154,11 @@ pub async fn update_repo(
             .await
         {
             Ok(result) if result.rows_affected() == 0 => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "repo not found"})),
-                );
+                return Err(AppError::not_found("repo not found"));
             }
             Ok(_) => {}
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
             }
         }
     } else {
@@ -190,17 +170,13 @@ pub async fn update_repo(
             {
                 Ok(count) => count > 0,
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
+                    return Err(
+                        AppError::internal(format!("{error}")).with_code(ErrorCode::Database)
                     );
                 }
             };
         if !exists {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "repo not found"})),
-            );
+            return Err(AppError::not_found("repo not found"));
         }
     }
 
@@ -213,7 +189,7 @@ pub async fn update_repo(
     .fetch_one(pool)
     .await
     {
-        Ok(row) => (
+        Ok(row) => Ok((
             StatusCode::OK,
             Json(json!({"repo": {
                 "id": row.try_get::<String, _>("id").unwrap_or_default(),
@@ -222,11 +198,8 @@ pub async fn update_repo(
                 "last_synced_at": row.try_get::<Option<String>, _>("last_synced_at").ok().flatten(),
                 "default_agent_id": row.try_get::<Option<String>, _>("default_agent_id").ok().flatten(),
             }})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+        )),
+        Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
     }
 }
 
@@ -234,11 +207,11 @@ pub async fn update_repo(
 pub async fn delete_repo(
     State(state): State<AppState>,
     Path((owner, repo)): Path<(String, String)>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let id = format!("{owner}/{repo}");
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
     match sqlx::query("DELETE FROM github_repos WHERE id = $1")
@@ -246,21 +219,16 @@ pub async fn delete_repo(
         .execute(pool)
         .await
     {
-        Ok(result) if result.rows_affected() == 0 => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "repo not found"})),
-        ),
-        Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+        Ok(result) if result.rows_affected() == 0 => Err(AppError::not_found("repo not found")),
+        Ok(_) => Ok((StatusCode::OK, Json(json!({"ok": true})))),
+        Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
     }
 }
 
-fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
+fn pg_unavailable() -> AppError {
+    AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool unavailable"})),
+        ErrorCode::Config,
+        "postgres pool unavailable",
     )
 }
