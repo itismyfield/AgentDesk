@@ -349,6 +349,7 @@ fn long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081() {
         (0, body.len() as u64),
         Some(9_4081),
         &body,
+        None,
     );
 
     assert_eq!(

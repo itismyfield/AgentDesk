@@ -61,6 +61,10 @@ pub(super) fn record_stopped_turn_terminal_replace_delivery(
     terminal_anchor_msg_id: MessageId,
     terminal_anchor_channel_id: ChannelId,
     raw_response_body: &str,
+    // #4564: inbound turn id of the delivered (stopped) turn, from the caller's
+    // inflight snapshot. The completed-turn ledger is keyed by the delivery channel
+    // (`terminal_anchor_channel_id`), NOT `watcher_owner_channel_id`.
+    ledger_user_msg_id: u64,
 ) {
     super::super::outbound::delivery_record::record_delivered_frontier_with_body(
         shared,
@@ -70,6 +74,7 @@ pub(super) fn record_stopped_turn_terminal_replace_delivery(
         terminal_anchor_msg_id.get(),
         terminal_anchor_channel_id.get(),
         raw_response_body,
+        Some(ledger_user_msg_id),
     );
 }
 
@@ -1288,6 +1293,7 @@ mod tests {
             MessageId::new(94_084),
             channel_id,
             raw_body,
+            0,
         );
 
         let degenerate_key =

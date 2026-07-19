@@ -566,6 +566,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             dispatch_id.as_deref(),
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
+                            inflight_state.user_msg_id,
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -736,6 +737,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                                             current_msg_id.get(),
                                             channel_id.get(),
                                             &spoken_delivery_response,
+                                            Some(inflight_state.user_msg_id), // #4564 explicit inbound id (delivery channel)
                                         );
                                     }
                                     replace_committed

@@ -18,7 +18,7 @@
 | `src/services/discord/catch_up.rs` | 1809 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2566 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1375 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/outbound/delivery_record.rs` | 1347 | discord-relay | 2026-10-31 | #3405 |
+| `src/services/discord/outbound/delivery_record.rs` | 1369 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1228 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine/restore_inflight.rs` | 2326 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1536 | discord-relay | 2026-08-31 | #3405 |

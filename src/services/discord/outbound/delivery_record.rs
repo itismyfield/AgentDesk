@@ -1263,6 +1263,7 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     terminal_anchor_msg_id: Option<u64>,
     terminal_anchor_channel_id: Option<u64>,
     delivered_body: Option<&str>,
+    ledger_user_msg_id: Option<u64>,
 ) {
     let channel_id = channel.get();
     let coord = shared.tmux_relay_coord(channel);
@@ -1281,25 +1282,38 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     // durable completed-turn ledger — the authority the catch-up TooOld gate
     // consults so an already-answered inbound user message is never re-flagged
     // "unprocessed" after a restart. Gated on `is_delivered` (the DeliveredCommit
-    // gate), NOT on the shadow flag (unlike the frontier mirror below): the ledger
-    // is the #4564 fix, not shadow telemetry, and NEVER a checkpoint/frontier
-    // cursor (promoting those is what got #4600 closed P1). `fresh` is loaded here
-    // so the inbound `user_msg_id` is available; a `0` sentinel (synthetic turn)
-    // is dropped by `append_completed_turn`.
-    let fresh = is_delivered
-        .then(|| crate::services::discord::inflight::load_inflight_state(provider, channel_id))
-        .flatten();
+    // gate), NOT on the shadow flag: the ledger is the #4564 fix, not shadow
+    // telemetry, and NEVER a checkpoint/frontier cursor (#4600 P1).
+    //
+    // #4564 channel-split fix: keyed by the DELIVERY/inbound channel
+    // (`terminal_anchor_channel_id`, where the answered user message lives and
+    // catch-up scans) — NEVER the offset-authority `channel`, which on a
+    // recovered/reused-watcher bridge is `watcher_owner_channel_id`, a DIFFERENT
+    // channel whose preserved inflight row is an UNANSWERED turn. The delivered
+    // turn's `user_msg_id` is passed EXPLICITLY (`Some`) by the bridge/commit call
+    // site from the turn snapshot; it is NEVER re-derived by a commit-time inflight
+    // reload keyed by `channel` (that reload was the channel-split silent-loss
+    // vector — it appended the wrong channel's unanswered id, false-Settling it).
+    // `None` is the same-channel sink/watcher path where `channel` IS the inbound
+    // channel and a reload of it is race-safe (identity-gated advance guarantees
+    // the fresh row is the delivered turn). A `0` sentinel is dropped by append.
     if is_delivered {
-        completed_turn_ledger::append_completed_turn(
-            provider,
-            channel_id,
-            fresh.as_ref().map(|f| f.user_msg_id).unwrap_or(0),
-        );
+        let ledger_channel_id = terminal_anchor_channel_id.unwrap_or(channel_id);
+        let user_msg_id = match ledger_user_msg_id {
+            Some(user_msg_id) => user_msg_id,
+            None => {
+                crate::services::discord::inflight::load_inflight_state(provider, ledger_channel_id)
+                    .map(|fresh| fresh.user_msg_id)
+                    .unwrap_or(0)
+            }
+        };
+        completed_turn_ledger::append_completed_turn(provider, ledger_channel_id, user_msg_id);
     }
     if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
         return;
     }
     let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
+    let fresh = crate::services::discord::inflight::load_inflight_state(provider, channel_id);
     let attempts = fresh
         .as_ref()
         .map(|f| f.recovery_relay_attempts)
@@ -1324,6 +1338,7 @@ pub(in crate::services::discord) fn record_delivered_frontier_with_body(
     terminal_anchor_msg_id: u64,
     terminal_anchor_channel_id: u64,
     body: &str,
+    ledger_user_msg_id: Option<u64>,
 ) {
     shadow_mirror_delivered_frontier(
         shared,
@@ -1334,6 +1349,7 @@ pub(in crate::services::discord) fn record_delivered_frontier_with_body(
         Some(terminal_anchor_msg_id),
         Some(terminal_anchor_channel_id),
         Some(body),
+        ledger_user_msg_id,
     );
 }
 
@@ -1346,6 +1362,9 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
     terminal_anchor_msg_id: u64,
     body: &str,
 ) {
+    // Same-channel (sink) path: `channel` IS the inbound channel, so `None` lets
+    // the funnel reload it for `user_msg_id` (race-safe under identity-gated
+    // advance). #3016 hotfile `session_relay_sink.rs` therefore needs no change.
     shadow_mirror_delivered_frontier(
         shared,
         provider,
@@ -1355,6 +1374,7 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
         Some(terminal_anchor_msg_id),
         Some(channel.get()),
         Some(body),
+        None,
     );
 }
 
@@ -1398,6 +1418,7 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
+    ledger_user_msg_id: Option<u64>,
 ) {
     shadow_mirror_delivered_frontier(
         shared,
@@ -1408,6 +1429,7 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
         last_chunk_anchor_msg_id,
         Some(delivery_channel_id.get()),
         Some(delivered_body),
+        ledger_user_msg_id,
     );
 }
 
@@ -2655,6 +2677,7 @@ mod tests {
             (0, 4096),
             Some(912_345_678),
             "",
+            None,
         );
         // No durable record was created for either channel under the test root.
         for channel_id in [100_200_300, 900_800_700] {
@@ -2667,6 +2690,77 @@ mod tests {
             );
             assert!(read_record(&ProviderKind::Claude, channel_id).is_none());
         }
+    }
+
+    #[test]
+    fn ledger_append_keys_by_delivery_channel_not_watcher_owner_4564() {
+        // #4564 channel-split silent-loss regression (counter-model finding). A
+        // recovered/reused-watcher bridge delivers channel Y's answered turn while
+        // reusing channel X's tmux session, so the funnel is invoked with
+        // `channel = watcher_owner_channel_id = X` even though the delivered turn
+        // belongs to Y. X still holds a PRESERVED, UNANSWERED inflight row
+        // (user_msg_id = B). The completed-turn ledger MUST key by the delivery
+        // channel Y and record Y's EXPLICIT user_msg_id (A) — it must NOT reload X's
+        // row and false-Settle B (which would make catch-up skip B's recovery on the
+        // next restart = silent loss, the #4600 class re-introduced by a new vector).
+        let _root = IsolatedRoot::new();
+        let _shadow_off = shadow_test_seam::force(false);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let watcher_owner_x = ChannelId::new(4_564_100); // offset-authority / session owner
+        let delivery_y = ChannelId::new(4_564_200); // where the answered user msg lives
+        let unanswered_b: u64 = 88_000_001; // X's preserved, un-delivered turn
+        let answered_a: u64 = 99_000_002; // Y's delivered turn
+
+        // X carries a preserved UNANSWERED inflight row for B.
+        let mut x_state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            watcher_owner_x.get(),
+            Some("adk-test".to_string()),
+            343_742_347_365_974_026,
+            unanswered_b,
+            0,
+            "미답변 메시지".to_string(),
+            Some("session-x".to_string()),
+            Some("AgentDesk-codex-adk-test".to_string()),
+            Some("/tmp/4564-split.jsonl".to_string()),
+            None,
+            128,
+        );
+        x_state.turn_start_offset = Some(0);
+        crate::services::discord::inflight::save_inflight_state(&x_state).expect("save X inflight");
+
+        // Y's answered turn commits terminally while reusing X's session.
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            watcher_owner_x, // funnel `channel` = offset-authority X
+            (0, 128),
+            true, // is_delivered
+            Some(77_001),
+            Some(delivery_y.get()), // terminal_anchor_channel_id = delivery channel Y
+            Some("answer"),
+            Some(answered_a), // explicit inbound turn id from Y's snapshot
+        );
+
+        // (b) Y's answered turn is recorded under Y.
+        assert!(
+            completed_turn_ledger::settled_user_msg_ids(&provider, delivery_y.get())
+                .contains(&answered_a),
+            "the answered turn's user_msg_id must be recorded under the delivery channel Y"
+        );
+        // (a) X's UNANSWERED turn must NOT be false-Settled.
+        let x_settled =
+            completed_turn_ledger::settled_user_msg_ids(&provider, watcher_owner_x.get());
+        assert!(
+            !x_settled.contains(&unanswered_b),
+            "MUTATION: reverting to a commit-time reload of `channel`=X would append X's \
+             unanswered B here — silently losing B on restart (#4600 class)"
+        );
+        assert!(
+            x_settled.is_empty(),
+            "no ledger entry may be written under the offset-authority channel X"
+        );
     }
 
     // ---- #3610 PR-1d: WATCHER legacy long-chunk arm (same-channel) --------------

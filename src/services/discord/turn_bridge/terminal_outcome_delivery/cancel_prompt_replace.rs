@@ -307,6 +307,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                         current_msg_id,
                         channel_id,
                         remaining_response,
+                        inflight_state.user_msg_id,
                     );
                 }
             }
@@ -406,6 +407,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                         current_msg_id.get(),
                         channel_id.get(),
                         &full_response,
+                        Some(inflight_state.user_msg_id), // #4564 explicit inbound id (delivery channel)
                     );
                 }
             }
