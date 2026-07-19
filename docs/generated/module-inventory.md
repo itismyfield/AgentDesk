@@ -598,7 +598,7 @@
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
 | `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 270 | 270 | 0 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1293 | 998 | 295 |  |
-| `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 886 | 479 | 407 |  |
+| `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 914 | 492 | 422 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 687 | 687 | 0 |  |
 | `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 419 | 200 | 219 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
@@ -859,7 +859,7 @@
 | `services::discord::turn_bridge::response_delivery` | `src/services/discord/turn_bridge/response_delivery.rs` | 222 | 93 | 129 |  |
 | `services::discord::turn_bridge::retry_state` | `src/services/discord/turn_bridge/retry_state.rs` | 891 | 426 | 465 |  |
 | `services::discord::turn_bridge::runtime_handoff_loop` | `src/services/discord/turn_bridge/runtime_handoff_loop.rs` | 989 | 989 | 0 |  |
-| `services::discord::turn_bridge::runtime_handoff_loop::claude_e` | `src/services/discord/turn_bridge/runtime_handoff_loop/claude_e.rs` | 27 | 27 | 0 |  |
+| `services::discord::turn_bridge::runtime_handoff_loop::claude_e` | `src/services/discord/turn_bridge/runtime_handoff_loop/claude_e.rs` | 73 | 35 | 38 |  |
 | `services::discord::turn_bridge::runtime_handoff_loop::guarded_save` | `src/services/discord/turn_bridge/runtime_handoff_loop/guarded_save.rs` | 211 | 76 | 135 |  |
 | `services::discord::turn_bridge::single_message_footer` | `src/services/discord/turn_bridge/single_message_footer.rs` | 835 | 521 | 314 |  |
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 80 | 80 | 0 |  |

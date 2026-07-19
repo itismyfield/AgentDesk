@@ -7,7 +7,9 @@ use super::super::inflight::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::platform::tmux::PaneLiveness;
-use crate::services::process::{ProcessIdentity, ProcessIdentityProbe};
+#[cfg(unix)]
+use crate::services::process::ProcessIdentity;
+use crate::services::process::ProcessIdentityProbe;
 use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +108,7 @@ fn claude_e_process_probe_decision(probe: ProcessIdentityProbe) -> AbandonedTmux
 
 // This closes only the row-present ClaudeE sweeper path. The Drop-time row-delete
 // gap remains a separate follow-up because no durable identity survives that deletion.
+#[cfg(unix)]
 fn claude_e_process_cleanup_decision(
     runtime_kind: Option<RuntimeHandoffKind>,
     pid: Option<u32>,
@@ -123,6 +126,16 @@ fn claude_e_process_cleanup_decision(
     }
     let identity = ProcessIdentity::from_persisted(starttime, macos_lstart_hash);
     claude_e_process_probe_decision(identity.probe(pid))
+}
+
+#[cfg(not(unix))]
+fn claude_e_process_cleanup_decision(
+    _runtime_kind: Option<RuntimeHandoffKind>,
+    _pid: Option<u32>,
+    _starttime: Option<u128>,
+    _macos_lstart_hash: Option<u128>,
+) -> AbandonedTmuxCleanupDecision {
+    AbandonedTmuxCleanupDecision::PreserveRetry
 }
 
 pub(super) async fn abandoned_tmux_cleanup_decision_for(
@@ -600,6 +613,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_e_pid_reuse_evidence_allows_cleanup() {
         let identity = crate::services::process::ProcessIdentity::capture(std::process::id());
@@ -617,6 +631,20 @@ mod tests {
                 wrong_macos_hash,
             ),
             AbandonedTmuxCleanupDecision::Kill,
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn claude_e_process_cleanup_is_fail_closed_without_unix_probe() {
+        assert_eq!(
+            claude_e_process_cleanup_decision(
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter),
+                Some(42),
+                Some(1),
+                Some(1),
+            ),
+            AbandonedTmuxCleanupDecision::PreserveRetry,
         );
     }
 
