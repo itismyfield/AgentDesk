@@ -47,6 +47,7 @@ fn classify(view: &CatchUpMessageView) -> CatchUpClassification {
         view,
         Some(CURRENT_BOT_ID),
         &HashSet::new(),
+        &HashSet::new(),
         300,
         &[],
         None,
@@ -62,6 +63,7 @@ fn classify_with_resolutions(
     classify_catch_up_message_with_utility_resolution(
         view,
         Some(CURRENT_BOT_ID),
+        &HashSet::new(),
         &HashSet::new(),
         300,
         &[],
@@ -233,6 +235,7 @@ fn notify_identity_is_terminal_before_age_even_when_discord_bot_flag_is_false() 
             &message,
             Some(CURRENT_BOT_ID),
             &HashSet::new(),
+            &HashSet::new(),
             300,
             &[NOTIFY_BOT_ID],
             Some(NOTIFY_BOT_ID),
@@ -281,6 +284,7 @@ fn notify_identity_is_terminal_before_age_even_when_discord_bot_flag_is_false() 
                 &stale,
                 Some(CURRENT_BOT_ID),
                 &HashSet::new(),
+                &HashSet::new(),
                 300,
                 &allowed_bot_ids,
                 announce_bot_id,
@@ -293,6 +297,7 @@ fn notify_identity_is_terminal_before_age_even_when_discord_bot_flag_is_false() 
             classify_catch_up_message(
                 &fresh,
                 Some(CURRENT_BOT_ID),
+                &HashSet::new(),
                 &HashSet::new(),
                 300,
                 &allowed_bot_ids,
@@ -411,6 +416,7 @@ fn aged_announce_bot_settles_without_a_human_resend_notice() {
         &message,
         Some(CURRENT_BOT_ID),
         &HashSet::new(),
+        &HashSet::new(),
         300,
         &[],
         Some(INFO_BOT_ID),
@@ -452,6 +458,7 @@ fn aged_announce_bot_settles_without_a_human_resend_notice() {
             &fresh,
             Some(CURRENT_BOT_ID),
             &HashSet::new(),
+            &HashSet::new(),
             300,
             &[],
             Some(INFO_BOT_ID),
@@ -473,6 +480,7 @@ fn aged_marker_authorized_bot_settles_without_notice_but_fresh_trigger_recovers(
     let stale_outcome = classify_catch_up_message(
         &stale,
         Some(CURRENT_BOT_ID),
+        &HashSet::new(),
         &HashSet::new(),
         300,
         &[INFO_BOT_ID],
@@ -504,6 +512,7 @@ fn aged_marker_authorized_bot_settles_without_notice_but_fresh_trigger_recovers(
         classify_catch_up_message(
             &fresh,
             Some(CURRENT_BOT_ID),
+            &HashSet::new(),
             &HashSet::new(),
             300,
             &[INFO_BOT_ID],
@@ -1882,5 +1891,155 @@ async fn production_sweep_checkpoint_stops_before_capacity_blocked_human() {
     assert!(
         outbox.lock().expect("outbox capture lock").is_empty(),
         "an aged bot before a capacity-blocked human must settle without a resend notice"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #4564 durable completed-turn ledger: an already-answered inbound message must
+// never be re-flagged "restart-gap TooOld", while a genuinely-undelivered one
+// still ages out (no silent loss). The Settled branch is a NEW guard, so each
+// test below fails by ASSERT (not a compile error) under the named mutation.
+// ---------------------------------------------------------------------------
+
+/// Test 2: an aged inbound message WITH a confirmed terminal delivery on the
+/// ledger classifies `Settled`, pre-empting the age gate.
+///
+/// MUTATION: deleting the `settled_ids.contains(..)` branch in
+/// `classify_catch_up_message` makes this return `TooOld` — caught here by the
+/// assert, since the `Settled` variant still exists (used by stats + tests) so
+/// removing the branch is not a compile error.
+#[test]
+fn aged_message_on_the_ledger_is_settled_not_too_old() {
+    let message = view(HUMAN_ID, false, 3600, "아까 그거 다 됐어?");
+    let mut settled = HashSet::new();
+    settled.insert(message.message_id);
+    assert_eq!(
+        classify_catch_up_message(
+            &message,
+            Some(CURRENT_BOT_ID),
+            &HashSet::new(),
+            &settled,
+            300,
+            &[],
+            None,
+            None,
+        ),
+        CatchUpClassification::Settled,
+        "an aged message on the completed-turn ledger must be Settled, not TooOld"
+    );
+}
+
+/// Test 3 (#4260 non-regression): a genuine downtime message NOT on the ledger
+/// still ages out to `TooOld`.
+///
+/// MUTATION: widening the `Settled` match to key on channel/age alone (instead
+/// of `settled_ids` membership) would wrongly settle this un-answered message —
+/// the assert catches it.
+#[test]
+fn aged_message_absent_from_the_ledger_is_too_old() {
+    let message = view(HUMAN_ID, false, 3600, "이거 아직 처리 안 됐지?");
+    let mut settled = HashSet::new();
+    settled.insert(message.message_id + 1); // a DIFFERENT turn is settled
+    assert_eq!(
+        classify_catch_up_message(
+            &message,
+            Some(CURRENT_BOT_ID),
+            &HashSet::new(),
+            &settled,
+            300,
+            &[],
+            None,
+            None,
+        ),
+        CatchUpClassification::TooOld,
+        "a message whose id is not on the ledger must fall through to TooOld"
+    );
+}
+
+/// Test 5 (P1 silent-loss guard — why #4600 was closed): a `DeliveredCommit`
+/// written to the delivery-record frontier must NOT be treated as "settled".
+/// ONLY a completed-turn LEDGER append settles. This simulates a crash after the
+/// frontier write but before the ledger append: the consult set stays empty and
+/// the row still ages to TooOld/DLQ (no false suppression, no silent loss).
+#[test]
+fn delivery_frontier_without_ledger_append_is_not_settled() {
+    let _root = scoped_runtime_root();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_564_005);
+    let message = view(HUMAN_ID, false, 3600, "크래시 직전에 배달된 답변");
+
+    // The delivery committed (frontier written)...
+    crate::services::discord::outbound::delivery_record::write_delivered_frontier(
+        &provider,
+        channel_id.get(),
+        crate::services::discord::outbound::delivery_record::DeliveredCommit {
+            range: (0, 128),
+            generation_mtime_ns: 1,
+            attempts: 1,
+            panel_msg_id: Some(message.message_id),
+            panel_channel_id: Some(channel_id.get()),
+        },
+    )
+    .expect("write delivery frontier");
+
+    // ...but the ledger was never appended, so the consult set is empty.
+    let settled = crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(
+        &provider,
+        channel_id.get(),
+    );
+    assert!(
+        !settled.contains(&message.message_id),
+        "a delivery frontier must never leak into the settled set (#4600 P1)"
+    );
+    assert_eq!(
+        classify_catch_up_message(
+            &message,
+            Some(CURRENT_BOT_ID),
+            &HashSet::new(),
+            &settled,
+            300,
+            &[],
+            None,
+            None,
+        ),
+        CatchUpClassification::TooOld,
+        "ledger absence must fall through to TooOld/DLQ (no silent loss)"
+    );
+}
+
+/// Test 1 (end-to-end): after a restart, an already-answered aged human message
+/// on the completed-turn ledger must NOT raise the false restart-gap notice.
+///
+/// MUTATION: dropping the `settled_ids` consult in the sweep re-flags the
+/// message `TooOld`, and the aggregate notice lands in the outbox — the assert
+/// on an empty outbox catches it.
+#[tokio::test(flavor = "current_thread")]
+async fn ledger_suppresses_the_restart_gap_notice_for_an_answered_message() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_564_001);
+    let answered = discord_message(
+        channel_id,
+        message_id_with_age(1, Duration::from_secs(3600)),
+        HUMAN_ID,
+        false,
+        "아까 그거 다 됐어?",
+    );
+    write_checkpoint(root.path(), &provider, channel_id, answered.id.get() - 1);
+
+    // The turn reached terminal delivery before the restart → on the ledger.
+    crate::services::discord::outbound::completed_turn_ledger::append_completed_turn(
+        &provider,
+        channel_id.get(),
+        answered.id.get(),
+    );
+
+    let (api, outbox) = TestCatchUpApi::new(vec![answered]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert!(
+        outbox.lock().expect("outbox capture lock").is_empty(),
+        "an answered message on the ledger must not raise a restart-gap notice"
     );
 }

@@ -211,6 +211,7 @@ impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
 
 mod classification;
 mod phase2;
+mod settled_ledger_consult;
 mod too_old_notice;
 
 #[cfg(test)]
@@ -1143,6 +1144,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // Get bot's own user ID to filter out self-messages
         // Collect existing message IDs in queue for dedup
         let existing_ids = recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
+        // #4564: the durable completed-turn ledger for this channel, read once per
+        // scan (mirrors `existing_ids`). Suppresses the false restart-gap TooOld
+        // notice for inbound messages that already reached terminal delivery.
+        let settled_ids = settled_ledger_consult::settled_ids(provider, channel_id);
 
         let allowed_bot_ids: Vec<u64> = {
             let settings = shared.settings.read().await;
@@ -1201,6 +1206,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 &view,
                 current_bot_user_id,
                 &existing_ids,
+                &settled_ids,
                 max_age.as_secs() as i64,
                 &allowed_bot_ids,
                 announce_resolution,
@@ -1377,13 +1383,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             total_recovered += stats.recovered;
             tracing::info!(
                 "  [{ts}] 🔍 CATCH-UP: recovered {} message(s) for channel {} \
-                 (returned={} self={} dup={} too_old={} empty={} not_allowed={} system={})",
+                 (returned={} self={} dup={} too_old={} settled={} empty={} not_allowed={} system={})",
                 stats.recovered,
                 channel_id,
                 stats.returned,
                 stats.self_authored,
                 stats.duplicate,
                 stats.too_old,
+                stats.settled,
                 stats.empty,
                 stats.not_allowed,
                 stats.system_kind,
@@ -1391,12 +1398,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         } else {
             tracing::info!(
                 "  [{ts}] 🔍 catch-up scan: channel={} returned={} bot={} dup={} \
-                 too_old={} empty={} not_allowed={} system={} recovered=0",
+                 too_old={} settled={} empty={} not_allowed={} system={} recovered=0",
                 channel_id,
                 stats.returned,
                 stats.self_authored,
                 stats.duplicate,
                 stats.too_old,
+                stats.settled,
                 stats.empty,
                 stats.not_allowed,
                 stats.system_kind,
@@ -1532,6 +1540,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let remaining_capacity =
             catch_up_remaining_queue_capacity(mailbox.intervention_queue.len());
         let mut existing_ids = recovery_known_message_ids(&mailbox);
+        // #4564: same durable completed-turn ledger consult as phase 1, read once
+        // per channel. A Settled outcome in phase 2 simply skips (no enqueue, no
+        // notice) — an already-answered message must not be re-surfaced.
+        let settled_ids = settled_ledger_consult::settled_ids(provider, channel_id);
         let mut phase2_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
         let phase2_checkpoint_start = phase2_checkpoint;
         let mut max_recovered_id: Option<u64> = None;
@@ -1597,6 +1609,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 &utility_view,
                 current_bot_user_id,
                 &existing_ids,
+                &settled_ids,
                 600,
                 &allowed_bot_ids_phase2,
                 announce_resolution_phase2,
@@ -2207,11 +2220,29 @@ mod catch_up_recovery_tests {
         let existing = HashSet::new();
 
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None, None,),
+            classify_catch_up_message(
+                &view,
+                Some(current_bot_id),
+                &existing,
+                &HashSet::new(),
+                300,
+                &[],
+                None,
+                None,
+            ),
             CatchUpClassification::Recover
         );
         assert_eq!(
-            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None, None,),
+            classify_catch_up_message(
+                &view,
+                Some(owner_user_id),
+                &existing,
+                &HashSet::new(),
+                300,
+                &[],
+                None,
+                None,
+            ),
             CatchUpClassification::SelfAuthored
         );
     }
@@ -2245,6 +2276,7 @@ mod catch_up_recovery_tests {
                 &view,
                 Some(current_bot_id),
                 &existing,
+                &HashSet::new(),
                 300,
                 &[notice_bot_id],
                 None,
@@ -2259,6 +2291,7 @@ mod catch_up_recovery_tests {
                 &view,
                 Some(current_bot_id),
                 &existing,
+                &HashSet::new(),
                 300,
                 &[notice_bot_id],
                 None,
@@ -2294,6 +2327,7 @@ mod catch_up_recovery_tests {
                 &human,
                 Some(current_bot_id),
                 &existing,
+                &HashSet::new(),
                 300,
                 &[],
                 None,
@@ -2322,7 +2356,16 @@ mod catch_up_recovery_tests {
         // Without the announce_bot_id hint the bot message is NotAllowed
         // (no marker), proving the parameter is load-bearing.
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None, None,),
+            classify_catch_up_message(
+                &view,
+                Some(current_bot_id),
+                &existing,
+                &HashSet::new(),
+                300,
+                &[],
+                None,
+                None,
+            ),
             CatchUpClassification::NotAllowed
         );
         // With the announce_bot_id hint it recovers.
@@ -2331,6 +2374,7 @@ mod catch_up_recovery_tests {
                 &view,
                 Some(current_bot_id),
                 &existing,
+                &HashSet::new(),
                 300,
                 &[],
                 Some(announce_id),

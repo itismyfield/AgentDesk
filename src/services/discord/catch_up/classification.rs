@@ -14,6 +14,12 @@ pub(in crate::services::discord) enum CatchUpClassification {
     Duplicate,
     /// Older than the catch-up max-age window - too late to safely replay.
     TooOld,
+    /// #4564: this inbound message already has a CONFIRMED terminal delivery on
+    /// the durable completed-turn ledger. Suppresses the false restart-gap
+    /// TooOld notice without touching the DLQ path. Positioned strictly between
+    /// the sender-eligibility gates and the age gate so it never overrides
+    /// NotAllowed/SelfAuthored (#4443/#4453) and only pre-empts TooOld.
+    Settled,
     /// Empty content (whitespace only).
     Empty,
     /// Authored by a non-allowed bot or an allowed bot without DISPATCH prefix.
@@ -31,6 +37,10 @@ pub(in crate::services::discord) struct CatchUpScanStats {
     pub self_authored: usize,
     pub duplicate: usize,
     pub too_old: usize,
+    /// #4564: aged messages suppressed by the durable completed-turn ledger.
+    /// Tallied separately from `duplicate` so ledger suppression is observable
+    /// and never conflated with live-mailbox dedup.
+    pub settled: usize,
     pub empty: usize,
     pub not_allowed: usize,
 }
@@ -43,6 +53,7 @@ impl CatchUpScanStats {
             CatchUpClassification::SelfAuthored => self.self_authored += 1,
             CatchUpClassification::Duplicate => self.duplicate += 1,
             CatchUpClassification::TooOld => self.too_old += 1,
+            CatchUpClassification::Settled => self.settled += 1,
             CatchUpClassification::Empty => self.empty += 1,
             CatchUpClassification::NotAllowed => self.not_allowed += 1,
         }
@@ -80,6 +91,7 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
     existing_ids: &std::collections::HashSet<u64>,
+    settled_ids: &std::collections::HashSet<u64>,
     max_age_secs: i64,
     allowed_bot_ids: &[u64],
     announce_bot_id: Option<u64>,
@@ -112,6 +124,16 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     ) {
         return CatchUpClassification::NotAllowed;
     }
+    // #4564: a confirmed terminal delivery on the durable ledger settles this
+    // inbound message. Placed AFTER every sender-eligibility gate
+    // (SystemKind/SelfAuthored/Duplicate/is_restart_gap_notice/Empty/NotAllowed)
+    // so ledger consult can never override them (#4443/#4453 invariant), and
+    // BEFORE the age gate so an already-answered aged message is Settled rather
+    // than TooOld — the #4564 fix. Membership is keyed strictly by `message_id`,
+    // so a message NOT on the ledger falls straight through to the age gate.
+    if settled_ids.contains(&msg.message_id) {
+        return CatchUpClassification::Settled;
+    }
     if msg.age_secs > max_age_secs {
         return CatchUpClassification::TooOld;
     }
@@ -137,6 +159,7 @@ fn disposition_for_utility_ids(
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
     existing_ids: &std::collections::HashSet<u64>,
+    settled_ids: &std::collections::HashSet<u64>,
     max_age_secs: i64,
     allowed_bot_ids: &[u64],
     announce_bot_id: Option<u64>,
@@ -146,6 +169,7 @@ fn disposition_for_utility_ids(
         msg,
         bot_user_id,
         existing_ids,
+        settled_ids,
         max_age_secs,
         allowed_bot_ids,
         announce_bot_id,
@@ -168,6 +192,7 @@ fn phase2_disposition_for_utility_ids(
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
     existing_ids: &std::collections::HashSet<u64>,
+    settled_ids: &std::collections::HashSet<u64>,
     max_age_secs: i64,
     allowed_bot_ids: &[u64],
     announce_bot_id: Option<u64>,
@@ -178,6 +203,7 @@ fn phase2_disposition_for_utility_ids(
         msg,
         bot_user_id,
         existing_ids,
+        settled_ids,
         max_age_secs,
         allowed_bot_ids,
         announce_bot_id,
@@ -233,6 +259,7 @@ pub(in crate::services::discord) fn classify_catch_up_message_with_utility_resol
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
     existing_ids: &std::collections::HashSet<u64>,
+    settled_ids: &std::collections::HashSet<u64>,
     max_age_secs: i64,
     allowed_bot_ids: &[u64],
     announce_resolution: UtilityBotUserIdResolution,
@@ -247,6 +274,7 @@ pub(in crate::services::discord) fn classify_catch_up_message_with_utility_resol
                 msg,
                 bot_user_id,
                 existing_ids,
+                settled_ids,
                 max_age_secs,
                 allowed_bot_ids,
                 announce_bot_id,
@@ -265,6 +293,7 @@ pub(in crate::services::discord) fn classify_phase2_message_with_utility_resolut
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
     existing_ids: &std::collections::HashSet<u64>,
+    settled_ids: &std::collections::HashSet<u64>,
     max_age_secs: i64,
     allowed_bot_ids: &[u64],
     announce_resolution: UtilityBotUserIdResolution,
@@ -280,6 +309,7 @@ pub(in crate::services::discord) fn classify_phase2_message_with_utility_resolut
                 msg,
                 bot_user_id,
                 existing_ids,
+                settled_ids,
                 max_age_secs,
                 allowed_bot_ids,
                 announce_bot_id,

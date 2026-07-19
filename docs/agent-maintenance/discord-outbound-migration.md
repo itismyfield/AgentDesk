@@ -424,6 +424,19 @@ button hits the manual outbound API, which is covered under §3.A
 - `src/services/discord/outbound/manual_delivery.rs`:
   #3807 keeps the manual over-limit notification path on the compatibility
   chunk shim while adding compact continuation context to each split message.
+- `src/services/discord/outbound/completed_turn_ledger.rs` and
+  `src/services/discord/outbound/delivery_record.rs` (#4564): the durable
+  completed-turn ledger is appended ONLY from the `shadow_mirror_delivered_frontier`
+  terminal-delivery funnel (and the recovery `record_durable_frontier` bypass), gated
+  on `is_delivered`, so the catch-up TooOld gate can suppress a false restart-gap
+  notice for an already-answered inbound message.
+  `ledger_append_keys_by_delivery_channel_not_watcher_owner_4564` pins the
+  channel-split invariant: the ledger keys by the DELIVERY channel and records the
+  delivered turn's EXPLICIT inbound `user_msg_id` (passed by the bridge/commit call
+  site from the turn snapshot), never a commit-time reload of the offset-authority
+  `watcher_owner_channel_id` — whose preserved inflight row is an unanswered turn
+  that a reload would false-Settle (silent-loss vector). The same-channel
+  sink/watcher callers pass `None`, keeping `session_relay_sink.rs` untouched.
 
 ## 6. Guardrail proposal (DoD #4)
 

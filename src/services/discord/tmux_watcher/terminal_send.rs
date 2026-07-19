@@ -262,6 +262,9 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         Some(msg_id.get()),
         Some(channel_id.get()),
         Some(delivered_body),
+        // #4564: same-channel watcher path — `channel_id` IS the inbound channel, so
+        // `None` lets the funnel reload it (race-safe under identity-gated advance).
+        None,
     );
 
     match outcome {
@@ -544,6 +547,9 @@ pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
         range,
         last_chunk_anchor_msg_id,
         delivered_body,
+        // #4564: same-channel watcher long-chunk (owner == delivery == channel_id),
+        // so `None` reloads `channel_id` for the inbound id (race-safe here).
+        None,
     );
 }
 
