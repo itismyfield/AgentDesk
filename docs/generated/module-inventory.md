@@ -283,9 +283,9 @@
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 2701 | 1775 | 926 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 136 | 136 | 0 |  |
-| `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 405 | 405 | 0 |  |
+| `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 406 | 406 | 0 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 2788 | 2725 | 63 | giant-file |
-| `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 | 266 | 0 |  |
+| `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 234 | 234 | 0 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 | 17 | 0 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 1290 | 1290 | 0 | giant-file |
 | `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 901 | 465 | 436 |  |
