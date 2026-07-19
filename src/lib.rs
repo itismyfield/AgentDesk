@@ -221,6 +221,23 @@ mod services;
 ///     let _raw_command = ProcessCommand::new(binary);
 /// }
 /// ```
+///
+/// Resolver-layer sealing (#4627) closes the last gap. `ClaudeBinary::resolve`
+/// obtains the raw executable path through a `pub(crate)` seam that lives behind
+/// the crate-private `services` module, so no external crate can reach it — the
+/// module path itself does not resolve from outside the crate. The public generic
+/// `resolve_provider_binary("claude")` scrubs the raw path to `None` and redacts
+/// the raw-path components in its `attempts` diagnostics, so there is no external
+/// route to a raw Claude executable path:
+///
+/// ```compile_fail
+/// // The sealed raw-path Claude resolver seam lives behind the crate-private
+/// // `services` module, so an external crate cannot even name the module that
+/// // contains it: this `use` fails to resolve, sealing the seam by construction.
+/// use agentdesk::services::platform::binary_resolver::BinaryResolution;
+///
+/// fn wants_raw_claude_path(_: BinaryResolution) {}
+/// ```
 pub use services::claude_command::ClaudeBinary;
 
 // Supervisor test hooks are intentionally retained for dispatch/runtime tests.

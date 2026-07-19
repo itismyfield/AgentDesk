@@ -27,8 +27,12 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinaryResolution {
     pub requested_binary: String,
-    // #4627: raw Claude paths remain publicly exposed here; full
-    // by-construction sealing is tracked separately from #4619.
+    // #4627: the public generic resolver `resolve_provider_binary` scrubs these
+    // path fields to `None` for the normalized `claude` provider, so a raw Claude
+    // executable path is unreachable through the generic seam. The sole sanctioned
+    // raw-path seam is `resolve_claude_binary_sealed` (consumed only by
+    // `ClaudeBinary::resolve`); diagnostics below (source/attempts/failure_kind)
+    // are preserved by the scrub.
     pub resolved_path: Option<String>,
     pub canonical_path: Option<String>,
     pub source: Option<String>,
@@ -181,9 +185,27 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
         .map(|path| path.to_string_lossy().to_string())
 }
 
-// #4627: this public resolver can return `resolved_path` for Claude, so it is
-// not a complete type-level raw-spawn barrier yet.
+/// Public generic provider-binary resolver.
+///
+/// #4627: for the normalized `claude` provider this scrubs the raw path fields
+/// (`resolved_path` / `canonical_path` / `exec_path`) to `None` by construction,
+/// and additionally redacts the raw path components embedded in the `attempts`
+/// diagnostics (several attempt lines carry `Path::display()` output, so leaving
+/// them intact would let a caller reconstruct the raw Claude path from
+/// `attempts`). The diagnostic *structure* (`source` / `failure_kind` and each
+/// attempt's non-path fields) is preserved. A caller therefore cannot obtain a
+/// raw Claude executable path through this generic seam. The only sanctioned way
+/// to reach the raw Claude path is [`resolve_claude_binary_sealed`], consumed
+/// solely by `ClaudeBinary::resolve`. Non-Claude providers are returned
+/// unchanged.
 pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
+    scrub_sealed_provider_paths(resolve_provider_binary_unsealed(provider))
+}
+
+/// Internal unsealed resolver: returns the full [`BinaryResolution`] including the
+/// raw Claude path. Deliberately not `pub` — the only callers are the scrubbing
+/// public wrapper above and the sanctioned [`resolve_claude_binary_sealed`] seam.
+fn resolve_provider_binary_unsealed(provider: &str) -> BinaryResolution {
     match resolve_provider_binary_set(provider) {
         ProviderResolutionSet::Candidates(candidates) => match candidates.len() {
             0 => unresolved_provider_binary(normalize_name(provider), Vec::new()),
@@ -192,6 +214,67 @@ pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
         },
         ProviderResolutionSet::Failure(failure) => failure,
     }
+}
+
+/// Sole sanctioned raw-path seam for the Claude binary.
+///
+/// #4627: `ClaudeBinary::resolve` is the only permitted caller (enforced by the
+/// `sealed_claude_seam_confined_to_chokepoint` guard in `claude_command.rs`). It
+/// returns the unscrubbed resolution so the guarded launch builder can wrap the
+/// raw path; every other consumer must go through the generic
+/// [`resolve_provider_binary`], which scrubs Claude paths.
+pub(crate) fn resolve_claude_binary_sealed() -> BinaryResolution {
+    resolve_provider_binary_unsealed("claude")
+}
+
+/// Marker substituted for any raw filesystem-path component when a Claude
+/// resolution's diagnostics are redacted by [`scrub_sealed_provider_paths`].
+const SEALED_PATH_MARKER: &str = "<sealed-path>";
+
+/// Scrub the raw path fields of a Claude resolution while preserving diagnostics.
+///
+/// This is the by-construction seal for the generic public resolver: any
+/// resolution whose normalized provider is `claude` has its `resolved_path`,
+/// `canonical_path`, and `exec_path` set to `None`, and every raw-path component
+/// embedded in its `attempts` lines redacted (see [`redact_paths_from_attempt`]).
+/// Non-Claude resolutions pass through untouched.
+fn scrub_sealed_provider_paths(mut resolution: BinaryResolution) -> BinaryResolution {
+    if normalize_name(&resolution.requested_binary) == "claude" {
+        resolution.resolved_path = None;
+        resolution.canonical_path = None;
+        resolution.exec_path = None;
+        for attempt in &mut resolution.attempts {
+            *attempt = redact_paths_from_attempt(attempt);
+        }
+    }
+    resolution
+}
+
+/// Redact filesystem-path components from a single diagnostic attempt line while
+/// keeping its structural fields (source label, `priority=N`, counts,
+/// `version=…`, failure kind).
+///
+/// The resolver assembles every attempt as `:`-delimited fields and never embeds
+/// a `:` inside an emitted path, so any field carrying a path separator (`/` or
+/// `\`) is a path token and is replaced wholesale with [`SEALED_PATH_MARKER`].
+/// This is deliberately over-inclusive (a `version=…` field that happens to
+/// contain a separator is redacted too) because the seal's invariant — no raw
+/// path survives in the generic seam's output — must hold regardless of which
+/// attempt pattern produced the line (`env_override`, `selected_candidate`,
+/// per-source `candidate`, `registry`, or the probe `skipped_candidate_*` /
+/// `selected_candidate_version` lines).
+fn redact_paths_from_attempt(attempt: &str) -> String {
+    attempt
+        .split(':')
+        .map(|field| {
+            if field.contains('/') || field.contains('\\') {
+                SEALED_PATH_MARKER
+            } else {
+                field
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 enum ProviderResolutionSet {
@@ -1561,5 +1644,316 @@ mod tests {
         let mut permissions = std::fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn write_executable_stub(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    /// Process-global lock serializing the `#[cfg(unix)]` tests that mutate
+    /// `AGENTDESK_CLAUDE_PATH` / `PATH`. The Rust harness runs tests in parallel
+    /// threads within one binary, so two env-mutating seal tests would otherwise
+    /// race on the same variables. Poison is recovered (a mutation-demo panic
+    /// while holding the lock must not cascade into unrelated failures).
+    #[cfg(unix)]
+    fn env_mutation_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Scoped guard that sets an env var to a value and restores the previous
+    /// value (or unsets it) on drop.
+    #[cfg(unix)]
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    #[cfg(unix)]
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    /// Scoped guard that forces Claude resolution through the `env_override`
+    /// branch by pointing `AGENTDESK_CLAUDE_PATH` at a real executable, then
+    /// restores the previous value. Env-mutating seal tests hold
+    /// [`env_mutation_lock`] so they do not race each other.
+    #[cfg(unix)]
+    struct ClaudePathOverrideGuard {
+        previous: Option<OsString>,
+    }
+
+    #[cfg(unix)]
+    impl ClaudePathOverrideGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("AGENTDESK_CLAUDE_PATH");
+            unsafe { std::env::set_var("AGENTDESK_CLAUDE_PATH", path) };
+            Self { previous }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ClaudePathOverrideGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_CLAUDE_PATH", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_CLAUDE_PATH") },
+            }
+        }
+    }
+
+    /// #4627 mutation-proof seal test. With a real Claude executable forced via
+    /// `AGENTDESK_CLAUDE_PATH`, the sanctioned sealed seam still surfaces the raw
+    /// path (so `ClaudeBinary::resolve` keeps working), while the generic public
+    /// `resolve_provider_binary` scrubs the raw path for `claude` and its
+    /// whitespace/case variants — preserving diagnostics.
+    ///
+    /// Mutation proof: delete the `claude` branch in `scrub_sealed_provider_paths`
+    /// and the `resolved_path.is_none()` assertions FAIL at runtime (assertion
+    /// failure, not a compile error), because the override makes the unscrubbed
+    /// `resolved_path` `Some(..)`.
+    #[cfg(unix)]
+    #[test]
+    fn generic_seam_seals_claude_while_sealed_seam_exposes_it() {
+        let _env = env_mutation_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_path = temp.path().join("bin/claude");
+        write_executable_stub(&claude_path);
+        let _guard = ClaudePathOverrideGuard::set(&claude_path);
+
+        // The sanctioned raw-path seam still exposes the resolved path.
+        let sealed = resolve_claude_binary_sealed();
+        assert_eq!(
+            sealed.resolved_path.as_deref(),
+            Some(claude_path.to_string_lossy().as_ref()),
+            "the sanctioned sealed seam must still surface the raw Claude path"
+        );
+
+        // The generic public seam scrubs the raw path for claude + variants.
+        for provider in ["claude", "  CLAUDE ", "Claude"] {
+            let resolution = resolve_provider_binary(provider);
+            assert_eq!(resolution.requested_binary, "claude");
+            assert!(
+                resolution.resolved_path.is_none(),
+                "claude resolved_path must be sealed for provider {provider:?}"
+            );
+            assert!(
+                resolution.canonical_path.is_none(),
+                "claude canonical_path must be sealed for provider {provider:?}"
+            );
+            assert!(
+                resolution.exec_path.is_none(),
+                "claude exec_path must be sealed for provider {provider:?}"
+            );
+            // Diagnostics survive the scrub.
+            assert_eq!(resolution.source.as_deref(), Some("env_override"));
+            assert!(resolution.failure_kind.is_none());
+            assert!(!resolution.attempts.is_empty());
+        }
+    }
+
+    /// Unit coverage for the scrub itself: only `claude` is sealed; its `attempts`
+    /// have every raw-path component redacted while structural fields survive;
+    /// other providers pass through untouched.
+    #[test]
+    fn scrub_seals_only_claude_paths() {
+        let sample = |provider: &str| BinaryResolution {
+            requested_binary: provider.to_string(),
+            resolved_path: Some(format!("/opt/{provider}/bin/{provider}")),
+            canonical_path: Some(format!("/opt/{provider}/bin/{provider}")),
+            source: Some("env_override".to_string()),
+            // Cover all path-bearing attempt patterns the resolver can emit.
+            attempts: vec![
+                format!(
+                    "env_override:AGENTDESK_{provider}_PATH=found:/opt/{provider}/bin/{provider}"
+                ),
+                format!("current_path=candidate:priority=50:/usr/local/bin/{provider}"),
+                format!("selected_candidate:current_path:priority=50:/usr/local/bin/{provider}"),
+                format!("registry:current=found:/opt/{provider}/bin/{provider}"),
+                format!("selected_candidate_version:/opt/{provider}/bin/{provider}:version=1.2.3"),
+                "current_path=candidates:2".to_string(),
+            ],
+            failure_kind: None,
+            exec_path: Some("/opt/bin".to_string()),
+        };
+
+        let claude = scrub_sealed_provider_paths(sample("claude"));
+        assert!(claude.resolved_path.is_none());
+        assert!(claude.canonical_path.is_none());
+        assert!(claude.exec_path.is_none());
+        assert_eq!(claude.source.as_deref(), Some("env_override"));
+        // No attempt retains a raw path; structural prefixes/suffixes survive.
+        for attempt in &claude.attempts {
+            assert!(
+                !attempt.contains('/') && !attempt.contains('\\'),
+                "claude attempt still leaks a path: {attempt}"
+            );
+        }
+        assert!(
+            claude
+                .attempts
+                .iter()
+                .any(|attempt| attempt == "env_override:AGENTDESK_claude_PATH=found:<sealed-path>"),
+            "env_override structure must survive redaction: {:?}",
+            claude.attempts
+        );
+        assert!(
+            claude
+                .attempts
+                .iter()
+                .any(|attempt| attempt
+                    == "selected_candidate:current_path:priority=50:<sealed-path>"),
+            "selected_candidate structure must survive redaction"
+        );
+        assert!(
+            claude
+                .attempts
+                .iter()
+                .any(|attempt| attempt == "selected_candidate_version:<sealed-path>:version=1.2.3"),
+            "version diagnostic must survive path redaction"
+        );
+        assert!(
+            claude
+                .attempts
+                .iter()
+                .any(|attempt| attempt == "current_path=candidates:2"),
+            "path-free attempts must be untouched"
+        );
+
+        for provider in ["codex", "gemini", "qwen", "opencode"] {
+            let untouched = scrub_sealed_provider_paths(sample(provider));
+            assert_eq!(
+                untouched.resolved_path.as_deref(),
+                Some(format!("/opt/{provider}/bin/{provider}").as_str()),
+                "non-claude provider {provider} resolved_path must be unchanged"
+            );
+            assert!(untouched.canonical_path.is_some());
+            assert!(untouched.exec_path.is_some());
+            assert!(
+                untouched
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.contains(&format!("/opt/{provider}/bin/{provider}"))),
+                "non-claude provider {provider} attempts must be unchanged"
+            );
+        }
+    }
+
+    /// #4627 mutation-proof seal test for the `attempts` diagnostics. Two
+    /// resolutions are exercised end-to-end through the generic public
+    /// `resolve_provider_binary("claude")`:
+    ///
+    ///   1. `env_override` — attempt line `env_override:…=found:<path>` carries the
+    ///      raw path.
+    ///   2. `PATH` discovery — attempt lines `current_path=candidate:…:<path>` /
+    ///      `selected_candidate:…:<path>` carry the raw path.
+    ///
+    /// In both cases NO returned attempt may contain a filesystem-path separator,
+    /// and the specific temp paths must not appear anywhere in `attempts`.
+    ///
+    /// Mutation proof: delete the `attempts` redaction loop in
+    /// `scrub_sealed_provider_paths` and both phases FAIL at runtime (assertion
+    /// failure, not a compile error), because the raw override / candidate path
+    /// then survives in `attempts`.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_provider_binary_redacts_claude_paths_in_attempts() {
+        let _env = env_mutation_lock();
+        let temp = tempfile::tempdir().unwrap();
+
+        // Phase 1: env_override.
+        let override_path = temp.path().join("override/bin/claude");
+        write_executable_stub(&override_path);
+        {
+            let _guard = ClaudePathOverrideGuard::set(&override_path);
+            let resolution = resolve_provider_binary("claude");
+            assert_eq!(resolution.source.as_deref(), Some("env_override"));
+            assert!(!resolution.attempts.is_empty());
+            assert_attempts_are_path_free(&resolution.attempts, &override_path);
+            assert!(
+                resolution
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.starts_with("env_override:")
+                        && attempt.ends_with(SEALED_PATH_MARKER)),
+                "env_override attempt must be present and redacted: {:?}",
+                resolution.attempts
+            );
+        }
+
+        // Phase 2: PATH discovery (env_override unset, PATH points at a temp bin
+        // holding a `claude` executable). Extra candidates from the login-shell /
+        // fallback dirs may also appear; the invariant is that NONE of the
+        // returned attempts retains a raw path.
+        let path_bin = temp.path().join("pathbin");
+        write_executable_stub(&path_bin.join("claude"));
+        let _no_override = ScopedEnv::unset("AGENTDESK_CLAUDE_PATH");
+        let _path = ScopedEnv::set("PATH", &path_bin);
+
+        let resolution = resolve_provider_binary("claude");
+        assert!(!resolution.attempts.is_empty());
+        assert_attempts_are_path_free(&resolution.attempts, &path_bin);
+        assert!(
+            resolution.attempts.iter().any(|attempt| {
+                attempt.starts_with("current_path=candidate:")
+                    && attempt.ends_with(SEALED_PATH_MARKER)
+            }),
+            "PATH-discovered candidate attempt must be present and redacted: {:?}",
+            resolution.attempts
+        );
+    }
+
+    /// Assert no attempt line retains a filesystem-path separator, and that the
+    /// specific raw path (and its parent dir) never appears in any attempt.
+    #[cfg(unix)]
+    fn assert_attempts_are_path_free(attempts: &[String], raw_path: &Path) {
+        let raw = raw_path.to_string_lossy();
+        let parent = raw_path
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for attempt in attempts {
+            assert!(
+                !attempt.contains('/') && !attempt.contains('\\'),
+                "attempt still contains a path separator: {attempt}"
+            );
+            assert!(
+                !attempt.contains(raw.as_ref()),
+                "attempt leaks the raw path {raw}: {attempt}"
+            );
+            assert!(
+                parent.is_empty() || !attempt.contains(&parent),
+                "attempt leaks the raw parent dir {parent}: {attempt}"
+            );
+        }
     }
 }

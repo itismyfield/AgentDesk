@@ -204,7 +204,7 @@
 | `kanban::transition_cleanup` | `src/kanban/transition_cleanup.rs` | 341 | 341 | 0 |  |
 | `kanban::transition_core` | `src/kanban/transition_core.rs` | 674 | 674 | 0 |  |
 | `launch` | `src/launch.rs` | 67 | 67 | 0 |  |
-| `lib` | `src/lib.rs` | 259 | 259 | 0 |  |
+| `lib` | `src/lib.rs` | 276 | 276 | 0 |  |
 | `logging` | `src/logging.rs` | 554 | 382 | 172 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 35 | 35 | 0 |  |
 | `pipeline` | `src/pipeline.rs` | 1517 | 1383 | 134 | giant-file |
@@ -380,7 +380,7 @@
 | `services::claude` | `src/services/claude.rs` | 4306 | 2951 | 1355 | giant-file |
 | `services::claude::active_usage` | `src/services/claude/active_usage.rs` | 55 | 55 | 0 |  |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
-| `services::claude_command` | `src/services/claude_command.rs` | 956 | 465 | 491 |  |
+| `services::claude_command` | `src/services/claude_command.rs` | 1055 | 473 | 582 |  |
 | `services::claude_compact_context` | `src/services/claude_compact_context.rs` | 1044 | 694 | 350 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 952 | 457 | 495 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
@@ -1013,7 +1013,7 @@
 | `services::pipeline_override` | `src/services/pipeline_override.rs` | 1001 | 333 | 668 |  |
 | `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 863 | 672 | 191 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 26 | 26 | 0 |  |
-| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1565 | 1412 | 153 | giant-file |
+| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1959 | 1495 | 464 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 97 | 97 | 0 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 49 | 49 | 0 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 1263 | 951 | 312 |  |
