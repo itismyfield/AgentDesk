@@ -7,7 +7,9 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use super::super::{formatting, recovery_paths};
 use super::RecoveryRelayOutcome;
 use crate::services::discord::inflight::{opt_channel_id, opt_message_id};
-use crate::services::discord::outbound::{delivery_frontier_probe, delivery_record};
+use crate::services::discord::outbound::{
+    completed_turn_ledger, delivery_frontier_probe, delivery_record,
+};
 use crate::services::discord::{
     DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey,
     LeaseHolder, LeaseOutcome, SharedData, inflight, lease_now_ms,
@@ -33,6 +35,12 @@ pub(in crate::services::discord) struct RecoveryDeliveryContext {
     current_output_eof: Option<u64>,
     attempts: u32,
     reuse_recorded_anchor: bool,
+    /// #4564: the inbound `user_msg_id` this turn answers, copied from the
+    /// inflight state. Appended to the completed-turn ledger on a confirmed
+    /// durable-frontier write (`record_durable_frontier`) — this recovery path
+    /// bypasses the `shadow_mirror_delivered_frontier` funnel, so the append is
+    /// wired here too. `0` (synthetic/no-inbound turn) is a no-op sentinel.
+    user_msg_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +123,7 @@ impl RecoveryDeliveryContext {
                 .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len())),
             attempts: state.recovery_relay_attempts,
             reuse_recorded_anchor,
+            user_msg_id: state.user_msg_id,
         }
     }
 
@@ -233,6 +242,19 @@ impl RecoveryDeliveryContext {
     }
 
     fn record_durable_frontier(&self, anchor: MessageId) {
+        // #4564: reaching here means a recovery terminal delivery was CONFIRMED
+        // (the caller bound the anchor after a successful send), so append the
+        // inbound turn to the completed-turn ledger. Keyed by the delivery
+        // channel the inbound `user_msg_id` lives in (`channel_id`, what catch-up
+        // scans) — NOT `record_channel_id` (the frontier's offset-authority
+        // channel). Independent of the durable-frontier write below so a delivery
+        // with no readable generation marker still suppresses the false TooOld
+        // notice. `0` is a no-op sentinel.
+        completed_turn_ledger::append_completed_turn(
+            &self.provider,
+            self.channel_id.get(),
+            self.user_msg_id,
+        );
         let Some(range) = self.durable_range else {
             return;
         };

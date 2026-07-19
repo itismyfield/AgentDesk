@@ -6,6 +6,7 @@
 
 use std::sync::OnceLock;
 
+pub(in crate::services::discord) mod completed_turn_ledger; // #4564
 pub(crate) mod confirmation;
 pub(crate) mod decision;
 pub(crate) mod delivery;

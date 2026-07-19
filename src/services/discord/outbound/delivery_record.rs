@@ -65,6 +65,7 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
+use super::completed_turn_ledger;
 use super::turn_output_controller::DeliveryOutcome;
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
@@ -237,7 +238,7 @@ fn delivery_owner_context_path(provider: &ProviderKind, channel_id: u64) -> Opti
 // dir, still outside the inflight scan path.
 // ---------------------------------------------------------------------------
 
-struct DeliveryRecordLock {
+pub(in crate::services::discord::outbound) struct DeliveryRecordLock {
     _file: fs::File,
 }
 
@@ -252,7 +253,9 @@ impl Drop for DeliveryRecordLock {
     }
 }
 
-fn lock_record_path(record_path: &Path) -> Result<DeliveryRecordLock, String> {
+pub(in crate::services::discord::outbound) fn lock_record_path(
+    record_path: &Path,
+) -> Result<DeliveryRecordLock, String> {
     let lock_path = record_path.with_extension("json.lock");
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -1274,11 +1277,29 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
             generation_mtime_ns,
         );
     }
+    // #4564: a confirmed terminal delivery is the ONLY event that appends the
+    // durable completed-turn ledger — the authority the catch-up TooOld gate
+    // consults so an already-answered inbound user message is never re-flagged
+    // "unprocessed" after a restart. Gated on `is_delivered` (the DeliveredCommit
+    // gate), NOT on the shadow flag (unlike the frontier mirror below): the ledger
+    // is the #4564 fix, not shadow telemetry, and NEVER a checkpoint/frontier
+    // cursor (promoting those is what got #4600 closed P1). `fresh` is loaded here
+    // so the inbound `user_msg_id` is available; a `0` sentinel (synthetic turn)
+    // is dropped by `append_completed_turn`.
+    let fresh = is_delivered
+        .then(|| crate::services::discord::inflight::load_inflight_state(provider, channel_id))
+        .flatten();
+    if is_delivered {
+        completed_turn_ledger::append_completed_turn(
+            provider,
+            channel_id,
+            fresh.as_ref().map(|f| f.user_msg_id).unwrap_or(0),
+        );
+    }
     if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
         return;
     }
     let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
-    let fresh = crate::services::discord::inflight::load_inflight_state(provider, channel_id);
     let attempts = fresh
         .as_ref()
         .map(|f| f.recovery_relay_attempts)
