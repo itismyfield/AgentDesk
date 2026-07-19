@@ -33,12 +33,12 @@ fn scheduled_push_rejects_agent_only_fields_but_allows_explicit_clears() {
             "onAgentFailure is only valid for agent delivery",
         ),
     ] {
-        let (status, Json(body)) =
+        let err =
             validate_agent_only_fields(db::KIND_PUSH, agent_id, instruction, explicit_failure)
                 .expect_err("push must reject agent-only values");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
-            body.get("error").and_then(JsonValue::as_str),
+            err.to_json_value().get("error").and_then(JsonValue::as_str),
             Some(expected_error)
         );
     }
@@ -119,12 +119,12 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
         dedupe_key: None,
     };
 
-    let (status, Json(error)) = validate_create(&pool, &body)
+    let err = validate_create(&pool, &body)
         .await
         .expect_err("push agentId must fail as a request error before INSERT");
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        error.get("error").and_then(JsonValue::as_str),
+        err.to_json_value().get("error").and_then(JsonValue::as_str),
         Some("agentId is only valid for agent delivery")
     );
     let stored_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_messages")
@@ -206,16 +206,16 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
             "onAgentFailure is only valid for agent delivery",
         ),
     ] {
-        let (status, Json(error)) = build_patch(
+        let err = build_patch(
             &pool,
             body.as_object().expect("invalid push patch object"),
             &existing,
         )
         .await
         .expect_err("push PATCH must reject effective agent-only values");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
-            error.get("error").and_then(JsonValue::as_str),
+            err.to_json_value().get("error").and_then(JsonValue::as_str),
             Some(expected_error)
         );
     }
@@ -241,7 +241,7 @@ async fn postgres_scheduled_message_explicit_target_still_requires_agent_primary
     .await
     .expect("seed agent without a primary channel");
 
-    let (status, Json(body)) = validate_targeting(
+    let err = validate_targeting(
         &pool,
         db::KIND_AGENT,
         Some("987654321"),
@@ -250,9 +250,9 @@ async fn postgres_scheduled_message_explicit_target_still_requires_agent_primary
     .await
     .expect_err("an explicit delivery target must not bypass the owner-channel requirement");
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        body.get("error").and_then(JsonValue::as_str),
+        err.to_json_value().get("error").and_then(JsonValue::as_str),
         Some("agent 'scheduled-agent-without-primary' has no primary Discord channel")
     );
 
@@ -278,7 +278,7 @@ async fn postgres_scheduled_message_rejects_invalid_agent_primary_channel() {
     .await
     .expect("seed agent with an invalid primary channel");
 
-    let (status, Json(body)) = validate_targeting(
+    let err = validate_targeting(
         &pool,
         db::KIND_AGENT,
         None,
@@ -287,9 +287,9 @@ async fn postgres_scheduled_message_rejects_invalid_agent_primary_channel() {
     .await
     .expect_err("an invalid owner channel must fail before fire time");
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        body.get("error").and_then(JsonValue::as_str),
+        err.to_json_value().get("error").and_then(JsonValue::as_str),
         Some("agent 'scheduled-agent-invalid-primary' has an invalid primary Discord channel")
     );
 
