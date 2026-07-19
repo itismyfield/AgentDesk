@@ -507,6 +507,36 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     tracing::info!("  [{ts}] ◀ [{user_name}] /stop");
 
     let channel_id = ctx.channel_id();
+    let forward_context =
+        crate::services::session_forwarding::ForwardCallerContext::from_live_globals(
+            ctx.data().shared.pg_pool.clone(),
+        );
+    match crate::services::session_forwarding::forward_remote_cancel_if_needed(
+        &forward_context,
+        &axum::http::HeaderMap::new(),
+        &channel_id.get().to_string(),
+        false,
+    )
+    .await
+    {
+        Ok(Some(_)) => {
+            ctx.say(super::STOPPING_RESPONSE).await?;
+            tracing::info!("  [{ts}] ■ Remote cancel acknowledged");
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(error) if error.status() == axum::http::StatusCode::NOT_FOUND => {
+            ctx.say(super::NO_ACTIVE_TURN_RESPONSE).await?;
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::error!(channel_id = channel_id.get(), error = %error, "/stop remote cancel failed closed");
+            ctx.say("중지 요청을 owner에 전달하지 못했어요. 잠시 후 다시 시도해 주세요.")
+                .await?;
+            return Ok(());
+        }
+    }
+
     let result = mailbox_cancel_active_turn(&ctx.data().shared, channel_id).await;
 
     match result.token {

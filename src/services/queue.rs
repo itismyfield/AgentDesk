@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::http::HeaderMap;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
@@ -466,7 +467,37 @@ impl QueueService {
         health_registry: Option<&Arc<HealthRegistry>>,
         channel_id: &str,
         force: bool,
+        headers: &HeaderMap,
+        forward_context: &crate::services::session_forwarding::ForwardCallerContext,
     ) -> ServiceResult<Value> {
+        if let Some(response) =
+            crate::services::session_forwarding::forward_remote_cancel_if_needed(
+                forward_context,
+                headers,
+                channel_id,
+                force,
+            )
+            .await?
+        {
+            return Ok(response);
+        }
+
+        if crate::services::session_forwarding::is_forwarded_request(headers) {
+            let pool = self.pg_pool.as_ref().ok_or_else(|| {
+                ServiceError::internal("postgres pool unavailable for forwarded cancel guard")
+                    .with_code(ErrorCode::Database)
+            })?;
+            let owner =
+                crate::services::session_forwarding::load_cancel_owner(pool, channel_id).await?;
+            if owner.as_deref() != forward_context.cluster_instance_id.as_deref() {
+                return Err(ServiceError::conflict(
+                    "forwarded cancel owner changed before local mutation",
+                )
+                .with_context("channel_id", channel_id)
+                .with_context("owner_instance_id", owner));
+            }
+        }
+
         let channel_target = self.resolve_cancel_turn_channel_target(channel_id).await?;
         let session_info = self.load_cancel_turn_session(channel_id).await?;
 

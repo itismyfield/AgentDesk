@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::app_state::AppState;
+use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 const FORWARDED_BY_HEADER: &str = "x-agentdesk-forwarded-by";
 const SESSION_OWNER_HEADER: &str = "x-agentdesk-session-owner";
@@ -27,6 +28,41 @@ pub(crate) enum ForwardResolution {
     Local,
     Forward(ForwardTarget),
     Unavailable { status: StatusCode, body: Value },
+}
+
+/// Narrow state needed by session-control callers outside HTTP route handlers.
+#[derive(Clone)]
+pub(crate) struct ForwardCallerContext {
+    pub(crate) pg_pool: Option<PgPool>,
+    pub(crate) config: std::sync::Arc<crate::config::Config>,
+    pub(crate) cluster_instance_id: Option<String>,
+}
+
+impl From<&AppState> for ForwardCallerContext {
+    fn from(state: &AppState) -> Self {
+        Self {
+            pg_pool: state.pg_pool.clone(),
+            config: state.config.clone(),
+            cluster_instance_id: state.cluster_instance_id.clone(),
+        }
+    }
+}
+
+impl ForwardCallerContext {
+    pub(crate) fn from_live_globals(pg_pool: Option<PgPool>) -> Self {
+        Self {
+            pg_pool,
+            config: crate::config_live_reload::current()
+                .unwrap_or_else(|| std::sync::Arc::new(crate::config::Config::default())),
+            cluster_instance_id: Some(
+                crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
+            ),
+        }
+    }
+
+    pub(crate) fn pg_pool_ref(&self) -> Option<&PgPool> {
+        self.pg_pool.as_ref()
+    }
 }
 
 pub(crate) fn is_forwarded_request(headers: &HeaderMap) -> bool {
@@ -131,7 +167,7 @@ fn valid_instance_id(value: &str) -> bool {
 }
 
 pub(crate) async fn resolve_forward_target(
-    state: &AppState,
+    state: &ForwardCallerContext,
     owner_instance_id: Option<&str>,
     pool: &PgPool,
 ) -> ForwardResolution {
@@ -174,7 +210,7 @@ pub(crate) async fn resolve_forward_target(
 }
 
 pub(crate) async fn forward_tmux_output(
-    state: &AppState,
+    state: &ForwardCallerContext,
     target: &ForwardTarget,
     session_id: i64,
     lines: i32,
@@ -188,7 +224,7 @@ pub(crate) async fn forward_tmux_output(
 }
 
 pub(crate) async fn forward_force_kill(
-    state: &AppState,
+    state: &ForwardCallerContext,
     target: &ForwardTarget,
     session_key: &str,
     retry: bool,
@@ -210,7 +246,7 @@ pub(crate) async fn forward_force_kill(
 }
 
 pub(crate) async fn forward_kill_tmux(
-    state: &AppState,
+    state: &ForwardCallerContext,
     target: &ForwardTarget,
     session_key: &str,
     reason: &str,
@@ -231,8 +267,176 @@ pub(crate) async fn forward_kill_tmux(
     forward_json_response(request, "kill-tmux", target).await
 }
 
+pub(crate) async fn forward_cancel_turn(
+    state: &ForwardCallerContext,
+    target: &ForwardTarget,
+    channel_id: &str,
+    force: bool,
+) -> (StatusCode, Json<Value>) {
+    let url = format!(
+        "{}/api/turns/{}/cancel",
+        target.base_url,
+        encode_path_segment(channel_id)
+    );
+    let request = apply_node_headers(
+        state,
+        target,
+        client().post(url).json(&json!({ "force": force })),
+    );
+    forward_json_response(request, "cancel-turn", target).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CancelRetryDecision {
+    Success,
+    RetryOwner,
+    Fail,
+}
+
+pub(crate) fn classify_cancel_forward_status(status: StatusCode) -> CancelRetryDecision {
+    match status {
+        StatusCode::OK | StatusCode::NOT_FOUND => CancelRetryDecision::Success,
+        StatusCode::CONFLICT => CancelRetryDecision::RetryOwner,
+        _ => CancelRetryDecision::Fail,
+    }
+}
+
+pub(crate) async fn forward_cancel_with_owner_retry(
+    state: &ForwardCallerContext,
+    channel_id: &str,
+    force: bool,
+    first_target: ForwardTarget,
+) -> ServiceResult<Option<Value>> {
+    let (status, Json(body)) = forward_cancel_turn(state, &first_target, channel_id, force).await;
+    match classify_cancel_forward_status(status) {
+        CancelRetryDecision::Success => {
+            return Ok(Some(cancel_success_body(status, body, channel_id)));
+        }
+        CancelRetryDecision::Fail => return Err(cancel_forward_error(status, body, channel_id)),
+        CancelRetryDecision::RetryOwner => {}
+    }
+
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        ServiceError::internal("postgres pool unavailable for cancel owner retry")
+            .with_code(ErrorCode::Database)
+    })?;
+    let owner = load_cancel_owner(pool, channel_id).await?;
+    let resolution = resolve_forward_target(state, owner.as_deref(), pool).await;
+    let retry_target = match resolution {
+        ForwardResolution::Forward(target) if target != first_target => target,
+        ForwardResolution::Local => return Ok(None),
+        ForwardResolution::Forward(_) => {
+            return Err(ServiceError::conflict(
+                "cancel owner rejected the request without changing",
+            )
+            .with_context("channel_id", channel_id));
+        }
+        ForwardResolution::Unavailable { status, body } => {
+            return Err(cancel_forward_error(status, body, channel_id));
+        }
+    };
+
+    let (status, Json(body)) = forward_cancel_turn(state, &retry_target, channel_id, force).await;
+    match classify_cancel_forward_status(status) {
+        CancelRetryDecision::Success => Ok(Some(cancel_success_body(status, body, channel_id))),
+        CancelRetryDecision::RetryOwner | CancelRetryDecision::Fail => {
+            Err(cancel_forward_error(status, body, channel_id))
+        }
+    }
+}
+
+pub(crate) async fn forward_remote_cancel_if_needed(
+    state: &ForwardCallerContext,
+    headers: &HeaderMap,
+    channel_id: &str,
+    force: bool,
+) -> ServiceResult<Option<Value>> {
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        ServiceError::internal("postgres pool unavailable for cancel owner lookup")
+            .with_code(ErrorCode::Database)
+    })?;
+    let owner = load_cancel_owner(pool, channel_id).await?;
+    let resolution = resolve_forward_target(state, owner.as_deref(), pool).await;
+
+    if is_forwarded_request(headers) {
+        return match resolution {
+            ForwardResolution::Local => Ok(None),
+            _ => Err(ServiceError::conflict(
+                "forwarded cancel reached a non-owner instance",
+            )
+            .with_context("channel_id", channel_id)
+            .with_context("owner_instance_id", owner)),
+        };
+    }
+
+    match resolution {
+        ForwardResolution::Local => Ok(None),
+        ForwardResolution::Forward(target) => {
+            forward_cancel_with_owner_retry(state, channel_id, force, target).await
+        }
+        ForwardResolution::Unavailable { status, body } => Err(cancel_forward_error(
+            status,
+            body,
+            channel_id,
+        )),
+    }
+}
+
+pub(crate) async fn load_cancel_owner(
+    pool: &PgPool,
+    channel_id: &str,
+) -> ServiceResult<Option<String>> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT instance_id
+         FROM sessions
+         WHERE status IN ('turn_active', 'working')
+           AND (COALESCE(thread_channel_id, '') = $1 OR COALESCE(channel_id, '') = $1)
+         ORDER BY last_heartbeat DESC
+         LIMIT 1",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .map(|value| value.flatten())
+    .map_err(|error| {
+        ServiceError::internal(format!("load cancel owner: {error}"))
+            .with_code(ErrorCode::Database)
+            .with_operation("cancel_turn.query_owner_pg")
+            .with_context("channel_id", channel_id)
+    })
+}
+
+fn cancel_success_body(status: StatusCode, body: Value, channel_id: &str) -> Value {
+    if status == StatusCode::NOT_FOUND {
+        json!({
+            "ok": true,
+            "channel_id": channel_id,
+            "already_absent": true,
+            "remote_response": body,
+        })
+    } else {
+        body
+    }
+}
+
+fn cancel_forward_error(status: StatusCode, body: Value, channel_id: &str) -> ServiceError {
+    ServiceError::new(
+        status,
+        if status == StatusCode::CONFLICT {
+            ErrorCode::Conflict
+        } else {
+            ErrorCode::Queue
+        },
+        body.get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("remote cancel forwarding failed"),
+    )
+    .with_context("channel_id", channel_id)
+    .with_context("remote_response", body)
+}
+
 fn apply_node_headers(
-    state: &AppState,
+    state: &ForwardCallerContext,
     target: &ForwardTarget,
     mut request: RequestBuilder,
 ) -> RequestBuilder {
@@ -316,8 +520,9 @@ fn encode_path_segment(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ForwardResolution, ForwardTarget, client, encode_path_segment, forward_json_response,
-        is_forwarded_request, resolve_forward_target_from_nodes,
+        CancelRetryDecision, ForwardResolution, ForwardTarget, classify_cancel_forward_status,
+        client, encode_path_segment, forward_json_response, is_forwarded_request,
+        load_cancel_owner, resolve_forward_target_from_nodes,
     };
     use axum::Json;
     use axum::http::{HeaderMap, HeaderValue};
@@ -489,5 +694,232 @@ mod tests {
             encode_path_segment("host:AgentDesk-codex/a b"),
             "host%3AAgentDesk-codex%2Fa%20b"
         );
+    }
+
+    #[test]
+    fn cancel_retry_status_accepts_ack_and_idempotent_not_found() {
+        assert_eq!(
+            classify_cancel_forward_status(axum::http::StatusCode::OK),
+            CancelRetryDecision::Success
+        );
+        assert_eq!(
+            classify_cancel_forward_status(axum::http::StatusCode::NOT_FOUND),
+            CancelRetryDecision::Success
+        );
+    }
+
+    #[test]
+    fn cancel_retry_status_reloads_owner_only_for_conflict() {
+        assert_eq!(
+            classify_cancel_forward_status(axum::http::StatusCode::CONFLICT),
+            CancelRetryDecision::RetryOwner
+        );
+        for status in [
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert_eq!(
+                classify_cancel_forward_status(status),
+                CancelRetryDecision::Fail
+            );
+        }
+    }
+
+    // PostgreSQL cases below pin sessions.instance_id as cancel authority.
+    async fn insert_cancel_owner_fixture(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        channel_id: Option<&str>,
+        thread_channel_id: Option<&str>,
+        instance_id: Option<&str>,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, status, channel_id, thread_channel_id, instance_id, last_heartbeat)
+             VALUES ($1, $2, $3, $4, $5, NOW())",
+        )
+        .bind(session_key)
+        .bind(status)
+        .bind(channel_id)
+        .bind(thread_channel_id)
+        .bind(instance_id)
+        .execute(pool)
+        .await
+        .expect("insert cancel owner fixture");
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_reads_sessions_instance_id_for_thread_channel() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "cancel-owner-thread",
+            None,
+            Some("101"),
+            Some("worker-a"),
+            "turn_active",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "101").await.expect("load owner"),
+            Some("worker-a".to_string())
+        );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_reads_sessions_instance_id_for_runtime_channel() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "cancel-owner-runtime",
+            Some("102"),
+            None,
+            Some("worker-b"),
+            "working",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "102").await.expect("load owner"),
+            Some("worker-b".to_string())
+        );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_ignores_disconnected_sessions() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "cancel-owner-disconnected",
+            Some("103"),
+            None,
+            Some("worker-c"),
+            "disconnected",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "103").await.expect("load owner"),
+            None
+        );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_preserves_null_instance_as_local_authority() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "cancel-owner-null",
+            Some("104"),
+            None,
+            None,
+            "turn_active",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "104").await.expect("load owner"),
+            None
+        );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_prefers_latest_active_heartbeat() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "cancel-owner-old",
+            Some("105"),
+            None,
+            Some("worker-old"),
+            "turn_active",
+        )
+        .await;
+        sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '1 minute' WHERE session_key = $1")
+            .bind("cancel-owner-old")
+            .execute(&pool)
+            .await
+            .expect("age owner fixture");
+        insert_cancel_owner_fixture(
+            &pool,
+            "cancel-owner-new",
+            Some("105"),
+            None,
+            Some("worker-new"),
+            "turn_active",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "105").await.expect("load owner"),
+            Some("worker-new".to_string())
+        );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_matches_exact_channel_not_session_key_text() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "contains-106",
+            Some("999"),
+            None,
+            Some("worker-wrong"),
+            "turn_active",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "106").await.expect("load owner"),
+            None
+        );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_does_not_fall_back_to_agent_binding() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "cancel-owner-unrelated",
+            Some("107"),
+            None,
+            Some("worker-unrelated"),
+            "turn_active",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "108").await.expect("load owner"),
+            None
+        );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_owner_returns_none_when_no_session_exists() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        assert_eq!(
+            load_cancel_owner(&pool, "109").await.expect("load owner"),
+            None
+        );
+        pg_db.drop().await;
     }
 }

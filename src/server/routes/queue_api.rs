@@ -6,7 +6,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -196,14 +196,22 @@ fn resolve_cancel_force(query_force: bool, body: &Bytes) -> bool {
 /// #3029); the body wins when both are present.
 pub async fn cancel_turn(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(channel_id): Path<String>,
     Query(query): Query<CancelTurnQuery>,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let force = resolve_cancel_force(query.force, &body);
+    let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
     match state
         .queue_service()
-        .cancel_turn(state.health_registry.as_ref(), &channel_id, force)
+        .cancel_turn(
+            state.health_registry.as_ref(),
+            &channel_id,
+            force,
+            &headers,
+            &forward_context,
+        )
         .await
     {
         Ok(response) => (StatusCode::OK, Json(response)),

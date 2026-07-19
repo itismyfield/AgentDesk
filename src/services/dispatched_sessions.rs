@@ -676,8 +676,10 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
         };
 
     if !crate::services::session_forwarding::is_forwarded_request(headers) {
+        let forward_context =
+            crate::services::session_forwarding::ForwardCallerContext::from(state);
         match crate::services::session_forwarding::resolve_forward_target(
-            state,
+            &forward_context,
             owner_instance_id.as_deref(),
             pool,
         )
@@ -686,7 +688,7 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
             crate::services::session_forwarding::ForwardResolution::Local => {}
             crate::services::session_forwarding::ForwardResolution::Forward(target) => {
                 return crate::services::session_forwarding::forward_force_kill(
-                    state,
+                    &forward_context,
                     &target,
                     session_key,
                     retry,
@@ -936,8 +938,10 @@ pub async fn tmux_output(
     };
 
     if !crate::services::session_forwarding::is_forwarded_request(&headers) {
+        let forward_context =
+            crate::services::session_forwarding::ForwardCallerContext::from(&state);
         match crate::services::session_forwarding::resolve_forward_target(
-            &state,
+            &forward_context,
             owner_instance_id.as_deref(),
             pool,
         )
@@ -946,7 +950,7 @@ pub async fn tmux_output(
             crate::services::session_forwarding::ForwardResolution::Local => {}
             crate::services::session_forwarding::ForwardResolution::Forward(target) => {
                 return crate::services::session_forwarding::forward_tmux_output(
-                    &state,
+                    &forward_context,
                     &target,
                     id,
                     effective_lines,
@@ -1486,8 +1490,10 @@ async fn kill_tmux_session_impl(
         };
 
     if !crate::services::session_forwarding::is_forwarded_request(headers) {
+        let forward_context =
+            crate::services::session_forwarding::ForwardCallerContext::from(state);
         match crate::services::session_forwarding::resolve_forward_target(
-            state,
+            &forward_context,
             owner_instance_id.as_deref(),
             pool,
         )
@@ -1496,7 +1502,7 @@ async fn kill_tmux_session_impl(
             crate::services::session_forwarding::ForwardResolution::Local => {}
             crate::services::session_forwarding::ForwardResolution::Forward(target) => {
                 return crate::services::session_forwarding::forward_kill_tmux(
-                    state,
+                    &forward_context,
                     &target,
                     session_key,
                     reason,
