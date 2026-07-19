@@ -243,10 +243,14 @@ mod tests {
         };
 
         // First notice for the batch (control plane boot #1).
-        super::super::CatchUpDiscordApi::enqueue_too_old_notice(&api, Some(pool.clone()), batch.clone())
-            .expect("first boot must spawn the PG producer")
-            .await
-            .expect("first boot producer task");
+        super::super::CatchUpDiscordApi::enqueue_too_old_notice(
+            &api,
+            Some(pool.clone()),
+            batch.clone(),
+        )
+        .expect("first boot must spawn the PG producer")
+        .await
+        .expect("first boot producer task");
 
         // Age the staged row past the 5-minute TTL window to emulate a restart
         // whose gap exceeds the rolling dedupe horizon. Shift the whole row back
