@@ -148,10 +148,10 @@
 | `GET` | `/api/kanban-cards/{id}/review-state` | `kanban::get_card_review_state` | `src/server/routes/kanban.rs:1053` | `src/server/routes/domains/kanban.rs:43` |
 | `GET` | `/api/kanban-cards/{id}/reviews` | `kanban::list_card_reviews` | `src/server/routes/kanban.rs:1075` | `src/server/routes/domains/kanban.rs:42` |
 | `POST` | `/api/kanban-cards/{id}/transition` | `kanban::force_transition` | `src/server/routes/kanban.rs:2423` | `src/server/routes/domains/kanban.rs:31` |
-| `GET` | `/api/kanban-repos` | `kanban_repos::list_repos` | `src/server/routes/kanban_repos.rs:29` | `src/server/routes/domains/kanban.rs:52` |
-| `POST` | `/api/kanban-repos` | `kanban_repos::create_repo` | `src/server/routes/kanban_repos.rs:78` | `src/server/routes/domains/kanban.rs:52` |
-| `DELETE` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::delete_repo` | `src/server/routes/kanban_repos.rs:234` | `src/server/routes/domains/kanban.rs:56` |
-| `PATCH` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::update_repo` | `src/server/routes/kanban_repos.rs:153` | `src/server/routes/domains/kanban.rs:56` |
+| `GET` | `/api/kanban-repos` | `kanban_repos::list_repos` | `src/server/routes/kanban_repos.rs:30` | `src/server/routes/domains/kanban.rs:52` |
+| `POST` | `/api/kanban-repos` | `kanban_repos::create_repo` | `src/server/routes/kanban_repos.rs:76` | `src/server/routes/domains/kanban.rs:52` |
+| `DELETE` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::delete_repo` | `src/server/routes/kanban_repos.rs:207` | `src/server/routes/domains/kanban.rs:56` |
+| `PATCH` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::update_repo` | `src/server/routes/kanban_repos.rs:139` | `src/server/routes/domains/kanban.rs:56` |
 | `PATCH` | `/api/kanban-reviews/{id}/decisions` | `reviews::update_decisions` | `src/server/routes/reviews.rs:573` | `src/server/routes/domains/reviews.rs:13` |
 | `POST` | `/api/kanban-reviews/{id}/trigger-rework` | `reviews::trigger_rework` | `src/server/routes/reviews.rs:627` | `src/server/routes/domains/reviews.rs:17` |
 | `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:496` | `src/server/routes/domains/admin.rs:77` |
@@ -265,7 +265,7 @@
 | `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:1259` | `src/server/routes/domains/agents.rs:49` |
 | `GET` | `/api/sessions/{id}/tmux-output` | `dispatched_sessions::tmux_output` | `src/server/routes/dispatched_sessions.rs:93` | `src/server/routes/domains/ops.rs:213` |
 | `POST` | `/api/sessions/{session_key}/force-kill` | `dispatched_sessions::force_kill_session` | `src/server/routes/dispatched_sessions.rs:109` | `src/server/routes/domains/ops.rs:199` |
-| `POST` | `/api/sessions/{session_key}/idle-recap` | `idle_recap::post_idle_recap` | `src/server/routes/idle_recap.rs:69` | `src/server/routes/domains/ops.rs:207` |
+| `POST` | `/api/sessions/{session_key}/idle-recap` | `idle_recap::post_idle_recap` | `src/server/routes/idle_recap.rs:70` | `src/server/routes/domains/ops.rs:207` |
 | `POST` | `/api/sessions/{session_key}/kill-tmux` | `dispatched_sessions::kill_tmux_session` | `src/server/routes/dispatched_sessions.rs:125` | `src/server/routes/domains/ops.rs:203` |
 | `GET` | `/api/settings` | `settings::get_settings` | `src/server/routes/settings.rs:28` | `src/server/routes/domains/admin.rs:48` |
 | `PUT` | `/api/settings` | `settings::put_settings` | `src/server/routes/settings.rs:38` | `src/server/routes/domains/admin.rs:48` |
