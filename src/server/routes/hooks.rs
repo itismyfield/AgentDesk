@@ -8,6 +8,17 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
+
+fn app_error(status: StatusCode, message: impl Into<String>) -> AppError {
+    let message = message.into();
+    match status {
+        StatusCode::NOT_FOUND => AppError::not_found(message),
+        StatusCode::INTERNAL_SERVER_ERROR => AppError::internal(message),
+        StatusCode::SERVICE_UNAVAILABLE => AppError::new(status, ErrorCode::Config, message),
+        _ => AppError::new(status, ErrorCode::Internal, message),
+    }
+}
 
 // ── Body types ───────────────────────────────────────────────
 
@@ -22,19 +33,21 @@ pub struct SkillUsageBody {
 // ── Handlers ─────────────────────────────────────────────────
 
 /// POST /api/hook/reset-status
-pub async fn reset_status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn reset_status(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     match reset_status_pg(pool).await {
-        Ok(updated) => (
+        Ok(updated) => Ok((
             StatusCode::OK,
             Json(json!({"ok": true, "updated": updated})),
-        ),
-        Err(error) => (
+        )),
+        Err(error) => Err(app_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+            format!("{error}"),
+        )),
     }
 }
 
@@ -42,16 +55,16 @@ pub async fn reset_status(State(state): State<AppState>) -> (StatusCode, Json<se
 pub async fn skill_usage(
     State(state): State<AppState>,
     Json(body): Json<SkillUsageBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     match skill_usage_pg(pool, &body).await {
-        Ok(id) => (StatusCode::OK, Json(json!({"ok": true, "id": id}))),
-        Err(error) => (
+        Ok(id) => Ok((StatusCode::OK, Json(json!({"ok": true, "id": id})))),
+        Err(error) => Err(app_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+            format!("{error}"),
+        )),
     }
 }
 
@@ -59,31 +72,25 @@ pub async fn skill_usage(
 pub async fn disconnect_session(
     State(state): State<AppState>,
     Path(session_key): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
     match disconnect_session_pg(pool, &session_key).await {
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "session not found"})),
-        ),
-        Ok(true) => (
+        Ok(false) => Err(app_error(StatusCode::NOT_FOUND, "session not found")),
+        Ok(true) => Ok((
             StatusCode::OK,
             Json(json!({"ok": true, "session_key": session_key})),
-        ),
-        Err(error) => (
+        )),
+        Err(error) => Err(app_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+            format!("{error}"),
+        )),
     }
 }
 
-fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+fn pg_unavailable() -> AppError {
+    app_error(StatusCode::SERVICE_UNAVAILABLE, "postgres pool unavailable")
 }
 
 async fn reset_status_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {

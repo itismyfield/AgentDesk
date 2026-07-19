@@ -8,6 +8,16 @@ use serde_json::json;
 use sqlx::{PgPool, QueryBuilder, Row};
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
+
+fn app_error(status: StatusCode, message: impl Into<String>) -> AppError {
+    let message = message.into();
+    match status {
+        StatusCode::INTERNAL_SERVER_ERROR => AppError::internal(message),
+        StatusCode::SERVICE_UNAVAILABLE => AppError::new(status, ErrorCode::Config, message),
+        _ => AppError::new(status, ErrorCode::Internal, message),
+    }
+}
 
 // ── Query / Body types ─────────────────────────────────────────
 
@@ -41,19 +51,19 @@ pub struct CreateMessageBody {
 pub async fn list_messages(
     State(state): State<AppState>,
     Query(params): Query<ListMessagesQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(app_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            "postgres pool unavailable",
+        ));
     };
     match list_messages_pg(pool, &params).await {
-        Ok(messages) => (StatusCode::OK, Json(json!({"messages": messages}))),
-        Err(error) => (
+        Ok(messages) => Ok((StatusCode::OK, Json(json!({"messages": messages})))),
+        Err(error) => Err(app_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+            format!("{error}"),
+        )),
     }
 }
 
@@ -61,7 +71,7 @@ pub async fn list_messages(
 pub async fn create_message(
     State(state): State<AppState>,
     Json(body): Json<CreateMessageBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let sender_type = body
         .sender_type
         .clone()
@@ -72,17 +82,17 @@ pub async fn create_message(
         .unwrap_or_else(|| "chat".to_string());
 
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(app_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            "postgres pool unavailable",
+        ));
     };
     match create_message_pg(pool, &body, &sender_type, &message_type).await {
-        Ok(message) => (StatusCode::CREATED, Json(message)),
-        Err(error) => (
+        Ok(message) => Ok((StatusCode::CREATED, Json(message))),
+        Err(error) => Err(app_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+            format!("{error}"),
+        )),
     }
 }
 
