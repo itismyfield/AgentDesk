@@ -7,7 +7,10 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row;
 
-use crate::services as services_layer;
+use crate::{
+    error::{AppError, AppResult, ErrorCode},
+    services as services_layer,
+};
 
 use super::AppState;
 // #3863: reuse the verdict route's hardened SHA guard so the recovery route
@@ -574,84 +577,65 @@ pub async fn update_decisions(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateDecisionsBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     for item in &body.decisions {
         if !validate_review_decision(&item.decision) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": format!("invalid decision '{}', must be 'accept' or 'reject'", item.decision)}),
-                ),
-            );
+            return Err(AppError::bad_request(format!(
+                "invalid decision '{}', must be 'accept' or 'reject'",
+                item.decision
+            )));
         }
     }
 
     let Some(pg_pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "postgres pool unavailable"})),
+        return Err(
+            AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database)
         );
     };
 
-    match update_decisions_pg(pg_pool, &id, &body.decisions).await {
-        Ok(decisions) => (
-            StatusCode::OK,
-            Json(json!({"review": {"dispatch_id": id, "decisions": decisions}})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
-    }
+    let decisions = update_decisions_pg(pg_pool, &id, &body.decisions)
+        .await
+        .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({"review": {"dispatch_id": id, "decisions": decisions}})),
+    ))
 }
 
 /// POST /api/reviews/recovery
 pub async fn recover_review_target(
     State(state): State<AppState>,
     Json(body): Json<ReviewTargetRecoveryBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "postgres pool unavailable"})),
+        return Err(
+            AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database)
         );
     };
 
-    match recover_review_target_pg(pg_pool, body).await {
-        Ok(value) => (StatusCode::OK, Json(value)),
-        Err((status, error)) => (status, Json(json!({"error": error}))),
-    }
+    let value = recover_review_target_pg(pg_pool, body)
+        .await
+        .map_err(|(status, error)| AppError::new(status, ErrorCode::Validation, error))?;
+    Ok((StatusCode::OK, Json(value)))
 }
 
 /// POST /api/kanban-reviews/:id/trigger-rework
 pub async fn trigger_rework(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "postgres pool unavailable"})),
+        return Err(
+            AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database)
         );
     };
 
-    let card_id = match resolve_review_card_id_pg(pg_pool, &id).await {
-        Ok(Some(card_id)) => card_id,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "review or dispatch not found"})),
-            );
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
-    };
+    let card_id = resolve_review_card_id_pg(pg_pool, &id)
+        .await
+        .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?
+        .ok_or_else(|| AppError::not_found("review or dispatch not found"))?;
 
-    match crate::kanban::transition_status_with_opts_pg_only(
+    crate::kanban::transition_status_with_opts_pg_only(
         pg_pool,
         &state.engine,
         &card_id,
@@ -660,13 +644,8 @@ pub async fn trigger_rework(
         crate::engine::transition::ForceIntent::OperatorOverride,
     )
     .await
-    {
-        Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
-    }
+    .map_err(|error| AppError::internal(format!("{error}")))?;
+    Ok((StatusCode::OK, Json(json!({"ok": true}))))
 }
 
 #[cfg(test)]

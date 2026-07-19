@@ -20,6 +20,7 @@ use super::{
         collect_direct_skill_usage_summary_pg,
     },
 };
+use crate::error::{AppError, AppResult, ErrorCode};
 
 fn skill_description_from_markdown(content: &str) -> String {
     content
@@ -352,22 +353,17 @@ pub struct SkillCatalogQuery {
 pub async fn catalog(
     State(state): State<AppState>,
     Query(params): Query<SkillCatalogQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
-    let disk_skill_ids = match sync_skills_from_disk_pg(pool).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("skill sync failed: {e}")})),
-            );
-        }
-    };
+    let disk_skill_ids = sync_skills_from_disk_pg(pool).await.map_err(|error| {
+        AppError::internal(format!("skill sync failed: {error}")).with_code(ErrorCode::Database)
+    })?;
     let include_stale = params.include_stale.unwrap_or(false);
     // Dashboard catalog requests should stay cheap. Use the canonical
     // skill_usage table instead of reparsing large transcript JSON on every
@@ -376,24 +372,12 @@ pub async fn catalog(
         load_skill_metadata_pg(pool),
         collect_direct_skill_usage_summary_pg(pool, None),
     );
-    let metadata = match metadata_result {
-        Ok(data) => data,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("metadata query failed: {e}")})),
-            );
-        }
-    };
-    let usage = match usage_result {
-        Ok(data) => data,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("usage query failed: {e}")})),
-            );
-        }
-    };
+    let metadata = metadata_result.map_err(|error| {
+        AppError::internal(format!("metadata query failed: {error}")).with_code(ErrorCode::Database)
+    })?;
+    let usage = usage_result.map_err(|error| {
+        AppError::internal(format!("usage query failed: {error}")).with_code(ErrorCode::Database)
+    })?;
     let totals = aggregate_usage_summaries(usage);
     let known_ids: HashSet<String> = metadata.keys().cloned().collect();
 
@@ -450,13 +434,13 @@ pub async fn catalog(
             })
     });
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "catalog": catalog,
             "include_stale": include_stale,
         })),
-    )
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -470,22 +454,17 @@ pub struct RankingQuery {
 pub async fn ranking(
     State(state): State<AppState>,
     Query(params): Query<RankingQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
-    let disk_skill_ids = match sync_skills_from_disk_pg(pool).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("skill sync failed: {e}")})),
-            );
-        }
-    };
+    let disk_skill_ids = sync_skills_from_disk_pg(pool).await.map_err(|error| {
+        AppError::internal(format!("skill sync failed: {error}")).with_code(ErrorCode::Database)
+    })?;
 
     let window = params.window.as_deref().unwrap_or("7d");
     let limit = params.limit.unwrap_or(20);
@@ -499,33 +478,16 @@ pub async fn ranking(
         collect_direct_skill_usage_summary_pg(pool, days),
         collect_direct_agent_skill_usage_summary_pg(pool, days),
     );
-    let metadata = match metadata_result {
-        Ok(data) => data,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("metadata query failed: {e}")})),
-            );
-        }
-    };
-    let usage = match usage_result {
-        Ok(data) => data,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("usage query failed: {e}")})),
-            );
-        }
-    };
-    let by_agent_usage = match by_agent_usage_result {
-        Ok(data) => data,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("agent usage query failed: {e}")})),
-            );
-        }
-    };
+    let metadata = metadata_result.map_err(|error| {
+        AppError::internal(format!("metadata query failed: {error}")).with_code(ErrorCode::Database)
+    })?;
+    let usage = usage_result.map_err(|error| {
+        AppError::internal(format!("usage query failed: {error}")).with_code(ErrorCode::Database)
+    })?;
+    let by_agent_usage = by_agent_usage_result.map_err(|error| {
+        AppError::internal(format!("agent usage query failed: {error}"))
+            .with_code(ErrorCode::Database)
+    })?;
 
     let mut overall = aggregate_usage_summaries(usage)
         .into_iter()
@@ -622,7 +584,7 @@ pub async fn ranking(
     });
     by_agent.truncate(100);
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "window": window,
@@ -630,7 +592,7 @@ pub async fn ranking(
             "overall": overall,
             "byAgent": by_agent,
         })),
-    )
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -642,35 +604,29 @@ pub struct PruneSkillsQuery {
 pub async fn prune(
     State(state): State<AppState>,
     Query(params): Query<PruneSkillsQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     let dry_run = params.dry_run.unwrap_or(false);
-    let disk_skill_ids = match sync_skills_from_disk_with_prune_pg(pool, !dry_run).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("skill sync failed: {e}")})),
-            );
-        }
-    };
-    let stale_skill_ids = match load_stale_skill_ids_pg(pool, &disk_skill_ids).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("stale skill query failed: {e}")})),
-            );
-        }
-    };
+    let disk_skill_ids = sync_skills_from_disk_with_prune_pg(pool, !dry_run)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("skill sync failed: {error}")).with_code(ErrorCode::Database)
+        })?;
+    let stale_skill_ids = load_stale_skill_ids_pg(pool, &disk_skill_ids)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("stale skill query failed: {error}"))
+                .with_code(ErrorCode::Database)
+        })?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -680,5 +636,5 @@ pub async fn prune(
             "soft_deleted_from_skills": if dry_run { 0 } else { stale_skill_ids.len() },
             "skill_usage_policy": "preserved",
         })),
-    )
+    ))
 }
