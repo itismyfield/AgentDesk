@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
 use crate::db::session_status::is_active_status;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Deserialize)]
 pub struct StatsQuery {
@@ -500,20 +501,18 @@ async fn get_stats_pg(pool: &PgPool, office_id: Option<&str>) -> Result<serde_js
 pub async fn get_stats(
     State(state): State<AppState>,
     Query(params): Query<StatsQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
-    };
-    match get_stats_pg(pool, params.office_id.as_deref()).await {
-        Ok(body) => (StatusCode::OK, Json(body)),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
-    }
+            ErrorCode::Config,
+            "postgres pool unavailable",
+        )
+    })?;
+    let body = get_stats_pg(pool, params.office_id.as_deref())
+        .await
+        .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?;
+    Ok((StatusCode::OK, Json(body)))
 }
 
 /// GET /api/stats/memento

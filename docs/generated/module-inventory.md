@@ -292,7 +292,7 @@
 | `server::routes::message_outbox` | `src/server/routes/message_outbox.rs` | 477 | 284 | 193 |  |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 195 | 195 | 0 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 96 | 96 | 0 |  |
-| `server::routes::offices` | `src/server/routes/offices.rs` | 485 | 485 | 0 |  |
+| `server::routes::offices` | `src/server/routes/offices.rs` | 381 | 381 | 0 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 58 | 58 | 0 |  |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 353 | 353 | 0 |  |
 | `server::routes::pr_summary` | `src/server/routes/pr_summary.rs` | 241 | 142 | 99 |  |
@@ -316,7 +316,7 @@
 | `server::routes::settings` | `src/server/routes/settings.rs` | 91 | 91 | 0 |  |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 425 | 425 | 0 |  |
 | `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 640 | 640 | 0 |  |
-| `server::routes::stats` | `src/server/routes/stats.rs` | 722 | 589 | 133 |  |
+| `server::routes::stats` | `src/server/routes/stats.rs` | 721 | 588 | 133 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 152 | 152 | 0 |  |
 | `server::routes::tests::preflight_harness::types` | `src/server/routes/tests/preflight_harness/types.rs` | 217 | 0 | 217 |  |
 | `server::routes::tests::preflight_harness::validation` | `src/server/routes/tests/preflight_harness/validation.rs` | 260 | 0 | 260 |  |
