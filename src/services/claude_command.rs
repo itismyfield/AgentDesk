@@ -39,10 +39,14 @@ use crate::services::platform::BinaryResolution;
 /// is a compile error. That seals the builder's typed path, including aliases,
 /// re-bindings, helpers, and closures that receive this capability.
 ///
-/// This is not complete resolver-layer sealing: the public
-/// `resolve_provider_binary("claude").resolved_path` still exposes a raw path
-/// that a new spawn site could misuse. Full by-construction sealing is tracked in
-/// #4627; `FORBIDDEN_RAW_SPAWN` remains defense-in-depth in the meantime.
+/// Resolver-layer sealing (#4627) closes the remaining gap: the public generic
+/// `resolve_provider_binary("claude")` now scrubs `resolved_path` /
+/// `canonical_path` / `exec_path` to `None` AND redacts the raw-path components
+/// embedded in the `attempts` diagnostics, so no raw Claude path is reachable
+/// through that seam (including by parsing `attempts`). The sole sanctioned
+/// raw-path seam is `binary_resolver::resolve_claude_binary_sealed`, consumed
+/// only by [`ClaudeBinary::resolve`] below; `FORBIDDEN_RAW_SPAWN` remains
+/// defense-in-depth.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClaudeBinary {
     program: OsString,
@@ -62,7 +66,11 @@ impl ClaudeBinary {
     }
 
     pub(crate) fn resolve() -> Result<(Self, BinaryResolution), String> {
-        let resolution = crate::services::platform::resolve_provider_binary("claude");
+        // #4627: the sole sanctioned raw-path seam. The generic
+        // `resolve_provider_binary("claude")` scrubs the raw path, so this
+        // chokepoint uses the sealed resolver to obtain the unscrubbed
+        // resolution that the guarded builder wraps.
+        let resolution = crate::services::platform::binary_resolver::resolve_claude_binary_sealed();
         let binary = Self::from_resolution(&resolution)
             .ok_or_else(|| "Claude CLI not found. Is Claude CLI installed?".to_string())?;
         Ok((binary, resolution))
@@ -951,6 +959,97 @@ mod chokepoint_guard_tests {
                     && violation.contains("`ClaudeGatewayProxyEnv`")
             }),
             "a matching basename outside the exact consumer path must not be sanctioned"
+        );
+    }
+
+    /// #4627: crate-relative sites permitted to define or call the sealed
+    /// raw-path Claude resolver seam. The definition lives in `binary_resolver.rs`
+    /// and the sole caller is `ClaudeBinary::resolve` in `claude_command.rs`; every
+    /// other module must obtain Claude paths through the scrubbing generic
+    /// `resolve_provider_binary`.
+    const SEALED_CLAUDE_SEAM_SITES: &[&str] = &[
+        "src/services/platform/binary_resolver.rs",
+        "src/services/claude_command.rs",
+    ];
+
+    /// The sealed-seam symbol. Any crate-relative source outside
+    /// [`SEALED_CLAUDE_SEAM_SITES`] that names it is reaching around the scrubbing
+    /// generic resolver for a raw Claude path.
+    const SEALED_CLAUDE_SEAM_NEEDLE: &str = "resolve_claude_binary_sealed";
+
+    fn sealed_claude_seam_violations(relative_path: &str, contents: &str) -> Vec<String> {
+        if SEALED_CLAUDE_SEAM_SITES.contains(&relative_path) {
+            return Vec::new();
+        }
+        if contents.contains(SEALED_CLAUDE_SEAM_NEEDLE) {
+            vec![format!(
+                "{relative_path} references sealed Claude seam `{SEALED_CLAUDE_SEAM_NEEDLE}`"
+            )]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn scan_sealed_claude_seam_sources<'a>(
+        sources: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Vec<String> {
+        sources
+            .into_iter()
+            .flat_map(|(relative_path, contents)| {
+                sealed_claude_seam_violations(relative_path, contents)
+            })
+            .collect()
+    }
+
+    /// By-construction guard: the sealed raw-path Claude seam must be referenced
+    /// only by its definition site and the single sanctioned chokepoint caller.
+    #[test]
+    fn sealed_claude_seam_confined_to_chokepoint() {
+        let sources = crate_source_entries();
+        let violations = scan_sealed_claude_seam_sources(
+            sources
+                .iter()
+                .map(|(relative_path, contents)| (relative_path.as_str(), contents.as_str())),
+        );
+
+        assert!(
+            violations.is_empty(),
+            "the sealed Claude resolver seam leaked outside its sanctioned sites \
+             (obtain Claude paths through platform::resolve_provider_binary, which \
+             scrubs them):\n{}",
+            violations.join("\n")
+        );
+    }
+
+    /// Mutation coverage for the sealed-seam guard: a foreign reference is flagged
+    /// while the sanctioned sites stay exempt. Inverting the exemption check or
+    /// broadening the site list is caught here.
+    #[test]
+    fn sealed_claude_seam_guard_flags_foreign_reference_only() {
+        let foreign = scan_sealed_claude_seam_sources([(
+            "src/services/other.rs",
+            "let r = resolve_claude_binary_sealed();",
+        )]);
+        assert!(
+            foreign
+                .iter()
+                .any(|violation| violation.contains(SEALED_CLAUDE_SEAM_NEEDLE)),
+            "a foreign reference to the sealed seam must be flagged"
+        );
+
+        let sanctioned = scan_sealed_claude_seam_sources([
+            (
+                "src/services/claude_command.rs",
+                "resolve_claude_binary_sealed();",
+            ),
+            (
+                "src/services/platform/binary_resolver.rs",
+                "pub(crate) fn resolve_claude_binary_sealed()",
+            ),
+        ]);
+        assert!(
+            sanctioned.is_empty(),
+            "the definition site and sanctioned chokepoint caller must stay exempt"
         );
     }
 }
