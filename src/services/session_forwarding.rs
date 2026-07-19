@@ -456,11 +456,11 @@ pub(crate) async fn forward_remote_cancel_if_needed(
     if is_forwarded_request(headers) {
         return match resolution {
             ForwardResolution::Local => Ok(None),
-            _ => Err(ServiceError::conflict(
-                "forwarded cancel reached a non-owner instance",
-            )
-            .with_context("channel_id", channel_id)
-            .with_context("owner_instance_id", owner)),
+            _ => Err(
+                ServiceError::conflict("forwarded cancel reached a non-owner instance")
+                    .with_context("channel_id", channel_id)
+                    .with_context("owner_instance_id", owner),
+            ),
         };
     }
 
@@ -469,11 +469,9 @@ pub(crate) async fn forward_remote_cancel_if_needed(
         ForwardResolution::Forward(target) => {
             forward_cancel_with_owner_retry(state, channel_id, force, target).await
         }
-        ForwardResolution::Unavailable { status, body } => Err(cancel_forward_error(
-            status,
-            body,
-            channel_id,
-        )),
+        ForwardResolution::Unavailable { status, body } => {
+            Err(cancel_forward_error(status, body, channel_id))
+        }
     }
 }
 
@@ -482,8 +480,10 @@ pub(crate) async fn load_cancel_turn_session(
     channel_id: &str,
 ) -> ServiceResult<Option<CancelTurnSessionInfo>> {
     if channel_id.is_empty() || !channel_id.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(ServiceError::bad_request("channel_id must contain only decimal digits")
-            .with_context("channel_id", channel_id));
+        return Err(
+            ServiceError::bad_request("channel_id must contain only decimal digits")
+                .with_context("channel_id", channel_id),
+        );
     }
 
     let rows = sqlx::query_as::<
@@ -571,7 +571,9 @@ pub(crate) async fn load_cancel_turn_session(
         {
             1
         } else if requested_provider.as_deref().is_some_and(|requested| {
-            provider_name.as_deref().is_some_and(|provider| provider == requested)
+            provider_name
+                .as_deref()
+                .is_some_and(|provider| provider == requested)
         }) {
             2
         } else {
@@ -586,20 +588,21 @@ pub(crate) async fn load_cancel_turn_session(
             owner_instance_id,
             match_rank,
         };
-        let replace = selected.as_ref().is_none_or(|(rank, heartbeat, current)| {
-            match match_rank.cmp(rank) {
-                std::cmp::Ordering::Less => true,
-                std::cmp::Ordering::Greater => false,
-                std::cmp::Ordering::Equal => match (last_heartbeat, *heartbeat) {
-                    (Some(candidate), Some(existing)) if candidate != existing => {
-                        candidate > existing
-                    }
-                    (Some(_), None) => true,
-                    (None, Some(_)) => false,
-                    _ => info.session_key < current.session_key,
-                },
-            }
-        });
+        let replace =
+            selected
+                .as_ref()
+                .is_none_or(|(rank, heartbeat, current)| match match_rank.cmp(rank) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Greater => false,
+                    std::cmp::Ordering::Equal => match (last_heartbeat, *heartbeat) {
+                        (Some(candidate), Some(existing)) if candidate != existing => {
+                            candidate > existing
+                        }
+                        (Some(_), None) => true,
+                        (None, Some(_)) => false,
+                        _ => info.session_key < current.session_key,
+                    },
+                });
         if replace {
             selected = Some((match_rank, last_heartbeat, info));
         }
@@ -608,6 +611,10 @@ pub(crate) async fn load_cancel_turn_session(
 }
 
 fn legacy_session_key_matches_channel(session_key: &str, channel_id: &str) -> bool {
+    if channel_id.is_empty() || !channel_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+
     session_key
         .as_bytes()
         .windows(channel_id.len())
@@ -615,7 +622,10 @@ fn legacy_session_key_matches_channel(session_key: &str, channel_id: &str) -> bo
         .any(|(offset, window)| {
             window == channel_id.as_bytes()
                 && offset > 0
-                && matches!(session_key.as_bytes()[offset - 1], b'-' | b'_' | b':' | b'/')
+                && matches!(
+                    session_key.as_bytes()[offset - 1],
+                    b'-' | b'_' | b':' | b'/'
+                )
                 && session_key
                     .as_bytes()
                     .get(offset + channel_id.len())
@@ -645,16 +655,18 @@ pub(crate) async fn revalidate_local_cancel_owner(
     let owner = selected
         .as_ref()
         .and_then(|session| session.owner_instance_id.as_deref());
-    let selected_key = selected.as_ref().map(|session| session.session_key.as_str());
+    let selected_key = selected
+        .as_ref()
+        .map(|session| session.session_key.as_str());
     if (owner.is_some() && owner != state.cluster_instance_id.as_deref())
         || expected_session_key.is_some_and(|expected| selected_key != Some(expected))
     {
-        return Err(ServiceError::conflict(
-            "cancel owner changed before local mutation",
-        )
-        .with_context("channel_id", channel_id)
-        .with_context("owner_instance_id", owner)
-        .with_context("selected_session_key", selected_key));
+        return Err(
+            ServiceError::conflict("cancel owner changed before local mutation")
+                .with_context("channel_id", channel_id)
+                .with_context("owner_instance_id", owner)
+                .with_context("selected_session_key", selected_key),
+        );
     }
     Ok(())
 }
@@ -1015,8 +1027,7 @@ mod tests {
             base_url: format!("http://{addr}"),
         };
 
-        let (status, Json(body)) =
-            super::forward_cancel_turn(&state, &target, "42", false).await;
+        let (status, Json(body)) = super::forward_cancel_turn(&state, &target, "42", false).await;
         server.await.expect("test server task");
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(body["ok"].as_bool(), Some(true));

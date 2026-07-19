@@ -421,7 +421,7 @@
 | `services::cluster::session_discovery` | `src/services/cluster/session_discovery.rs` | 1280 | 693 | 587 |  |
 | `services::cluster::session_matcher` | `src/services/cluster/session_matcher.rs` | 952 | 529 | 423 |  |
 | `services::cluster::session_registry` | `src/services/cluster/session_registry.rs` | 566 | 330 | 236 |  |
-| `services::cluster::session_routing` | `src/services/cluster/session_routing.rs` | 416 | 220 | 196 |  |
+| `services::cluster::session_routing` | `src/services/cluster/session_routing.rs` | 421 | 221 | 200 |  |
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 1638 | 985 | 653 |  |
 | `services::cluster::stream_relay::identity` | `src/services/cluster/stream_relay/identity.rs` | 37 | 37 | 0 |  |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 845 | 373 | 472 |  |
@@ -450,7 +450,7 @@
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 248 | 189 | 59 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 227 | 209 | 18 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
-| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 939 | 872 | 67 |  |
+| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 952 | 885 | 67 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics/mod.rs` | 389 | 389 | 0 |  |
 | `services::discord::commands::diagnostics::reports` | `src/services/discord/commands/diagnostics/reports.rs` | 765 | 667 | 98 |  |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 82 | 82 | 0 |  |
@@ -1039,7 +1039,7 @@
 | `services::provider_hosting` | `src/services/provider_hosting.rs` | 1073 | 493 | 580 |  |
 | `services::provider_output_guard` | `src/services/provider_output_guard.rs` | 195 | 195 | 0 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 73 | 73 | 0 |  |
-| `services::queue` | `src/services/queue.rs` | 1050 | 906 | 144 |  |
+| `services::queue` | `src/services/queue.rs` | 966 | 822 | 144 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2219 | 2198 | 21 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 944 | 944 | 0 |  |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 126 | 58 | 68 |  |
@@ -1075,7 +1075,7 @@
 | `services::session_backend` | `src/services/session_backend.rs` | 1087 | 676 | 411 |  |
 | `services::session_backend::stream_line` | `src/services/session_backend/stream_line.rs` | 761 | 585 | 176 |  |
 | `services::session_backend::terminal_usage` | `src/services/session_backend/terminal_usage.rs` | 212 | 106 | 106 |  |
-| `services::session_forwarding` | `src/services/session_forwarding.rs` | 925 | 519 | 406 |  |
+| `services::session_forwarding` | `src/services/session_forwarding.rs` | 1418 | 784 | 634 |  |
 | `services::session_selector_validity` | `src/services/session_selector_validity.rs` | 395 | 149 | 246 |  |
 | `services::settings` | `src/services/settings.rs` | 1745 | 1112 | 633 | giant-file |
 | `services::settings::runtime_config_put` | `src/services/settings/runtime_config_put.rs` | 44 | 44 | 0 |  |
