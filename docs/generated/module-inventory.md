@@ -282,7 +282,7 @@
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 | 188 | 0 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 2701 | 1775 | 926 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
-| `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 | 129 | 0 |  |
+| `server::routes::hooks` | `src/server/routes/hooks.rs` | 136 | 136 | 0 |  |
 | `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 405 | 405 | 0 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 2788 | 2725 | 63 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 | 266 | 0 |  |
@@ -290,7 +290,7 @@
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 1290 | 1290 | 0 | giant-file |
 | `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 901 | 465 | 436 |  |
 | `server::routes::message_outbox` | `src/server/routes/message_outbox.rs` | 477 | 284 | 193 |  |
-| `server::routes::messages` | `src/server/routes/messages.rs` | 185 | 185 | 0 |  |
+| `server::routes::messages` | `src/server/routes/messages.rs` | 195 | 195 | 0 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 96 | 96 | 0 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 485 | 485 | 0 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 58 | 58 | 0 |  |

@@ -120,9 +120,9 @@
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:847` | `src/server/routes/domains/ops.rs:22` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:38` | `src/server/routes/domains/ops.rs:352` |
 | `GET` | `/api/home/kpi-trends` | `home_metrics::home_kpi_trends` | `src/server/routes/home_metrics.rs:54` | `src/server/routes/domains/admin.rs:79` |
-| `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:25` | `src/server/routes/domains/integrations.rs:49` |
-| `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:59` | `src/server/routes/domains/integrations.rs:51` |
-| `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:42` | `src/server/routes/domains/integrations.rs:50` |
+| `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:36` | `src/server/routes/domains/integrations.rs:49` |
+| `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:72` | `src/server/routes/domains/integrations.rs:51` |
+| `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:55` | `src/server/routes/domains/integrations.rs:50` |
 | `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1660` | `src/server/routes/domains/ops.rs:51` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:68` | `src/server/routes/domains/ops.rs:127` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1373` | `src/server/routes/domains/admin.rs:72` |
@@ -162,8 +162,8 @@
 | `GET` | `/api/message-outbox/failed` | `message_outbox::list_failed` | `src/server/routes/message_outbox.rs:200` | `src/server/routes/domains/ops.rs:28` |
 | `POST` | `/api/message-outbox/failed/redrive` | `message_outbox::redrive_failed` | `src/server/routes/message_outbox.rs:235` | `src/server/routes/domains/ops.rs:33` |
 | `POST` | `/api/message-outbox/monitor-alerts` | `message_outbox::enqueue_monitor_alert` | `src/server/routes/message_outbox.rs:143` | `src/server/routes/domains/ops.rs:29` |
-| `GET` | `/api/messages` | `messages::list_messages` | `src/server/routes/messages.rs:41` | `src/server/routes/domains/ops.rs:221` |
-| `POST` | `/api/messages` | `messages::create_message` | `src/server/routes/messages.rs:61` | `src/server/routes/domains/ops.rs:221` |
+| `GET` | `/api/messages` | `messages::list_messages` | `src/server/routes/messages.rs:51` | `src/server/routes/domains/ops.rs:221` |
+| `POST` | `/api/messages` | `messages::create_message` | `src/server/routes/messages.rs:71` | `src/server/routes/domains/ops.rs:221` |
 | `GET` | `/api/offices` | `offices::list_offices` | `src/server/routes/offices.rs:58` | `src/server/routes/domains/admin.rs:16` |
 | `POST` | `/api/offices` | `offices::create_office` | `src/server/routes/offices.rs:124` | `src/server/routes/domains/admin.rs:16` |
 | `PATCH` | `/api/offices/reorder` | `offices::reorder_offices` | `src/server/routes/offices.rs:73` | `src/server/routes/domains/admin.rs:20` |

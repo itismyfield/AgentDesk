@@ -59,10 +59,7 @@ pub async fn list_messages(
         ));
     };
     match list_messages_pg(pool, &params).await {
-        Ok(messages) => Ok((
-            StatusCode::OK,
-            Json(json!({"messages": messages})),
-        )),
+        Ok(messages) => Ok((StatusCode::OK, Json(json!({"messages": messages})))),
         Err(error) => Err(app_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{error}"),

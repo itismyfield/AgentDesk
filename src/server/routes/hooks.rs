@@ -90,10 +90,7 @@ pub async fn disconnect_session(
 }
 
 fn pg_unavailable() -> AppError {
-    app_error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "postgres pool unavailable",
-    )
+    app_error(StatusCode::SERVICE_UNAVAILABLE, "postgres pool unavailable")
 }
 
 async fn reset_status_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {
